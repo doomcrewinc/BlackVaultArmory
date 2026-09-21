@@ -1,0 +1,90 @@
+/**
+ * date.ts — the only sanctioned way to read or write a date in this app.
+ *
+ * Two kinds of temporal value exist here and they must not be confused:
+ *
+ *   DATE-ONLY   a calendar day with no time: acquisitionDate, sessionDate,
+ *               purchaseDate, lastMaintenanceDate, lastBatteryChangeDate,
+ *               drillDate, MaintenanceLog.date.
+ *               Stored as DateTime pinned to 00:00:00.000Z.
+ *               Written with toDateOnlyUTC(). Displayed with formatDateOnly().
+ *
+ *   TIMESTAMP   an instant: createdAt, updatedAt, loggedAt, transactedAt,
+ *               cachedAt, changedAt.
+ *               Stored UTC. Displayed with formatTimestamp() in local time.
+ *
+ * A date-only value rendered in local time is off by one day for every viewer
+ * west of UTC — that is the bug this module exists to prevent. There is
+ * deliberately no generic `formatDate`: every call site must state which kind
+ * of value it holds.
+ */
+
+const DASH = "—";
+
+/**
+ * Force a value onto UTC midnight of its UTC calendar day.
+ * The only correct way to write a date-only field.
+ *
+ * Throws on unparseable input — storing an Invalid Date would corrupt the row
+ * silently, and a date-only column has no sentinel for "unknown" other than null,
+ * which the caller must choose explicitly.
+ */
+export function toDateOnlyUTC(input: Date | string): Date {
+  const parsed = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+  }
+  return new Date(
+    Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate())
+  );
+}
+
+/**
+ * Render a date-only value. Pinned to UTC so the stored calendar day is shown
+ * verbatim to every viewer, in any timezone.
+ */
+export function formatDateOnly(value: Date | string | null | undefined): string {
+  if (!value) return DASH;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return DASH;
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+/**
+ * Render an instant in the viewer's local timezone.
+ * `timeZone` exists for tests; production callers omit it.
+ */
+export function formatTimestamp(
+  value: Date | string | null | undefined,
+  timeZone?: string
+): string {
+  if (!value) return DASH;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return DASH;
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
+}
+
+/**
+ * Today's date in the VIEWER's timezone, as YYYY-MM-DD for a date input.
+ *
+ * Deliberately not `new Date().toISOString().split("T")[0]`, which returns the
+ * UTC day and therefore shows tomorrow to anyone west of UTC late in the evening.
+ * Call this from client components only — on the server "local" is the
+ * container's timezone, which is UTC in Docker and not the user's.
+ */
+export function todayLocalISO(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
