@@ -10,6 +10,7 @@ import { LoadingState } from "@/components/shared/LoadingState";
 import { SettingToggleCard } from "@/components/settings/SettingToggleCard";
 import { FormField, INPUT_CLASS } from "@/components/shared/FormField";
 import { StandardButton, buttonClassName } from "@/components/shared/StandardButton";
+import { APP_VERSION } from "@/lib/version";
 
 export default function SettingsPage() {
   const [dataLoading, setDataLoading] = useState(true);
@@ -578,6 +579,10 @@ export default function SettingsPage() {
             />
           </div>
         </SectionCard>
+
+        <div className="pt-2">
+          <StatusRow label="Version" value={APP_VERSION} ok={APP_VERSION !== "dev"} />
+        </div>
 
         <div className="flex justify-end">
           <StandardButton

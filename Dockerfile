@@ -29,6 +29,9 @@ RUN npm ci
 RUN npx prisma generate
 
 # Build Next.js in standalone mode
+# Version string (YYYY.M.D-sha7). Inlined into client bundles at build time.
+ARG APP_VERSION=dev
+ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 ENV NEXT_TELEMETRY_DISABLED=1
 # Provide a throw-away DB so pages that call Prisma can prerender during build
 ENV DATABASE_URL="file:/tmp/prisma-build.db"
@@ -43,6 +46,8 @@ RUN apk add --no-cache libc6-compat openssl
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ARG APP_VERSION=dev
+ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 
 # Create a non-root user
 RUN addgroup --system --gid 1001 nodejs && \
