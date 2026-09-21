@@ -125,6 +125,18 @@ describe("formatDateOnly", () => {
     expect(formatDateOnly(null)).toBe("—");
     expect(formatDateOnly(undefined)).toBe("—");
   });
+
+  it("renders the stored day identically in every timezone", () => {
+    const original = process.env.TZ;
+    try {
+      for (const zone of ["Pacific/Pago_Pago", "UTC", "Pacific/Auckland"]) {
+        process.env.TZ = zone;
+        expect(formatDateOnly("2026-09-20T00:00:00.000Z"), zone).toBe("Sep 20, 2026");
+      }
+    } finally {
+      process.env.TZ = original;
+    }
+  });
 });
 
 describe("formatTimestamp", () => {
