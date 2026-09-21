@@ -56,6 +56,12 @@ The tag push triggers `.github/workflows/release.yml`, which builds `linux/amd64
 and pushes to `ghcr.io/doomcrewinc/blackvaultarmory`. Pushes to `develop` and `master` run CI
 but publish nothing.
 
+> **Note on the no-direct-commits rule.** The release stamp commit on `develop` and the
+> `develop` → `master` merge are the documented exception to it. If you enable branch
+> protection requiring the `verify` check on those branches, the release operator needs
+> permission to bypass it — otherwise route the stamp through a `chore/release-<calver>`
+> PR and merge `develop` → `master` via PR as well.
+
 ## Hotfixes
 
 ```bash
