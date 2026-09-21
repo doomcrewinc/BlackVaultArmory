@@ -157,15 +157,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const parsedDate = (() => {
-      if (typeof sessionDate !== "string" || sessionDate.trim().length === 0) {
-        return toDateOnlyUTC(new Date());
-      }
-      const parsed = new Date(sessionDate);
-      return Number.isNaN(parsed.getTime())
-        ? toDateOnlyUTC(new Date())
-        : toDateOnlyUTC(parsed);
-    })();
+    const parsedDate =
+      typeof sessionDate !== "string" || sessionDate.trim().length === 0
+        ? toDateOnlyUTC(new Date())          // absent -> UTC today (server cannot know the viewer's date)
+        : toDateOnlyUTC(sessionDate.trim());  // malformed -> InvalidDateError -> 400
 
     const resolvedLocation = typeof location === "string" && location.trim().length > 0
       ? location.trim()
