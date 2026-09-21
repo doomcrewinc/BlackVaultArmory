@@ -111,10 +111,16 @@ const UPCOMING_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface MaintenanceDueItemWithDue extends MaintenanceDueItem {
   dueDate: Date;
+  days: number;
 }
 
 interface BatteryDueItemWithDue extends BatteryDueItem {
   dueDate: Date;
+  days: number;
+}
+
+function daysBetween(a: number, b: number) {
+  return Math.ceil(Math.abs(a - b) / 86400000);
 }
 
 function MaintenanceDueWidget() {
@@ -141,8 +147,12 @@ function MaintenanceDueWidget() {
         const overdue = allDue.filter((f) => f.dueDate <= now);
         const dueSoon = allDue.filter((f) => f.dueDate > now);
         const MAX = 8;
-        const overdueDisplay = overdue.slice(0, MAX);
-        const dueSoonDisplay = dueSoon.slice(0, MAX - overdueDisplay.length);
+        const overdueDisplay = overdue
+          .slice(0, MAX)
+          .map((f) => ({ ...f, days: daysBetween(now.getTime(), f.dueDate.getTime()) }));
+        const dueSoonDisplay = dueSoon
+          .slice(0, MAX - overdueDisplay.length)
+          .map((f) => ({ ...f, days: daysBetween(now.getTime(), f.dueDate.getTime()) }));
         setOverdueFirearms(overdueDisplay);
         setDueSoonFirearms(dueSoonDisplay);
       })
@@ -173,8 +183,12 @@ function MaintenanceDueWidget() {
         const overdue = allDue.filter((a) => a.dueDate <= now);
         const dueSoon = allDue.filter((a) => a.dueDate > now);
         const MAX = 8;
-        const overdueDisplay = overdue.slice(0, MAX);
-        const dueSoonDisplay = dueSoon.slice(0, MAX - overdueDisplay.length);
+        const overdueDisplay = overdue
+          .slice(0, MAX)
+          .map((a) => ({ ...a, days: daysBetween(now.getTime(), a.dueDate.getTime()) }));
+        const dueSoonDisplay = dueSoon
+          .slice(0, MAX - overdueDisplay.length)
+          .map((a) => ({ ...a, days: daysBetween(now.getTime(), a.dueDate.getTime()) }));
         setOverdueItems(overdueDisplay);
         setDueSoonItems(dueSoonDisplay);
       })
@@ -186,7 +200,6 @@ function MaintenanceDueWidget() {
 
   const hasFirearmItems = overdueFirearms.length > 0 || dueSoonFirearms.length > 0;
   const hasBatteryItems = overdueItems.length > 0 || dueSoonItems.length > 0;
-  const renderNow = Date.now();
 
   return (
     <section>
@@ -208,22 +221,19 @@ function MaintenanceDueWidget() {
                 <div className="px-4 py-1.5 bg-[#E53935]/5">
                   <span className="text-[10px] font-semibold tracking-widest uppercase text-[#E53935]/70">Overdue</span>
                 </div>
-                {overdueFirearms.map((item) => {
-                  const daysOverdue = Math.ceil((renderNow - item.dueDate.getTime()) / 86400000);
-                  return (
-                    <Link
-                      key={item.id}
-                      href={`/vault/${item.id}`}
-                      className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
-                    >
-                      <div>
-                        <p className="text-sm font-semibold text-vault-text">{item.name}</p>
-                        <p className="text-xs text-vault-text-muted">{item.manufacturer} · {item.model}</p>
-                      </div>
-                      <span className="text-xs text-[#E53935] font-mono">{daysOverdue}d overdue</span>
-                    </Link>
-                  );
-                })}
+                {overdueFirearms.map((item) => (
+                  <Link
+                    key={item.id}
+                    href={`/vault/${item.id}`}
+                    className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-vault-text">{item.name}</p>
+                      <p className="text-xs text-vault-text-muted">{item.manufacturer} · {item.model}</p>
+                    </div>
+                    <span className="text-xs text-[#E53935] font-mono">{item.days}d overdue</span>
+                  </Link>
+                ))}
               </>
             )}
             {dueSoonFirearms.length > 0 && (
@@ -231,22 +241,19 @@ function MaintenanceDueWidget() {
                 <div className="px-4 py-1.5 bg-yellow-400/5">
                   <span className="text-[10px] font-semibold tracking-widest uppercase text-yellow-400/70">Due Soon</span>
                 </div>
-                {dueSoonFirearms.map((item) => {
-                  const daysUntil = Math.ceil((item.dueDate.getTime() - renderNow) / 86400000);
-                  return (
-                    <Link
-                      key={item.id}
-                      href={`/vault/${item.id}`}
-                      className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
-                    >
-                      <div>
-                        <p className="text-sm font-semibold text-vault-text">{item.name}</p>
-                        <p className="text-xs text-vault-text-muted">{item.manufacturer} · {item.model}</p>
-                      </div>
-                      <span className="text-xs text-yellow-400 font-mono">Due in {daysUntil}d</span>
-                    </Link>
-                  );
-                })}
+                {dueSoonFirearms.map((item) => (
+                  <Link
+                    key={item.id}
+                    href={`/vault/${item.id}`}
+                    className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-vault-text">{item.name}</p>
+                      <p className="text-xs text-vault-text-muted">{item.manufacturer} · {item.model}</p>
+                    </div>
+                    <span className="text-xs text-yellow-400 font-mono">Due in {item.days}d</span>
+                  </Link>
+                ))}
               </>
             )}
           </div>
@@ -268,25 +275,22 @@ function MaintenanceDueWidget() {
                   <div className="px-4 py-1.5 bg-[#E53935]/5">
                     <span className="text-[10px] font-semibold tracking-widest uppercase text-[#E53935]/70">Overdue</span>
                   </div>
-                  {overdueItems.map((item) => {
-                    const daysOverdue = Math.ceil((renderNow - item.dueDate.getTime()) / 86400000);
-                    return (
-                      <Link
-                        key={item.id}
-                        href={`/accessories/${item.id}`}
-                        className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
-                      >
-                        <div>
-                          <p className="text-sm font-semibold text-vault-text">{item.name}</p>
-                          <p className="text-xs text-vault-text-muted">
-                            {item.manufacturer} · {item.model}
-                            {item.batteryType ? ` — ${item.batteryType}` : ""}
-                          </p>
-                        </div>
-                        <span className="text-xs text-[#E53935] font-mono">{daysOverdue}d overdue</span>
-                      </Link>
-                    );
-                  })}
+                  {overdueItems.map((item) => (
+                    <Link
+                      key={item.id}
+                      href={`/accessories/${item.id}`}
+                      className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-vault-text">{item.name}</p>
+                        <p className="text-xs text-vault-text-muted">
+                          {item.manufacturer} · {item.model}
+                          {item.batteryType ? ` — ${item.batteryType}` : ""}
+                        </p>
+                      </div>
+                      <span className="text-xs text-[#E53935] font-mono">{item.days}d overdue</span>
+                    </Link>
+                  ))}
                 </>
               )}
               {dueSoonItems.length > 0 && (
@@ -294,25 +298,22 @@ function MaintenanceDueWidget() {
                   <div className="px-4 py-1.5 bg-yellow-400/5">
                     <span className="text-[10px] font-semibold tracking-widest uppercase text-yellow-400/70">Due Soon</span>
                   </div>
-                  {dueSoonItems.map((item) => {
-                    const daysUntil = Math.ceil((item.dueDate.getTime() - renderNow) / 86400000);
-                    return (
-                      <Link
-                        key={item.id}
-                        href={`/accessories/${item.id}`}
-                        className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
-                      >
-                        <div>
-                          <p className="text-sm font-semibold text-vault-text">{item.name}</p>
-                          <p className="text-xs text-vault-text-muted">
-                            {item.manufacturer} · {item.model}
-                            {item.batteryType ? ` — ${item.batteryType}` : ""}
-                          </p>
-                        </div>
-                        <span className="text-xs text-yellow-400 font-mono">Due in {daysUntil}d</span>
-                      </Link>
-                    );
-                  })}
+                  {dueSoonItems.map((item) => (
+                    <Link
+                      key={item.id}
+                      href={`/accessories/${item.id}`}
+                      className="flex items-center justify-between px-4 py-3 hover:bg-vault-surface-2 transition-colors"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-vault-text">{item.name}</p>
+                        <p className="text-xs text-vault-text-muted">
+                          {item.manufacturer} · {item.model}
+                          {item.batteryType ? ` — ${item.batteryType}` : ""}
+                        </p>
+                      </div>
+                      <span className="text-xs text-yellow-400 font-mono">Due in {item.days}d</span>
+                    </Link>
+                  ))}
                 </>
               )}
             </div>
