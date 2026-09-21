@@ -8,7 +8,7 @@ import {
   Plus,
   Wrench,
 } from "lucide-react";
-import { formatDateOnly } from "@/lib/date";
+import { formatDateOnly, todayLocalISO } from "@/lib/date";
 
 type LogEntry = {
   id: string;
@@ -47,7 +47,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
 
   // Add form state
   const [showForm, setShowForm] = useState(false);
-  const [formDate, setFormDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [formDate, setFormDate] = useState(() => todayLocalISO());
   const [formNotes, setFormNotes] = useState("");
   const [formRoundCount, setFormRoundCount] = useState("");
   const [formSetNextDue, setFormSetNextDue] = useState(false);
@@ -99,7 +99,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
       }
 
       // Reset form
-      setFormDate(new Date().toISOString().split("T")[0]);
+      setFormDate(todayLocalISO());
       setFormNotes("");
       setFormRoundCount("");
       setFormSetNextDue(false);

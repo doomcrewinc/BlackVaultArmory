@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { VaultInput, VaultSelect, VaultTextArea, vaultCardClass, vaultLabelClass, VaultButton } from "@/components/shared/ui-primitives";
 import { formatNumber } from "@/lib/utils";
+import { todayLocalISO } from "@/lib/date";
 import { Target, ChevronDown, ChevronUp, Loader2, AlertCircle, CheckCircle2, Shield, Timer, BookPlus, Plus, Minus, Calculator, Pencil, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { safeId } from "@/lib/client/id";
@@ -184,7 +185,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const [selectedBuild, setSelectedBuild] = useState<string>("");
   const [roundsFired, setRoundsFired] = useState<string>("");
   const [ammoSelections, setAmmoSelections] = useState<AmmoSelection[]>([{ ammoStockId: "", roundsUsed: "" }]);
-  const [sessionDate, setSessionDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [sessionDate, setSessionDate] = useState<string>(() => todayLocalISO());
   const [sessionLocation, setSessionLocation] = useState<string>("");
   const [sessionNote, setSessionNote] = useState<string>("");
   const [selectedAccessories, setSelectedAccessories] = useState<Set<string>>(new Set());
@@ -727,7 +728,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
         method: isEditingSession ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sessionDate: sessionDate || new Date().toISOString().slice(0, 10),
+          sessionDate: sessionDate || todayLocalISO(),
           location: sessionLocation || "Unspecified location",
           firearmId: selectedFirearmId,
           buildId: selectedBuild || null,
