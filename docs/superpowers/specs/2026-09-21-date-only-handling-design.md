@@ -108,8 +108,14 @@ deliberate approximation — not silently local.
   an identical logical shape.
 - Any data migration. Existing values were written from date strings and are already at UTC
   midnight; a spot check confirms this before work begins.
-- `BatteryChangeLog.changedAt` and `RoundCountLog.loggedAt` stay **timestamps**. They record when
-  an action happened, not a calendar date.
+- `RoundCountLog.loggedAt` stays a **timestamp**. It records when an action happened, not a
+  calendar date.
+
+**Reclassified during the fix wave:** `BatteryChangeLog.changedAt` was originally listed above as
+a timestamp that stays out of scope. User decision: it is populated from a date picker and means
+"which day the battery was changed," not an instant, so it is now treated as date-only —
+written with `toDateOnlyUTC()` and displayed with `formatDateOnly()`, same as the other nine
+fields.
 
 ## Sequencing
 

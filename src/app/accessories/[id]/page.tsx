@@ -671,7 +671,7 @@ export default function AccessoryDetailPage() {
                       {accessory.batteryChangeLogs.map((log) => (
                         <tr key={log.id} className="hover:bg-vault-surface-2 transition-colors">
                           <td className="px-4 py-3 text-xs text-vault-text-muted">
-                            {formatTimestamp(log.changedAt)}
+                            {formatDateOnly(log.changedAt)}
                           </td>
                           <td className="px-4 py-3 font-mono text-vault-text">
                             {log.batteryType ?? <span className="text-vault-text-faint">—</span>}

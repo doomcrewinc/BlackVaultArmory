@@ -6,7 +6,8 @@
  *
  *   DATE-ONLY, for a HUMAN    a calendar day with no time: acquisitionDate,
  *                             sessionDate, purchaseDate, lastMaintenanceDate,
- *                             lastBatteryChangeDate, drillDate, MaintenanceLog.date.
+ *                             lastBatteryChangeDate, drillDate, MaintenanceLog.date,
+ *                             BatteryChangeLog.changedAt.
  *                             Stored as DateTime pinned to 00:00:00.000Z.
  *                             Written with toDateOnlyUTC(). Displayed with
  *                             formatDateOnly().
@@ -16,7 +17,7 @@
  *                             page. Written with toISODate().
  *
  *   TIMESTAMP                 an instant: createdAt, updatedAt, loggedAt,
- *                             transactedAt, cachedAt, changedAt.
+ *                             transactedAt, cachedAt.
  *                             Stored UTC. Displayed with formatTimestamp() in
  *                             local time.
  *

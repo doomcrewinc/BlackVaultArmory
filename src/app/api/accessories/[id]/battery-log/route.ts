@@ -45,9 +45,8 @@ export async function POST(
       return NextResponse.json({ error: "Accessory not found" }, { status: 404 });
     }
 
-    // changedAt on the log is an instant; lastBatteryChangeDate on the accessory
-    // is date-only and must be pinned to UTC midnight separately.
-    const changeDate = changedAt ? new Date(changedAt) : new Date();
+    // changedAt is date-only (it comes from a date picker: "which day"), same as
+    // lastBatteryChangeDate on the accessory, and both are pinned to UTC midnight.
     const changeDateOnly = changedAt ? toDateOnlyUTC(changedAt) : toDateOnlyUTC(new Date());
 
     const updateData: Record<string, unknown> = {
@@ -62,7 +61,7 @@ export async function POST(
       prisma.batteryChangeLog.create({
         data: {
           accessoryId: id,
-          changedAt: changeDate,
+          changedAt: changeDateOnly,
           batteryType: batteryType ?? accessory.batteryType ?? null,
           notes: notes ?? null,
         },
