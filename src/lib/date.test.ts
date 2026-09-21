@@ -68,6 +68,35 @@ describe("toDateOnlyUTC", () => {
       );
     }
   });
+
+  it("rejects out-of-range calendar values instead of rolling them over", () => {
+    // Date.UTC normalizes these silently: Feb 30 -> Mar 2, month 13 -> next year.
+    expect(() => toDateOnlyUTC("2026-02-30")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("2026-13-01")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("2026-00-10")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("2026-04-31")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("2026-09-00")).toThrow(/invalid date/i);
+  });
+
+  it("validates leap years through the round-trip check", () => {
+    expect(toDateOnlyUTC("2028-02-29").toISOString()).toBe("2028-02-29T00:00:00.000Z");
+    expect(() => toDateOnlyUTC("2026-02-29")).toThrow(/invalid date/i);
+  });
+
+  it("reads unpadded month and day lexically rather than falling back", () => {
+    // These previously bypassed the lexical path and were off by one in +UTC zones.
+    expect(toDateOnlyUTC("2026-9-20").toISOString()).toBe("2026-09-20T00:00:00.000Z");
+    expect(toDateOnlyUTC("2026-09-5").toISOString()).toBe("2026-09-05T00:00:00.000Z");
+    expect(toDateOnlyUTC("2026-1-5").toISOString()).toBe("2026-01-05T00:00:00.000Z");
+  });
+
+  it("rejects strings that are not Y-M-D rather than guessing", () => {
+    // JS parses these as LOCAL time, which is the bug this module exists to prevent.
+    expect(() => toDateOnlyUTC("September 20, 2026")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("09/20/2026")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("20260920")).toThrow(/invalid date/i);
+    expect(() => toDateOnlyUTC("")).toThrow(/invalid date/i);
+  });
 });
 
 describe("formatDateOnly", () => {
@@ -114,6 +143,10 @@ describe("toISODate", () => {
   it("returns an empty string for null so CSV cells stay blank", () => {
     expect(toISODate(null)).toBe("");
     expect(toISODate(undefined)).toBe("");
+  });
+
+  it("ignores an explicit offset in favour of the written calendar day", () => {
+    expect(toISODate("2026-09-20T23:00:00-06:00")).toBe("2026-09-20");
   });
 });
 

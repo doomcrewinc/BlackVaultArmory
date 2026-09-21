@@ -28,45 +28,55 @@
 
 const DASH = "—";
 
-const DATE_ONLY_PREFIX = /^(\d{4})-(\d{2})-(\d{2})/;
+const DATE_ONLY_PREFIX = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
 
 /**
  * Force a value onto UTC midnight of its UTC calendar day.
  * The only correct way to write a date-only field.
  *
- * A string beginning `YYYY-MM-DD` is read lexically — the calendar day is taken
- * from those first 10 characters and any time-of-day or offset is ignored
- * entirely. A naive datetime string (no `Z`, no offset) is parsed by JS as
- * LOCAL time, so reading UTC components back off it would make the result
+ * A string must begin `Y-M-D` (1- or 2-digit month/day) and is read lexically —
+ * the calendar day is taken from those components and any time-of-day or offset
+ * is ignored entirely. A naive datetime string (no `Z`, no offset) is parsed by
+ * JS as LOCAL time, so reading UTC components back off it would make the result
  * depend on the time of day it happened to run. For a date-only field the user
  * typed a calendar day, not an instant, so the written day is the correct
  * reading regardless of any time or offset attached to the string.
  *
+ * There is no fallback to `new Date(input)` for strings that don't start with
+ * `Y-M-D`: that path parses forms like "September 20, 2026" as LOCAL time,
+ * which is the exact bug this module exists to prevent. Such input throws.
+ *
+ * `Date.UTC` silently normalizes out-of-range components (month 13, Feb 30) into
+ * the next valid date instead of rejecting them, so the parsed components are
+ * validated by round-tripping through `Date.UTC` and confirming they survive
+ * unchanged — the canonical calendar check, and it gets leap years right for free.
+ *
  * A `Date` object has no such ambiguity — it genuinely is an instant — so its
  * UTC calendar day is used directly.
  *
- * Throws on unparseable input — storing an Invalid Date would corrupt the row
- * silently, and a date-only column has no sentinel for "unknown" other than null,
- * which the caller must choose explicitly.
+ * Throws on unparseable or out-of-range input — storing an Invalid Date, or a
+ * silently rolled-over one, would corrupt the row, and a date-only column has no
+ * sentinel for "unknown" other than null, which the caller must choose explicitly.
  */
 export function toDateOnlyUTC(input: Date | string): Date {
   if (typeof input === "string") {
     const match = DATE_ONLY_PREFIX.exec(input);
-    if (match) {
-      const [, year, month, day] = match;
-      const candidate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-      if (Number.isNaN(candidate.getTime())) {
-        throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
-      }
-      return candidate;
-    }
-    const parsed = new Date(input);
-    if (Number.isNaN(parsed.getTime())) {
+    if (!match) {
       throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
     }
-    return new Date(
-      Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate())
-    );
+    const [, yearStr, monthStr, dayStr] = match;
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    const day = Number(dayStr);
+    const candidate = new Date(Date.UTC(year, month - 1, day));
+    const rolledOver =
+      candidate.getUTCFullYear() !== year ||
+      candidate.getUTCMonth() + 1 !== month ||
+      candidate.getUTCDate() !== day;
+    if (Number.isNaN(candidate.getTime()) || rolledOver) {
+      throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+    }
+    return candidate;
   }
 
   const parsed = input;
