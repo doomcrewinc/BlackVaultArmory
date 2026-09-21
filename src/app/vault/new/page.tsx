@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
 import { useRouter } from "next/navigation";
@@ -25,6 +25,7 @@ export default function NewFirearmPage() {
   const [compatCaliberDropdownOpen, setCompatCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const caliberRef = useRef<HTMLDivElement>(null);
+  const acquisitionDateRef = useRef<HTMLInputElement>(null);
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
     c.toLowerCase().includes(caliberInput.toLowerCase())
@@ -32,6 +33,17 @@ export default function NewFirearmPage() {
   const showCustomCaliberOption =
     caliberInput.trim() !== "" &&
     !COMMON_CALIBERS.some((c) => c.toLowerCase() === caliberInput.toLowerCase().trim());
+
+  // todayLocalISO() must run in the browser, not during SSR: on a server whose
+  // TZ differs from the viewer's (UTC in Docker), a value baked into the initial
+  // HTML can be the wrong calendar day, and React won't overwrite an uncontrolled
+  // defaultValue already present in the DOM. Assign it via ref after mount
+  // instead, and only if the user hasn't already typed a date.
+  useEffect(() => {
+    if (acquisitionDateRef.current && !acquisitionDateRef.current.value) {
+      acquisitionDateRef.current.value = todayLocalISO();
+    }
+  }, []);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -372,11 +384,12 @@ export default function NewFirearmPage() {
                 Date Acquired
               </label>
               <input
+                ref={acquisitionDateRef}
                 id="acquisitionDate"
                 name="acquisitionDate"
                 type="date"
                 className={INPUT_CLASS}
-                defaultValue={todayLocalISO()}
+                defaultValue=""
               />
             </div>
 

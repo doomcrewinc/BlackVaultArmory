@@ -185,7 +185,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const [selectedBuild, setSelectedBuild] = useState<string>("");
   const [roundsFired, setRoundsFired] = useState<string>("");
   const [ammoSelections, setAmmoSelections] = useState<AmmoSelection[]>([{ ammoStockId: "", roundsUsed: "" }]);
-  const [sessionDate, setSessionDate] = useState<string>(() => todayLocalISO());
+  const [sessionDate, setSessionDate] = useState<string>("");
   const [sessionLocation, setSessionLocation] = useState<string>("");
   const [sessionNote, setSessionNote] = useState<string>("");
   const [selectedAccessories, setSelectedAccessories] = useState<Set<string>>(new Set());
@@ -259,6 +259,14 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   // Drill library — session counts + notice banner
   const [sessionCountByDrill, setSessionCountByDrill] = useState<Record<string, number>>({});
   const [drillLibNoticeDismissed, setDrillLibNoticeDismissed] = useState(false);
+
+  // sessionDate must be computed in the browser, not during SSR: todayLocalISO()
+  // reflects the server's timezone (UTC in Docker) when it runs on the server,
+  // which can bake in the wrong calendar day for viewers west of UTC. Only set
+  // it if the user hasn't already typed a date.
+  useEffect(() => {
+    setSessionDate((current) => (current === "" ? todayLocalISO() : current));
+  }, []);
 
   const loadSessions = useCallback(async () => {
     setLoadingSessions(true);
