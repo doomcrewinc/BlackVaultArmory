@@ -4,7 +4,8 @@ import { useState } from "react";
 import Link from "next/link";
 import { Plus, Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
+import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
@@ -356,7 +357,7 @@ export function AccessoriesClientPage({ accessories }: Props) {
                           {/* Date */}
                           <td className="px-4 py-3 hidden xl:table-cell">
                             <p className="text-xs text-vault-text-faint">
-                              {formatDate(accessory.acquisitionDate)}
+                              {formatDateOnly(accessory.acquisitionDate)}
                             </p>
                           </td>
 

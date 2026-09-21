@@ -8,7 +8,8 @@ import {
   selectVisualEvidence,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency } from "@/lib/utils";
+import { formatTimestamp } from "@/lib/date";
 
 export default function FullArmoryPreviewPage() {
   const [queryString, setQueryString] = useState("");
@@ -261,7 +262,7 @@ export default function FullArmoryPreviewPage() {
                         <td className="py-2">{row.name}</td>
                         <td className="py-2">{row.linkedItemName || row.linkedItemType}</td>
                         <td className="py-2">{row.mimeType || "—"}</td>
-                        <td className="py-2">{formatDate(row.uploadedAt)}</td>
+                        <td className="py-2">{formatTimestamp(row.uploadedAt)}</td>
                       </tr>
                     ))
                   )}

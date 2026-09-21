@@ -8,6 +8,7 @@ import {
   Plus,
   Wrench,
 } from "lucide-react";
+import { formatDateOnly } from "@/lib/date";
 
 type LogEntry = {
   id: string;
@@ -23,14 +24,6 @@ type Props = {
   maintenanceIntervalDays: number | null;
   initialLogs: LogEntry[];
 };
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 function computeStatus(lastDate: string | null, intervalDays: number | null) {
   if (!lastDate || !intervalDays) return { label: "Neutral", style: "text-vault-text-faint border-vault-border" };
@@ -162,12 +155,12 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
           <p className="text-vault-text-muted">
             Last serviced:{" "}
             <span className="text-vault-text">
-              {lastMaintenanceDate ? formatDate(lastMaintenanceDate) : "—"}
+              {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
             </span>
           </p>
           <p className="text-vault-text-muted">
             Next due:{" "}
-            <span className="text-vault-text">{nextDue ? formatDate(nextDue) : "—"}</span>
+            <span className="text-vault-text">{nextDue ? formatDateOnly(nextDue) : "—"}</span>
           </p>
           <p className="text-vault-text-muted">
             Entries:{" "}
@@ -184,7 +177,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
             <p className="text-vault-text-muted">
               Last serviced:{" "}
               <span className="text-vault-text">
-                {lastMaintenanceDate ? formatDate(lastMaintenanceDate) : "—"}
+                {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
               </span>
             </p>
             <p className="text-vault-text-muted">
@@ -195,7 +188,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
             </p>
             <p className="text-vault-text-muted">
               Next due:{" "}
-              <span className="text-vault-text">{nextDue ? formatDate(nextDue) : "—"}</span>
+              <span className="text-vault-text">{nextDue ? formatDateOnly(nextDue) : "—"}</span>
             </p>
           </div>
 
@@ -304,7 +297,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
                 <div key={entry.id} className="rounded border border-vault-border bg-vault-bg px-2.5 py-2">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <p className="text-[11px] font-mono text-vault-text-muted">{formatDate(entry.date)}</p>
+                      <p className="text-[11px] font-mono text-vault-text-muted">{formatDateOnly(entry.date)}</p>
                       <p className="text-xs text-vault-text mt-0.5 leading-snug whitespace-pre-wrap">{entry.notes}</p>
                       {entry.roundCount != null && (
                         <p className="text-[11px] text-vault-text-faint mt-0.5">{entry.roundCount.toLocaleString()} rounds at service</p>
