@@ -34,6 +34,40 @@ describe("toDateOnlyUTC", () => {
   it("throws on an unparseable input rather than storing Invalid Date", () => {
     expect(() => toDateOnlyUTC("not-a-date")).toThrow(/invalid date/i);
   });
+
+  it("reads a date-only string lexically, ignoring any time component", () => {
+    // A naive datetime string is parsed as LOCAL by JS. Reading UTC components off
+    // that would make the result depend on the time of day, so the date part is
+    // taken lexically instead.
+    expect(toDateOnlyUTC("2026-09-20T20:00:00").toISOString()).toBe("2026-09-20T00:00:00.000Z");
+    expect(toDateOnlyUTC("2026-09-20T10:00:00").toISOString()).toBe("2026-09-20T00:00:00.000Z");
+  });
+
+  it("ignores an explicit offset in favour of the written calendar day", () => {
+    // The user typed a day, not an instant.
+    expect(toDateOnlyUTC("2026-09-20T23:00:00-06:00").toISOString()).toBe(
+      "2026-09-20T00:00:00.000Z"
+    );
+    expect(toDateOnlyUTC("2026-09-20T01:00:00+13:00").toISOString()).toBe(
+      "2026-09-20T00:00:00.000Z"
+    );
+  });
+
+  it("is time-of-day independent for every string form", () => {
+    const forms = [
+      "2026-09-20",
+      "2026-09-20T00:00:00",
+      "2026-09-20T12:00:00",
+      "2026-09-20T23:59:59",
+      "2026-09-20T00:00:00Z",
+      "2026-09-20T23:59:59Z",
+    ];
+    for (const form of forms) {
+      expect(toDateOnlyUTC(form).toISOString(), `failed for ${form}`).toBe(
+        "2026-09-20T00:00:00.000Z"
+      );
+    }
+  });
 });
 
 describe("formatDateOnly", () => {

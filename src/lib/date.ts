@@ -21,16 +21,48 @@
 
 const DASH = "—";
 
+const DATE_ONLY_PREFIX = /^(\d{4})-(\d{2})-(\d{2})/;
+
 /**
  * Force a value onto UTC midnight of its UTC calendar day.
  * The only correct way to write a date-only field.
+ *
+ * A string beginning `YYYY-MM-DD` is read lexically — the calendar day is taken
+ * from those first 10 characters and any time-of-day or offset is ignored
+ * entirely. A naive datetime string (no `Z`, no offset) is parsed by JS as
+ * LOCAL time, so reading UTC components back off it would make the result
+ * depend on the time of day it happened to run. For a date-only field the user
+ * typed a calendar day, not an instant, so the written day is the correct
+ * reading regardless of any time or offset attached to the string.
+ *
+ * A `Date` object has no such ambiguity — it genuinely is an instant — so its
+ * UTC calendar day is used directly.
  *
  * Throws on unparseable input — storing an Invalid Date would corrupt the row
  * silently, and a date-only column has no sentinel for "unknown" other than null,
  * which the caller must choose explicitly.
  */
 export function toDateOnlyUTC(input: Date | string): Date {
-  const parsed = input instanceof Date ? input : new Date(input);
+  if (typeof input === "string") {
+    const match = DATE_ONLY_PREFIX.exec(input);
+    if (match) {
+      const [, year, month, day] = match;
+      const candidate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+      if (Number.isNaN(candidate.getTime())) {
+        throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+      }
+      return candidate;
+    }
+    const parsed = new Date(input);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+    }
+    return new Date(
+      Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate())
+    );
+  }
+
+  const parsed = input;
   if (Number.isNaN(parsed.getTime())) {
     throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
   }
