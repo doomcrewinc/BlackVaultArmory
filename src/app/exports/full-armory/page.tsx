@@ -64,14 +64,11 @@ export default function FullArmoryExportPage() {
 
       const exportDate = todayLocalISO();
       const preferredName = `blackvault-export-${exportDate}.${format}`;
-      const disposition = response.headers.get("content-disposition") ?? "";
-      const nameMatch = disposition.match(/filename="?([^"]+)"?/i);
-      const serverName = nameMatch?.[1];
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = serverName || preferredName;
+      link.download = preferredName;
       document.body.append(link);
       link.click();
       link.remove();
