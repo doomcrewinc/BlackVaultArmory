@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 
 function normalizeString(value: unknown) {
@@ -126,7 +127,7 @@ export async function PUT(
         ...(caliber !== undefined && { caliber }),
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(acquisitionDate !== undefined && {
-          acquisitionDate: acquisitionDate ? new Date(acquisitionDate) : null,
+          acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : null,
         }),
         ...(notes !== undefined && { notes }),
         ...(imageUrl !== undefined && { imageUrl }),
@@ -136,7 +137,7 @@ export async function PUT(
         ...(hasBattery !== undefined && { hasBattery: Boolean(hasBattery) }),
         ...(batteryType !== undefined && { batteryType }),
         ...(lastBatteryChangeDate !== undefined && {
-          lastBatteryChangeDate: lastBatteryChangeDate ? new Date(lastBatteryChangeDate) : null,
+          lastBatteryChangeDate: lastBatteryChangeDate ? toDateOnlyUTC(lastBatteryChangeDate) : null,
         }),
         ...(replacementIntervalDays !== undefined && { replacementIntervalDays }),
       },
@@ -167,6 +168,9 @@ export async function PUT(
     return NextResponse.json(updated);
   } catch (error) {
     console.error("PUT /api/accessories/[id] error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: "Failed to update accessory" },
       { status: 500 }

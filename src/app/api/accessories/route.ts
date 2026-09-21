@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 
 function normalizeString(value: unknown) {
@@ -108,7 +109,7 @@ export async function POST(request: NextRequest) {
         type: normalizeString(type) || "UNSPECIFIED",
         caliber: caliber ?? null,
         purchasePrice: purchasePrice ?? null,
-        acquisitionDate: acquisitionDate ? new Date(acquisitionDate) : null,
+        acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : null,
         notes: notes ?? null,
         imageUrl: imageUrl ?? null,
         imageSource: imageSource ?? null,
@@ -116,7 +117,7 @@ export async function POST(request: NextRequest) {
         compatibleCalibers: compatibleCalibers ?? null,
         hasBattery: Boolean(hasBattery),
         batteryType: batteryType ?? null,
-        lastBatteryChangeDate: lastBatteryChangeDate ? new Date(lastBatteryChangeDate) : null,
+        lastBatteryChangeDate: lastBatteryChangeDate ? toDateOnlyUTC(lastBatteryChangeDate) : null,
         replacementIntervalDays: replacementIntervalDays ?? null,
         roundCount: initialRoundCount ? Math.floor(Number(initialRoundCount)) : 0,
       },
@@ -141,6 +142,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(accessory, { status: 201 });
   } catch (error) {
     console.error("POST /api/accessories error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: "Failed to create accessory" },
       { status: 500 }

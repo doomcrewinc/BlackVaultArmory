@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 
 function normalizeString(value: unknown) {
@@ -110,7 +111,7 @@ export async function PUT(
         ...(serialNumber !== undefined && { serialNumber: normalizeString(serialNumber) || fallbackSerialNumber() }),
         ...(type !== undefined && { type: normalizeString(type) || "UNSPECIFIED" }),
         ...(acquisitionDate !== undefined && {
-          acquisitionDate: acquisitionDate ? new Date(acquisitionDate) : existing.acquisitionDate,
+          acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : existing.acquisitionDate,
         }),
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(currentValue !== undefined && { currentValue }),
@@ -118,7 +119,7 @@ export async function PUT(
         ...(imageUrl !== undefined && { imageUrl }),
         ...(imageSource !== undefined && { imageSource }),
         ...(lastMaintenanceDate !== undefined && {
-          lastMaintenanceDate: lastMaintenanceDate ? new Date(lastMaintenanceDate) : null,
+          lastMaintenanceDate: lastMaintenanceDate ? toDateOnlyUTC(lastMaintenanceDate) : null,
         }),
         ...(maintenanceIntervalDays !== undefined && { maintenanceIntervalDays }),
       },
@@ -149,6 +150,9 @@ export async function PUT(
     });
   } catch (error: unknown) {
     console.error("PUT /api/firearms/[id] error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     if (
       error instanceof Error &&
       error.message.includes("Unique constraint failed") &&

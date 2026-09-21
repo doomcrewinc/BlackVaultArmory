@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
+import { toDateOnlyUTC } from "@/lib/date";
 
 function calculateHitFactor(points: number, timeSeconds: number): number {
   if (!Number.isFinite(timeSeconds) || timeSeconds <= 0) return 0;
@@ -72,7 +73,7 @@ export async function POST(request: NextRequest) {
       sortOrder: 0,
       rangeSession: {
         create: {
-          sessionDate: new Date(),
+          sessionDate: toDateOnlyUTC(new Date()),
           location: "Drill-only entry",
           roundsFired: 0,
           firearm: {

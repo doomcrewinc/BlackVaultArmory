@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 // GET /api/ammo - List all AmmoStock grouped by caliber
 export async function GET() {
@@ -98,7 +99,7 @@ export async function POST(request: NextRequest) {
         quantity: quantity ?? 0,
         purchasePrice: purchasePrice ?? null,
         pricePerRound: pricePerRound ?? null,
-        purchaseDate: purchaseDate ? new Date(purchaseDate) : null,
+        purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         storageLocation: storageLocation ?? null,
         lowStockAlert: resolvedLowStockAlert,
         notes: notes ?? null,
@@ -115,6 +116,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(stock, { status: 201 });
   } catch (error) {
     console.error("POST /api/ammo error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: "Failed to create ammo stock" },
       { status: 500 }

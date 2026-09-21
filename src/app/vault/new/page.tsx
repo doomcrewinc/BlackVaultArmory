@@ -6,6 +6,7 @@ import { HelpTip } from "@/components/shared/HelpTip";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { FIREARM_TYPES, FIREARM_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import { todayLocalISO } from "@/lib/date";
 import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
@@ -375,7 +376,7 @@ export default function NewFirearmPage() {
                 name="acquisitionDate"
                 type="date"
                 className={INPUT_CLASS}
-                defaultValue={new Date().toISOString().split("T")[0]}
+                defaultValue={todayLocalISO()}
               />
             </div>
 

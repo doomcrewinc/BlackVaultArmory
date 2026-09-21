@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatDateOnly, formatTimestamp, toDateOnlyUTC, todayLocalISO, toISODate } from "./date";
+import {
+  formatDateOnly,
+  formatTimestamp,
+  InvalidDateError,
+  toDateOnlyUTC,
+  todayLocalISO,
+  toISODate,
+} from "./date";
 
 describe("toDateOnlyUTC", () => {
   it("normalizes a YYYY-MM-DD string to UTC midnight", () => {
@@ -96,6 +103,10 @@ describe("toDateOnlyUTC", () => {
     expect(() => toDateOnlyUTC("09/20/2026")).toThrow(/invalid date/i);
     expect(() => toDateOnlyUTC("20260920")).toThrow(/invalid date/i);
     expect(() => toDateOnlyUTC("")).toThrow(/invalid date/i);
+  });
+
+  it("throws a typed InvalidDateError so callers can map it to a 400", () => {
+    expect(() => toDateOnlyUTC("2026-02-30")).toThrow(InvalidDateError);
   });
 });
 

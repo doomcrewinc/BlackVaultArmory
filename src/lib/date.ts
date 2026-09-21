@@ -30,6 +30,14 @@ const DASH = "—";
 
 const DATE_ONLY_PREFIX = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
 
+/** Thrown by toDateOnlyUTC for any input that is not a valid calendar date. */
+export class InvalidDateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidDateError";
+  }
+}
+
 /**
  * Force a value onto UTC midnight of its UTC calendar day.
  * The only correct way to write a date-only field.
@@ -62,7 +70,7 @@ export function toDateOnlyUTC(input: Date | string): Date {
   if (typeof input === "string") {
     const match = DATE_ONLY_PREFIX.exec(input);
     if (!match) {
-      throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+      throw new InvalidDateError(`toDateOnlyUTC: invalid date input: ${String(input)}`);
     }
     const [, yearStr, monthStr, dayStr] = match;
     const year = Number(yearStr);
@@ -74,14 +82,14 @@ export function toDateOnlyUTC(input: Date | string): Date {
       candidate.getUTCMonth() + 1 !== month ||
       candidate.getUTCDate() !== day;
     if (Number.isNaN(candidate.getTime()) || rolledOver) {
-      throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+      throw new InvalidDateError(`toDateOnlyUTC: invalid date input: ${String(input)}`);
     }
     return candidate;
   }
 
   const parsed = input;
   if (Number.isNaN(parsed.getTime())) {
-    throw new Error(`toDateOnlyUTC: invalid date input: ${String(input)}`);
+    throw new InvalidDateError(`toDateOnlyUTC: invalid date input: ${String(input)}`);
   }
   return new Date(
     Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate())

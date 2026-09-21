@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
-import { formatDateOnly, formatTimestamp } from "@/lib/date";
+import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -122,7 +122,7 @@ export default function AccessoryDetailPage() {
 
   // Battery change log
   const [batteryLogOpen, setBatteryLogOpen] = useState(false);
-  const [batteryDate, setBatteryDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [batteryDate, setBatteryDate] = useState(() => todayLocalISO());
   const [batteryTypeInput, setBatteryTypeInput] = useState("");
   const [batteryNotes, setBatteryNotes] = useState("");
   const [batterySubmitting, setBatterySubmitting] = useState(false);
@@ -216,7 +216,7 @@ export default function AccessoryDetailPage() {
               }
             : prev
         );
-        setBatteryDate(new Date().toISOString().split("T")[0]);
+        setBatteryDate(todayLocalISO());
         setBatteryNotes("");
         setBatteryLogOpen(false);
       }

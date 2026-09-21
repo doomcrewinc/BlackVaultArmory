@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 
 function normalizeString(value: unknown) {
@@ -103,13 +104,18 @@ export async function POST(request: NextRequest) {
           : null,
         serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
         type: normalizeString(type) || "UNSPECIFIED",
-        acquisitionDate: acquisitionDate ? new Date(acquisitionDate) : new Date(),
+        // No date supplied: fall back to UTC's today. The server cannot know the
+        // viewer's timezone (in Docker this container is UTC), so the client sends
+        // the date whenever it has one.
+        acquisitionDate: acquisitionDate
+          ? toDateOnlyUTC(acquisitionDate)
+          : toDateOnlyUTC(new Date()),
         purchasePrice: purchasePrice ?? null,
         currentValue: currentValue ?? null,
         notes: notes ? normalizeString(notes) : null,
         imageUrl: imageUrl ?? null,
         imageSource: imageSource ?? null,
-        lastMaintenanceDate: lastMaintenanceDate ? new Date(lastMaintenanceDate) : null,
+        lastMaintenanceDate: lastMaintenanceDate ? toDateOnlyUTC(lastMaintenanceDate) : null,
         maintenanceIntervalDays: maintenanceIntervalDays ?? null,
       },
       include: {
@@ -128,7 +134,9 @@ export async function POST(request: NextRequest) {
       await prisma.rangeSession.create({
         data: {
           firearmId: firearm.id,
-          sessionDate: firearm.acquisitionDate ?? new Date(),
+          sessionDate: firearm.acquisitionDate
+            ? toDateOnlyUTC(firearm.acquisitionDate)
+            : toDateOnlyUTC(new Date()),
           location: "Pre-existing use",
           roundsFired: parsedInitialRounds,
           notes: "Initial round count logged at time of vault entry.",
@@ -144,6 +152,9 @@ export async function POST(request: NextRequest) {
     );
   } catch (error: unknown) {
     console.error("POST /api/firearms error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     if (
       error instanceof Error &&
       error.message.includes("Unique constraint failed") &&

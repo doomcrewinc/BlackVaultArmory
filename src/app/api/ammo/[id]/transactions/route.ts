@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 // Types that subtract from quantity
 const SUBTRACT_TYPES = new Set(["RANGE_USE", "TRANSFER_OUT", "EXPENDED"]);
@@ -99,7 +100,7 @@ export async function POST(
           note: note ?? null,
           purchasePrice: purchasePrice ?? null,
           pricePerRound: pricePerRound ?? null,
-          purchaseDate: purchaseDate ? new Date(purchaseDate) : null,
+          purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         },
       }),
     ]);
@@ -115,6 +116,9 @@ export async function POST(
     );
   } catch (error) {
     console.error("POST /api/ammo/[id]/transactions error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: "Failed to create ammo transaction" },
       { status: 500 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 // GET /api/accessories/[id]/battery-log - Get battery change history
 export async function GET(
@@ -44,10 +45,13 @@ export async function POST(
       return NextResponse.json({ error: "Accessory not found" }, { status: 404 });
     }
 
+    // changedAt on the log is an instant; lastBatteryChangeDate on the accessory
+    // is date-only and must be pinned to UTC midnight separately.
     const changeDate = changedAt ? new Date(changedAt) : new Date();
+    const changeDateOnly = changedAt ? toDateOnlyUTC(changedAt) : toDateOnlyUTC(new Date());
 
     const updateData: Record<string, unknown> = {
-      lastBatteryChangeDate: changeDate,
+      lastBatteryChangeDate: changeDateOnly,
       hasBattery: true,
     };
     if (batteryType && batteryType !== accessory.batteryType) {
@@ -74,6 +78,9 @@ export async function POST(
     return NextResponse.json(log, { status: 201 });
   } catch (error) {
     console.error("POST /api/accessories/[id]/battery-log error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Failed to log battery change" }, { status: 500 });
   }
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 export async function PUT(
   request: NextRequest,
@@ -26,11 +27,7 @@ export async function PUT(
       if (typeof body.sessionDate !== "string" || body.sessionDate.trim().length === 0) {
         return NextResponse.json({ error: "sessionDate must be a valid date string" }, { status: 400 });
       }
-      const parsed = new Date(body.sessionDate);
-      if (Number.isNaN(parsed.getTime())) {
-        return NextResponse.json({ error: "sessionDate must be a valid date string" }, { status: 400 });
-      }
-      updateData.sessionDate = parsed;
+      updateData.sessionDate = toDateOnlyUTC(body.sessionDate);
     }
 
     if (body.location !== undefined) {
@@ -125,6 +122,9 @@ export async function PUT(
     return NextResponse.json(updated);
   } catch (error) {
     console.error("PUT /api/range/sessions/[id] error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Failed to update range session" }, { status: 500 });
   }
 }
