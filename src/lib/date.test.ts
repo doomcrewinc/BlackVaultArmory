@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDateOnly, formatTimestamp, toDateOnlyUTC, todayLocalISO } from "./date";
+import { formatDateOnly, formatTimestamp, toDateOnlyUTC, todayLocalISO, toISODate } from "./date";
 
 describe("toDateOnlyUTC", () => {
   it("normalizes a YYYY-MM-DD string to UTC midnight", () => {
@@ -99,6 +99,21 @@ describe("formatTimestamp", () => {
 
   it("renders a dash for null", () => {
     expect(formatTimestamp(null)).toBe("—");
+  });
+});
+
+describe("toISODate", () => {
+  it("renders a date-only value as machine-readable YYYY-MM-DD", () => {
+    expect(toISODate(new Date("2026-09-20T00:00:00.000Z"))).toBe("2026-09-20");
+  });
+
+  it("is time-of-day independent, inheriting the lexical parsing", () => {
+    expect(toISODate("2026-09-20T20:00:00")).toBe("2026-09-20");
+  });
+
+  it("returns an empty string for null so CSV cells stay blank", () => {
+    expect(toISODate(null)).toBe("");
+    expect(toISODate(undefined)).toBe("");
   });
 });
 

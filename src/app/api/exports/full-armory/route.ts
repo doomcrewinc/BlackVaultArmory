@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { decryptField } from "@/lib/crypto";
-import { formatDateOnly } from "@/lib/date";
+import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
   type ExportFormat,
@@ -389,7 +389,7 @@ export async function GET(request: NextRequest) {
           caliber: firearm.caliber || "",
           serialNumber: resolvedSerial,
           hasSerial: !!firearm.serialNumber,
-          purchaseDate: formatDateOnly(firearm.acquisitionDate),
+          purchaseDate: toISODate(firearm.acquisitionDate),
           purchasePrice: exportOptions.includeValue ? (firearm.purchasePrice ?? null) : null,
           replacementValue: exportOptions.includeValue ? (firearm.currentValue ?? null) : null,
           receiptCount: exportOptions.includeDocuments ? receiptCount : 0,
@@ -419,7 +419,7 @@ export async function GET(request: NextRequest) {
           caliber: accessory.caliber || "",
           serialNumber: "",
           hasSerial: false,
-          purchaseDate: formatDateOnly(accessory.acquisitionDate),
+          purchaseDate: toISODate(accessory.acquisitionDate),
           purchasePrice: exportOptions.includeValue ? (accessory.purchasePrice ?? null) : null,
           replacementValue: null,
           receiptCount: exportOptions.includeDocuments ? receiptCount : 0,

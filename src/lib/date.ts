@@ -1,22 +1,29 @@
 /**
  * date.ts — the only sanctioned way to read or write a date in this app.
  *
- * Two kinds of temporal value exist here and they must not be confused:
+ * Two kinds of temporal value exist here and they must not be confused, and
+ * date-only values further split by audience — human or machine:
  *
- *   DATE-ONLY   a calendar day with no time: acquisitionDate, sessionDate,
- *               purchaseDate, lastMaintenanceDate, lastBatteryChangeDate,
- *               drillDate, MaintenanceLog.date.
- *               Stored as DateTime pinned to 00:00:00.000Z.
- *               Written with toDateOnlyUTC(). Displayed with formatDateOnly().
+ *   DATE-ONLY, for a HUMAN    a calendar day with no time: acquisitionDate,
+ *                             sessionDate, purchaseDate, lastMaintenanceDate,
+ *                             lastBatteryChangeDate, drillDate, MaintenanceLog.date.
+ *                             Stored as DateTime pinned to 00:00:00.000Z.
+ *                             Written with toDateOnlyUTC(). Displayed with
+ *                             formatDateOnly().
  *
- *   TIMESTAMP   an instant: createdAt, updatedAt, loggedAt, transactedAt,
- *               cachedAt, changedAt.
- *               Stored UTC. Displayed with formatTimestamp() in local time.
+ *   DATE-ONLY, for a MACHINE  the same calendar day, rendered as YYYY-MM-DD for
+ *                             a CSV/JSON export or API payload instead of a
+ *                             page. Written with toISODate().
+ *
+ *   TIMESTAMP                 an instant: createdAt, updatedAt, loggedAt,
+ *                             transactedAt, cachedAt, changedAt.
+ *                             Stored UTC. Displayed with formatTimestamp() in
+ *                             local time.
  *
  * A date-only value rendered in local time is off by one day for every viewer
  * west of UTC — that is the bug this module exists to prevent. There is
  * deliberately no generic `formatDate`: every call site must state which kind
- * of value it holds.
+ * of value it holds, and for which audience.
  */
 
 const DASH = "—";
@@ -104,6 +111,18 @@ export function formatTimestamp(
     day: "numeric",
     ...(timeZone ? { timeZone } : {}),
   }).format(date);
+}
+
+/**
+ * A date-only value as YYYY-MM-DD, for MACHINE-readable output: CSV and JSON
+ * exports, API payloads. Empty string for null so CSV cells stay blank.
+ *
+ * Not for display — use formatDateOnly for anything a person reads. Built on
+ * toDateOnlyUTC so it inherits the lexical, time-of-day-independent parsing.
+ */
+export function toISODate(value: Date | string | null | undefined): string {
+  if (!value) return "";
+  return toDateOnlyUTC(value).toISOString().slice(0, 10);
 }
 
 /**
