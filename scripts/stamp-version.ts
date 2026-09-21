@@ -1,14 +1,12 @@
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import { calverForDate, formatVersion } from "../src/lib/version";
+import { calverForDate } from "../src/lib/version";
 
 const pkgPath = path.join(__dirname, "..", "package.json");
 const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version: string };
 
 const calver = calverForDate(new Date());
-const sha = execSync("git rev-parse --short=7 HEAD", { encoding: "utf8" }).trim();
-const full = formatVersion(calver, sha);
 
 pkg.version = calver;
 fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
@@ -19,7 +17,10 @@ const existingTags = execSync("git tag --list", { encoding: "utf8" })
   .map((t) => t.trim())
   .filter(Boolean);
 
-const tag = existingTags.includes(`v${calver}`) ? `v${full}` : `v${calver}`;
+// A same-day re-release needs a distinct tag. Do NOT use the develop sha here:
+// the tag will live on a merge commit on master, whose sha this script cannot know.
+const rerunSuffix = new Date().toISOString().slice(11, 16).replace(":", "");
+const tag = existingTags.includes(`v${calver}`) ? `v${calver}-${rerunSuffix}` : `v${calver}`;
 if (tag !== `v${calver}`) {
   console.log(`NOTE: v${calver} already exists — using disambiguated tag.`);
 }
@@ -34,4 +35,5 @@ console.log(`  git merge --no-ff develop -m "chore: release ${calver}"`);
 console.log(`  git tag ${tag}`);
 console.log(`  git push origin master ${tag}`);
 console.log("");
-console.log(`Image will publish as ${full}`);
+console.log(`Image will publish as ${calver}-<sha of the tagged merge commit on master>`);
+console.log("(the release workflow derives the sha from the tagged commit, not from develop)");

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]*"]
 
 jobs:
   publish:
@@ -19,7 +19,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           CALVER="${TAG%%-*}"
-          SHA="$(git rev-parse --short=7 HEAD)"
+          SHA="$(git rev-parse --short=7 HEAD | cut -c1-7)"
           echo "calver=$CALVER" >> "$GITHUB_OUTPUT"
           echo "full=$CALVER-$SHA"  >> "$GITHUB_OUTPUT"
 

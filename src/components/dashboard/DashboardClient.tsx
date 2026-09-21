@@ -119,6 +119,11 @@ interface BatteryDueItemWithDue extends BatteryDueItem {
   days: number;
 }
 
+/**
+ * Whole days between two timestamps, unsigned.
+ * Callers must pre-partition by direction — this cannot distinguish
+ * "3 days overdue" from "due in 3 days".
+ */
 function daysBetween(a: number, b: number) {
   return Math.ceil(Math.abs(a - b) / 86400000);
 }
