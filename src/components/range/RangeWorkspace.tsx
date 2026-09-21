@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { VaultInput, VaultSelect, VaultTextArea, vaultCardClass, vaultLabelClass, VaultButton } from "@/components/shared/ui-primitives";
 import { formatNumber } from "@/lib/utils";
-import { todayLocalISO } from "@/lib/date";
+import { todayLocalISO, formatDateOnly } from "@/lib/date";
 import { Target, ChevronDown, ChevronUp, Loader2, AlertCircle, CheckCircle2, Shield, Timer, BookPlus, Plus, Minus, Calculator, Pencil, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { safeId } from "@/lib/client/id";
@@ -928,7 +928,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     return sorted.map((drill, index) => ({
       ...drill,
       index: index + 1,
-      displayDate: new Date(drill.sessionDate).toLocaleDateString(),
+      displayDate: formatDateOnly(drill.sessionDate),
       scoreValue: Math.max(0, drill.points - (drill.penalties ?? 0)),
     }));
   }, [allLoggedDrills, performanceDrillName]);
@@ -1502,7 +1502,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
                     <option value="">No session (optional)</option>
                     {sessions.map((session) => (
                       <option key={session.id} value={session.id}>
-                        {new Date(session.sessionDate).toLocaleDateString()} · {session.location} · {session.firearm.name}
+                        {formatDateOnly(session.sessionDate)} · {session.location} · {session.firearm.name}
                       </option>
                     ))}
                   </VaultSelect>
@@ -2058,7 +2058,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
                 >
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-medium text-vault-text">{new Date(session.sessionDate).toLocaleDateString()} · {session.location}</p>
+                      <p className="text-sm font-medium text-vault-text">{formatDateOnly(session.sessionDate)} · {session.location}</p>
                       <div className="flex items-center gap-2">
                         <p className="text-xs font-mono text-[#F5A623]">{formatNumber(session.roundsFired)} rds</p>
                         <button
@@ -2103,7 +2103,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
                   {expandedSessionId === session.id && (
                     <div className="px-4 pb-4 pt-2 border-t border-vault-border/40 space-y-2">
                       <div className="grid grid-cols-2 gap-2 text-xs text-vault-text-muted">
-                        <span>Date: {new Date(session.sessionDate).toLocaleDateString()}</span>
+                        <span>Date: {formatDateOnly(session.sessionDate)}</span>
                         <span>Location: {session.location}</span>
                         <span>Firearm: {session.firearm.name}</span>
                         <span>Rounds: {session.roundsFired}</span>
@@ -2131,7 +2131,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
                                   {drill.name}
                                   {showDrillDate && (
                                     <span className="ml-1.5 text-[10px] text-vault-text-faint">
-                                      (logged: {new Date(drill.drillDate!).toLocaleDateString(undefined, { month: "short", day: "numeric" })})
+                                      (logged: {new Date(drill.drillDate!).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })})
                                     </span>
                                   )}
                                 </td>
