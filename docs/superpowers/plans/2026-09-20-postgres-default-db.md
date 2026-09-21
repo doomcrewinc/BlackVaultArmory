@@ -32,6 +32,13 @@ table lists in backup/restore, guarded by a DMMF test that fails when a schema m
 - Depends on Epic A for the vitest harness (`npm test`) and for the `develop` branch created in
   its Task 0.
 - All work happens on branch `feat/postgres-default`, branched off `develop`, PR'd into `develop`.
+- **`gh pr create` must pass `--repo doomcrewinc/BlackVaultArmory`** — this is a fork, so `gh`
+  otherwise targets the upstream parent and fails on permissions.
+- **Assumes `chore/untrack-dev-db` has merged.** Task 2 Step 8 and Task 9 Step 4 run
+  `npm run build`, which invokes `prisma migrate deploy`. Against the previously-committed
+  `prisma/prisma/dev.db` that fails with `P3018: duplicate column name: serialNumber`, because
+  that file's migration ledger recorded 10 of 18 migrations while its schema sat past migration
+  11. If a stale `dev.db` is present on disk, delete it before running any build step.
 
 ---
 

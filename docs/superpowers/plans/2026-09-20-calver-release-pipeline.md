@@ -31,6 +31,16 @@ build/push on `v*` tag).
 - All work happens on branch `feat/calver-release`, PR'd into `develop`.
 - **Task 0 must run first.** `develop` does not exist yet, so there is nowhere for the first PR
   to land.
+- **`gh pr create` must pass `--repo doomcrewinc/BlackVaultArmory`.** This repo is a fork, so
+  `gh` defaults the PR base to the upstream parent and fails with
+  `doomcrewinc does not have the correct permissions to execute CreatePullRequest`.
+- **PREREQUISITE — `npm run build` is broken on a clean checkout.** `prisma/prisma/dev.db` is
+  committed with a `_prisma_migrations` ledger recording only 10 of the 18 migrations on disk,
+  while its schema was already pushed past that point. `migrate deploy` re-applies migration 11
+  and dies with `P3018: duplicate column name: serialNumber`. Since CI runs `npm run build` on a
+  fresh checkout, the pipeline in Task 7 fails on every run until the file is untracked. Tasks 5
+  and 7 both depend on the fix. Tracked as `chore/untrack-dev-db`; it must be merged to `develop`
+  before Task 5.
 
 ---
 
