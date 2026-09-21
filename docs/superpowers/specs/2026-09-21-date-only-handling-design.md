@@ -16,8 +16,9 @@ backups use UTC.
 The schema has 33 `DateTime` fields that divide cleanly in two:
 
 **Audit timestamps — genuine instants, already correct.** `createdAt` ×9, `updatedAt` ×7,
-`loggedAt`, `transactedAt`, `cachedAt`, `changedAt`. Stored UTC, displayed browser-local. No
-change needed.
+`loggedAt`, `transactedAt`, `cachedAt`. Stored UTC, displayed browser-local. No change needed.
+(`BatteryChangeLog.changedAt` was originally listed here; it was reclassified as date-only —
+see *Reclassified during the fix wave* below.)
 
 **Domain dates — date-only concepts stored as instants. This is the bug.** Nine fields:
 
