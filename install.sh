@@ -26,26 +26,9 @@ else
 fi
 
 # ── Helpers ──────────────────────────────────────────────────
-# Compose file for a database provider. PostgreSQL is the default.
-compose_file_for() {
-  if [ "$1" = "sqlite" ]; then
-    echo "docker-compose.sqlite.yml"
-  else
-    echo "docker-compose.yml"
-  fi
-}
-
-# Provider recorded in an existing .env. Installs made before PostgreSQL
-# support have no DB_PROVIDER line and were always SQLite.
-provider_from_env() {
-  local value
-  value=$(grep "^DB_PROVIDER=" .env | cut -d'=' -f2- | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)
-  if [ -z "$value" ]; then
-    echo "sqlite"
-  else
-    echo "$value"
-  fi
-}
+# provider_from_env / compose_file_for live in one shared file.
+# shellcheck source=scripts/compose-provider.sh
+. "$(dirname "$0")/scripts/compose-provider.sh"
 
 # Random hex secret. Never echoed to the terminal.
 generate_password() {

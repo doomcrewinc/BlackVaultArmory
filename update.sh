@@ -32,6 +32,13 @@ if [ ! -f ".env" ]; then
   echo ""
 fi
 
+# ── Database provider and compose file ────────────────────────
+# shellcheck source=scripts/compose-provider.sh
+. "$(dirname "$0")/scripts/compose-provider.sh"
+DB_PROVIDER=$(provider_from_env)
+COMPOSE_FILE=$(compose_file_for "$DB_PROVIDER")
+echo "Database provider: $DB_PROVIDER (using $COMPOSE_FILE)"
+
 # ── Read DATA_DIR from .env ────────────────────────────────────
 ACTIVE_DATA_DIR=""
 if [ -f ".env" ]; then
@@ -39,13 +46,23 @@ if [ -f ".env" ]; then
 fi
 
 # ── Preflight: verify the database exists ─────────────────────
-if [ -n "$ACTIVE_DATA_DIR" ]; then
+if [ -n "$ACTIVE_DATA_DIR" ] && [ "$DB_PROVIDER" != "sqlite" ]; then
+  # PostgreSQL keeps its cluster in $DATA_DIR/postgres. DATA_DIR is never
+  # relocated here: moving it would bring up a new, empty database.
+  if [ -d "$ACTIVE_DATA_DIR/postgres" ]; then
+    echo "PostgreSQL data verified at: $ACTIVE_DATA_DIR/postgres"
+  else
+    echo "⚠  WARNING: No PostgreSQL data found at: $ACTIVE_DATA_DIR/postgres"
+    echo "   DATA_DIR in .env is left unchanged. If your data lives elsewhere,"
+    echo "   fix DATA_DIR in .env and re-run ./update.sh."
+  fi
+elif [ -n "$ACTIVE_DATA_DIR" ]; then
   DB_PATH="$ACTIVE_DATA_DIR/db/vault.db"
   if [ ! -f "$DB_PATH" ]; then
     echo "⚠  WARNING: No database found at expected location:"
     echo "   $DB_PATH"
     echo ""
-    # Check legacy locations
+    # Check legacy locations (SQLite installs only)
     LEGACY_DB=""
     if [ -f "./data/db/vault.db" ]; then
       LEGACY_DB="$(pwd)/data/db/vault.db"
@@ -81,17 +98,17 @@ fi
 
 # ── Rebuild and restart ───────────────────────────────────────
 echo "Rebuilding BlackVault image..."
-$COMPOSE build --pull
+$COMPOSE -f "$COMPOSE_FILE" build --pull
 
 echo ""
 echo "Restarting..."
-$COMPOSE up -d
+$COMPOSE -f "$COMPOSE_FILE" up -d
 
 echo ""
 echo "Waiting for health check..."
 sleep 5
 
-if $COMPOSE ps | grep -q "healthy\|running"; then
+if $COMPOSE -f "$COMPOSE_FILE" ps | grep -q "healthy\|running"; then
   STATUS="running"
 else
   STATUS="started (check logs if app doesn't load)"
@@ -109,5 +126,5 @@ if [ -n "$ACTIVE_DATA_DIR" ]; then
 fi
 echo "  URL:      http://localhost:${PORT:-3000}"
 echo ""
-echo "  To check logs: $COMPOSE logs -f"
+echo "  To check logs: $COMPOSE -f $COMPOSE_FILE logs -f"
 echo ""
