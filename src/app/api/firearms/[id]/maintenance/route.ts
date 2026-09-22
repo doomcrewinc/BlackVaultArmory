@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 export async function GET(
   _req: NextRequest,
@@ -37,36 +38,46 @@ export async function POST(
     return NextResponse.json({ error: "date and notes are required" }, { status: 400 });
   }
 
-  const entryDate = new Date(body.date);
-  if (isNaN(entryDate.getTime())) {
-    return NextResponse.json({ error: "Invalid date" }, { status: 400 });
-  }
+  try {
+    const entryDate = toDateOnlyUTC(body.date);
 
-  const log = await prisma.maintenanceLog.create({
-    data: {
-      firearmId: id,
-      date: entryDate,
-      notes: body.notes.trim(),
-      roundCount: body.roundCount ?? null,
-    },
-  });
+    const log = await prisma.maintenanceLog.create({
+      data: {
+        firearmId: id,
+        date: entryDate,
+        notes: body.notes.trim(),
+        roundCount: body.roundCount ?? null,
+      },
+    });
 
-  // Optionally update the firearm's lastMaintenanceDate and maintenanceIntervalDays
-  if (body.nextDueDate) {
-    const nextDue = new Date(body.nextDueDate);
-    if (!isNaN(nextDue.getTime())) {
-      const intervalDays = Math.round(
-        (nextDue.getTime() - entryDate.getTime()) / 86400000
-      );
-      await prisma.firearm.update({
-        where: { id },
-        data: {
-          lastMaintenanceDate: entryDate,
-          maintenanceIntervalDays: intervalDays > 0 ? intervalDays : null,
-        },
-      });
+    // Optionally update the firearm's lastMaintenanceDate and maintenanceIntervalDays
+    if (body.nextDueDate) {
+      let nextDue: Date;
+      try {
+        nextDue = toDateOnlyUTC(body.nextDueDate);
+      } catch {
+        nextDue = new Date(NaN);
+      }
+      if (!isNaN(nextDue.getTime())) {
+        const intervalDays = Math.round(
+          (nextDue.getTime() - entryDate.getTime()) / 86400000
+        );
+        await prisma.firearm.update({
+          where: { id },
+          data: {
+            lastMaintenanceDate: entryDate,
+            maintenanceIntervalDays: intervalDays > 0 ? intervalDays : null,
+          },
+        });
+      }
     }
-  }
 
-  return NextResponse.json(log, { status: 201 });
+    return NextResponse.json(log, { status: 201 });
+  } catch (error) {
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: "Invalid date" }, { status: 400 });
+    }
+    console.error("POST /api/firearms/[id]/maintenance error:", error);
+    return NextResponse.json({ error: "Failed to create maintenance log" }, { status: 500 });
+  }
 }

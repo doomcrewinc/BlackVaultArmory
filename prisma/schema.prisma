@@ -316,6 +316,26 @@ model MaintenanceLog {
   @@index([date])
 }
 
+// ─── DATE NORMALIZATION AUDIT ─────────────────────────────────
+// Records every legacy date-only value before the migration changes it, so the
+// migration is reversible and can be re-run with a corrected timezone.
+// No foreign keys: an audit row must outlive the record it describes.
+
+model DateNormalizationAudit {
+  id            String   @id @default(cuid())
+  model         String
+  field         String
+  recordId      String
+  originalValue DateTime
+  appliedValue  DateTime
+  appliedZone   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([model, field, recordId])
+  @@index([model, field])
+}
+
 // ─── SETTINGS ─────────────────────────────────────────────────
 
 model AppSettings {
@@ -331,6 +351,9 @@ model AppSettings {
   defaultCurrency         String   @default("USD")
   appPassword             String?
   defaultAmmoAlertThreshold Int?
+  // IANA timezone, e.g. "America/Denver". null = unset.
+  // Used to convert legacy date-only instants to the day their author meant.
+  timezone                String?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 }

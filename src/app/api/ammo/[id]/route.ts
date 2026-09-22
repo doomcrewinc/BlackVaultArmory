@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 // GET /api/ammo/[id] - Get a single AmmoStock entry
 export async function GET(
@@ -78,7 +79,7 @@ export async function PUT(
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(pricePerRound !== undefined && { pricePerRound: pricePerRound ?? null }),
         ...(purchaseDate !== undefined && {
-          purchaseDate: purchaseDate ? new Date(purchaseDate) : null,
+          purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         }),
         ...(storageLocation !== undefined && { storageLocation }),
         ...(lowStockAlert !== undefined && { lowStockAlert }),
@@ -97,6 +98,9 @@ export async function PUT(
     return NextResponse.json(updated);
   } catch (error) {
     console.error("PUT /api/ammo/[id] error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: "Failed to update ammo stock" },
       { status: 500 }

@@ -18,7 +18,8 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { StatCard } from "@/components/shared/StatCard";
-import { formatCurrency, formatNumber, formatDate } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
+import { formatDateOnly } from "@/lib/date";
 import {
   Shield,
   Crosshair,
@@ -588,7 +589,7 @@ function RecentWidget({ firearms }: { firearms: RecentFirearm[] }) {
                 </div>
                 <div className="text-right shrink-0">
                   <p className="text-xs text-vault-text-faint">
-                    {formatDate(firearm.acquisitionDate)}
+                    {formatDateOnly(firearm.acquisitionDate)}
                   </p>
                   <ChevronRight className="w-3 h-3 text-vault-text-faint group-hover:text-[#00C2FF] ml-auto mt-1 transition-colors" />
                 </div>

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { isValidTimeZone, runLegacyDateMigration, type MigrationSummary } from "@/lib/date-migration";
 
 const ALLOWED_AUTO_BACKUP_CADENCE = new Set(["daily", "weekly", "monthly"]);
 
@@ -62,6 +63,7 @@ export async function GET() {
       manualLanHost: settings.manualLanHost,
       defaultCurrency: settings.defaultCurrency,
       defaultAmmoAlertThreshold: settings.defaultAmmoAlertThreshold,
+      timezone: settings.timezone,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt,
     };
@@ -98,6 +100,7 @@ export async function PUT(request: NextRequest) {
       manualLanHost,
       defaultCurrency,
       defaultAmmoAlertThreshold,
+      timezone,
     } = body;
 
     const updateData: Record<string, unknown> = {};
@@ -189,12 +192,24 @@ export async function PUT(request: NextRequest) {
       }
     }
 
+    if (timezone !== undefined && timezone !== null && timezone !== "") {
+      if (typeof timezone !== "string" || !isValidTimeZone(timezone)) {
+        return NextResponse.json({ error: `Unknown timezone: ${String(timezone)}` }, { status: 400 });
+      }
+    }
+    if (timezone !== undefined) {
+      updateData.timezone = timezone === null || timezone === "" ? null : timezone;
+    }
+
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json(
         { error: "No valid settings fields provided." },
         { status: 400 }
       );
     }
+
+    const previous = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
+    const previousTimezone = previous?.timezone ?? null;
 
     const settings = await prisma.appSettings.upsert({
       where: { id: "singleton" },
@@ -205,6 +220,15 @@ export async function PUT(request: NextRequest) {
       update: updateData,
     });
 
+    let dateMigration: MigrationSummary | undefined;
+    if (settings.timezone && settings.timezone !== previousTimezone) {
+      try {
+        dateMigration = await runLegacyDateMigration(prisma, settings.timezone);
+      } catch (error) {
+        console.error("[date-migration] failed after timezone change:", error);
+      }
+    }
+
     const v1Settings = {
       id: settings.id,
       includeUploadsInBackup: settings.includeUploadsInBackup,
@@ -214,6 +238,7 @@ export async function PUT(request: NextRequest) {
       manualLanHost: settings.manualLanHost,
       defaultCurrency: settings.defaultCurrency,
       defaultAmmoAlertThreshold: settings.defaultAmmoAlertThreshold,
+      timezone: settings.timezone,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt,
     };
@@ -221,6 +246,7 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({
       ...v1Settings,
       appPassword: null,
+      dateMigration,
     });
   } catch (error) {
     console.error("PUT /api/settings error:", error);

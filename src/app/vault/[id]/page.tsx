@@ -4,7 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { decryptField } from "@/lib/crypto";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency } from "@/lib/utils";
+import { formatDateOnly } from "@/lib/date";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -214,7 +215,7 @@ export default async function FirearmDetailPage({
               <Calendar className="w-3.5 h-3.5 text-vault-text-faint" />
               <p className="text-[10px] uppercase tracking-widest text-vault-text-faint">Acquired</p>
             </div>
-            <p className="text-sm text-vault-text">{formatDate(firearm.acquisitionDate)}</p>
+            <p className="text-sm text-vault-text">{formatDateOnly(firearm.acquisitionDate)}</p>
           </div>
 
           <div className="bg-vault-surface border border-vault-border rounded-lg p-4">

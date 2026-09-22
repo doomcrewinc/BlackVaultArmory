@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { buildExportQueryString, type FullArmoryExportOptions } from "@/lib/exports/full-armory";
+import { todayLocalISO } from "@/lib/date";
 
 const DEFAULT_OPTIONS: FullArmoryExportOptions = {
   preset: "CLAIMS",
@@ -61,16 +62,13 @@ export default function FullArmoryExportPage() {
         throw new Error(`No ${format.toUpperCase()} content was generated. Try adjusting export options and retry.`);
       }
 
-      const exportDate = new Date().toISOString().slice(0, 10);
+      const exportDate = todayLocalISO();
       const preferredName = `blackvault-export-${exportDate}.${format}`;
-      const disposition = response.headers.get("content-disposition") ?? "";
-      const nameMatch = disposition.match(/filename="?([^"]+)"?/i);
-      const serverName = nameMatch?.[1];
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = serverName || preferredName;
+      link.download = preferredName;
       document.body.append(link);
       link.click();
       link.remove();

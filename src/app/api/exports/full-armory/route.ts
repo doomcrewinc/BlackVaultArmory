@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { decryptField } from "@/lib/crypto";
+import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
   type ExportFormat,
@@ -158,11 +159,6 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
   }));
 
   return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows]);
-}
-
-function formatDate(value: Date | null | undefined): string {
-  if (!value) return "";
-  return value.toISOString().slice(0, 10);
 }
 
 function pdfEscape(value: string): string {
@@ -393,7 +389,7 @@ export async function GET(request: NextRequest) {
           caliber: firearm.caliber || "",
           serialNumber: resolvedSerial,
           hasSerial: !!firearm.serialNumber,
-          purchaseDate: formatDate(firearm.acquisitionDate),
+          purchaseDate: toISODate(firearm.acquisitionDate),
           purchasePrice: exportOptions.includeValue ? (firearm.purchasePrice ?? null) : null,
           replacementValue: exportOptions.includeValue ? (firearm.currentValue ?? null) : null,
           receiptCount: exportOptions.includeDocuments ? receiptCount : 0,
@@ -423,7 +419,7 @@ export async function GET(request: NextRequest) {
           caliber: accessory.caliber || "",
           serialNumber: "",
           hasSerial: false,
-          purchaseDate: formatDate(accessory.acquisitionDate),
+          purchaseDate: toISODate(accessory.acquisitionDate),
           purchasePrice: exportOptions.includeValue ? (accessory.purchasePrice ?? null) : null,
           replacementValue: null,
           receiptCount: exportOptions.includeDocuments ? receiptCount : 0,

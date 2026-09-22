@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 function calculateHitFactor(points: number, timeSeconds: number): number {
   if (!Number.isFinite(timeSeconds) || timeSeconds <= 0) {
@@ -126,13 +127,16 @@ export async function POST(
         hitFactor,
         notes: typeof notes === "string" ? notes.trim() || null : null,
         sortOrder: typeof sortOrder === "number" && Number.isInteger(sortOrder) ? sortOrder : 0,
-        drillDate: drillDate ? new Date(drillDate) : null,
+        drillDate: drillDate ? toDateOnlyUTC(drillDate) : null,
       },
     });
 
     return NextResponse.json(drill, { status: 201 });
   } catch (error) {
     console.error("POST /api/range/sessions/[id]/drills error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Failed to create drill" }, { status: 500 });
   }
 }

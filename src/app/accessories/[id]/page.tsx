@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
+import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -121,7 +122,7 @@ export default function AccessoryDetailPage() {
 
   // Battery change log
   const [batteryLogOpen, setBatteryLogOpen] = useState(false);
-  const [batteryDate, setBatteryDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [batteryDate, setBatteryDate] = useState(() => todayLocalISO());
   const [batteryTypeInput, setBatteryTypeInput] = useState("");
   const [batteryNotes, setBatteryNotes] = useState("");
   const [batterySubmitting, setBatterySubmitting] = useState(false);
@@ -215,7 +216,7 @@ export default function AccessoryDetailPage() {
               }
             : prev
         );
-        setBatteryDate(new Date().toISOString().split("T")[0]);
+        setBatteryDate(todayLocalISO());
         setBatteryNotes("");
         setBatteryLogOpen(false);
       }
@@ -355,7 +356,7 @@ export default function AccessoryDetailPage() {
               <Calendar className="w-3.5 h-3.5 text-vault-text-faint" />
               <p className="text-[10px] uppercase tracking-widest text-vault-text-faint">Acquired</p>
             </div>
-            <p className="text-sm text-vault-text">{formatDate(accessory.acquisitionDate)}</p>
+            <p className="text-sm text-vault-text">{formatDateOnly(accessory.acquisitionDate)}</p>
           </div>
 
           <div className="bg-vault-surface border border-vault-border rounded-lg p-4">
@@ -506,7 +507,7 @@ export default function AccessoryDetailPage() {
                     {visibleLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-vault-surface-2 transition-colors">
                         <td className="px-4 py-3 text-xs text-vault-text-muted">
-                          {formatDate(log.loggedAt)}
+                          {formatTimestamp(log.loggedAt)}
                         </td>
                         <td className="px-4 py-3 font-mono font-bold text-[#00C2FF]">
                           +{formatNumber(log.roundsAdded)}
@@ -670,7 +671,7 @@ export default function AccessoryDetailPage() {
                       {accessory.batteryChangeLogs.map((log) => (
                         <tr key={log.id} className="hover:bg-vault-surface-2 transition-colors">
                           <td className="px-4 py-3 text-xs text-vault-text-muted">
-                            {formatDate(log.changedAt)}
+                            {formatDateOnly(log.changedAt)}
                           </td>
                           <td className="px-4 py-3 font-mono text-vault-text">
                             {log.batteryType ?? <span className="text-vault-text-faint">—</span>}

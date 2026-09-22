@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
+import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 
 function calculateHitFactor(points: number, timeSeconds: number): number {
   if (!Number.isFinite(timeSeconds) || timeSeconds <= 0) {
@@ -156,11 +157,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const parsedDate = (() => {
-      if (typeof sessionDate !== "string" || sessionDate.trim().length === 0) return new Date();
-      const parsed = new Date(sessionDate);
-      return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
-    })();
+    const parsedDate =
+      typeof sessionDate !== "string" || sessionDate.trim().length === 0
+        ? toDateOnlyUTC(new Date())          // absent -> UTC today (server cannot know the viewer's date)
+        : toDateOnlyUTC(sessionDate.trim());  // malformed -> InvalidDateError -> 400
 
     const resolvedLocation = typeof location === "string" && location.trim().length > 0
       ? location.trim()
@@ -286,6 +286,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(created, { status: 201 });
   } catch (error) {
     console.error("POST /api/range/sessions error:", error);
+    if (error instanceof InvalidDateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Failed to create range session" }, { status: 500 });
   }
 }

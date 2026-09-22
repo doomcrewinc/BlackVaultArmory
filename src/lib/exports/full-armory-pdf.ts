@@ -2,7 +2,8 @@
 
 import jsPDF from "jspdf";
 import { PDFDocument } from "pdf-lib";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency } from "@/lib/utils";
+import { formatTimestamp } from "@/lib/date";
 import {
   type FullArmoryAttachmentRow,
   type FullArmoryExportOptions,
@@ -239,7 +240,7 @@ export async function generateFullArmoryPdf(
         row.name,
         row.linkedItemName || row.linkedItemType,
         row.mimeType || "—",
-        formatDate(row.uploadedAt),
+        formatTimestamp(row.uploadedAt),
         row.fileUrl || "—",
       ];
 
