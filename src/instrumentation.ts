@@ -12,7 +12,7 @@ export async function register() {
   }
   try {
     if (process.env.NEXT_RUNTIME !== "nodejs") return;
-    // Log-only warning for an SQLite install started on an empty PostgreSQL.
+    // Log-only warning: PostgreSQL active, vault.db has data, no .migrated.
     const { runSplitBrainGuard } = await import("./lib/db/split-brain-guard");
     await runSplitBrainGuard();
   } catch (error) {
