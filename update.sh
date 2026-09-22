@@ -112,13 +112,17 @@ $COMPOSE up -d
 
 echo ""
 echo "Waiting for health check..."
-sleep 5
-
-if $COMPOSE ps | grep -q "healthy\|running"; then
-  STATUS="running"
-else
-  STATUS="started (check logs if app doesn't load)"
-fi
+# The app healthcheck runs every 30s, so the first probe is not instant. Poll
+# for up to two minutes: right after `up -d` the status reads
+# "Up 2 seconds (health: starting)", which is neither healthy nor a failure.
+STATUS="started (check logs if app doesn't load)"
+for _ in $(seq 1 60); do
+  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
+    STATUS="running"
+    break
+  fi
+  sleep 2
+done
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""

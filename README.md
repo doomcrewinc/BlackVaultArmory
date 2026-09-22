@@ -563,8 +563,9 @@ ignored.) The first lines say whether `.env` will be
 switched after the copy. It will be if the copy goes into this install's own database.
 
 **Step 8: Real run.** It copies everything and then verifies it. It must end with
-`VERIFIED: all 16 models match`, followed by `Wrote .../data/db/.migrated` and `Switched .env to
-PostgreSQL` (the password is shown as `****`). If it reports a mismatch, the copy is rolled back,
+`VERIFIED: all 16 models match`, followed by `Wrote .../data/db/.migrated` and
+`Switched /your/path/.env to PostgreSQL (backup: /your/path/.env.pre-migration):` and the new
+lines it wrote (the password is shown as `****`). If it reports a mismatch, the copy is rolled back,
 `.env` is left alone, and you are still on SQLite. Stop there, and open an issue.
 
 ```bash
