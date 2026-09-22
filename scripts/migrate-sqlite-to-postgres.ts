@@ -1,47 +1,55 @@
 /**
- * One-way, verified copy of a BlackVault SQLite database into Postgres.
+ * One-way, verified copy of a BlackVault SQLite database into Postgres, then
+ * (for this Docker stack's own database) the .migrated record and .env switch.
  *
- *   SQLITE_URL=file:/abs/path/vault.db POSTGRES_URL=postgresql://... npm run migrate:to-postgres [-- --dry-run] [-- --force]
+ *   npm run migrate:to-postgres [-- --dry-run] [-- --force] [-- --write-env]
  *
- * SQLITE_URL   source; default file:<repo>/data/db/vault.db. Only ever read.
- * POSTGRES_URL target (falls back to DATABASE_URL); must be postgres:// or postgresql://,
+ * SQLITE_URL   source; default file:${DATA_DIR}/db/vault.db, DATA_DIR from .env
+ *              (default ./data). Only ever read.
+ * POSTGRES_URL target (falls back to DATABASE_URL, then to the stack's database
+ *              through docker-compose.migrate.yml: 127.0.0.1:55432 with
+ *              POSTGRES_PASSWORD from .env). Must be postgres:// or postgresql://,
  *              already migrated (`prisma migrate deploy`), and empty unless --force.
- * --dry-run    print source row counts and exit; never connects to the target.
- * --force      copy even if the target already has rows (it does not wipe them).
+ * --dry-run    print source row counts and exit; never connects to the target,
+ *              never writes .migrated or .env.
+ * --force      copy even if the target already has rows (it does not wipe them),
+ *              or if ${DATA_DIR}/db/.migrated says this install already migrated.
+ * --write-env  switch .env even though the target is not 127.0.0.1:55432. Every
+ *              other check still applies (see stackTargetCheck).
  *
- * Deliberately does NOT load .env: the two URLs are read from the real
- * environment once, here, and handed to each client explicitly, so a DATABASE_URL
- * in .env can never redirect the source or the target.
+ * After a VERIFIED copy into the stack's own database it writes
+ * ${DATA_DIR}/db/.migrated and switches .env (backup: .env.pre-migration).
+ * Otherwise it prints the lines to add by hand. See src/lib/db/migration-finalize.ts.
+ *
+ * Deliberately does NOT load .env into the environment: .env is only parsed for
+ * DATA_DIR and POSTGRES_PASSWORD, and the two URLs are handed to each client
+ * explicitly, so a DATABASE_URL in .env can never redirect the source or target.
  */
 import fs from "fs";
 import path from "path";
-import { migrateSqliteToPostgres, type DbClient } from "../src/lib/db/sqlite-to-postgres";
+import type { DbClient } from "../src/lib/db/sqlite-to-postgres";
+import { maskUrl, overlayUrl, resolveStack, runMigration } from "../src/lib/db/migration-finalize";
 
 type ClientCtor = new (options: { datasources: { db: { url: string } } }) => DbClient;
 
+const FLAGS = ["--dry-run", "--force", "--write-env"];
 const args = new Set(process.argv.slice(2));
-const dryRun = args.has("--dry-run");
-const force = args.has("--force");
 for (const a of args) {
-  if (a !== "--dry-run" && a !== "--force") {
+  if (!FLAGS.includes(a)) {
     console.error(`Unknown argument: ${a}`);
     process.exit(2);
   }
 }
+const dryRun = args.has("--dry-run");
+const force = args.has("--force");
+const writeEnv = args.has("--write-env");
 
 const repo = path.join(__dirname, "..");
-const sqliteUrl = process.env.SQLITE_URL || `file:${path.join(repo, "data", "db", "vault.db")}`;
-const postgresUrl = process.env.POSTGRES_URL || process.env.DATABASE_URL || "";
-
-function mask(url: string): string {
-  try {
-    const u = new URL(url);
-    if (u.password) u.password = "****";
-    return u.toString();
-  } catch {
-    return "<unparseable URL>";
-  }
-}
+const stack = resolveStack(repo);
+const stackPassword = stack.env.get("POSTGRES_PASSWORD") ?? "";
+const sqliteUrl = process.env.SQLITE_URL || `file:${stack.stackSqlitePath}`;
+const postgresUrl =
+  process.env.POSTGRES_URL || process.env.DATABASE_URL || (stackPassword ? overlayUrl(stackPassword) : "");
 
 function fail(message: string): never {
   console.error(`ERROR: ${message}`);
@@ -56,30 +64,34 @@ if (!fs.existsSync(sqlitePath)) fail(`source SQLite file does not exist: ${sqlit
 
 const postgresOk = /^postgres(ql)?:\/\//.test(postgresUrl);
 if (!dryRun && !postgresOk) {
-  fail("POSTGRES_URL (or DATABASE_URL) must be set to a postgres:// or postgresql:// URL");
+  fail("POSTGRES_URL (or DATABASE_URL, or POSTGRES_PASSWORD in .env) must give a postgres:// or postgresql:// URL");
 }
 
 console.log("BlackVault SQLite -> Postgres migrator (one-way)");
 console.log(`  source (SQLite):   file:${sqlitePath}`);
 console.log(
-  `  target (Postgres): ${postgresOk ? mask(postgresUrl) : "<not set>"}${dryRun ? "  (not contacted: --dry-run)" : ""}`,
+  `  target (Postgres): ${postgresOk ? maskUrl(postgresUrl) : "<not set>"}${dryRun ? "  (not contacted: --dry-run)" : ""}`,
 );
-if (force) console.log("  --force: a non-empty target will not be refused");
+if (force) console.log("  --force: a non-empty target or an existing .migrated will not be refused");
 console.log("");
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const SqliteClient: ClientCtor = require(".prisma/client-sqlite").PrismaClient;
 const source = new SqliteClient({ datasources: { db: { url: `file:${sqlitePath}` } } });
 
-migrateSqliteToPostgres({
+runMigration({
+  stack,
+  sqlitePath,
+  postgresUrl,
+  dryRun,
+  force,
+  writeEnv,
   source,
   connectTarget: () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const PostgresClient: ClientCtor = require("@prisma/client").PrismaClient;
     return new PostgresClient({ datasources: { db: { url: postgresUrl } } });
   },
-  dryRun,
-  force,
 })
   .then((code) => process.exit(code))
   .catch((err) => {

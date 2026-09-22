@@ -1,101 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  BATCH_SIZE,
-  MIGRATION_MODELS,
-  SOURCE_UNTOUCHED,
-  migrateSqliteToPostgres,
-  type DbClient,
-  type FindManyArgs,
-  type Row,
-} from "./sqlite-to-postgres";
+import { BATCH_SIZE, MIGRATION_MODELS, SOURCE_UNTOUCHED, migrateSqliteToPostgres } from "./sqlite-to-postgres";
 import { BACKUP_MODELS } from "../backup/models";
-
-/** In-memory stand-in for one Prisma model delegate. */
-class FakeDelegate {
-  rows: Row[] = [];
-  countShortBy = 0;
-  /** Only applied outside a transaction: simulates the committed state drifting from what was verified. */
-  countShortOutsideTx = 0;
-  owner?: { inTx: boolean };
-  createManyCalls: number[] = [];
-  writeShortBy = 0;
-
-  async count() {
-    const outside = this.owner?.inTx ? 0 : this.countShortOutsideTx;
-    return Math.max(0, this.rows.length - this.countShortBy - outside);
-  }
-
-  async findMany(args: FindManyArgs) {
-    let rows = [...this.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    if (args.where) rows = rows.filter((r) => args.where!.id.in.includes(r.id));
-    if (args.cursor) rows = rows.slice(rows.findIndex((r) => r.id === args.cursor!.id));
-    if (args.skip) rows = rows.slice(args.skip);
-    if (args.take !== undefined) rows = rows.slice(0, args.take);
-    return rows.map((r) => ({ ...r }));
-  }
-
-  async createMany({ data }: { data: Row[] }) {
-    this.createManyCalls.push(data.length);
-    const kept = data.slice(0, data.length - this.writeShortBy);
-    this.rows.push(...kept.map((r) => ({ ...r })));
-    return { count: kept.length };
-  }
-}
-
-class FakeClient {
-  disconnected = false;
-  inTx = false;
-  delegates: Record<string, FakeDelegate> = {};
-  order: string[] = [];
-
-  constructor() {
-    for (const m of MIGRATION_MODELS) {
-      const d = new FakeDelegate();
-      d.owner = this;
-      const origCreate = d.createMany.bind(d);
-      d.createMany = async (args) => {
-        this.order.push(m.model);
-        return origCreate(args);
-      };
-      this.delegates[m.delegate] = d;
-      (this as unknown as Record<string, FakeDelegate>)[m.delegate] = d;
-    }
-  }
-
-  async $disconnect() {
-    this.disconnected = true;
-  }
-
-  /** Snapshot/rollback like a real transaction. */
-  async $transaction<T>(fn: (tx: DbClient) => Promise<T>): Promise<T> {
-    const snapshot = Object.fromEntries(Object.entries(this.delegates).map(([k, d]) => [k, [...d.rows]]));
-    this.inTx = true;
-    try {
-      return await fn(this as unknown as DbClient);
-    } catch (err) {
-      // Discard every write made inside the callback, as a real rollback would.
-      for (const [k, rows] of Object.entries(snapshot)) this.delegates[k].rows = rows;
-      throw err;
-    } finally {
-      this.inTx = false;
-    }
-  }
-
-  asDb() {
-    return this as unknown as DbClient;
-  }
-}
-
-function seeded(): FakeClient {
-  const c = new FakeClient();
-  for (const m of MIGRATION_MODELS) {
-    c.delegates[m.delegate].rows = [
-      { id: `${m.delegate}-1`, createdAt: new Date("2024-03-01T00:00:00.000Z"), name: "a" },
-      { id: `${m.delegate}-2`, createdAt: new Date("2024-03-02T06:00:00.123Z"), name: null },
-    ];
-  }
-  return c;
-}
+import { FakeClient, seeded } from "./fake-db";
 
 async function run(source: FakeClient, target: FakeClient, extra: { dryRun?: boolean; force?: boolean } = {}) {
   const lines: string[] = [];
@@ -231,5 +137,45 @@ describe("migrateSqliteToPostgres", () => {
     expect(code).toBe(1);
     expect(out).toContain("FAILED: boom");
     expect(source.disconnected).toBe(true);
+  });
+});
+
+describe("onVerified", () => {
+  async function withHook(source: FakeClient, target: FakeClient, dryRun = false) {
+    const onVerified = vi.fn();
+    const code = await migrateSqliteToPostgres({
+      source: source.asDb(),
+      connectTarget: () => target.asDb(),
+      dryRun,
+      force: false,
+      log: () => {},
+      onVerified,
+    });
+    return { code, onVerified };
+  }
+
+  it("is called once with the verified counts after a verified copy", async () => {
+    const { code, onVerified } = await withHook(seeded(), new FakeClient());
+    expect(code).toBe(0);
+    expect(onVerified).toHaveBeenCalledTimes(1);
+    const [counts, total] = onVerified.mock.calls[0];
+    expect(total).toBe(32);
+    expect(counts.get("Firearm")).toBe(2);
+  });
+
+  it("is not called on a dry run, a refusal, a rollback or a post-commit failure", async () => {
+    expect((await withHook(seeded(), new FakeClient(), true)).onVerified).not.toHaveBeenCalled();
+
+    const occupied = new FakeClient();
+    occupied.delegates.firearm.rows = [{ id: "existing" }];
+    expect((await withHook(seeded(), occupied)).onVerified).not.toHaveBeenCalled();
+
+    const short = new FakeClient();
+    short.delegates.build.writeShortBy = 1;
+    expect((await withHook(seeded(), short)).onVerified).not.toHaveBeenCalled();
+
+    const drifting = new FakeClient();
+    drifting.delegates.sessionDrill.countShortOutsideTx = 1;
+    expect((await withHook(seeded(), drifting)).onVerified).not.toHaveBeenCalled();
   });
 });

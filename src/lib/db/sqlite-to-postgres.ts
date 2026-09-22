@@ -62,6 +62,12 @@ export interface MigrateOptions {
   dryRun: boolean;
   force: boolean;
   log?: (line: string) => void;
+  /**
+   * Called once, only after the copy committed AND the post-commit count check
+   * passed, with the verified per-model counts and their total. Never called on
+   * a dry run, a refusal, a mismatch/rollback or any other failure.
+   */
+  onVerified?: (counts: ReadonlyMap<string, number>, total: number) => void;
 }
 
 export const SOURCE_UNTOUCHED = "The source SQLite database was not modified.";
@@ -243,6 +249,7 @@ export async function migrateSqliteToPostgres(opts: MigrateOptions): Promise<num
       return 1;
     }
     log(`VERIFIED: all ${MIGRATION_MODELS.length} models match (${total} rows). ${SOURCE_UNTOUCHED}`);
+    opts.onVerified?.(sourceCounts, total);
     return 0;
   } catch (err) {
     log(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
