@@ -101,6 +101,9 @@ export async function runLegacyDateMigration(
           continue;
         }
         const next = normalizeInstant(new Date(existing.originalValue), zone);
+        // These calls must stay un-awaited: $transaction receives the pending
+        // queries and runs them atomically. Awaiting either one here would
+        // execute it eagerly, outside the transaction, and break reversibility.
         await client.$transaction([
           table.update({ where: { id: row.id }, data: { [field]: next } }),
           audit.update({
@@ -115,6 +118,9 @@ export async function runLegacyDateMigration(
       if (value.getTime() % DAY_MS === 0) continue; // already date-only
 
       const next = normalizeInstant(value, zone);
+      // These calls must stay un-awaited: $transaction receives the pending
+      // queries and runs them atomically. Awaiting either one here would
+      // execute it eagerly, outside the transaction, and break reversibility.
       await client.$transaction([
         audit.create({
           data: {
@@ -133,4 +139,29 @@ export async function runLegacyDateMigration(
   }
 
   return summary;
+}
+
+/** Runs at server start. Never throws: a failure must not block the app. */
+export async function runStartupDateMigration(): Promise<void> {
+  try {
+    const { prisma } = await import("@/lib/prisma");
+    const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
+    const configured = settings?.timezone;
+    const zone = configured && isValidTimeZone(configured) ? configured : "UTC";
+    const summary = await runLegacyDateMigration(prisma, zone);
+    if (summary.normalized || summary.reconverted || summary.skippedEdited) {
+      console.log(
+        `[date-migration] zone=${zone} normalized=${summary.normalized} ` +
+          `reconverted=${summary.reconverted} skippedEdited=${summary.skippedEdited}`
+      );
+    }
+    if (!configured && summary.normalized) {
+      console.log(
+        "[date-migration] No timezone set; used UTC provisionally. " +
+          "Set your timezone in Settings to correct these dates."
+      );
+    }
+  } catch (error) {
+    console.error("[date-migration] failed; the server will continue:", error);
+  }
 }

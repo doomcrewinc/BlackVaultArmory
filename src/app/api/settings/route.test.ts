@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
   create: vi.fn(),
   upsert: vi.fn(),
+  runLegacyDateMigration: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -16,6 +17,14 @@ vi.mock("@/lib/prisma", () => ({
     },
   },
 }));
+
+vi.mock("@/lib/date-migration", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/date-migration")>("@/lib/date-migration");
+  return {
+    ...actual,
+    runLegacyDateMigration: mocks.runLegacyDateMigration,
+  };
+});
 
 import { GET, PUT } from "./route";
 
@@ -250,5 +259,112 @@ describe("/api/settings backup fields", () => {
     expect(response.status).toBe(400);
     expect(json.error).toMatch(/No valid settings fields provided/i);
     expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid timezone", async () => {
+    const request = new NextRequest("http://localhost/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        timezone: "Mars/Olympus_Mons",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const response = await PUT(request);
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).toMatch(/Unknown timezone/i);
+    expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("persists a valid timezone and returns it in GET/PUT", async () => {
+    mocks.findUnique.mockResolvedValue({ id: "singleton", timezone: null });
+    mocks.upsert.mockResolvedValue({
+      id: "singleton",
+      timezone: "America/Denver",
+    });
+
+    const request = new NextRequest("http://localhost/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        timezone: "America/Denver",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const response = await PUT(request);
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    const upsertArgs = mocks.upsert.mock.calls[0][0];
+    expect(upsertArgs.update.timezone).toBe("America/Denver");
+    expect(json.timezone).toBe("America/Denver");
+  });
+
+  it("runs the date migration when the timezone changes", async () => {
+    mocks.findUnique.mockResolvedValue({ id: "singleton", timezone: null });
+    mocks.upsert.mockResolvedValue({
+      id: "singleton",
+      timezone: "America/Denver",
+    });
+    mocks.runLegacyDateMigration.mockResolvedValue({
+      zone: "America/Denver",
+      normalized: 0,
+      reconverted: 1,
+      skippedEdited: 1,
+    });
+
+    const request = new NextRequest("http://localhost/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        timezone: "America/Denver",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const response = await PUT(request);
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.runLegacyDateMigration).toHaveBeenCalledTimes(1);
+    expect(mocks.runLegacyDateMigration).toHaveBeenCalledWith(expect.anything(), "America/Denver");
+    expect(json.dateMigration).toEqual({
+      zone: "America/Denver",
+      normalized: 0,
+      reconverted: 1,
+      skippedEdited: 1,
+    });
+  });
+
+  it("does not run the date migration when the timezone is unchanged", async () => {
+    mocks.findUnique.mockResolvedValue({ id: "singleton", timezone: "America/Denver" });
+    mocks.upsert.mockResolvedValue({
+      id: "singleton",
+      timezone: "America/Denver",
+    });
+
+    const request = new NextRequest("http://localhost/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        timezone: "America/Denver",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const response = await PUT(request);
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.runLegacyDateMigration).not.toHaveBeenCalled();
+    expect(json.dateMigration).toBeUndefined();
   });
 });
