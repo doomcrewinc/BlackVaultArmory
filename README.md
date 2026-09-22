@@ -40,6 +40,24 @@ A self-hosted, local-only web app for tracking firearms, accessories, and range 
 After installing, **open Docker Desktop and wait for it to fully load** before continuing.
 You'll know it's ready when the whale 🐳 icon appears in your system tray (Windows) or menu bar (Mac).
 
+**BlackVault needs Docker Compose v2.20 or newer** (run as `docker compose`, with a space). Any
+current Docker Desktop has it. Check with:
+
+```bash
+docker compose version
+```
+
+On Linux without Docker Desktop, install or update the `docker-compose-plugin` package
+([guide](https://docs.docker.com/compose/install/linux/)). The old standalone `docker-compose`
+(v1) is not supported. The installer and `update.sh` / `update.bat` check this first and stop,
+changing nothing, if Compose is missing or too old.
+
+> ⚠️ **Updating an older install on older Compose:** the copy of `update.sh` / `update.bat` you
+> already have predates this check. If your Compose is older than v2.20, that first update fails
+> loudly at the rebuild step (`docker compose` cannot read the new `docker-compose.yml`). Your
+> BlackVault keeps running on the old version and your data is untouched. Upgrade Docker Compose,
+> then run the update again.
+
 > ⚠️ **Windows users:** Use `install.bat` — do **not** run `install.sh` and do **not** install Git Bash.
 > `install.bat` is the Windows version and does the exact same thing.
 

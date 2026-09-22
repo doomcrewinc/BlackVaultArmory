@@ -42,19 +42,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "COMPOSE="
-docker compose version >nul 2>&1
-if not errorlevel 1 set "COMPOSE=docker compose"
-if not defined COMPOSE (
-  docker-compose version >nul 2>&1
-  if not errorlevel 1 set "COMPOSE=docker-compose"
-)
-if not defined COMPOSE (
-  echo ERROR: 'docker compose' v2 or 'docker-compose' is required.
-  echo        Upgrade Docker Desktop or install the Compose plugin.
-  pause
-  exit /b 1
-)
+:: Docker Compose v2.20+ (docker-compose.yml needs it). Stops before
+:: anything is written when it is missing or older.
+call :require_compose
+if not defined COMPOSE goto :compose_too_old
 
 :: ── Check for existing .env (already configured) ─────────────
 :: Mirrors install.sh: start with the existing .env only when its data is
@@ -324,6 +315,23 @@ echo ERROR: could not create the data directories under: !DATA_DIR!
 pause
 exit /b 1
 
+:compose_too_old
+if defined _CV (
+  echo ERROR: Docker Compose !_CV! is too old. BlackVault needs v2.20 or newer.
+) else (
+  echo ERROR: BlackVault needs Docker Compose v2.20 or newer, run as
+  echo        'docker compose' ^(the Compose v2 plugin^).
+  docker-compose version >nul 2>&1
+  if not errorlevel 1 (
+    echo        Only the old 'docker-compose' was found; it cannot read
+    echo        BlackVault's docker-compose.yml.
+  )
+)
+echo        Upgrade Docker Desktop: https://docs.docker.com/desktop/
+echo        Nothing was changed.
+pause
+exit /b 1
+
 :compose_failed
 echo.
 echo ERROR: docker compose failed. See the output above.
@@ -333,6 +341,34 @@ exit /b 1
 :: ════════════════════════════════════════════════════════════
 :: Subroutines
 :: ════════════════════════════════════════════════════════════
+
+:: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh
+:: (install.sh and update.sh source it; batch cannot, so change all three
+:: together). docker-compose.yml uses depends_on.required: false, which needs
+:: Docker Compose v2.20 or newer: older v2 rejects the file and v1
+:: (docker-compose) cannot parse it, so the v1 fallback is gone on purpose.
+:: Sets COMPOSE=docker compose when `docker compose version --short` is at
+:: least 2.20 (a leading v is allowed), else leaves COMPOSE undefined and
+:: _CV holding the version found (empty when there is no Compose v2).
+:require_compose
+set "COMPOSE="
+set "_CV="
+set "_CMAJ="
+set "_CMIN="
+for /f "usebackq delims=" %%V in (`docker compose version --short 2^>nul`) do if not defined _CV set "_CV=%%V"
+if not defined _CV goto :eof
+set "_CV=!_CV: =!"
+if /i "!_CV:~0,1!"=="v" set "_CV=!_CV:~1!"
+for /f "tokens=1,2 delims=.-+" %%A in ("!_CV!") do (
+  set "_CMAJ=%%A"
+  set "_CMIN=%%B"
+)
+if not defined _CMAJ goto :eof
+if not defined _CMIN goto :eof
+for /f "delims=0123456789" %%X in ("!_CMAJ!!_CMIN!") do goto :eof
+if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
+if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
+goto :eof
 
 :: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
 :: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line

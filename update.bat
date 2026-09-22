@@ -25,19 +25,11 @@ set "BLACKVAULT_DATABASE_URL="
 set "BLACKVAULT_DB_PROVIDER="
 set "BLACKVAULT_POSTGRES_PASSWORD="
 
-:: ── Docker compose v1/v2 detection ────────────────────────────
-set "COMPOSE="
-docker compose version >nul 2>&1
-if not errorlevel 1 set "COMPOSE=docker compose"
-if not defined COMPOSE (
-  docker-compose version >nul 2>&1
-  if not errorlevel 1 set "COMPOSE=docker-compose"
-)
-if not defined COMPOSE (
-  echo ERROR: Docker with Compose is required.
-  pause
-  exit /b 1
-)
+:: ── Docker Compose v2.20+ ─────────────────────────────────────
+:: docker-compose.yml needs it. Stops before anything is touched (no .env
+:: change, no git pull, no rebuild), so the running BlackVault keeps running.
+call :require_compose
+if not defined COMPOSE goto :compose_too_old
 
 :: ── Migrate .blackvault.env to .env ──────────────────────────
 if not exist ".env" if exist ".blackvault.env" (
@@ -54,6 +46,20 @@ if not exist ".env" (
   echo    Continuing with Docker defaults, DATA_DIR=./data ...
   echo.
 )
+
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:: The all-colon lines above are a landing pad. cmd.exe re-reads a running
+:: batch file by byte offset. The update.bat shipped before PostgreSQL support
+:: runs `git pull` inside an if ( ) block, so once the pull replaces this file
+:: it resumes here at byte 2699 (LF checkout) or 2773 (CRLF checkout). Landing
+:: mid-line in a line of colons is a silent label, not a stray command. Keep
+:: both offsets inside the pad when editing anything above it.
 
 :: ── Database provider ─────────────────────────────────────────
 :: Comes from .env only. A missing BLACKVAULT_DB_PROVIDER line means SQLite,
@@ -77,8 +83,9 @@ if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
 :: ── Preflight: verify the database exists ─────────────────────
 :: The provider is read again here on purpose. cmd.exe re-reads a running
 :: batch file by byte offset, so an older update.bat whose `git pull` just
-:: replaced this file resumes in it at about this point, without having run
-:: the lines above. Keep this call here, before the provider is used.
+:: replaced this file resumes partway through it (see the landing pad above),
+:: without having run everything above. Keep this call here, before the
+:: provider is used.
 call :provider_from_env
 if not defined ACTIVE_DATA_DIR goto :preflight_done
 if /i "!DB_PROVIDER!"=="sqlite" goto :preflight_sqlite
@@ -146,6 +153,13 @@ echo.
 
 :: ── Rebuild and restart ───────────────────────────────────────
 :rebuild
+:: Checked again on purpose. cmd.exe re-reads a running batch file by byte
+:: offset, so an older update.bat whose `git pull` just replaced this file
+:: resumes partway through it, possibly past the check at the top and still
+:: holding its own COMPOSE (which may be v1 docker-compose). Keep this call
+:: here, right before the first compose command.
+call :require_compose
+if not defined COMPOSE goto :compose_too_old
 echo Rebuilding BlackVault image...
 %COMPOSE% build --pull
 if errorlevel 1 goto :compose_failed
@@ -188,6 +202,23 @@ echo        Edit DATA_DIR in .env by hand, then re-run update.bat.
 pause
 exit /b 1
 
+:compose_too_old
+if defined _CV (
+  echo ERROR: Docker Compose !_CV! is too old. BlackVault needs v2.20 or newer.
+) else (
+  echo ERROR: BlackVault needs Docker Compose v2.20 or newer, run as
+  echo        'docker compose' ^(the Compose v2 plugin^).
+  docker-compose version >nul 2>&1
+  if not errorlevel 1 (
+    echo        Only the old 'docker-compose' was found; it cannot read
+    echo        BlackVault's docker-compose.yml.
+  )
+)
+echo        Upgrade Docker Desktop: https://docs.docker.com/desktop/
+echo        BlackVault was not rebuilt or restarted; the running copy keeps running.
+pause
+exit /b 1
+
 :compose_failed
 echo.
 echo ERROR: docker compose failed. See the output above.
@@ -197,6 +228,34 @@ exit /b 1
 :: ════════════════════════════════════════════════════════════
 :: Subroutines
 :: ════════════════════════════════════════════════════════════
+
+:: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh
+:: (install.sh and update.sh source it; batch cannot, so change all three
+:: together). docker-compose.yml uses depends_on.required: false, which needs
+:: Docker Compose v2.20 or newer: older v2 rejects the file and v1
+:: (docker-compose) cannot parse it, so the v1 fallback is gone on purpose.
+:: Sets COMPOSE=docker compose when `docker compose version --short` is at
+:: least 2.20 (a leading v is allowed), else leaves COMPOSE undefined and
+:: _CV holding the version found (empty when there is no Compose v2).
+:require_compose
+set "COMPOSE="
+set "_CV="
+set "_CMAJ="
+set "_CMIN="
+for /f "usebackq delims=" %%V in (`docker compose version --short 2^>nul`) do if not defined _CV set "_CV=%%V"
+if not defined _CV goto :eof
+set "_CV=!_CV: =!"
+if /i "!_CV:~0,1!"=="v" set "_CV=!_CV:~1!"
+for /f "tokens=1,2 delims=.-+" %%A in ("!_CV!") do (
+  set "_CMAJ=%%A"
+  set "_CMIN=%%B"
+)
+if not defined _CMAJ goto :eof
+if not defined _CMIN goto :eof
+for /f "delims=0123456789" %%X in ("!_CMAJ!!_CMIN!") do goto :eof
+if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
+if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
+goto :eof
 
 :: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
 :: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line

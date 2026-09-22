@@ -16,23 +16,16 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
-if ! docker compose version &>/dev/null 2>&1 && ! docker-compose version &>/dev/null 2>&1; then
-  echo "ERROR: 'docker compose' (v2) or 'docker-compose' is required."
-  echo "       Upgrade Docker Desktop or install the Compose plugin."
-  exit 1
-fi
-
-if docker compose version &>/dev/null 2>&1; then
-  COMPOSE="docker compose"
-else
-  COMPOSE="docker-compose"
-fi
-
 # ── Helpers ──────────────────────────────────────────────────
-# env_value / provider_from_env / check_postgres_env live in one shared file.
-# There is one compose file: plain `$COMPOSE` everywhere, .env picks the database.
+# env_value / provider_from_env / check_postgres_env / require_compose live in
+# one shared file. There is one compose file: plain `$COMPOSE` everywhere,
+# .env picks the database.
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+
+# Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
+# is written when it is missing or older.
+require_compose
 # docker compose must get the BLACKVAULT_* keys from .env only, never from
 # this shell's environment (a shell variable would override .env).
 unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD

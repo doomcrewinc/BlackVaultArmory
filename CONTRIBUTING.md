@@ -89,6 +89,10 @@ keep meaning SQLite, forever. Keep it that way:
   default before anything starts. Use `${VAR:-default}`. An empty `BLACKVAULT_POSTGRES_PASSWORD`
   with the profile on makes the postgres container itself refuse to start, which is loud enough.
 - The app's `depends_on: db` must keep `required: false`, or SQLite installs fail to start.
+  `required` needs Docker Compose 2.20+, so `require_compose` in `scripts/compose-provider.sh`
+  (mirrored as `:require_compose` in both `.bat` files) refuses anything older before touching
+  anything. Raise `COMPOSE_MIN_VERSION` there, and in the batch mirror, if the file ever needs a
+  newer Compose feature.
 - Every app setting that differs by provider comes from `.env` with a SQLite default
   (`DB_PROVIDER=${BLACKVAULT_DB_PROVIDER:-sqlite}`,
   `DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:...}`).
