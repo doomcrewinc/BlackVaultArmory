@@ -26,6 +26,49 @@ long stabilization window.
 
 Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `ci:`, `refactor:`, `test:`.
 
+## Changing the schema
+
+Every image ships **both** Prisma clients and **both** migration histories: PostgreSQL (the
+default) and SQLite (the fallback). A schema change must land in both, in the same PR.
+
+1. Edit **only** `prisma/schema.base.prisma`. `prisma/postgres/schema.prisma` and
+   `prisma/sqlite/schema.prisma` are generated; never edit them by hand.
+2. Regenerate them:
+   ```bash
+   npm run gen:schemas
+   ```
+3. Create a migration for **each** provider, with the same name and timestamp:
+   ```bash
+   NAME=20260922120000_add_widget   # <UTC timestamp>_<snake_case_name>
+
+   mkdir -p prisma/sqlite/migrations/$NAME
+   npx prisma migrate diff \
+     --from-migrations prisma/sqlite/migrations \
+     --to-schema-datamodel prisma/sqlite/schema.prisma \
+     --shadow-database-url "file:$(mktemp -d)/shadow.db" \
+     --script > prisma/sqlite/migrations/$NAME/migration.sql
+
+   # needs a scratch PostgreSQL database; Prisma wipes it
+   mkdir -p prisma/postgres/migrations/$NAME
+   npx prisma migrate diff \
+     --from-migrations prisma/postgres/migrations \
+     --to-schema-datamodel prisma/postgres/schema.prisma \
+     --shadow-database-url "$SHADOW_DATABASE_URL" \
+     --script > prisma/postgres/migrations/$NAME/migration.sql
+   ```
+   Read both files. Hand-edit them where the diff cannot know your intent (renames, backfills).
+4. Run the drift check. It must pass for **both** providers before you open the PR:
+   ```bash
+   SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/shadow npm run db:check-drift
+   ```
+   Without `SHADOW_DATABASE_URL` it checks SQLite only and says it skipped PostgreSQL.
+
+**Why both.** At startup the container runs `prisma migrate deploy` for its own provider only.
+A SQLite migration without its PostgreSQL twin passes every SQLite test, then ships a client
+that queries columns the PostgreSQL database does not have: runtime errors for every
+PostgreSQL user (and the reverse for SQLite users). The drift check fails when a provider's
+migration history does not produce its schema.
+
 ## Versioning
 
 CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.20-e991c37`.

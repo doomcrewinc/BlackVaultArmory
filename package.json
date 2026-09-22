@@ -6,6 +6,7 @@
     "dev": "next dev -H 0.0.0.0",
     "db:generate": "prisma generate --schema prisma/postgres/schema.prisma && prisma generate --schema prisma/sqlite/schema.prisma",
     "db:deploy": "prisma migrate deploy --schema $(node scripts/schema-path.js)",
+    "db:check-drift": "bash scripts/check-migration-drift.sh",
     "build": "npm run gen:schemas && npm run db:generate && DB_PROVIDER=sqlite DATABASE_URL=${BUILD_DATABASE_URL:-file:$PWD/prisma/prisma/build.db} prisma migrate deploy --schema prisma/sqlite/schema.prisma && DB_PROVIDER=sqlite DATABASE_URL=${BUILD_DATABASE_URL:-file:$PWD/prisma/prisma/build.db} next build",
     "start": "next start -H 0.0.0.0",
     "lint": "eslint",
