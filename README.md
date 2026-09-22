@@ -312,6 +312,33 @@ docker compose up -d
 
 ---
 
+### ❌ App loads but shows no data after updating
+
+**Nothing is lost.** If you installed BlackVault before PostgreSQL support (or chose SQLite),
+your data is in `data/db/vault.db`. Running a plain `docker compose up -d` (or following the
+old `POSTGRES_PASSWORD must be set` error by adding a password to `.env`) starts BlackVault on
+a **new, empty PostgreSQL database** instead of your SQLite file. `vault.db` is not touched.
+The container log shows a `WARNING: BlackVault is running on an EMPTY PostgreSQL database`
+banner when this happens.
+
+To get back to your data:
+
+1. Stop the PostgreSQL stack:
+   ```bash
+   docker compose down
+   ```
+2. Open `.env`. Set `DB_PROVIDER=sqlite`, or delete the `DB_PROVIDER` line (no line means SQLite).
+3. Start BlackVault on SQLite:
+   ```bash
+   docker compose -f docker-compose.sqlite.yml up -d --remove-orphans
+   ```
+
+Your records are back. `./update.sh` reads `DB_PROVIDER` from `.env` and keeps using SQLite from
+now on. The empty `data/postgres` folder it created can be left alone or deleted. To move to
+PostgreSQL for real, follow **"Moving from SQLite to PostgreSQL"** below.
+
+---
+
 ### ❌ The app loads but shows no data / database looks empty
 
 Your data is still there — BlackVault is probably pointing at a different folder. **Do not reinstall.**

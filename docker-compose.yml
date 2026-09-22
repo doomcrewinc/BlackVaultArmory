@@ -19,7 +19,7 @@ services:
     environment:
       POSTGRES_USER: blackvault
       POSTGRES_DB: blackvault
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set. Existing SQLite install? Run: docker compose -f docker-compose.sqlite.yml up -d}"
     volumes:
       - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
     healthcheck:
