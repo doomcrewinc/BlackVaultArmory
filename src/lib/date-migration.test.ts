@@ -63,20 +63,45 @@ describe("DATE_ONLY_FIELDS", () => {
 // ── in-memory fake ───────────────────────────────────────────
 type Row = Record<string, unknown> & { id: string };
 
-function fakePrisma(seed: Record<string, Row[]>) {
+/**
+ * Called on every row write before its `where` is checked, so a test can make
+ * the row change under the migration (a concurrent edit) or make a write throw.
+ */
+type OnWrite = (table: string, id: string, row: Row | undefined) => void;
+
+const sameValue = (a: unknown, b: unknown) =>
+  a instanceof Date && b instanceof Date ? a.getTime() === b.getTime() : a === b;
+
+function fakePrisma(seed: Record<string, Row[]>, onWrite: OnWrite = () => {}) {
   const tables: Record<string, Row[]> = { dateNormalizationAudit: [], ...seed };
   let nextId = 1;
   const delegate = (name: string) => {
     tables[name] ??= [];
     return {
       findMany: async (args?: { where?: Record<string, unknown> }) =>
-        tables[name].filter((r) =>
-          Object.entries(args?.where ?? {}).every(([k, v]) => r[k] === v)
-        ),
+        tables[name]
+          .filter((r) => Object.entries(args?.where ?? {}).every(([k, v]) => sameValue(r[k], v)))
+          .map((r) => ({ ...r })), // a snapshot, as a real query returns
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
-        const row = tables[name].find((r) => r.id === where.id)!;
+        const row = tables[name].find((r) => r.id === where.id);
+        onWrite(name, where.id, row);
+        if (!row) throw new Error(`${name} ${where.id} not found`);
         Object.assign(row, data);
         return row;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: Record<string, unknown> & { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        onWrite(name, where.id, tables[name].find((r) => r.id === where.id));
+        const hits = tables[name].filter((r) =>
+          Object.entries(where).every(([k, v]) => sameValue(r[k], v))
+        );
+        for (const row of hits) Object.assign(row, data);
+        return { count: hits.length };
       },
       create: async ({ data }: { data: Record<string, unknown> }) => {
         const row = { id: `audit-${nextId++}`, ...data } as Row;
@@ -86,7 +111,9 @@ function fakePrisma(seed: Record<string, Row[]>) {
     };
   };
   const client: Record<string, unknown> = {
-    $transaction: async (ops: Promise<unknown>[]) => Promise.all(ops),
+    // Interactive form only: the migration must read its writes' counts inside
+    // the transaction. The array form would throw here.
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client),
   };
   for (const f of DATE_ONLY_FIELDS) client[f.delegate] = delegate(f.delegate);
   client.dateNormalizationAudit = delegate("dateNormalizationAudit");
@@ -215,5 +242,58 @@ describe("runLegacyDateMigration", () => {
     expect(tables.dateNormalizationAudit).toHaveLength(1);
     expect(tables.dateNormalizationAudit[0].appliedZone).toBe("Pacific/Auckland");
     expect(iso(tables.dateNormalizationAudit[0].originalValue as Date)).toBe(iso(LEGACY));
+  });
+
+  it("never overwrites a concurrent edit on first-time normalization", async () => {
+    const edit = new Date("2026-08-01T00:00:00.000Z");
+    const { client, tables } = fakePrisma(
+      { firearm: [{ id: "f1", acquisitionDate: LEGACY }] },
+      (table, _id, row) => {
+        if (table === "firearm" && row) row.acquisitionDate = edit; // another device saves
+      }
+    );
+    const summary = await runLegacyDateMigration(client, "UTC");
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(edit));
+    expect(tables.dateNormalizationAudit).toHaveLength(0);
+    expect(summary).toMatchObject({ normalized: 0, skippedConcurrent: 1 });
+  });
+
+  it("never overwrites a concurrent edit during re-conversion", async () => {
+    const edit = new Date("2026-08-01T00:00:00.000Z");
+    let editing = false;
+    const { client, tables } = fakePrisma(
+      { firearm: [{ id: "f1", acquisitionDate: LEGACY }] },
+      (table, _id, row) => {
+        if (editing && table === "firearm" && row) row.acquisitionDate = edit;
+      }
+    );
+    await runLegacyDateMigration(client, "UTC");
+    editing = true;
+    const summary = await runLegacyDateMigration(client, "America/Denver");
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(edit));
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe("UTC"); // audit untouched
+    expect(summary).toMatchObject({ reconverted: 0, skippedConcurrent: 1 });
+  });
+
+  it("isolates a failing row and keeps processing the rest", async () => {
+    const { client, tables } = fakePrisma(
+      {
+        firearm: [
+          { id: "f1", acquisitionDate: LEGACY },
+          { id: "f2", acquisitionDate: LEGACY },
+        ],
+      },
+      (table, id) => {
+        if (table === "firearm" && id === "f1") throw new Error("disk I/O error");
+      }
+    );
+    const summary = await runLegacyDateMigration(client, "UTC");
+
+    expect(summary).toMatchObject({ failed: 1, normalized: 1 });
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(LEGACY));
+    expect(iso(tables.firearm[1].acquisitionDate as Date)).toBe("2026-09-21T00:00:00.000Z");
+    expect(tables.dateNormalizationAudit.map((a) => a.recordId)).toEqual(["f2"]);
   });
 });

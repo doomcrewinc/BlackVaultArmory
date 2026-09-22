@@ -42,6 +42,10 @@ export interface MigrationSummary {
   normalized: number;
   reconverted: number;
   skippedEdited: number;
+  /** Rows that changed between read and write (e.g. an edit from another device); left alone. */
+  skippedConcurrent: number;
+  /** Rows whose processing threw; logged and left for the next run. */
+  failed: number;
 }
 
 export function isValidTimeZone(zone: string): boolean {
@@ -69,29 +73,43 @@ export function normalizeInstant(instant: Date, zone: string): Date {
 type Delegate = {
   findMany: (args?: unknown) => Promise<Array<Record<string, unknown> & { id: string }>>;
   update: (args: unknown) => Promise<unknown>;
+  updateMany: (args: unknown) => Promise<{ count: number }>;
+  create: (args: unknown) => Promise<unknown>;
 };
+
+type Client = Record<string, Delegate> & {
+  $transaction: <T>(fn: (tx: Record<string, Delegate>) => Promise<T>) => Promise<T>;
+};
+
+type Audit = {
+  id: string;
+  recordId: string;
+  originalValue: Date;
+  appliedValue: Date;
+  appliedZone: string;
+};
+
+type Outcome = "normalized" | "reconverted" | "skippedEdited" | "skippedConcurrent" | null;
 
 export async function runLegacyDateMigration(
   prisma: PrismaClient,
   zone: string
 ): Promise<MigrationSummary> {
-  const summary: MigrationSummary = { zone, normalized: 0, reconverted: 0, skippedEdited: 0 };
-  const client = prisma as unknown as Record<string, Delegate> & {
-    $transaction: (ops: unknown[]) => Promise<unknown>;
-    dateNormalizationAudit: Delegate & { create: (args: unknown) => Promise<unknown> };
+  const summary: MigrationSummary = {
+    zone,
+    normalized: 0,
+    reconverted: 0,
+    skippedEdited: 0,
+    skippedConcurrent: 0,
+    failed: 0,
   };
-  const audit = client.dateNormalizationAudit;
+  const client = prisma as unknown as Client;
 
   for (const { model, delegate, field } of DATE_ONLY_FIELDS) {
-    const table = client[delegate];
-    const rows = await table.findMany({ select: { id: true, [field]: true } });
-    const audits = (await audit.findMany({ where: { model, field } })) as Array<{
-      id: string;
-      recordId: string;
-      originalValue: Date;
-      appliedValue: Date;
-      appliedZone: string;
-    }>;
+    const rows = await client[delegate].findMany({ select: { id: true, [field]: true } });
+    const audits = (await client.dateNormalizationAudit.findMany({
+      where: { model, field },
+    })) as unknown as Audit[];
     const auditByRecord = new Map(audits.map((a) => [a.recordId, a]));
 
     for (const row of rows) {
@@ -99,73 +117,89 @@ export async function runLegacyDateMigration(
       if (!value) continue;
       const existing = auditByRecord.get(row.id);
 
-      if (existing && value.getTime() % DAY_MS !== 0) {
-        // A non-midnight value is always legacy (every current writer stores UTC
-        // midnight), so this is not a user edit: a pre-upgrade backup was restored
-        // over an audited row. Normalize it afresh from the value now in the row,
-        // and reset the audit to it - even if the row had been released.
-        const next = normalizeInstant(value, zone);
-        // These calls must stay un-awaited: $transaction receives the pending
-        // queries and runs them atomically. Awaiting either one here would
-        // execute it eagerly, outside the transaction, and break reversibility.
-        await client.$transaction([
-          table.update({ where: { id: row.id }, data: { [field]: next } }),
-          audit.update({
-            where: { id: existing.id },
-            data: { originalValue: value, appliedValue: next, appliedZone: zone },
-          }),
-        ]);
-        summary.normalized++;
-        continue;
-      }
+      /**
+       * Writes `next` only if the row still holds `value`, the value we read, then
+       * runs `onWritten` (the audit write) in the same transaction. If the row
+       * changed under us - an edit saved from another device - nothing is
+       * written and it is left for the user.
+       */
+      const writeIfUnchanged = (
+        next: Date,
+        onWritten: (tx: Record<string, Delegate>) => Promise<unknown>
+      ) =>
+        client.$transaction(async (tx) => {
+          const { count } = await tx[delegate].updateMany({
+            where: { id: row.id, [field]: value },
+            data: { [field]: next },
+          });
+          if (count !== 1) return false;
+          await onWritten(tx);
+          return true;
+        });
 
-      if (existing) {
-        if (existing.appliedZone === USER_EDITED) continue; // released to the user, permanently
-        // Re-conversion: only when the zone changed, and only while the row
-        // still holds what the migration wrote. A user edit always wins.
-        if (existing.appliedZone === zone) continue;
-        if (value.getTime() !== new Date(existing.appliedValue).getTime()) {
-          // The user changed it after migration. Release the row so no later run can
-          // re-convert it - even if they edit it back to the value we once wrote.
-          await audit.update({ where: { id: existing.id }, data: { appliedZone: USER_EDITED } });
-          summary.skippedEdited++;
-          continue;
+      try {
+        let outcome: Outcome = null;
+
+        if (existing && value.getTime() % DAY_MS !== 0) {
+          // A non-midnight value is always legacy (every current writer stores UTC
+          // midnight), so this is not a user edit: a pre-upgrade backup was restored
+          // over an audited row. Normalize it afresh from the value now in the row,
+          // and reset the audit to it - even if the row had been released.
+          const next = normalizeInstant(value, zone);
+          const written = await writeIfUnchanged(next, (tx) =>
+            tx.dateNormalizationAudit.update({
+              where: { id: existing.id },
+              data: { originalValue: value, appliedValue: next, appliedZone: zone },
+            })
+          );
+          outcome = written ? "normalized" : "skippedConcurrent";
+        } else if (existing) {
+          if (existing.appliedZone === USER_EDITED) continue; // released to the user, permanently
+          // Re-conversion: only when the zone changed, and only while the row
+          // still holds what the migration wrote. A user edit always wins.
+          if (existing.appliedZone === zone) continue;
+          if (value.getTime() !== new Date(existing.appliedValue).getTime()) {
+            // The user changed it after migration. Release the row so no later run can
+            // re-convert it - even if they edit it back to the value we once wrote.
+            await client.dateNormalizationAudit.update({
+              where: { id: existing.id },
+              data: { appliedZone: USER_EDITED },
+            });
+            outcome = "skippedEdited";
+          } else {
+            const next = normalizeInstant(new Date(existing.originalValue), zone);
+            const written = await writeIfUnchanged(next, (tx) =>
+              tx.dateNormalizationAudit.update({
+                where: { id: existing.id },
+                data: { appliedValue: next, appliedZone: zone },
+              })
+            );
+            outcome = written ? "reconverted" : "skippedConcurrent";
+          }
+        } else {
+          if (value.getTime() % DAY_MS === 0) continue; // already date-only
+          const next = normalizeInstant(value, zone);
+          const written = await writeIfUnchanged(next, (tx) =>
+            tx.dateNormalizationAudit.create({
+              data: {
+                model,
+                field,
+                recordId: row.id,
+                originalValue: value,
+                appliedValue: next,
+                appliedZone: zone,
+              },
+            })
+          );
+          outcome = written ? "normalized" : "skippedConcurrent";
         }
-        const next = normalizeInstant(new Date(existing.originalValue), zone);
-        // These calls must stay un-awaited: $transaction receives the pending
-        // queries and runs them atomically. Awaiting either one here would
-        // execute it eagerly, outside the transaction, and break reversibility.
-        await client.$transaction([
-          table.update({ where: { id: row.id }, data: { [field]: next } }),
-          audit.update({
-            where: { id: existing.id },
-            data: { appliedValue: next, appliedZone: zone },
-          }),
-        ]);
-        summary.reconverted++;
-        continue;
+
+        if (outcome) summary[outcome]++;
+      } catch (error) {
+        // One bad row must not abort the run; it is retried on the next one.
+        console.error(`[date-migration] row failed: ${model}.${field} ${row.id}:`, error);
+        summary.failed++;
       }
-
-      if (value.getTime() % DAY_MS === 0) continue; // already date-only
-
-      const next = normalizeInstant(value, zone);
-      // These calls must stay un-awaited: $transaction receives the pending
-      // queries and runs them atomically. Awaiting either one here would
-      // execute it eagerly, outside the transaction, and break reversibility.
-      await client.$transaction([
-        audit.create({
-          data: {
-            model,
-            field,
-            recordId: row.id,
-            originalValue: value,
-            appliedValue: next,
-            appliedZone: zone,
-          },
-        }),
-        table.update({ where: { id: row.id }, data: { [field]: next } }),
-      ]);
-      summary.normalized++;
     }
   }
 
@@ -183,10 +217,17 @@ export async function runConfiguredDateMigration(trigger: string): Promise<void>
     const configured = settings?.timezone;
     const zone = configured && isValidTimeZone(configured) ? configured : "UTC";
     const summary = await runLegacyDateMigration(prisma, zone);
-    if (summary.normalized || summary.reconverted || summary.skippedEdited) {
+    if (
+      summary.normalized ||
+      summary.reconverted ||
+      summary.skippedEdited ||
+      summary.skippedConcurrent ||
+      summary.failed
+    ) {
       console.log(
         `[date-migration] trigger=${trigger} zone=${zone} normalized=${summary.normalized} ` +
-          `reconverted=${summary.reconverted} skippedEdited=${summary.skippedEdited}`
+          `reconverted=${summary.reconverted} skippedEdited=${summary.skippedEdited} ` +
+          `skippedConcurrent=${summary.skippedConcurrent} failed=${summary.failed}`
       );
     }
     if (!configured && summary.normalized) {
