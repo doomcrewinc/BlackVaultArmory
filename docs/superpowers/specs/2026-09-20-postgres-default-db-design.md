@@ -32,6 +32,23 @@
 > **6. Postgres migration history** starts as a single baseline generated non-destructively with
 > `prisma migrate diff --from-empty`, so no Postgres server is needed to create it.
 
+> **7. ONE compose file, switched by `.env` (added 2026-09-22, user design).** Existing users'
+> `update.sh` runs `git pull` then bare `docker compose`. Any design where a bare `docker compose`
+> means Postgres breaks every existing SQLite user's first update, and that copy of `update.sh`
+> is already deployed. So:
+> - `docker-compose.yml` is the only compose file. The `db` service sits under
+>   `profiles: [postgres]`; the app's `depends_on` is `required: false`.
+> - With no `.env`, a bare `docker compose up -d` runs SQLite exactly as before.
+> - `COMPOSE_PROFILES=postgres` in `.env` switches it to Postgres. The installer sets this for new
+>   installs, so **Postgres remains the default for new installs.**
+> - `POSTGRES_PASSWORD` uses `${...:-}`, never `:?` — Compose interpolates `:?` even for disabled
+>   services, which would break the SQLite default. An empty password makes the Postgres container
+>   itself refuse to start.
+> - **`.migrated`** (in `${DATA_DIR}/db/`, visible to the app at `/app/data/.migrated`) is written by
+>   the migrator only after a verified copy. The migrator then switches `.env`. The split-brain
+>   guard warns exactly when Postgres is active, `vault.db` is non-empty, and `.migrated` is absent.
+> - `docker-compose.sqlite.yml` is removed.
+
 ---
 
 
