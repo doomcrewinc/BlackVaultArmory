@@ -157,7 +157,7 @@ if [ -n "$DB_FILE" ]; then
   mkdir -p "$(dirname "$DB_FILE")"
 fi
 
-npx prisma generate --schema "$SCHEMA" >/dev/null
+npm run db:generate >/dev/null
 ok "Prisma client generated"
 
 # Always `migrate deploy` — the same path production and CI use. Never
