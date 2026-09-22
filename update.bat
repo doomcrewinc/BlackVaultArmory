@@ -69,6 +69,11 @@ if exist ".env" (
 if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
 
 :: ── Preflight: verify the database exists ─────────────────────
+:: The provider is read again here on purpose. cmd.exe re-reads a running
+:: batch file by byte offset, so an older update.bat whose `git pull` just
+:: replaced this file resumes in it at about this point, without having run
+:: the lines above. Keep this call here, before the provider is used.
+call :provider_from_env
 if not defined ACTIVE_DATA_DIR goto :preflight_done
 if /i "!DB_PROVIDER!"=="sqlite" goto :preflight_sqlite
 
