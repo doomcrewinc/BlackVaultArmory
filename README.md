@@ -180,22 +180,23 @@ http://localhost:3000
 
 ## Stopping and Starting BlackVault
 
+> 💡 **Which database am I using?** Check `DB_PROVIDER` in `.env`. `DB_PROVIDER=postgres` is
+> PostgreSQL. `DB_PROVIDER=sqlite`, **or no `DB_PROVIDER` line at all** (installs made before
+> PostgreSQL support), is SQLite. SQLite commands add `-f docker-compose.sqlite.yml`.
+
 **To stop BlackVault** (your data is never affected):
 
 ```bash
-docker compose down
+docker compose down                                  # PostgreSQL
+docker compose -f docker-compose.sqlite.yml down     # SQLite
 ```
 
 **To start it again after stopping:**
 
 ```bash
-docker compose up -d
+docker compose up -d                                 # PostgreSQL
+docker compose -f docker-compose.sqlite.yml up -d    # SQLite
 ```
-
-> 💡 **Using SQLite?** (you chose option 2 in the installer, or installed before PostgreSQL
-> support.) Add `-f docker-compose.sqlite.yml` to every command, e.g.
-> `docker compose -f docker-compose.sqlite.yml up -d`. Check `DB_PROVIDER` in `.env` if unsure —
-> a `.env` with no `DB_PROVIDER` line is SQLite.
 
 **To update to the latest version:**
 
@@ -225,12 +226,24 @@ mkdir data\db
 mkdir data\uploads
 ```
 
+PostgreSQL:
+
 ```cmd
 docker compose down
 ```
 
 ```cmd
 docker compose up -d
+```
+
+SQLite:
+
+```cmd
+docker compose -f docker-compose.sqlite.yml down
+```
+
+```cmd
+docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 **Mac / Linux — run these one at a time in Terminal:**
@@ -239,12 +252,18 @@ docker compose up -d
 mkdir -p ./data/db ./data/uploads
 ```
 
-```bash
-docker compose down
-```
+PostgreSQL (the default):
 
 ```bash
+docker compose down
 docker compose up -d
+```
+
+SQLite:
+
+```bash
+docker compose -f docker-compose.sqlite.yml down
+docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 **If the error still appears, check these:**
@@ -260,8 +279,10 @@ docker compose up -d
 
 - **Linux only:** Run this to fix folder permissions:
   ```bash
-  sudo chown -R 1001:1001 ./data
+  sudo chown -R 1001:1001 ./data/db ./data/uploads
   ```
+  Do **not** run it on the whole `./data` folder: `data/postgres` belongs to the PostgreSQL
+  container, and PostgreSQL refuses to start if it is re-owned.
 
 ---
 
@@ -302,12 +323,18 @@ PORT=3001
 
 Save the file, then run:
 
-```bash
-docker compose down
-```
+PostgreSQL (the default):
 
 ```bash
+docker compose down
 docker compose up -d
+```
+
+SQLite:
+
+```bash
+docker compose -f docker-compose.sqlite.yml down
+docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 ---
@@ -352,7 +379,8 @@ See **"If two data directories exist"** in the Data & Backups section below.
 Check the logs for a specific error message:
 
 ```bash
-docker compose logs -f
+docker compose logs -f                                # PostgreSQL
+docker compose -f docker-compose.sqlite.yml logs -f   # SQLite
 ```
 
 Still stuck? Open a [GitHub issue](https://github.com/doomcrewinc/BlackVaultArmory/issues) and paste the log output.
@@ -395,13 +423,35 @@ You can change this by editing `DATA_DIR` in the `.env` file before first run.
 
 ### Backing up your data
 
-**Windows:** Copy the `data` folder to another drive or location in File Explorer.
+**Easiest, works for both databases, safe while running:** in BlackVault go to
+**Settings → Backup** and save a backup. It downloads a JSON file with every record. Keep it
+together with a copy of `data/uploads` (your images and documents) and `.env`.
 
-**Mac / Linux:**
+**Copying the `data` folder:** only do this with BlackVault **stopped**. On PostgreSQL,
+copying `data/postgres` while the database is running can produce a copy that will not start.
+
+**Windows:** stop BlackVault (see *Stopping and Starting* above), then copy the `data` folder
+and `.env` to another drive or location in File Explorer.
+
+**Mac / Linux, SQLite:**
 
 ```bash
+docker compose -f docker-compose.sqlite.yml down
 cp -r ./data ~/blackvault-backup-$(date +%Y%m%d)
+docker compose -f docker-compose.sqlite.yml up -d
 ```
+
+**Mac / Linux, PostgreSQL:**
+
+```bash
+docker compose down
+sudo cp -a ./data ~/blackvault-backup-$(date +%Y%m%d)
+cp .env ~/blackvault-backup-$(date +%Y%m%d)/
+docker compose up -d
+```
+
+On Linux, `data/postgres` is owned by the database container, so a plain `cp -r` fails with
+*permission denied*; `sudo cp -a` copies it and keeps its ownership, which PostgreSQL needs.
 
 ---
 
@@ -426,16 +476,26 @@ never modified or deleted** — it stays on disk as your rollback. Uploaded imag
 stay where they are. Mac / Linux, run from the BlackVault folder; you need
 [Node.js 20+](https://nodejs.org/) for the copy step.
 
-**Step 1 — Back up first.** In BlackVault go to **Settings → Backup** and save a backup, then
+**Step 1 — Bring your SQLite install up to the current version first.** The copy tool checks
+that `vault.db` has every current migration and stops with an error if it does not. Update, then
+open BlackVault once and confirm your records are there:
+
+```bash
+./update.sh
+```
+
+(`update.sh` keeps a SQLite install on SQLite.)
+
+**Step 2 — Back up first.** In BlackVault go to **Settings → Backup** and save a backup, then
 also copy the whole `data` folder (see *Backing up your data* above).
 
-**Step 2 — Stop BlackVault:**
+**Step 3 — Stop BlackVault:**
 
 ```bash
 docker compose -f docker-compose.sqlite.yml down
 ```
 
-**Step 3 — Configure PostgreSQL in `.env`.** Open `.env` and set these two lines (add them if
+**Step 4 — Configure PostgreSQL in `.env`.** Open `.env` and set these two lines (add them if
 missing, and keep only one of each):
 
 ```
@@ -443,13 +503,13 @@ DB_PROVIDER=postgres
 POSTGRES_PASSWORD=<paste the output of: openssl rand -hex 24>
 ```
 
-**Step 4 — Start only the database**, published on this machine (127.0.0.1:55432) for the copy:
+**Step 5 — Start only the database**, published on this machine (127.0.0.1:55432) for the copy:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait db
 ```
 
-**Step 5 — Prepare the copy tool** (installs dependencies and creates the empty tables):
+**Step 6 — Prepare the copy tool** (installs dependencies and creates the empty tables):
 
 ```bash
 npm ci && npm run db:generate
@@ -458,13 +518,13 @@ export POSTGRES_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env |
 DATABASE_URL="$POSTGRES_URL" npx prisma migrate deploy --schema prisma/postgres/schema.prisma
 ```
 
-**Step 6 — Dry run.** Prints how many rows each table has. Nothing is written:
+**Step 7 — Dry run.** Prints how many rows each table has. Nothing is written:
 
 ```bash
 npm run migrate:to-postgres -- --dry-run
 ```
 
-**Step 7 — Real run.** Copies everything, then verifies it. It must end with
+**Step 8 — Real run.** Copies everything, then verifies it. It must end with
 `VERIFIED: all 16 models match`. If it reports a mismatch, the copy is rolled back — stop here
 and go back to SQLite (see *Rolling back* below).
 
@@ -472,13 +532,13 @@ and go back to SQLite (see *Rolling back* below).
 npm run migrate:to-postgres
 ```
 
-**Step 8 — Start BlackVault on PostgreSQL:**
+**Step 9 — Start BlackVault on PostgreSQL:**
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-This also closes the temporary database port from Step 4. Check that your records are there.
+This also closes the temporary database port from Step 5. Check that your records are there.
 
 **Rolling back:** run `docker compose down`, set `DB_PROVIDER=sqlite` in `.env`, then
 `docker compose -f docker-compose.sqlite.yml up -d`. Your `vault.db` is exactly as you left it —
@@ -488,7 +548,11 @@ but anything added while on PostgreSQL is not in it.
 
 ### Moving to a new machine
 
-**Step 1 —** Copy your `data` folder to the new machine (USB drive, network share, etc.)
+**Step 1 —** Stop BlackVault on the old machine (see *Stopping and Starting* above), then copy
+your `data` folder **and `.env`** to the new machine (USB drive, network share, etc.). On Linux
+with PostgreSQL, use `sudo cp -a` (see *Backing up your data*): `data/postgres` is owned by the
+database container. Alternatively, save an in-app backup (**Settings → Backup**) and restore it
+on the new machine after installing, copying `data/uploads` across for your images.
 
 **Step 2 —** Download and extract BlackVault on the new machine
 
