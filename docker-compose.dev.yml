@@ -33,6 +33,7 @@ services:
       - DB_PROVIDER=postgres
       - DATABASE_URL=postgresql://blackvault:devpass@db:5432/blackvault
     volumes:
+      - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
@@ -42,4 +43,5 @@ services:
 
 volumes:
   blackvault-dev-postgres:
+  blackvault-dev-data:
   blackvault-dev-uploads:

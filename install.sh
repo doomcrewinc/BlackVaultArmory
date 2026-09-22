@@ -162,7 +162,7 @@ echo "Creating data directories..."
 if [ "$DB_PROVIDER" = "sqlite" ]; then
   mkdir -p "$DATA_DIR/db" "$DATA_DIR/uploads"
 else
-  mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/uploads"
+  mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/db" "$DATA_DIR/uploads"
 fi
 
 # ── Write .env ────────────────────────────────────────────────
