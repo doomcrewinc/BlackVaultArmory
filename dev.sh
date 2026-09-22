@@ -64,12 +64,15 @@ done
 # ── Prerequisites ─────────────────────────────────────────────
 step "Checking prerequisites"
 
-command -v node >/dev/null 2>&1 || die "node is not installed. Install Node 20 or newer."
+command -v node >/dev/null 2>&1 || die "node is not installed. Install Node 20.12 or newer."
 command -v npm  >/dev/null 2>&1 || die "npm is not installed."
 
-NODE_MAJOR="$(node --version | sed 's/^v//' | cut -d. -f1)"
-if [ "$NODE_MAJOR" -lt 20 ]; then
-  die "Node $NODE_MAJOR is too old. BlackVault needs Node 20 or newer."
+# 20.12 is the floor: scripts/load-env.ts uses process.loadEnvFile (added in 20.12).
+NODE_VERSION="$(node --version | sed 's/^v//')"
+NODE_MAJOR="$(echo "$NODE_VERSION" | cut -d. -f1)"
+NODE_MINOR="$(echo "$NODE_VERSION" | cut -d. -f2)"
+if [ "$NODE_MAJOR" -lt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 12 ]; }; then
+  die "Node $NODE_VERSION is too old. BlackVault needs Node 20.12 or newer."
 fi
 if [ "$NODE_MAJOR" -ne 20 ]; then
   warn "Running Node $NODE_MAJOR; the Docker image uses Node 20. Usually fine, but if you hit"

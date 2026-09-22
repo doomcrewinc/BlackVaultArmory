@@ -69,6 +69,7 @@
     "vitest": "^2.1.9"
   },
   "prisma": {
+    "schema": "prisma/sqlite/schema.prisma",
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
   }
 }
