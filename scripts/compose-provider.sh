@@ -6,6 +6,11 @@
 # There is only one compose file, so nothing here picks a file: plain
 # `docker compose` reads .env, and COMPOSE_PROFILES=postgres in .env is what
 # turns PostgreSQL on. The provider is only used for the preflight checks.
+#
+# The database keys in .env are BLACKVAULT_DB_PROVIDER, BLACKVAULT_POSTGRES_PASSWORD
+# and BLACKVAULT_DATABASE_URL, never the generic names: Compose lets a variable
+# exported in the shell override .env, and DATABASE_URL is commonly exported.
+# docker-compose.yml maps them to the names the container uses.
 
 # Value of KEY in ./.env (last line wins), with surrounding whitespace, a
 # trailing CR and one pair of matching quotes removed. Inner spaces are kept,
@@ -27,10 +32,12 @@ env_value() {
 }
 
 # Provider recorded in an existing .env. Installs made before PostgreSQL
-# support have no DB_PROVIDER line (or no .env at all) and were always SQLite.
+# support have no BLACKVAULT_DB_PROVIDER line (or no .env at all) and were
+# always SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml
+# ignores it.
 provider_from_env() {
   local value
-  value=$(env_value DB_PROVIDER | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  value=$(env_value BLACKVAULT_DB_PROVIDER | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
   case "$value" in
     "" | sqlite) echo "sqlite" ;;
     postgresql) echo "postgres" ;;
@@ -46,18 +53,18 @@ check_postgres_env() {
     *,postgres,*) ;;
     *) missing="$missing COMPOSE_PROFILES=postgres" ;;
   esac
-  [ -n "$(env_value POSTGRES_PASSWORD)" ] || missing="$missing POSTGRES_PASSWORD"
-  case "$(env_value DATABASE_URL)" in
+  [ -n "$(env_value BLACKVAULT_POSTGRES_PASSWORD)" ] || missing="$missing BLACKVAULT_POSTGRES_PASSWORD"
+  case "$(env_value BLACKVAULT_DATABASE_URL)" in
     postgres://* | postgresql://*) ;;
-    *) missing="$missing DATABASE_URL=postgresql://..." ;;
+    *) missing="$missing BLACKVAULT_DATABASE_URL=postgresql://..." ;;
   esac
   [ -z "$missing" ] && return 0
-  echo "⚠  WARNING: .env says DB_PROVIDER=postgres but is missing:$missing"
+  echo "⚠  WARNING: .env says BLACKVAULT_DB_PROVIDER=postgres but is missing:$missing"
   echo "   A PostgreSQL install needs all four of these in .env:"
   echo "     COMPOSE_PROFILES=postgres"
-  echo "     DB_PROVIDER=postgres"
-  echo "     POSTGRES_PASSWORD=<48 hex characters>"
-  echo "     DATABASE_URL=postgresql://blackvault:<same password>@db:5432/blackvault"
-  echo "   See .env.example. If this is a SQLite install, set DB_PROVIDER=sqlite instead."
+  echo "     BLACKVAULT_DB_PROVIDER=postgres"
+  echo "     BLACKVAULT_POSTGRES_PASSWORD=<48 hex characters>"
+  echo "     BLACKVAULT_DATABASE_URL=postgresql://blackvault:<same password>@db:5432/blackvault"
+  echo "   See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead."
   return 1
 }

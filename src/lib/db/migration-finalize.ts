@@ -8,6 +8,13 @@
  *   2. switches .env to the four Postgres keys, keeping every other line,
  *      after backing it up to .env.pre-migration.
  *
+ * The .env keys are COMPOSE_PROFILES plus BLACKVAULT_DB_PROVIDER,
+ * BLACKVAULT_POSTGRES_PASSWORD and BLACKVAULT_DATABASE_URL. They are
+ * BlackVault-only names because Compose lets a variable exported in the
+ * user's shell override .env, and plain DATABASE_URL is commonly exported.
+ * docker-compose.yml maps them to DB_PROVIDER / DATABASE_URL /
+ * POSTGRES_PASSWORD inside the containers.
+ *
  * "This stack's own Postgres" is checked, not assumed (see stackTargetCheck):
  * .env must never be switched to a database the app will not actually reach.
  * When the check fails, nothing is written and the exact lines are printed.
@@ -22,6 +29,10 @@ export const MARKER_NAME = ".migrated";
 export const ENV_BACKUP_NAME = ".env.pre-migration";
 /** Host port docker-compose.migrate.yml publishes the stack's database on. */
 export const OVERLAY_PORT = "55432";
+/** .env keys (host side). The container sees DB_PROVIDER, DATABASE_URL, POSTGRES_PASSWORD. */
+export const ENV_PROVIDER = "BLACKVAULT_DB_PROVIDER";
+export const ENV_PASSWORD = "BLACKVAULT_POSTGRES_PASSWORD";
+export const ENV_DATABASE_URL = "BLACKVAULT_DATABASE_URL";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const STACK_USER = "blackvault";
 const STACK_DB = "blackvault";
@@ -79,7 +90,7 @@ export function resolveStack(repoDir: string): Stack {
   };
 }
 
-/** URL the migrator uses when POSTGRES_URL is unset: the stack's db through the overlay. */
+/** URL the migrator uses when no target URL is given: the stack's db through the overlay. */
 export function overlayUrl(password: string): string {
   return `postgresql://${STACK_USER}:${encodeURIComponent(password)}@127.0.0.1:${OVERLAY_PORT}/${STACK_DB}`;
 }
@@ -111,10 +122,10 @@ function samePath(a: string, b: string): boolean {
  *
  *  - the source is ${DATA_DIR}/db/vault.db, so the marker lands next to the
  *    file that was actually copied;
- *  - .env holds a POSTGRES_PASSWORD, and the target URL authenticates as
+ *  - .env holds a BLACKVAULT_POSTGRES_PASSWORD, and the target URL authenticates as
  *    blackvault/blackvault with exactly that password. It is random, and it is
  *    what the stack's db container was initialised with, so it ties the target
- *    to this stack. The switched DATABASE_URL uses the same password;
+ *    to this stack. The switched BLACKVAULT_DATABASE_URL uses the same password;
  *  - the target is 127.0.0.1:55432, the port only docker-compose.migrate.yml
  *    publishes, and only on this machine. --write-env skips this one rule, for
  *    a user who reached the stack's db some other way and says so.
@@ -130,9 +141,9 @@ export function stackTargetCheck(opts: {
   if (!samePath(opts.sqlitePath, stack.stackSqlitePath)) {
     reasons.push(`the source is not this install's database (${stack.stackSqlitePath})`);
   }
-  const password = stack.env.get("POSTGRES_PASSWORD") ?? "";
+  const password = stack.env.get(ENV_PASSWORD) ?? "";
   if (!stack.envExists) reasons.push(`there is no .env at ${stack.envPath}`);
-  else if (!password) reasons.push(".env has no POSTGRES_PASSWORD");
+  else if (!password) reasons.push(`.env has no ${ENV_PASSWORD}`);
   let u: URL | undefined;
   try {
     u = new URL(opts.targetUrl);
@@ -144,7 +155,7 @@ export function stackTargetCheck(opts: {
       reasons.push(`the target is not the ${STACK_USER} database on user ${STACK_USER}`);
     }
     if (password && decodeURIComponent(u.password) !== password) {
-      reasons.push("the target's password is not POSTGRES_PASSWORD from .env");
+      reasons.push(`the target's password is not ${ENV_PASSWORD} from .env`);
     }
     if (!opts.writeEnv && !(LOOPBACK.has(u.hostname) && u.port === OVERLAY_PORT)) {
       reasons.push(
@@ -159,15 +170,15 @@ export function stackTargetCheck(opts: {
 export function postgresEnv(password: string): [string, string][] {
   return [
     ["COMPOSE_PROFILES", "postgres"],
-    ["DB_PROVIDER", "postgres"],
-    ["POSTGRES_PASSWORD", password],
-    ["DATABASE_URL", `postgresql://${STACK_USER}:${encodeURIComponent(password)}@db:5432/${STACK_DB}`],
+    [ENV_PROVIDER, "postgres"],
+    [ENV_PASSWORD, password],
+    [ENV_DATABASE_URL, `postgresql://${STACK_USER}:${encodeURIComponent(password)}@db:5432/${STACK_DB}`],
   ];
 }
 
 function maskValue(key: string, value: string): string {
-  if (key === "POSTGRES_PASSWORD") return value ? "****" : "";
-  if (key === "DATABASE_URL" && /^postgres(ql)?:\/\//.test(value)) return maskUrl(value);
+  if (key === ENV_PASSWORD) return value ? "****" : "";
+  if (key === ENV_DATABASE_URL && /^postgres(ql)?:\/\//.test(value)) return maskUrl(value);
   return value;
 }
 
@@ -272,16 +283,16 @@ export interface RunMigrationOptions {
 
 /**
  * Prints the exact .env lines for a manual switch without printing the
- * password: DATABASE_URL refers to ${POSTGRES_PASSWORD}, which Compose expands
- * from the line above it in .env.
+ * password: BLACKVAULT_DATABASE_URL refers to ${BLACKVAULT_POSTGRES_PASSWORD},
+ * which Compose expands from the line above it in .env.
  */
 function manualSteps(opts: RunMigrationOptions, hasPassword: boolean, log: (l: string) => void): void {
   log("To finish by hand, set these four lines in .env (keep only one of each):");
   log("  COMPOSE_PROFILES=postgres");
-  log("  DB_PROVIDER=postgres");
-  log(`  POSTGRES_PASSWORD=${hasPassword ? "<already in your .env; keep it>" : "<the target database's password>"}`);
-  log(`  DATABASE_URL=postgresql://${STACK_USER}:\${POSTGRES_PASSWORD}@db:5432/${STACK_DB}`);
-  log("That DATABASE_URL is the stack's own database (db:5432). If your data went to another");
+  log(`  ${ENV_PROVIDER}=postgres`);
+  log(`  ${ENV_PASSWORD}=${hasPassword ? "<already in your .env; keep it>" : "<the target database's password>"}`);
+  log(`  ${ENV_DATABASE_URL}=postgresql://${STACK_USER}:\${${ENV_PASSWORD}}@db:5432/${STACK_DB}`);
+  log(`That ${ENV_DATABASE_URL} is the stack's own database (db:5432). If your data went to another`);
   log("server, use a URL BlackVault's container can reach instead.");
   log(`Then create ${opts.stack.markerPath} (any content) so the startup check knows`);
   log("vault.db is a leftover, and run: docker compose up -d --build");
@@ -343,7 +354,7 @@ export async function runMigration(opts: RunMigrationOptions): Promise<number> {
   }
 
   log("");
-  const password = stack.env.get("POSTGRES_PASSWORD") ?? "";
+  const password = stack.env.get(ENV_PASSWORD) ?? "";
   if (!check.ok) {
     log("The copy is verified, but .env was NOT switched (see the reasons above).");
     manualSteps(opts, password !== "", log);

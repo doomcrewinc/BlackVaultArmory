@@ -7,7 +7,7 @@
 #
 # Naming the db service starts it even though .env has no COMPOSE_PROFILES
 # yet (the app keeps running on SQLite until the copy is verified). It needs
-# POSTGRES_PASSWORD in .env. The migrator recognises this port as the stack's
+# BLACKVAULT_POSTGRES_PASSWORD in .env. The migrator recognises this port as the stack's
 # own database, and only then switches .env.
 #
 # Running plain `docker compose up -d` afterwards recreates the database

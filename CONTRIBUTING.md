@@ -85,12 +85,25 @@ a `.env` with only `DATA_DIR` and `PORT`, so a bare `docker compose` with no `.e
 keep meaning SQLite, forever. Keep it that way:
 
 - **Never use `${VAR:?message}` in `docker-compose.yml`.** Compose interpolates it even for a
-  service whose profile is off, so a required `POSTGRES_PASSWORD` fails the SQLite default before
-  anything starts. Use `${VAR:-default}`. An empty `POSTGRES_PASSWORD` with the profile on makes
-  the postgres container itself refuse to start, which is loud enough.
+  service whose profile is off, so a required `BLACKVAULT_POSTGRES_PASSWORD` fails the SQLite
+  default before anything starts. Use `${VAR:-default}`. An empty `BLACKVAULT_POSTGRES_PASSWORD`
+  with the profile on makes the postgres container itself refuse to start, which is loud enough.
 - The app's `depends_on: db` must keep `required: false`, or SQLite installs fail to start.
 - Every app setting that differs by provider comes from `.env` with a SQLite default
-  (`DB_PROVIDER=${DB_PROVIDER:-sqlite}`, `DATABASE_URL=${DATABASE_URL:-file:...}`).
+  (`DB_PROVIDER=${BLACKVAULT_DB_PROVIDER:-sqlite}`,
+  `DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:...}`).
+- **Never interpolate a generic name** (`${DATABASE_URL}`, `${DB_PROVIDER}`,
+  `${POSTGRES_PASSWORD}`) in a compose file. Compose lets a variable exported in the user's shell
+  override `.env`, and many machines export `DATABASE_URL` for Prisma. A relative `file:` URL
+  there gives the container a healthy, **empty** database in its writable layer, and every write
+  is lost on recreate. The `.env` keys are `BLACKVAULT_*` so nothing else sets them; compose maps
+  them to the generic names inside the container, so app code keeps reading `DATABASE_URL` and
+  `DB_PROVIDER`. This must print nothing:
+  ```bash
+  grep -rnE '\$\{(DATABASE_URL|DB_PROVIDER|POSTGRES_PASSWORD)' docker-compose*.yml
+  ```
+  `DATA_DIR`, `PORT` and `COMPOSE_PROFILES` keep their names: every existing install's `.env`
+  uses the first two, and the third is Compose's own.
 - Check both shapes before merging a compose change:
   ```bash
   docker compose --env-file /dev/null config --services     # as if no .env: blackvault only

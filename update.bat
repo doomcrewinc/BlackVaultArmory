@@ -19,6 +19,12 @@ echo ║   BlackVault — Update Script         ║
 echo ╚══════════════════════════════════════╝
 echo.
 
+:: docker compose (a child of this script) must get the BLACKVAULT_* keys from
+:: .env only, never from the parent shell.
+set "BLACKVAULT_DATABASE_URL="
+set "BLACKVAULT_DB_PROVIDER="
+set "BLACKVAULT_POSTGRES_PASSWORD="
+
 :: ── Docker compose v1/v2 detection ────────────────────────────
 set "COMPOSE="
 docker compose version >nul 2>&1
@@ -50,8 +56,8 @@ if not exist ".env" (
 )
 
 :: ── Database provider ─────────────────────────────────────────
-:: Comes from .env only. A missing DB_PROVIDER line means SQLite, and a
-:: stray vault.db never switches a PostgreSQL install to SQLite. It only
+:: Comes from .env only. A missing BLACKVAULT_DB_PROVIDER line means SQLite,
+:: and a stray vault.db never switches a PostgreSQL install to SQLite. It only
 :: drives the preflight checks: plain %COMPOSE% reads .env itself.
 call :provider_from_env
 echo Database provider: !DB_PROVIDER!
@@ -193,14 +199,15 @@ exit /b 1
 :: ════════════════════════════════════════════════════════════
 
 :: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
-:: from the last DB_PROVIDER= line in .env, ignoring case, whitespace and
-:: quotes. Installs made before PostgreSQL support have no DB_PROVIDER line
-:: (or no .env at all) and were always SQLite.
+:: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line
+:: in .env, ignoring case, whitespace and quotes. Installs made before
+:: PostgreSQL support have no such line (or no .env at all) and were always
+:: SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml ignores it.
 :provider_from_env
 set "_PV="
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="DB_PROVIDER" set "_PV=%%B"
+    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
   )
 )
 if defined _PV set "_PV=!_PV: =!"
@@ -216,7 +223,7 @@ if /i "!_PV!"=="postgresql" set "DB_PROVIDER=postgres"
 goto :eof
 
 :: Mirrors check_postgres_env in scripts/compose-provider.sh. Warns when .env
-:: says DB_PROVIDER=postgres but lacks a key the single compose file needs to
+:: says BLACKVAULT_DB_PROVIDER=postgres but lacks a key the single compose file needs to
 :: run PostgreSQL. Only warns; never stops the script.
 :check_postgres_env
 set "_CP="
@@ -225,8 +232,8 @@ set "_DU="
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
     if "%%A"=="COMPOSE_PROFILES" set "_CP=%%B"
-    if "%%A"=="POSTGRES_PASSWORD" set "_PW=%%B"
-    if "%%A"=="DATABASE_URL" set "_DU=%%B"
+    if "%%A"=="BLACKVAULT_POSTGRES_PASSWORD" set "_PW=%%B"
+    if "%%A"=="BLACKVAULT_DATABASE_URL" set "_DU=%%B"
   )
 )
 if defined _CP set "_CP=!_CP: =!"
@@ -238,20 +245,20 @@ if not defined _CP (
 ) else (
   if "!_CP:postgres=!"=="!_CP!" set "_MISSING=!_MISSING! COMPOSE_PROFILES=postgres"
 )
-if not defined _PW set "_MISSING=!_MISSING! POSTGRES_PASSWORD"
+if not defined _PW set "_MISSING=!_MISSING! BLACKVAULT_POSTGRES_PASSWORD"
 set "_DU_OK="
 if defined _DU if /i "!_DU:~0,11!"=="postgres://" set "_DU_OK=1"
 if defined _DU if /i "!_DU:~0,13!"=="postgresql://" set "_DU_OK=1"
-if not defined _DU_OK set "_MISSING=!_MISSING! DATABASE_URL=postgresql://..."
+if not defined _DU_OK set "_MISSING=!_MISSING! BLACKVAULT_DATABASE_URL=postgresql://..."
 set "_PW="
 if not defined _MISSING goto :eof
-echo WARNING: .env says DB_PROVIDER=postgres but is missing:!_MISSING!
+echo WARNING: .env says BLACKVAULT_DB_PROVIDER=postgres but is missing:!_MISSING!
 echo    A PostgreSQL install needs all four of these in .env:
 echo      COMPOSE_PROFILES=postgres
-echo      DB_PROVIDER=postgres
-echo      POSTGRES_PASSWORD=^<48 hex characters^>
-echo      DATABASE_URL=postgresql://blackvault:^<same password^>@db:5432/blackvault
-echo    See .env.example. If this is a SQLite install, set DB_PROVIDER=sqlite instead.
+echo      BLACKVAULT_DB_PROVIDER=postgres
+echo      BLACKVAULT_POSTGRES_PASSWORD=^<48 hex characters^>
+echo      BLACKVAULT_DATABASE_URL=postgresql://blackvault:^<same password^>@db:5432/blackvault
+echo    See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead.
 goto :eof
 
 :: Sets IS_DIR=1 when %1 is an existing directory, else clears it.

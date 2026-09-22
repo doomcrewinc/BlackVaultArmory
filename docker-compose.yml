@@ -6,7 +6,7 @@
 #
 # Which database runs is decided by .env, not by picking a file:
 #
-#   SQLite     .env has none of the four lines below (or DB_PROVIDER=sqlite).
+#   SQLite     .env has none of the four lines below (or BLACKVAULT_DB_PROVIDER=sqlite).
 #              Only the BlackVault container starts; the database is the single
 #              file ${DATA_DIR}/db/vault.db. This is what every install made before
 #              PostgreSQL support has, so a plain `docker compose up -d` keeps them
@@ -14,17 +14,25 @@
 #
 #   PostgreSQL .env has all four of these (install.sh writes them for new installs):
 #                COMPOSE_PROFILES=postgres      <- turns on the "db" service below
-#                DB_PROVIDER=postgres
-#                POSTGRES_PASSWORD=<48 hex characters>
-#                DATABASE_URL=postgresql://blackvault:<same password>@db:5432/blackvault
+#                BLACKVAULT_DB_PROVIDER=postgres
+#                BLACKVAULT_POSTGRES_PASSWORD=<48 hex characters>
+#                BLACKVAULT_DATABASE_URL=postgresql://blackvault:<same password>@db:5432/blackvault
 #              The database container starts first, and BlackVault waits for it.
+#
+# Why BLACKVAULT_*: Compose lets a variable exported in the user's SHELL override
+# .env during interpolation. Many Prisma users export DATABASE_URL (often a
+# relative file: URL), and that would silently point the container at a new,
+# empty database. The .env keys are BlackVault-only names so nothing else sets
+# them; inside the container the app still gets DATABASE_URL, DB_PROVIDER and
+# (db service) POSTGRES_PASSWORD, mapped below. Never interpolate the generic
+# names here.
 #
 # Moving from SQLite to PostgreSQL: see "Moving from SQLite to PostgreSQL" in README.md.
 # The migration tool switches .env for you once the copy is verified.
 #
 # Maintainers: never use ${VAR:?message} in this file. Compose evaluates it even for
 # services whose profile is off, so it would break the SQLite default. An empty
-# POSTGRES_PASSWORD with the profile on makes the postgres container refuse to start,
+# BLACKVAULT_POSTGRES_PASSWORD with the profile on makes the postgres container refuse to start,
 # which is loud and safe.
 #
 # Docker Compose reads .env automatically — no --env-file flag needed.
@@ -39,7 +47,7 @@ services:
     environment:
       POSTGRES_USER: blackvault
       POSTGRES_DB: blackvault
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD: ${BLACKVAULT_POSTGRES_PASSWORD:-}
     volumes:
       - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
     healthcheck:
@@ -63,8 +71,8 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
-      - DB_PROVIDER=${DB_PROVIDER:-sqlite}
-      - DATABASE_URL=${DATABASE_URL:-file:/app/data/vault.db?connection_limit=1}
+      - DB_PROVIDER=${BLACKVAULT_DB_PROVIDER:-sqlite}
+      - DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:/app/data/vault.db?connection_limit=1}
       # Only needed to read legacy enc: serial numbers; new data is plain text.
       - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
     volumes:

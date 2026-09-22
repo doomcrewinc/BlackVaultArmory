@@ -41,6 +41,9 @@ fi
 # only drives the preflight checks.
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# docker compose must get the BLACKVAULT_* keys from .env only, never from
+# this shell's environment (a shell variable would override .env).
+unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 

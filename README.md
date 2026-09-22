@@ -191,7 +191,7 @@ http://localhost:3000
 The same commands work for both databases. Run them from the BlackVault folder.
 
 > 💡 **Which database am I using?** Look in `.env`. `COMPOSE_PROFILES=postgres` with
-> `DB_PROVIDER=postgres` is PostgreSQL. No `COMPOSE_PROFILES` line (installs made before
+> `BLACKVAULT_DB_PROVIDER=postgres` is PostgreSQL. No `COMPOSE_PROFILES` line (installs made before
 > PostgreSQL support, or SQLite chosen at install) is SQLite. Docker reads `.env` itself, so
 > plain `docker compose` always starts the right one.
 
@@ -319,7 +319,7 @@ docker compose up -d
 
 **Nothing is lost.** If you installed BlackVault before PostgreSQL support (or chose SQLite), your
 data is in `data/db/vault.db`. If `.env` was switched to PostgreSQL by hand (for example by adding
-`COMPOSE_PROFILES=postgres` or `DB_PROVIDER=postgres`) without running the migration, BlackVault
+`COMPOSE_PROFILES=postgres` or `BLACKVAULT_DB_PROVIDER=postgres`) without running the migration, BlackVault
 starts on a **new, empty PostgreSQL database** instead. `vault.db` is not touched.
 
 BlackVault checks for exactly this at startup. The container log (`docker compose logs blackvault`)
@@ -335,9 +335,9 @@ To get back to your data:
    ```bash
    docker compose down
    ```
-2. Open `.env`. Delete the `COMPOSE_PROFILES=postgres`, `DB_PROVIDER=postgres` and
-   `DATABASE_URL=postgresql://...` lines (or set `DB_PROVIDER=sqlite` and remove the other two).
-   `POSTGRES_PASSWORD` can stay.
+2. Open `.env`. Delete the `COMPOSE_PROFILES=postgres`, `BLACKVAULT_DB_PROVIDER=postgres` and
+   `BLACKVAULT_DATABASE_URL=postgresql://...` lines (or set `BLACKVAULT_DB_PROVIDER=sqlite` and
+   remove the other two). `BLACKVAULT_POSTGRES_PASSWORD` can stay.
 3. Start BlackVault on SQLite:
    ```bash
    docker compose up -d --remove-orphans
@@ -411,7 +411,7 @@ data/
     └── ...             ← uploaded images and documents
 ```
 
-With PostgreSQL, the database password lives in `.env` (`POSTGRES_PASSWORD`). Back up `.env`
+With PostgreSQL, the database password lives in `.env` (`BLACKVAULT_POSTGRES_PASSWORD`). Back up `.env`
 together with the `data` folder.
 
 You can change this by editing `DATA_DIR` in the `.env` file before first run.
@@ -505,7 +505,7 @@ docker compose down
 else. BlackVault keeps using SQLite until the copy is verified:
 
 ```bash
-grep -q '^POSTGRES_PASSWORD=.' .env || echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+grep -q '^BLACKVAULT_POSTGRES_PASSWORD=.' .env || echo "BLACKVAULT_POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
 ```
 
 **Step 5: Start only the database.** It is published on this machine only (127.0.0.1:55432)
@@ -519,7 +519,7 @@ docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait 
 
 ```bash
 npm ci && npm run db:generate
-DATABASE_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env | tail -n 1 | cut -d= -f2-)@127.0.0.1:55432/blackvault" \
+DATABASE_URL="postgresql://blackvault:$(grep '^BLACKVAULT_POSTGRES_PASSWORD=' .env | tail -n 1 | cut -d= -f2-)@127.0.0.1:55432/blackvault" \
   npx prisma migrate deploy --schema prisma/postgres/schema.prisma
 ```
 
@@ -529,8 +529,11 @@ DATABASE_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env | tail -
 npm run migrate:to-postgres -- --dry-run
 ```
 
-It reads `DATA_DIR` and `POSTGRES_PASSWORD` from `.env`, so it finds your `vault.db` and the
-database from Step 5 without any other settings. The first lines say whether `.env` will be
+It reads `DATA_DIR` and `BLACKVAULT_POSTGRES_PASSWORD` from `.env`, so it finds your `vault.db`
+and the database from Step 5 without any other settings. (To copy somewhere else, give it
+`POSTGRES_URL=... npm run migrate:to-postgres`, and `SQLITE_URL=file:...` for another source.
+These are arguments for that one command, not `.env` settings. A `DATABASE_URL` in your shell is
+used as the target only when it is a `postgres://` URL.) The first lines say whether `.env` will be
 switched after the copy. It will be if the copy goes into this install's own database.
 
 **Step 8: Real run.** It copies everything and then verifies it. It must end with
@@ -620,7 +623,10 @@ Run a local copy without Docker:
 ```
 
 It installs dependencies, writes a local `.env`, generates the Prisma client, applies every
-migration, and starts the dev server on http://localhost:3000.
+migration, and starts the dev server on http://localhost:3000. The local `.env` uses
+`DATABASE_URL` (Prisma's name); Docker installs use `BLACKVAULT_DATABASE_URL`, so the two never
+mix. `./dev.sh` refuses to add to a `.env` that has a `DATA_DIR` line, because that is a Docker
+install's `.env`: use a separate clone for development.
 
 ```bash
 ./dev.sh --fresh     # rebuild the local database from the full migration history, then seed
