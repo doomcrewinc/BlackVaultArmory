@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "decrypt-serials": "npx ts-node --project tsconfig.json scripts/decrypt-serials.ts",
     "reset-db": "npx ts-node --project tsconfig.json scripts/reset-db.ts",
-    "release:stamp": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/stamp-version.ts"
+    "release:stamp": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/stamp-version.ts",
+    "gen:schemas": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/gen-prisma-schemas.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
