@@ -8,7 +8,7 @@ import { resolveProvider } from "./db/provider";
  * structurally the same type.
  */
 function loadPrismaClient(): new (options?: object) => PrismaClient {
-  if (resolveProvider(process.env.DB_PROVIDER) === "sqlite") {
+  if (resolveProvider(process.env.DB_PROVIDER, process.env.DATABASE_URL) === "sqlite") {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require(".prisma/client-sqlite").PrismaClient;
   }

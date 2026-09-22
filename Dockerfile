@@ -80,9 +80,19 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
-# Default provider is PostgreSQL; compose supplies DATABASE_URL.
-# For SQLite set DB_PROVIDER=sqlite and DATABASE_URL=file:/app/data/vault.db
-ENV DB_PROVIDER=postgres
-
-# Run the chosen provider's migrations, then start the server
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy --schema \"prisma/${DB_PROVIDER}/schema.prisma\" && node server.js"]
+# Provider: an explicit DB_PROVIDER wins (case-insensitive; anything but
+# "sqlite" is postgres, so "postgresql" works). When DB_PROVIDER is unset or
+# empty, a file: DATABASE_URL means sqlite and anything else postgres. This
+# mirrors resolveProvider() in src/lib/db/provider.ts. No DB_PROVIDER default
+# is baked in, so `docker run -e DATABASE_URL=file:/app/data/vault.db` works.
+#
+# Run the chosen provider's migrations, then start the server.
+CMD ["sh", "-c", "\
+p=$(printf '%s' \"$DB_PROVIDER\" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'); \
+case \"$p\" in \
+  sqlite) ;; \
+  '') case \"$DATABASE_URL\" in [Ff][Ii][Ll][Ee]:*) p=sqlite ;; *) p=postgres ;; esac ;; \
+  *) p=postgres ;; \
+esac; \
+export DB_PROVIDER=\"$p\"; \
+node node_modules/prisma/build/index.js migrate deploy --schema \"prisma/$p/schema.prisma\" && node server.js"]
