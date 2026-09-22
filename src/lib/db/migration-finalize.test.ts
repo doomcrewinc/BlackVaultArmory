@@ -220,6 +220,49 @@ describe("runMigration", () => {
     expect(envText()).toBe(before);
   });
 
+  it("removes .migrated again when .env cannot be switched after the marker was written", async () => {
+    const before = envText();
+    // The repo folder is read-only, so the .env backup (and the switch) fail;
+    // data/db stays writable, so the marker itself was written first.
+    fs.chmodSync(repo, 0o500);
+    let result: { code: number; out: string };
+    try {
+      result = await run();
+    } finally {
+      fs.chmodSync(repo, 0o700);
+    }
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("Wrote ");
+    expect(result.out).toContain(".env could not be switched");
+    expect(result.out).toContain("Removed ");
+    expect(fs.existsSync(marker())).toBe(false);
+    expect(envText()).toBe(before);
+    // The manual steps put the marker after the .env lines.
+    const lines = result.out.split("\n");
+    const urlLine = lines.findIndex((l) => l.includes("BLACKVAULT_DATABASE_URL=postgresql://"));
+    const markerLine = lines.findIndex((l) => l.includes("After adding those lines, create"));
+    expect(urlLine).toBeGreaterThan(-1);
+    expect(markerLine).toBeGreaterThan(urlLine);
+  });
+
+  it("writes through a symlinked .env, keeping the link", async () => {
+    const realDir = path.join(repo, "config");
+    fs.mkdirSync(realDir);
+    const real = path.join(realDir, "blackvault.env");
+    fs.renameSync(path.join(repo, ".env"), real);
+    fs.symlinkSync(real, path.join(repo, ".env"));
+    const before = fs.readFileSync(real, "utf8");
+
+    expect((await run()).code).toBe(0);
+
+    expect(fs.lstatSync(path.join(repo, ".env")).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(path.join(repo, ".env"))).toBe(real);
+    expect(parseEnv(fs.readFileSync(real, "utf8")).get("BLACKVAULT_DB_PROVIDER")).toBe("postgres");
+    expect(fs.statSync(real).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(backup(), "utf8")).toBe(before);
+    expect(fs.readdirSync(realDir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+
   it("puts .migrated in DATA_DIR/db when DATA_DIR is elsewhere", async () => {
     const dataDir = path.join(repo, "my data");
     fs.mkdirSync(path.join(dataDir, "db"), { recursive: true });

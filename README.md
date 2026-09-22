@@ -523,8 +523,12 @@ docker compose down
 else. BlackVault keeps using SQLite until the copy is verified:
 
 ```bash
-grep -q '^BLACKVAULT_POSTGRES_PASSWORD=.' .env || echo "BLACKVAULT_POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+grep -q '^BLACKVAULT_POSTGRES_PASSWORD=.' .env ||
+  printf '\nBLACKVAULT_POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 ```
+
+(The leading newline keeps it on its own line even if `.env` does not end with one. A blank line
+in `.env` is harmless.)
 
 **Step 5: Start only the database.** It is published on this machine only (127.0.0.1:55432)
 for the copy:
@@ -537,9 +541,13 @@ docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait 
 
 ```bash
 npm ci && npm run db:generate
-DATABASE_URL="postgresql://blackvault:$(grep '^BLACKVAULT_POSTGRES_PASSWORD=' .env | tail -n 1 | cut -d= -f2-)@127.0.0.1:55432/blackvault" \
+PW="$(grep '^BLACKVAULT_POSTGRES_PASSWORD=' .env | tail -n 1 | cut -d= -f2- | tr -d '\r"')"
+DATABASE_URL="postgresql://blackvault:$PW@127.0.0.1:55432/blackvault" \
   npx prisma migrate deploy --schema prisma/postgres/schema.prisma
 ```
+
+(`tr` drops a Windows line ending or quotes around the value. `DATABASE_URL` here is Prisma's
+own setting for this one command, not a `.env` line.)
 
 **Step 7: Dry run.** It prints how many rows each table has. Nothing is written, not even `.env`:
 
@@ -572,8 +580,9 @@ docker compose up -d --build
 This also closes the temporary database port from Step 5. Check that your records are there.
 
 If the tool says it **could not** switch `.env` (for example because `data/db` is owned by the
-container on Linux), it prints the exact lines to add to `.env` and the `.migrated` file to
-create. Do those by hand, then run Step 9.
+container on Linux), it leaves no `.migrated` behind and prints the exact lines to add to `.env`
+and the `.migrated` file to create. Add the lines first, then create `.migrated`, then run
+Step 9.
 
 Running the tool again on a migrated install is refused, because `data/db/.migrated` exists.
 `--force` overrides that. Only use it if you know why.

@@ -250,16 +250,21 @@ function writeAtomic(file: string, content: string, mode: number): void {
   }
 }
 
-/** Backs .env up (never over an earlier backup), then switches it atomically, mode 600. */
+/**
+ * Backs .env up (never over an earlier backup), then switches it atomically,
+ * mode 600. A symlinked .env is written through to its target, so the link
+ * is kept rather than replaced by a regular file.
+ */
 export function switchEnvFile(stack: Stack, updates: [string, string][], log: (l: string) => void): string {
-  const current = fs.readFileSync(stack.envPath, "utf8");
+  const target = fs.realpathSync(stack.envPath);
+  const current = fs.readFileSync(target, "utf8");
   let backup = path.join(stack.repoDir, ENV_BACKUP_NAME);
   if (fs.existsSync(backup)) backup = `${backup}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
   fs.copyFileSync(stack.envPath, backup, fs.constants.COPYFILE_EXCL);
   fs.chmodSync(backup, 0o600);
   const { text, changes } = applyEnvUpdates(current, updates);
-  writeAtomic(stack.envPath, text, 0o600);
-  log(`Switched ${stack.envPath} to PostgreSQL (backup: ${backup}):`);
+  writeAtomic(target, text, 0o600);
+  log(`Switched ${stack.envPath}${target === stack.envPath ? "" : ` (-> ${target})`} to PostgreSQL (backup: ${backup}):`);
   for (const c of changes) log(c);
   return backup;
 }
@@ -284,7 +289,8 @@ export interface RunMigrationOptions {
 /**
  * Prints the exact .env lines for a manual switch without printing the
  * password: BLACKVAULT_DATABASE_URL refers to ${BLACKVAULT_POSTGRES_PASSWORD},
- * which Compose expands from the line above it in .env.
+ * which Compose expands from the line above it in .env. The marker comes
+ * last: .migrated must only exist once .env is switched.
  */
 function manualSteps(opts: RunMigrationOptions, hasPassword: boolean, log: (l: string) => void): void {
   log("To finish by hand, set these four lines in .env (keep only one of each):");
@@ -294,8 +300,8 @@ function manualSteps(opts: RunMigrationOptions, hasPassword: boolean, log: (l: s
   log(`  ${ENV_DATABASE_URL}=postgresql://${STACK_USER}:\${${ENV_PASSWORD}}@db:5432/${STACK_DB}`);
   log(`That ${ENV_DATABASE_URL} is the stack's own database (db:5432). If your data went to another`);
   log("server, use a URL BlackVault's container can reach instead.");
-  log(`Then create ${opts.stack.markerPath} (any content) so the startup check knows`);
-  log("vault.db is a leftover, and run: docker compose up -d --build");
+  log(`After adding those lines, create ${opts.stack.markerPath} (any content) so the startup`);
+  log("check knows vault.db is a leftover, and run: docker compose up -d --build");
 }
 
 /**
@@ -382,8 +388,17 @@ export async function runMigration(opts: RunMigrationOptions): Promise<number> {
   try {
     switchEnvFile(stack, postgresEnv(password), log);
   } catch (err) {
-    log(`ERROR: the copy is verified and .migrated was written, but .env could not be switched:`);
+    log(`ERROR: the copy is verified and committed, but .env could not be switched:`);
     log(`  ${err instanceof Error ? err.message : String(err)}`);
+    // Same state as every other "not switched" path: no .migrated. A marker
+    // beside an unswitched .env would claim a migration the app is not using.
+    try {
+      fs.rmSync(stack.markerPath, { force: true });
+      log(`Removed ${stack.markerPath} again. BlackVault still runs on SQLite.`);
+    } catch (rmErr) {
+      log(`WARNING: could not remove ${stack.markerPath}: ${rmErr instanceof Error ? rmErr.message : String(rmErr)}`);
+      log("  Delete it by hand before anything else.");
+    }
     manualSteps(opts, password !== "", log);
     return 1;
   }

@@ -48,7 +48,7 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
      --shadow-database-url "file:$(mktemp -d)/shadow.db" \
      --script > prisma/sqlite/migrations/$NAME/migration.sql
 
-   # needs a scratch PostgreSQL database; Prisma wipes it (its name must contain shadow, scratch or test)
+   # needs a scratch PostgreSQL database; Prisma wipes it (its name needs shadow, scratch or test as a word)
    mkdir -p prisma/postgres/migrations/$NAME
    npx prisma migrate diff \
      --from-migrations prisma/postgres/migrations \
@@ -63,8 +63,9 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
    ```
    Without `SHADOW_DATABASE_URL` it checks SQLite only and says it skipped PostgreSQL. Prisma
    **wipes** the shadow database, so the check refuses a `SHADOW_DATABASE_URL` that equals
-   `DATABASE_URL` or `POSTGRES_URL`, or whose database name does not contain `shadow`, `scratch`
-   or `test`.
+   `DATABASE_URL` or `POSTGRES_URL`, or whose database name does not have `shadow`, `scratch` or
+   `test` as a whole word split by `_` or `-` (`blackvault_shadow`, `test_db` and `scratch` pass;
+   `latest` and `contest` do not).
 
 **Why both.** At startup the container runs `prisma migrate deploy` for its own provider only.
 A SQLite migration without its PostgreSQL twin passes every SQLite test, then ships a client
