@@ -67,7 +67,11 @@ export function normalizeInstant(instant: Date, zone: string): Date {
     day: "2-digit",
   }).formatToParts(instant);
   const part = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-  return new Date(Date.UTC(part("year"), part("month") - 1, part("day")));
+  // Not Date.UTC: it maps years 0-99 into the 1900s.
+  const d = new Date(0);
+  d.setUTCFullYear(part("year"), part("month") - 1, part("day"));
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
 type Delegate = {
@@ -208,14 +212,21 @@ export async function runLegacyDateMigration(
 
 /**
  * Runs the migration with the configured zone, or UTC provisionally when none
- * is set. Never throws: a failure must not block the caller.
+ * is set; skips it when the configured zone is invalid. Never throws: a failure
+ * must not block the caller.
  */
 export async function runConfiguredDateMigration(trigger: string): Promise<void> {
   try {
     const { prisma } = await import("@/lib/prisma");
     const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
     const configured = settings?.timezone;
-    const zone = configured && isValidTimeZone(configured) ? configured : "UTC";
+    // Only a genuinely unset zone falls back to UTC. A set-but-invalid zone would
+    // otherwise convert every legacy row to UTC days under a zone the user never chose.
+    if (configured && !isValidTimeZone(configured)) {
+      console.log(`[date-migration] configured timezone "${configured}" is invalid; skipping migration`);
+      return;
+    }
+    const zone = configured || "UTC";
     const summary = await runLegacyDateMigration(prisma, zone);
     if (
       summary.normalized ||

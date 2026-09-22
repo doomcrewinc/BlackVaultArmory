@@ -1,13 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DATE_ONLY_FIELDS,
   isValidTimeZone,
   normalizeInstant,
   runLegacyDateMigration,
+  runStartupDateMigration,
   USER_EDITED,
 } from "./date-migration";
 
 const iso = (d: Date) => d.toISOString();
+
+// runStartupDateMigration imports the real client; tests swap in a fake.
+const mockPrisma = vi.hoisted(() => ({ current: undefined as unknown }));
+vi.mock("@/lib/prisma", () => ({
+  get prisma() {
+    return mockPrisma.current;
+  },
+}));
 
 describe("isValidTimeZone", () => {
   it("accepts IANA zones", () => {
@@ -33,6 +42,12 @@ describe("normalizeInstant", () => {
     // US DST ended 2026-11-01 at 02:00 local. 07:30Z that day is 00:30 MST / 01:30 MDT.
     expect(iso(normalizeInstant(new Date("2026-11-01T07:30:00.000Z"), "America/Denver"))).toBe(
       "2026-11-01T00:00:00.000Z"
+    );
+  });
+
+  it("keeps years below 100 out of the 1900s", () => {
+    expect(iso(normalizeInstant(new Date("0050-03-04T05:00:00.000Z"), "UTC"))).toBe(
+      "0050-03-04T00:00:00.000Z"
     );
   });
 
@@ -295,5 +310,41 @@ describe("runLegacyDateMigration", () => {
     expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(LEGACY));
     expect(iso(tables.firearm[1].acquisitionDate as Date)).toBe("2026-09-21T00:00:00.000Z");
     expect(tables.dateNormalizationAudit.map((a) => a.recordId)).toEqual(["f2"]);
+  });
+});
+
+describe("runStartupDateMigration", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const withSettings = (timezone: string | null) => {
+    const { client, tables } = fakePrisma({ firearm: [{ id: "f1", acquisitionDate: LEGACY }] });
+    (client as Record<string, unknown>).appSettings = {
+      findUnique: async () => ({ id: "singleton", timezone }),
+    };
+    mockPrisma.current = client;
+    return tables;
+  };
+
+  it("skips the run entirely when the configured zone is invalid", async () => {
+    const tables = withSettings("Mars/Olympus_Mons");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runStartupDateMigration();
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(LEGACY));
+    expect(tables.dateNormalizationAudit).toHaveLength(0);
+    expect(log).toHaveBeenCalledWith(
+      '[date-migration] configured timezone "Mars/Olympus_Mons" is invalid; skipping migration'
+    );
+  });
+
+  it("falls back to UTC only when no zone is set", async () => {
+    const tables = withSettings(null);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runStartupDateMigration();
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe("2026-09-21T00:00:00.000Z");
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe("UTC");
   });
 });
