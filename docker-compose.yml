@@ -42,6 +42,8 @@ services:
       - NODE_ENV=production
       - DB_PROVIDER=postgres
       - DATABASE_URL=postgresql://blackvault:${POSTGRES_PASSWORD}@db:5432/blackvault
+      # Only needed to read legacy enc: serial numbers; new data is plain text.
+      - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
     volumes:
       # /app/data holds server-side backups (and vault.db on SQLite installs,
       # which the startup guard checks for). Without this mount, backups saved

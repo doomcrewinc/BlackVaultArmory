@@ -19,6 +19,8 @@ services:
       - NODE_ENV=production
       - DB_PROVIDER=sqlite
       - DATABASE_URL=file:/app/data/vault.db?connection_limit=1
+      # Only needed to read legacy enc: serial numbers; new data is plain text.
+      - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
     volumes:
       - ${DATA_DIR:-./data}/db:/app/data
       - ${DATA_DIR:-./data}/uploads:/app/uploads
