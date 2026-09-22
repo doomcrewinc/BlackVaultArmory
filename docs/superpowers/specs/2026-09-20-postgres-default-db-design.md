@@ -1,5 +1,40 @@
 # Postgres as Default Database — Design Spec
 
+> **REVISED 2026-09-22.** The original plan (`plans/2026-09-20-postgres-default-db.md`) is
+> **superseded** by `plans/2026-09-22-postgres-default-db.md`. Read this revision block first; it
+> overrides anything below that conflicts with it.
+>
+> **1. Both Prisma clients ship in the image (user decision).** A Prisma client is
+> provider-specific, and the original design generated one at build time while users choose a
+> provider at runtime — so one published image could not serve both, and the Docker build itself
+> would fail (it prerenders against a throwaway SQLite DB while defaulting to Postgres). Now:
+> - the **Postgres** client generates to the default location, so `@prisma/client` *is* the
+>   Postgres client and the canonical type source — all existing imports keep working;
+> - the **SQLite** client generates to `node_modules/.prisma/client-sqlite`;
+> - `src/lib/prisma.ts` is the **only** file that chooses, by `DB_PROVIDER`;
+> - builds always prerender against **SQLite**, so compiling never needs a running Postgres.
+>   This supersedes "the app never loads two Prisma clients" below: the image carries two; the
+>   running process still instantiates exactly one.
+>
+> **2. Sixteen models, not fifteen.** `DateNormalizationAudit` was added by the date-only epic.
+> It is **included** in `BACKUP_MODELS` (it is provenance for normalized dates; excluding it would
+> make a restored install unable to re-convert them). Only `AppSettings` stays excluded. The
+> migrator copies all sixteen.
+>
+> **3. Restore keeps two behaviours added since this spec was written:** it runs the legacy-date
+> migration after a successful restore, and it reports success only after its transaction commits.
+>
+> **4. Scripts use** `ts-node --compiler-options '{"module":"CommonJS"}'` — the
+> `--project tsconfig.json` form fails with `ERR_MODULE_NOT_FOUND` on any `src/` import.
+>
+> **5. No CI changes.** GitHub Actions is disabled repo-wide pending a rewrite. Verification is local.
+>
+> **6. Postgres migration history** starts as a single baseline generated non-destructively with
+> `prisma migrate diff --from-empty`, so no Postgres server is needed to create it.
+
+---
+
+
 **Date:** 2026-09-20
 **Status:** Approved
 **Epic:** B (depends on Epic A only for the vitest harness)
