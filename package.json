@@ -14,6 +14,7 @@
     "decrypt-serials": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/decrypt-serials.ts",
     "reset-db": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/reset-db.ts",
     "release:stamp": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/stamp-version.ts",
+    "migrate:to-postgres": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/migrate-sqlite-to-postgres.ts",
     "gen:schemas": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/gen-prisma-schemas.ts"
   },
   "dependencies": {
