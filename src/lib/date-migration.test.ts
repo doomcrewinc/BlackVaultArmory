@@ -4,6 +4,7 @@ import {
   isValidTimeZone,
   normalizeInstant,
   runLegacyDateMigration,
+  USER_EDITED,
 } from "./date-migration";
 
 const iso = (d: Date) => d.toISOString();
@@ -161,7 +162,7 @@ describe("runLegacyDateMigration", () => {
 
     expect(first.skippedEdited).toBe(1);
     expect(second).toMatchObject({ normalized: 0, reconverted: 0, skippedEdited: 0 });
-    expect(tables.dateNormalizationAudit[0].appliedZone).toBe("user-edited");
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe(USER_EDITED);
   });
 
   it("never re-converts a released row, even if edited back to the migrated value", async () => {
@@ -177,5 +178,42 @@ describe("runLegacyDateMigration", () => {
 
     expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(migrated));
     expect(summary.reconverted).toBe(0);
+  });
+
+  it("re-normalizes a legacy value restored under an existing audit (same zone)", async () => {
+    const { client, tables } = fakePrisma({ firearm: [{ id: "f1", acquisitionDate: LEGACY }] });
+    await runLegacyDateMigration(client, "America/Denver");
+    const restored = new Date("2026-06-10T22:15:00.000Z"); // a pre-upgrade backup's value
+    tables.firearm[0].acquisitionDate = restored;
+
+    const summary = await runLegacyDateMigration(client, "America/Denver");
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe("2026-06-10T00:00:00.000Z");
+    expect(summary).toMatchObject({ normalized: 1, reconverted: 0, skippedEdited: 0 });
+    expect(tables.dateNormalizationAudit).toHaveLength(1);
+    expect(tables.dateNormalizationAudit[0]).toMatchObject({ appliedZone: "America/Denver" });
+    expect(iso(tables.dateNormalizationAudit[0].originalValue as Date)).toBe(iso(restored));
+    expect(iso(tables.dateNormalizationAudit[0].appliedValue as Date)).toBe(
+      "2026-06-10T00:00:00.000Z"
+    );
+  });
+
+  it("reclaims and normalizes a legacy value restored onto a released row (new zone)", async () => {
+    const { client, tables } = fakePrisma({ firearm: [{ id: "f1", acquisitionDate: LEGACY }] });
+    await runLegacyDateMigration(client, "UTC");
+    tables.firearm[0].acquisitionDate = new Date("2026-08-01T00:00:00.000Z");
+    await runLegacyDateMigration(client, "UTC"); // same zone: nothing yet
+    await runLegacyDateMigration(client, "America/Denver"); // detects the edit, releases
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe(USER_EDITED);
+
+    tables.firearm[0].acquisitionDate = LEGACY; // restore brings back the legacy instant
+    const summary = await runLegacyDateMigration(client, "Pacific/Auckland");
+
+    // 01:30Z on the 21st is 1:30pm on the 21st in Auckland
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe("2026-09-21T00:00:00.000Z");
+    expect(summary).toMatchObject({ normalized: 1, reconverted: 0, skippedEdited: 0 });
+    expect(tables.dateNormalizationAudit).toHaveLength(1);
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe("Pacific/Auckland");
+    expect(iso(tables.dateNormalizationAudit[0].originalValue as Date)).toBe(iso(LEGACY));
   });
 });

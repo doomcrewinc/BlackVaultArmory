@@ -99,6 +99,26 @@ export async function runLegacyDateMigration(
       if (!value) continue;
       const existing = auditByRecord.get(row.id);
 
+      if (existing && value.getTime() % DAY_MS !== 0) {
+        // A non-midnight value is always legacy (every current writer stores UTC
+        // midnight), so this is not a user edit: a pre-upgrade backup was restored
+        // over an audited row. Normalize it afresh from the value now in the row,
+        // and reset the audit to it - even if the row had been released.
+        const next = normalizeInstant(value, zone);
+        // These calls must stay un-awaited: $transaction receives the pending
+        // queries and runs them atomically. Awaiting either one here would
+        // execute it eagerly, outside the transaction, and break reversibility.
+        await client.$transaction([
+          table.update({ where: { id: row.id }, data: { [field]: next } }),
+          audit.update({
+            where: { id: existing.id },
+            data: { originalValue: value, appliedValue: next, appliedZone: zone },
+          }),
+        ]);
+        summary.normalized++;
+        continue;
+      }
+
       if (existing) {
         if (existing.appliedZone === USER_EDITED) continue; // released to the user, permanently
         // Re-conversion: only when the zone changed, and only while the row
@@ -152,8 +172,11 @@ export async function runLegacyDateMigration(
   return summary;
 }
 
-/** Runs at server start. Never throws: a failure must not block the app. */
-export async function runStartupDateMigration(): Promise<void> {
+/**
+ * Runs the migration with the configured zone, or UTC provisionally when none
+ * is set. Never throws: a failure must not block the caller.
+ */
+export async function runConfiguredDateMigration(trigger: string): Promise<void> {
   try {
     const { prisma } = await import("@/lib/prisma");
     const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
@@ -162,7 +185,7 @@ export async function runStartupDateMigration(): Promise<void> {
     const summary = await runLegacyDateMigration(prisma, zone);
     if (summary.normalized || summary.reconverted || summary.skippedEdited) {
       console.log(
-        `[date-migration] zone=${zone} normalized=${summary.normalized} ` +
+        `[date-migration] trigger=${trigger} zone=${zone} normalized=${summary.normalized} ` +
           `reconverted=${summary.reconverted} skippedEdited=${summary.skippedEdited}`
       );
     }
@@ -173,6 +196,11 @@ export async function runStartupDateMigration(): Promise<void> {
       );
     }
   } catch (error) {
-    console.error("[date-migration] failed; the server will continue:", error);
+    console.error(`[date-migration] ${trigger} run failed; continuing:`, error);
   }
+}
+
+/** Runs at server start. Never throws: a failure must not block the app. */
+export async function runStartupDateMigration(): Promise<void> {
+  await runConfiguredDateMigration("startup");
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
+import { runConfiguredDateMigration } from "@/lib/date-migration";
 
 const REQUIRED_ARRAY_KEYS = [
   "firearms",
@@ -109,11 +110,6 @@ export async function POST(request: NextRequest) {
       },
       { timeout: 30000 }
     );
-
-    return NextResponse.json({
-      success: true,
-      counts: Object.fromEntries(REQUIRED_ARRAY_KEYS.map((k) => [k, body[k].length])),
-    });
   } catch (error) {
     console.error("POST /api/backup/restore error:", error);
     return NextResponse.json(
@@ -121,4 +117,18 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+
+  // A pre-upgrade backup brings legacy date-only values back; normalize them now
+  // rather than at the next restart. The restore has already succeeded, so a
+  // migration failure is only logged and never changes the response.
+  try {
+    await runConfiguredDateMigration("restore");
+  } catch (error) {
+    console.error("[date-migration] failed after restore:", error);
+  }
+
+  return NextResponse.json({
+    success: true,
+    counts: Object.fromEntries(REQUIRED_ARRAY_KEYS.map((k) => [k, body[k].length])),
+  });
 }
