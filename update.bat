@@ -1,10 +1,12 @@
 @echo off
-:: Mirrors update.sh. The DB_PROVIDER -> compose file rules in
-:: :provider_from_env and :compose_file_for (bottom of this file) mirror
-:: scripts/compose-provider.sh, which install.sh and update.sh source.
-:: Batch cannot source a shell script, so the logic is duplicated here and
-:: in install.bat: change scripts/compose-provider.sh and both .bat files
-:: together.
+:: Mirrors update.sh. :provider_from_env and :check_postgres_env (bottom of
+:: this file) mirror scripts/compose-provider.sh, which install.sh and
+:: update.sh source. Batch cannot source a shell script, so the logic is
+:: duplicated here and in install.bat: change scripts/compose-provider.sh and
+:: both .bat files together.
+::
+:: There is one compose file. Plain %COMPOSE% reads .env, where
+:: COMPOSE_PROFILES=postgres turns PostgreSQL on and no profile means SQLite.
 ::
 :: Run from the folder this script lives in, even when launched with
 :: "Run as administrator" (which starts in C:\Windows\System32).
@@ -47,12 +49,13 @@ if not exist ".env" (
   echo.
 )
 
-:: ── Database provider and compose file ────────────────────────
+:: ── Database provider ─────────────────────────────────────────
 :: Comes from .env only. A missing DB_PROVIDER line means SQLite, and a
-:: stray vault.db never switches a PostgreSQL install to SQLite.
+:: stray vault.db never switches a PostgreSQL install to SQLite. It only
+:: drives the preflight checks: plain %COMPOSE% reads .env itself.
 call :provider_from_env
-call :compose_file_for
-echo Database provider: !DB_PROVIDER! (using !COMPOSE_FILE!)
+echo Database provider: !DB_PROVIDER!
+if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
 
 :: ── Read DATA_DIR from .env ────────────────────────────────────
 set "ACTIVE_DATA_DIR="
@@ -133,12 +136,12 @@ echo.
 :: ── Rebuild and restart ───────────────────────────────────────
 :rebuild
 echo Rebuilding BlackVault image...
-%COMPOSE% -f "!COMPOSE_FILE!" build --pull
+%COMPOSE% build --pull
 if errorlevel 1 goto :compose_failed
 
 echo.
 echo Restarting...
-%COMPOSE% -f "!COMPOSE_FILE!" up -d
+%COMPOSE% up -d
 if errorlevel 1 goto :compose_failed
 
 echo.
@@ -147,7 +150,7 @@ timeout /t 5 /nobreak >nul
 
 :: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
 set "STATUS=started, check logs if the app doesn't load"
-%COMPOSE% -f "%COMPOSE_FILE%" ps | findstr /i "healthy running" >nul
+%COMPOSE% ps | findstr /i "healthy running" >nul
 if not errorlevel 1 set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
@@ -162,7 +165,7 @@ echo   Status:   !STATUS!
 if defined ACTIVE_DATA_DIR echo   Data:     !ACTIVE_DATA_DIR!
 echo   URL:      http://localhost:!SUMMARY_PORT!
 echo.
-echo   To check logs: %COMPOSE% -f %COMPOSE_FILE% logs -f
+echo   To check logs: %COMPOSE% logs -f
 echo.
 pause
 exit /b 0
@@ -207,14 +210,43 @@ if /i "!_PV!"=="postgres" set "DB_PROVIDER=postgres"
 if /i "!_PV!"=="postgresql" set "DB_PROVIDER=postgres"
 goto :eof
 
-:: Mirrors compose_file_for in scripts/compose-provider.sh. Sets COMPOSE_FILE
-:: for DB_PROVIDER. PostgreSQL is the default.
-:compose_file_for
-if /i "!DB_PROVIDER!"=="sqlite" (
-  set "COMPOSE_FILE=docker-compose.sqlite.yml"
-) else (
-  set "COMPOSE_FILE=docker-compose.yml"
+:: Mirrors check_postgres_env in scripts/compose-provider.sh. Warns when .env
+:: says DB_PROVIDER=postgres but lacks a key the single compose file needs to
+:: run PostgreSQL. Only warns; never stops the script.
+:check_postgres_env
+set "_CP="
+set "_PW="
+set "_DU="
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+    if "%%A"=="COMPOSE_PROFILES" set "_CP=%%B"
+    if "%%A"=="POSTGRES_PASSWORD" set "_PW=%%B"
+    if "%%A"=="DATABASE_URL" set "_DU=%%B"
+  )
 )
+if defined _CP set "_CP=!_CP: =!"
+if defined _CP set "_CP=!_CP:"=!"
+if defined _DU set "_DU=!_DU:"=!"
+set "_MISSING="
+if not defined _CP (
+  set "_MISSING=!_MISSING! COMPOSE_PROFILES=postgres"
+) else (
+  if "!_CP:postgres=!"=="!_CP!" set "_MISSING=!_MISSING! COMPOSE_PROFILES=postgres"
+)
+if not defined _PW set "_MISSING=!_MISSING! POSTGRES_PASSWORD"
+set "_DU_OK="
+if defined _DU if /i "!_DU:~0,11!"=="postgres://" set "_DU_OK=1"
+if defined _DU if /i "!_DU:~0,13!"=="postgresql://" set "_DU_OK=1"
+if not defined _DU_OK set "_MISSING=!_MISSING! DATABASE_URL=postgresql://..."
+set "_PW="
+if not defined _MISSING goto :eof
+echo WARNING: .env says DB_PROVIDER=postgres but is missing:!_MISSING!
+echo    A PostgreSQL install needs all four of these in .env:
+echo      COMPOSE_PROFILES=postgres
+echo      DB_PROVIDER=postgres
+echo      POSTGRES_PASSWORD=^<48 hex characters^>
+echo      DATABASE_URL=postgresql://blackvault:^<same password^>@db:5432/blackvault
+echo    See .env.example. If this is a SQLite install, set DB_PROVIDER=sqlite instead.
 goto :eof
 
 :: Sets IS_DIR=1 when %1 is an existing directory, else clears it.
