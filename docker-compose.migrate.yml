@@ -1,0 +1,14 @@
+# Temporary overlay for the one-time SQLite -> PostgreSQL migration.
+# Publishes the database on 127.0.0.1:55432 (this machine only) so
+# `npm run migrate:to-postgres` can reach it. Use it ONLY during the
+# migration — see "Moving from SQLite to PostgreSQL" in README.md:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d db
+#
+# Running plain `docker compose up -d` afterwards recreates the database
+# container without the published port.
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:55432:5432"

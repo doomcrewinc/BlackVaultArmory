@@ -49,7 +49,7 @@ You'll know it's ready when the whale 🐳 icon appears in your system tray (Win
 
 ### Step 1 — Download BlackVault
 
-Go to the [BlackVault GitHub page](https://github.com/theaveragedeveloper/ProjectBlackVault), click **Code → Download ZIP**, and save it somewhere you'll find it (e.g. your Desktop).
+Go to the [BlackVault GitHub page](https://github.com/doomcrewinc/BlackVaultArmory), click **Code → Download ZIP**, and save it somewhere you'll find it (e.g. your Desktop).
 
 ### Step 2 — Extract the ZIP
 
@@ -61,7 +61,7 @@ Open the extracted folder and **double-click `install.bat`**.
 
 > 💡 If it flashes and closes, open **Command Prompt** and run:
 > ```cmd
-> cd C:\path\to\ProjectBlackVault
+> cd C:\path\to\BlackVaultArmory
 > ```
 > Then:
 > ```cmd
@@ -97,13 +97,13 @@ Press `Cmd + Space`, type `Terminal`, and press Enter.
 Copy this command, paste it into Terminal, and press Enter:
 
 ```bash
-git clone https://github.com/theaveragedeveloper/ProjectBlackVault.git
+git clone https://github.com/doomcrewinc/BlackVaultArmory.git
 ```
 
 ### Step 3 — Go into the folder
 
 ```bash
-cd ProjectBlackVault
+cd BlackVaultArmory
 ```
 
 ### Step 4 — Run the installer
@@ -112,9 +112,13 @@ cd ProjectBlackVault
 chmod +x install.sh && ./install.sh
 ```
 
-The installer will ask two questions — press **Enter** to accept the defaults:
+The installer will ask three questions — press **Enter** to accept the defaults:
 - Where to store your data → press Enter
 - Which port to use → press Enter
+- Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
+
+For PostgreSQL the installer generates a random database password and saves it in `.env`
+(it is never shown). **Keep `.env` safe** — your database cannot be opened without it.
 
 It will then build and start BlackVault. **This can take 5–10 minutes the first time.**
 
@@ -128,7 +132,7 @@ http://localhost:3000
 
 ✅ **BlackVault is running.**
 
-> 💡 **Don't have Git?** Go to the [GitHub page](https://github.com/theaveragedeveloper/ProjectBlackVault), click **Code → Download ZIP**, extract it, open Terminal in that folder, then start from Step 4.
+> 💡 **Don't have Git?** Go to the [GitHub page](https://github.com/doomcrewinc/BlackVaultArmory), click **Code → Download ZIP**, extract it, open Terminal in that folder, then start from Step 4.
 
 ---
 
@@ -139,13 +143,13 @@ http://localhost:3000
 ### Step 2 — Download BlackVault
 
 ```bash
-git clone https://github.com/theaveragedeveloper/ProjectBlackVault.git
+git clone https://github.com/doomcrewinc/BlackVaultArmory.git
 ```
 
 ### Step 3 — Go into the folder
 
 ```bash
-cd ProjectBlackVault
+cd BlackVaultArmory
 ```
 
 ### Step 4 — Run the installer
@@ -154,9 +158,13 @@ cd ProjectBlackVault
 chmod +x install.sh && ./install.sh
 ```
 
-The installer will ask two questions — press **Enter** to accept the defaults:
+The installer will ask three questions — press **Enter** to accept the defaults:
 - Where to store your data → press Enter
 - Which port to use → press Enter
+- Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
+
+For PostgreSQL the installer generates a random database password and saves it in `.env`
+(it is never shown). **Keep `.env` safe** — your database cannot be opened without it.
 
 It will then build and start BlackVault. **This can take 5–10 minutes the first time.**
 
@@ -183,6 +191,11 @@ docker compose down
 ```bash
 docker compose up -d
 ```
+
+> 💡 **Using SQLite?** (you chose option 2 in the installer, or installed before PostgreSQL
+> support.) Add `-f docker-compose.sqlite.yml` to every command, e.g.
+> `docker compose -f docker-compose.sqlite.yml up -d`. Check `DB_PROVIDER` in `.env` if unsure —
+> a `.env` with no `DB_PROVIDER` line is SQLite.
 
 **To update to the latest version:**
 
@@ -315,7 +328,7 @@ Check the logs for a specific error message:
 docker compose logs -f
 ```
 
-Still stuck? Open a [GitHub issue](https://github.com/theaveragedeveloper/ProjectBlackVault/issues) and paste the log output.
+Still stuck? Open a [GitHub issue](https://github.com/doomcrewinc/BlackVaultArmory/issues) and paste the log output.
 
 ---
 
@@ -339,11 +352,15 @@ BlackVault stores everything in a `data` folder inside the project directory by 
 
 ```
 data/
+├── postgres/           ← your database, if you use PostgreSQL (the default)
 ├── db/
-│   └── vault.db        ← your database (all firearms, accessories, sessions)
+│   └── vault.db        ← your database, if you use SQLite
 └── uploads/
     └── ...             ← uploaded images and documents
 ```
+
+With PostgreSQL, the database password lives in `.env` (`POSTGRES_PASSWORD`). Back up `.env`
+together with the `data` folder.
 
 You can change this by editing `DATA_DIR` in the `.env` file before first run.
 
@@ -375,6 +392,73 @@ Your data folder is never touched during an update.
 
 ---
 
+### Moving from SQLite to PostgreSQL
+
+A one-way, verified copy: every table is copied and its row count checked. **Your `vault.db` is
+never modified or deleted** — it stays on disk as your rollback. Uploaded images and documents
+stay where they are. Mac / Linux, run from the BlackVault folder; you need
+[Node.js 20+](https://nodejs.org/) for the copy step.
+
+**Step 1 — Back up first.** In BlackVault go to **Settings → Backup** and save a backup, then
+also copy the whole `data` folder (see *Backing up your data* above).
+
+**Step 2 — Stop BlackVault:**
+
+```bash
+docker compose -f docker-compose.sqlite.yml down
+```
+
+**Step 3 — Configure PostgreSQL in `.env`.** Open `.env` and set these two lines (add them if
+missing, and keep only one of each):
+
+```
+DB_PROVIDER=postgres
+POSTGRES_PASSWORD=<paste the output of: openssl rand -hex 24>
+```
+
+**Step 4 — Start only the database**, published on this machine (127.0.0.1:55432) for the copy:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait db
+```
+
+**Step 5 — Prepare the copy tool** (installs dependencies and creates the empty tables):
+
+```bash
+npm ci && npm run db:generate
+export SQLITE_URL="file:$(grep '^DATA_DIR=' .env | cut -d= -f2-)/db/vault.db"
+export POSTGRES_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)@127.0.0.1:55432/blackvault"
+DATABASE_URL="$POSTGRES_URL" npx prisma migrate deploy --schema prisma/postgres/schema.prisma
+```
+
+**Step 6 — Dry run.** Prints how many rows each table has. Nothing is written:
+
+```bash
+npm run migrate:to-postgres -- --dry-run
+```
+
+**Step 7 — Real run.** Copies everything, then verifies it. It must end with
+`VERIFIED: all 16 models match`. If it reports a mismatch, the copy is rolled back — stop here
+and go back to SQLite (see *Rolling back* below).
+
+```bash
+npm run migrate:to-postgres
+```
+
+**Step 8 — Start BlackVault on PostgreSQL:**
+
+```bash
+docker compose up -d
+```
+
+This also closes the temporary database port from Step 4. Check that your records are there.
+
+**Rolling back:** run `docker compose down`, set `DB_PROVIDER=sqlite` in `.env`, then
+`docker compose -f docker-compose.sqlite.yml up -d`. Your `vault.db` is exactly as you left it —
+but anything added while on PostgreSQL is not in it.
+
+---
+
 ### Moving to a new machine
 
 **Step 1 —** Copy your `data` folder to the new machine (USB drive, network share, etc.)
@@ -397,14 +481,14 @@ This can happen if the installer was run from different locations, or if `docker
 DATA_DIR=C:\Users\yourname\BlackVault\data
 ```
 
-**Step 3 —** Restart:
+**Step 3 —** Restart (SQLite):
 
 ```bash
-docker compose down
+docker compose -f docker-compose.sqlite.yml down
 ```
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 ---
