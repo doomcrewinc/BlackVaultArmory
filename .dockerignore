@@ -1,0 +1,23 @@
+# Keep secrets and host-only state out of the build context. Without this, the
+# host .env (which holds POSTGRES_PASSWORD after install.sh) is copied into the
+# image by `COPY . .` and ends up at /app/.env via Next's standalone output.
+.env
+.env.*
+!.env.example
+
+# Host build artefacts and dependencies — rebuilt inside the image.
+node_modules
+.next
+tsconfig.tsbuildinfo
+
+# Local databases, backups and runtime data.
+data
+prisma/prisma
+*.db
+*.db-journal
+
+# Repo metadata and tooling.
+.git
+.github
+.superpowers
+coverage

@@ -25,17 +25,18 @@ COPY . .
 # Install all deps (including devDependencies needed for build)
 RUN npm ci
 
-# Generate Prisma client
-RUN npx prisma generate
-
-# Build Next.js in standalone mode
+# Build Next.js in standalone mode.
+# `npm run build` regenerates prisma/{postgres,sqlite}/schema.prisma from
+# schema.base.prisma, generates BOTH Prisma clients (@prisma/client = Postgres,
+# node_modules/.prisma/client-sqlite = SQLite), migrates a throw-away SQLite DB
+# and prerenders against it. The build never needs a running Postgres.
 # Version string (YYYY.M.D-sha7). Inlined into client bundles at build time.
 ARG APP_VERSION=dev
 ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 ENV NEXT_TELEMETRY_DISABLED=1
-# Provide a throw-away DB so pages that call Prisma can prerender during build
-ENV DATABASE_URL="file:/tmp/prisma-build.db"
-RUN npx prisma migrate deploy && npm run build
+ENV DB_PROVIDER=sqlite
+ENV BUILD_DATABASE_URL="file:/tmp/prisma-build.db"
+RUN npm run build
 
 # ─── Stage 3: Production runner ───────────────────────────────────────────────
 FROM node:20-alpine AS runner
@@ -58,8 +59,13 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Copy Prisma schema and migrations so we can run migrate deploy at startup
-COPY --from=builder /app/prisma ./prisma
+# Copy Prisma schemas and migrations (both providers) so we can run
+# migrate deploy at startup. node_modules/.prisma carries BOTH generated
+# clients: .prisma/client (Postgres) and .prisma/client-sqlite (SQLite).
+# WORKDIR must stay /app: the SQLite client locates its query engine
+# relative to process.cwd().
+COPY --from=builder /app/prisma/postgres ./prisma/postgres
+COPY --from=builder /app/prisma/sqlite ./prisma/sqlite
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
@@ -74,7 +80,9 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
-ENV DATABASE_URL="file:/app/data/vault.db"
+# Default provider is PostgreSQL; compose supplies DATABASE_URL.
+# For SQLite set DB_PROVIDER=sqlite and DATABASE_URL=file:/app/data/vault.db
+ENV DB_PROVIDER=postgres
 
-# Run migrations then start the server
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && node server.js"]
+# Run the chosen provider's migrations, then start the server
+CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy --schema \"prisma/${DB_PROVIDER}/schema.prisma\" && node server.js"]

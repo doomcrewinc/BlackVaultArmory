@@ -1,20 +1,38 @@
-version: '3.8'
-
-# Development compose — builds image from local source.
+# Development compose — builds image from local source, PostgreSQL.
 # Usage: docker compose -f docker-compose.dev.yml up --build
 
 services:
+  db:
+    image: postgres:17-alpine
+    container_name: blackvault-dev-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: blackvault
+      POSTGRES_DB: blackvault
+      POSTGRES_PASSWORD: devpass
+    volumes:
+      - blackvault-dev-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blackvault -d blackvault"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   blackvault:
     build: .
     container_name: blackvault-dev
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "${PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=file:/app/data/vault.db?connection_limit=1
+      - DB_PROVIDER=postgres
+      - DATABASE_URL=postgresql://blackvault:devpass@db:5432/blackvault
     volumes:
-      - blackvault-dev-db:/app/data
       - blackvault-dev-uploads:/app/uploads
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
@@ -23,5 +41,5 @@ services:
       retries: 3
 
 volumes:
-  blackvault-dev-db:
+  blackvault-dev-postgres:
   blackvault-dev-uploads:

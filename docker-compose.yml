@@ -1,25 +1,48 @@
-# BlackVault — Production compose (amd64 + arm64)
+# BlackVault — Production compose, PostgreSQL (default) (amd64 + arm64)
 #
 # First time: run ./install.sh (Mac/Linux) or install.bat (Windows)
 # Updates:    run ./update.sh  (Mac/Linux) or update.bat  (Windows)
-# Manual run: copy .env.example to .env, edit DATA_DIR, then: docker compose up -d
+# Manual run: copy .env.example to .env, set POSTGRES_PASSWORD (openssl rand -hex 24)
+#             and DATA_DIR, then: docker compose up -d
+#
+# Prefer SQLite (single container, no database server)? Use docker-compose.sqlite.yml:
+#   docker compose -f docker-compose.sqlite.yml up -d
 #
 # Docker Compose reads .env automatically — no --env-file flag needed.
 # For local development, use docker-compose.dev.yml instead.
 
 services:
+  db:
+    image: postgres:17-alpine
+    container_name: blackvault-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: blackvault
+      POSTGRES_DB: blackvault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blackvault -d blackvault"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   blackvault:
     build: .
     container_name: blackvault
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "${PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=file:/app/data/vault.db?connection_limit=1
-      - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
+      - DB_PROVIDER=postgres
+      - DATABASE_URL=postgresql://blackvault:${POSTGRES_PASSWORD}@db:5432/blackvault
     volumes:
-      - ${DATA_DIR:-./data}/db:/app/data
       - ${DATA_DIR:-./data}/uploads:/app/uploads
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
