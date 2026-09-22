@@ -17,6 +17,13 @@ import type { PrismaClient } from "@prisma/client";
 
 const DAY_MS = 86_400_000;
 
+/**
+ * Audit sentinel: the user has edited this row since the migration wrote it,
+ * so it is theirs now and must never be re-converted. Not a valid IANA zone,
+ * so it can never equal a real one.
+ */
+export const USER_EDITED = "user-edited";
+
 export const DATE_ONLY_FIELDS = [
   { model: "Firearm", delegate: "firearm", field: "acquisitionDate" },
   { model: "Firearm", delegate: "firearm", field: "lastMaintenanceDate" },
@@ -93,10 +100,14 @@ export async function runLegacyDateMigration(
       const existing = auditByRecord.get(row.id);
 
       if (existing) {
+        if (existing.appliedZone === USER_EDITED) continue; // released to the user, permanently
         // Re-conversion: only when the zone changed, and only while the row
         // still holds what the migration wrote. A user edit always wins.
         if (existing.appliedZone === zone) continue;
         if (value.getTime() !== new Date(existing.appliedValue).getTime()) {
+          // The user changed it after migration. Release the row so no later run can
+          // re-convert it - even if they edit it back to the value we once wrote.
+          await audit.update({ where: { id: existing.id }, data: { appliedZone: USER_EDITED } });
           summary.skippedEdited++;
           continue;
         }

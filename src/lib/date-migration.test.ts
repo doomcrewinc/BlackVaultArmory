@@ -150,4 +150,32 @@ describe("runLegacyDateMigration", () => {
     expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(edited));
     expect(summary).toMatchObject({ reconverted: 0, skippedEdited: 1 });
   });
+
+  it("releases an edited row so later runs skip it silently", async () => {
+    const { client, tables } = fakePrisma({ firearm: [{ id: "f1", acquisitionDate: LEGACY }] });
+    await runLegacyDateMigration(client, "UTC");
+    tables.firearm[0].acquisitionDate = new Date("2026-08-01T00:00:00.000Z");
+
+    const first = await runLegacyDateMigration(client, "America/Denver");
+    const second = await runLegacyDateMigration(client, "America/Denver");
+
+    expect(first.skippedEdited).toBe(1);
+    expect(second).toMatchObject({ normalized: 0, reconverted: 0, skippedEdited: 0 });
+    expect(tables.dateNormalizationAudit[0].appliedZone).toBe("user-edited");
+  });
+
+  it("never re-converts a released row, even if edited back to the migrated value", async () => {
+    const { client, tables } = fakePrisma({ firearm: [{ id: "f1", acquisitionDate: LEGACY }] });
+    await runLegacyDateMigration(client, "UTC");
+    const migrated = tables.firearm[0].acquisitionDate as Date;
+
+    tables.firearm[0].acquisitionDate = new Date("2026-08-01T00:00:00.000Z");
+    await runLegacyDateMigration(client, "America/Denver"); // detects the edit, releases the row
+
+    tables.firearm[0].acquisitionDate = migrated; // user edits it back to exactly what we wrote
+    const summary = await runLegacyDateMigration(client, "Pacific/Auckland");
+
+    expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(migrated));
+    expect(summary.reconverted).toBe(0);
+  });
 });
