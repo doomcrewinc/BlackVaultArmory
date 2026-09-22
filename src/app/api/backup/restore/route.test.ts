@@ -98,6 +98,41 @@ describe("POST /api/backup/restore", () => {
     expect(json.counts.dateNormalizationAudits).toBe(0);
   });
 
+  it("rejects a truncated payload with only firearms and deletes nothing", async () => {
+    const response = await POST(
+      restoreRequest({ meta: { version: "1.1" }, firearms: [{ id: "firearms-1" }] }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.calls.filter((c) => c.op === "deleteMany")).toEqual([]);
+  });
+
+  it.each(V1_0_KEYS)("rejects a payload missing the v1.0 key %s and deletes nothing", async (key) => {
+    const { [key]: _dropped, ...partial } = v11Payload() as Record<string, unknown>;
+    void _dropped;
+
+    const response = await POST(restoreRequest(partial));
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.calls).toEqual([]);
+  });
+
+  it("rejects a payload where a v1.0 key is null", async () => {
+    const response = await POST(restoreRequest({ ...v11Payload(), sessionDrills: null }));
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("requires exactly the first 12 registry keys; only the v1.1 keys are optional", () => {
+    expect(BACKUP_MODELS.slice(0, 12).map((m) => m.key).sort()).toEqual([...V1_0_KEYS].sort());
+    expect(BACKUP_MODELS.slice(12).map((m) => m.key)).toEqual([
+      "maintenanceLogs", "batteryChangeLogs", "dateNormalizationAudits",
+    ]);
+  });
+
   it("rejects a payload with no meta.version", async () => {
     const { meta: _meta, ...noMeta } = v11Payload();
     void _meta;

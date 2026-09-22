@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
-import { BACKUP_MODELS } from "@/lib/backup/models";
+import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 
 type WriteDelegate = {
   deleteMany: () => Promise<unknown>;
@@ -12,16 +12,17 @@ type WriteDelegate = {
 type BackupBody = { meta: { version: string } } & Record<string, unknown>;
 
 /**
- * A backup needs `meta.version` and at least one registered key. Every registered key
- * that is present must be an array; a missing key (e.g. a v1.0 backup predating
- * MaintenanceLog) restores as empty.
+ * A backup needs `meta.version` and all 12 v1.0 keys as arrays. Only keys added
+ * after v1.0 (maintenanceLogs, batteryChangeLogs, dateNormalizationAudits) may be
+ * missing; they restore as empty. Any registered key that is present must be an
+ * array. Restore replaces every table, so a partial payload must never pass.
  */
 function isValidBackup(body: unknown): body is BackupBody {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
   const b = body as Record<string, unknown>;
   if (!b.meta || typeof (b.meta as Record<string, unknown>).version !== "string") return false;
-  const present = BACKUP_MODELS.filter(({ key }) => b[key] !== undefined);
-  return present.length > 0 && present.every(({ key }) => Array.isArray(b[key]));
+  if (!REQUIRED_BACKUP_KEYS.every((key) => Array.isArray(b[key]))) return false;
+  return BACKUP_MODELS.every(({ key }) => b[key] === undefined || Array.isArray(b[key]));
 }
 
 export async function POST(request: NextRequest) {

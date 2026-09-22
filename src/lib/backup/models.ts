@@ -37,5 +37,18 @@ export const BACKUP_MODELS: BackupModel[] = [
   { model: "DateNormalizationAudit", delegate: "dateNormalizationAudit", key: "dateNormalizationAudits" },
 ];
 
+/**
+ * The first 12 registry entries are the v1.0 backup format and must be present
+ * in every restore payload. Only models added after v1.0 (appended after these)
+ * may be missing from an older backup. Without this, a truncated file holding
+ * just `firearms` would wipe every other table and report success.
+ */
+export const BACKUP_V1_0_MODEL_COUNT = 12;
+
+/** Keys every restore payload must carry as arrays. */
+export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.slice(0, BACKUP_V1_0_MODEL_COUNT).map(
+  ({ key }) => key,
+);
+
 /** AppSettings is excluded: restore must not clobber local LAN host, paths, keys, or timezone. */
 export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings"];
