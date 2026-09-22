@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { containsInsensitive } from "@/lib/db/text-search";
 
 export async function GET(request: NextRequest) {
   const rawQ = request.nextUrl.searchParams.get("q") ?? "";
-  const q = rawQ.toLowerCase().trim();
+  // Not lowercased: containsInsensitive handles case on both providers.
+  const q = rawQ.trim();
 
   const empty = { firearms: [], accessories: [], ammo: [], builds: [] };
 
@@ -15,10 +17,10 @@ export async function GET(request: NextRequest) {
   const firearms = await prisma.firearm.findMany({
     where: {
       OR: [
-        { name: { contains: q } },
-        { manufacturer: { contains: q } },
-        { model: { contains: q } },
-        { caliber: { contains: q } },
+        { name: containsInsensitive(q) },
+        { manufacturer: containsInsensitive(q) },
+        { model: containsInsensitive(q) },
+        { caliber: containsInsensitive(q) },
       ],
     },
     take: 5,
@@ -28,10 +30,10 @@ export async function GET(request: NextRequest) {
   const accessories = await prisma.accessory.findMany({
     where: {
       OR: [
-        { name: { contains: q } },
-        { manufacturer: { contains: q } },
-        { model: { contains: q } },
-        { type: { contains: q } },
+        { name: containsInsensitive(q) },
+        { manufacturer: containsInsensitive(q) },
+        { model: containsInsensitive(q) },
+        { type: containsInsensitive(q) },
       ],
     },
     take: 5,
@@ -41,9 +43,9 @@ export async function GET(request: NextRequest) {
   const ammoStocks = await prisma.ammoStock.findMany({
     where: {
       OR: [
-        { brand: { contains: q } },
-        { caliber: { contains: q } },
-        { bulletType: { contains: q } },
+        { brand: containsInsensitive(q) },
+        { caliber: containsInsensitive(q) },
+        { bulletType: containsInsensitive(q) },
       ],
     },
     take: 5,
@@ -51,7 +53,7 @@ export async function GET(request: NextRequest) {
   });
 
   const builds = await prisma.build.findMany({
-    where: { name: { contains: q } },
+    where: { name: containsInsensitive(q) },
     take: 5,
     select: { id: true, name: true, firearmId: true },
   });

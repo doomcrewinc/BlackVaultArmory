@@ -26,6 +26,97 @@ long stabilization window.
 
 Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `ci:`, `refactor:`, `test:`.
 
+## Changing the schema
+
+Every image ships **both** Prisma clients and **both** migration histories: PostgreSQL (the
+default) and SQLite (the fallback). A schema change must land in both, in the same PR.
+
+1. Edit **only** `prisma/schema.base.prisma`. `prisma/postgres/schema.prisma` and
+   `prisma/sqlite/schema.prisma` are generated; never edit them by hand.
+2. Regenerate them:
+   ```bash
+   npm run gen:schemas
+   ```
+3. Create a migration for **each** provider, with the same name and timestamp:
+   ```bash
+   NAME=20260922120000_add_widget   # <UTC timestamp>_<snake_case_name>
+
+   mkdir -p prisma/sqlite/migrations/$NAME
+   npx prisma migrate diff \
+     --from-migrations prisma/sqlite/migrations \
+     --to-schema-datamodel prisma/sqlite/schema.prisma \
+     --shadow-database-url "file:$(mktemp -d)/shadow.db" \
+     --script > prisma/sqlite/migrations/$NAME/migration.sql
+
+   # needs a scratch PostgreSQL database; Prisma wipes it (its name needs shadow, scratch or test as a word)
+   mkdir -p prisma/postgres/migrations/$NAME
+   npx prisma migrate diff \
+     --from-migrations prisma/postgres/migrations \
+     --to-schema-datamodel prisma/postgres/schema.prisma \
+     --shadow-database-url "$SHADOW_DATABASE_URL" \
+     --script > prisma/postgres/migrations/$NAME/migration.sql
+   ```
+   Read both files. Hand-edit them where the diff cannot know your intent (renames, backfills).
+4. Run the drift check. It must pass for **both** providers before you open the PR:
+   ```bash
+   SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/blackvault_shadow npm run db:check-drift
+   ```
+   Without `SHADOW_DATABASE_URL` it checks SQLite only and says it skipped PostgreSQL. Prisma
+   **wipes** the shadow database, so the check refuses a `SHADOW_DATABASE_URL` that equals
+   `DATABASE_URL` or `POSTGRES_URL`, or whose database name does not have `shadow`, `scratch` or
+   `test` as a whole word split by `_` or `-` (`blackvault_shadow`, `test_db` and `scratch` pass;
+   `latest` and `contest` do not).
+
+**Why both.** At startup the container runs `prisma migrate deploy` for its own provider only.
+A SQLite migration without its PostgreSQL twin passes every SQLite test, then ships a client
+that queries columns the PostgreSQL database does not have: runtime errors for every
+PostgreSQL user (and the reverse for SQLite users). The drift check fails when a provider's
+migration history does not produce its schema.
+
+## Docker Compose
+
+There is **one** production compose file, `docker-compose.yml`, and plain `docker compose` (no
+`-f`) is correct for every install. `.env` chooses the database: `COMPOSE_PROFILES=postgres` turns
+on the `db` service, and with no profile only the app runs, on SQLite.
+
+That is deliberate. The `update.sh` already on users' machines runs `git pull` and then a bare
+`docker compose build --pull` / `up -d`. Bash keeps executing the old copy of the script, so
+those calls read whatever `docker-compose.yml` says after the pull. An existing SQLite install has
+a `.env` with only `DATA_DIR` and `PORT`, so a bare `docker compose` with no `.env` changes must
+keep meaning SQLite, forever. Keep it that way:
+
+- **Never use `${VAR:?message}` in `docker-compose.yml`.** Compose interpolates it even for a
+  service whose profile is off, so a required `BLACKVAULT_POSTGRES_PASSWORD` fails the SQLite
+  default before anything starts. Use `${VAR:-default}`. An empty `BLACKVAULT_POSTGRES_PASSWORD`
+  with the profile on makes the postgres container itself refuse to start, which is loud enough.
+- The app's `depends_on: db` must keep `required: false`, or SQLite installs fail to start.
+  `required` needs Docker Compose 2.20+, so `require_compose` in `scripts/compose-provider.sh`
+  (mirrored as `:require_compose` in both `.bat` files) refuses anything older before touching
+  anything. Raise `COMPOSE_MIN_VERSION` there, and in the batch mirror, if the file ever needs a
+  newer Compose feature.
+- Every app setting that differs by provider comes from `.env` with a SQLite default
+  (`DB_PROVIDER=${BLACKVAULT_DB_PROVIDER:-sqlite}`,
+  `DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:...}`).
+- **Never interpolate a generic name** (`${DATABASE_URL}`, `${DB_PROVIDER}`,
+  `${POSTGRES_PASSWORD}`) in a compose file. Compose lets a variable exported in the user's shell
+  override `.env`, and many machines export `DATABASE_URL` for Prisma. A relative `file:` URL
+  there gives the container a healthy, **empty** database in its writable layer, and every write
+  is lost on recreate. The `.env` keys are `BLACKVAULT_*` so nothing else sets them; compose maps
+  them to the generic names inside the container, so app code keeps reading `DATABASE_URL` and
+  `DB_PROVIDER`. This must print nothing:
+  ```bash
+  grep -rnE '\$\{(DATABASE_URL|DB_PROVIDER|POSTGRES_PASSWORD)' docker-compose*.yml
+  ```
+  `DATA_DIR`, `PORT` and `COMPOSE_PROFILES` keep their names: every existing install's `.env`
+  uses the first two, and the third is Compose's own.
+- Check both shapes before merging a compose change:
+  ```bash
+  docker compose --env-file /dev/null config --services     # as if no .env: blackvault only
+  docker compose --env-file postgres.env config --services  # a Postgres .env: db, blackvault
+  ```
+- `docker-compose.migrate.yml` is only an overlay for the SQLite -> PostgreSQL copy, and
+  `docker-compose.dev.yml` is only for development.
+
 ## Versioning
 
 CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.20-e991c37`.

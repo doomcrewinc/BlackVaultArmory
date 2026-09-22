@@ -1,7 +1,7 @@
-import { PrismaClient } from "@prisma/client";
+import "./load-env";
+import { prisma } from "../src/lib/prisma";
+import { BACKUP_MODELS } from "../src/lib/backup/models";
 import * as readline from "readline";
-
-const prisma = new PrismaClient();
 
 async function confirm(): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -20,24 +20,13 @@ async function main() {
     process.exit(0);
   }
 
-  const tables = [
-    { name: "SessionDrill", fn: () => prisma.sessionDrill.deleteMany() },
-    { name: "RangeSessionAmmoLink", fn: () => prisma.rangeSessionAmmoLink.deleteMany() },
-    { name: "AmmoTransaction", fn: () => prisma.ammoTransaction.deleteMany() },
-    { name: "RangeSession", fn: () => prisma.rangeSession.deleteMany() },
-    { name: "RoundCountLog", fn: () => prisma.roundCountLog.deleteMany() },
-    { name: "BuildSlot", fn: () => prisma.buildSlot.deleteMany() },
-    { name: "Build", fn: () => prisma.build.deleteMany() },
-    { name: "Document", fn: () => prisma.document.deleteMany() },
-    { name: "ImageCache", fn: () => prisma.imageCache.deleteMany() },
-    { name: "Accessory", fn: () => prisma.accessory.deleteMany() },
-    { name: "AmmoStock", fn: () => prisma.ammoStock.deleteMany() },
-    { name: "Firearm", fn: () => prisma.firearm.deleteMany() },
-  ] as const;
-
-  for (const table of tables) {
-    const result = await table.fn();
-    console.log(`Deleted ${result.count} rows from ${table.name}`);
+  // Children before parents: the backup registry is parent-first, so walk it in
+  // reverse. Driven by the registry so a new model can never be missed here.
+  // AppSettings is not in the registry, so settings are preserved.
+  const delegates = prisma as unknown as Record<string, { deleteMany: () => Promise<{ count: number }> }>;
+  for (const { model, delegate } of [...BACKUP_MODELS].reverse()) {
+    const result = await delegates[delegate].deleteMany();
+    console.log(`Deleted ${result.count} rows from ${model}`);
   }
 
   console.log("✓ Database reset complete. Ready for V1 release.");

@@ -1,4 +1,17 @@
 @echo off
+:: Mirrors update.sh. :provider_from_env and :check_postgres_env (bottom of
+:: this file) mirror scripts/compose-provider.sh, which install.sh and
+:: update.sh source. Batch cannot source a shell script, so the logic is
+:: duplicated here and in install.bat: change scripts/compose-provider.sh and
+:: both .bat files together.
+::
+:: There is one compose file. Plain %COMPOSE% reads .env, where
+:: COMPOSE_PROFILES=postgres turns PostgreSQL on and no profile means SQLite.
+::
+:: Run from the folder this script lives in, even when launched with
+:: "Run as administrator" (which starts in C:\Windows\System32).
+setlocal DisableDelayedExpansion
+cd /d "%~dp0"
 setlocal EnableDelayedExpansion
 
 echo ╔══════════════════════════════════════╗
@@ -6,96 +19,311 @@ echo ║   BlackVault — Update Script         ║
 echo ╚══════════════════════════════════════╝
 echo.
 
-:: ── Docker check ─────────────────────────────────────────────
-docker compose version >nul 2>&1
-if %errorlevel% neq 0 (
-  docker-compose version >nul 2>&1
-  if %errorlevel% neq 0 (
-    echo ERROR: Docker with Compose is required.
-    pause
-    exit /b 1
-  )
-  set COMPOSE=docker-compose
-) else (
-  set COMPOSE=docker compose
-)
+:: docker compose (a child of this script) must get the BLACKVAULT_* keys from
+:: .env only, never from the parent shell.
+set "BLACKVAULT_DATABASE_URL="
+set "BLACKVAULT_DB_PROVIDER="
+set "BLACKVAULT_POSTGRES_PASSWORD="
 
-:: ── Migrate .blackvault.env → .env ───────────────────────────
+:: ── Docker Compose v2.20+ ─────────────────────────────────────
+:: docker-compose.yml needs it. Stops before anything is touched (no .env
+:: change, no git pull, no rebuild), so the running BlackVault keeps running.
+call :require_compose
+if not defined COMPOSE goto :compose_too_old
+
+:: ── Migrate .blackvault.env to .env ──────────────────────────
 if not exist ".env" if exist ".blackvault.env" (
   echo Migrating .blackvault.env to .env ^(one-time^)...
-  copy /Y .blackvault.env .env >nul
+  copy /Y ".blackvault.env" ".env" >nul
   echo Done. .blackvault.env kept as backup.
   echo.
 )
 
-:: ── Read DATA_DIR from .env ───────────────────────────────────
-set ACTIVE_DATA_DIR=
-if exist ".env" (
-  for /f "eol=# tokens=1,* delims==" %%A in (.env) do (
-    if "%%A"=="DATA_DIR" set ACTIVE_DATA_DIR=%%B
-  )
-)
-
-:: ── Preflight: verify database exists ────────────────────────
-if not "!ACTIVE_DATA_DIR!"=="" (
-  if not exist "!ACTIVE_DATA_DIR!\db\vault.db" (
-    echo WARNING: No database found at expected location:
-    echo   !ACTIVE_DATA_DIR!\db\vault.db
-    echo.
-    set LEGACY_DB=
-    if exist "data\db\vault.db" set LEGACY_DB=%CD%\data\db\vault.db
-    if "!LEGACY_DB!"=="" if exist "%USERPROFILE%\.blackvault\db\vault.db" (
-      set LEGACY_DB=%USERPROFILE%\.blackvault\db\vault.db
-    )
-    if not "!LEGACY_DB!"=="" (
-      echo Data found at legacy location: !LEGACY_DB!
-      echo Your .env DATA_DIR may be pointing to the wrong location.
-      echo.
-      echo To fix: edit DATA_DIR in .env, then re-run update.bat
-      echo OR:     run install.bat to reconfigure
-      pause
-      exit /b 1
-    ) else (
-      echo No existing database found. This may be a fresh install — continuing.
-    )
-  ) else (
-    echo Database verified at: !ACTIVE_DATA_DIR!\db\vault.db
-  )
-)
-
-echo.
-
-:: ── Pull latest code ─────────────────────────────────────────
-git rev-parse --git-dir >nul 2>&1
-if %errorlevel% equ 0 (
-  echo Pulling latest updates from GitHub...
-  git pull
+:: ── Check for .env at all ─────────────────────────────────────
+if not exist ".env" (
+  echo WARNING: No .env file found. BlackVault may not be configured.
+  echo    If this is a fresh clone, run install.bat first.
+  echo    Continuing with Docker defaults, DATA_DIR=./data ...
   echo.
 )
 
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:: The all-colon lines above are a landing pad. cmd.exe re-reads a running
+:: batch file by byte offset. The update.bat shipped before PostgreSQL support
+:: runs `git pull` inside an if ( ) block, so once the pull replaces this file
+:: it resumes here at byte 2699 (LF checkout) or 2773 (CRLF checkout). Landing
+:: mid-line in a line of colons is a silent label, not a stray command. Keep
+:: both offsets inside the pad when editing anything above it.
+
+:: ── Database provider ─────────────────────────────────────────
+:: Comes from .env only. A missing BLACKVAULT_DB_PROVIDER line means SQLite,
+:: and a stray vault.db never switches a PostgreSQL install to SQLite. It only
+:: drives the preflight checks: plain %COMPOSE% reads .env itself.
+call :provider_from_env
+echo Database provider: !DB_PROVIDER!
+if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
+
+:: ── Read DATA_DIR from .env ────────────────────────────────────
+set "ACTIVE_DATA_DIR="
+set "ENV_PORT="
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+    if "%%A"=="DATA_DIR" set "ACTIVE_DATA_DIR=%%B"
+    if "%%A"=="PORT" set "ENV_PORT=%%B"
+  )
+)
+if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
+
+:: ── Preflight: verify the database exists ─────────────────────
+:: The provider is read again here on purpose. cmd.exe re-reads a running
+:: batch file by byte offset, so an older update.bat whose `git pull` just
+:: replaced this file resumes partway through it (see the landing pad above),
+:: without having run everything above. Keep this call here, before the
+:: provider is used.
+call :provider_from_env
+if not defined ACTIVE_DATA_DIR goto :preflight_done
+if /i "!DB_PROVIDER!"=="sqlite" goto :preflight_sqlite
+
+:: PostgreSQL keeps its cluster in DATA_DIR\postgres. DATA_DIR is never
+:: relocated here: moving it would bring up a new, empty database.
+call :is_dir "!ACTIVE_DATA_DIR!\postgres"
+if defined IS_DIR (
+  echo PostgreSQL data verified at: !ACTIVE_DATA_DIR!\postgres
+) else (
+  echo WARNING: No PostgreSQL data found at: !ACTIVE_DATA_DIR!\postgres
+  echo    DATA_DIR in .env is left unchanged. If your data lives elsewhere,
+  echo    fix DATA_DIR in .env and re-run update.bat.
+)
+goto :preflight_done
+
+:preflight_sqlite
+set "DB_PATH=!ACTIVE_DATA_DIR!\db\vault.db"
+if exist "!DB_PATH!" (
+  echo Database verified at: !DB_PATH!
+  goto :preflight_done
+)
+echo WARNING: No database found at expected location:
+echo    !DB_PATH!
+echo.
+:: Check legacy locations (SQLite installs only)
+set "LEGACY_DATA_DIR="
+if exist "data\db\vault.db" set "LEGACY_DATA_DIR=!CD!\data"
+if not defined LEGACY_DATA_DIR if exist "!USERPROFILE!\.blackvault\db\vault.db" set "LEGACY_DATA_DIR=!USERPROFILE!\.blackvault"
+if not defined LEGACY_DATA_DIR (
+  echo    No existing database found in any known location.
+  echo    This may be a fresh install - continuing.
+  goto :preflight_done
+)
+echo    Data found at: !LEGACY_DATA_DIR!\db\vault.db
+echo    Auto-updating DATA_DIR in .env:
+echo      from: !ACTIVE_DATA_DIR!
+echo      to:   !LEGACY_DATA_DIR!
+copy /Y ".env" ".env.bak" >nul
+if errorlevel 1 goto :env_update_failed
+:: Rewrite only the DATA_DIR= line; every other line is kept as-is.
+:: The new path is passed through the environment, never through quoting.
+set "BV_NEW_DATA_DIR=!LEGACY_DATA_DIR!"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $p = Join-Path (Get-Location) '.env'; $l = [IO.File]::ReadAllLines($p) | ForEach-Object { if ($_ -match '^DATA_DIR=') { 'DATA_DIR=' + $env:BV_NEW_DATA_DIR } else { $_ } }; [IO.File]::WriteAllLines($p, [string[]]$l)"
+if errorlevel 1 goto :env_update_failed
+set "BV_NEW_DATA_DIR="
+set "ACTIVE_DATA_DIR=!LEGACY_DATA_DIR!"
+echo    .env updated, backup in .env.bak. Continuing update...
+echo.
+
+:preflight_done
+echo.
+
+:: ── Pull latest code ──────────────────────────────────────────
+git rev-parse --git-dir >nul 2>&1
+if errorlevel 1 goto :rebuild
+echo Pulling latest updates from GitHub...
+git pull
+if errorlevel 1 (
+  echo ERROR: git pull failed. See the output above.
+  pause
+  exit /b 1
+)
+echo.
+
 :: ── Rebuild and restart ───────────────────────────────────────
+:rebuild
+:: Checked again on purpose. cmd.exe re-reads a running batch file by byte
+:: offset, so an older update.bat whose `git pull` just replaced this file
+:: resumes partway through it, possibly past the check at the top and still
+:: holding its own COMPOSE (which may be v1 docker-compose). Keep this call
+:: here, right before the first compose command.
+call :require_compose
+if not defined COMPOSE goto :compose_too_old
 echo Rebuilding BlackVault image...
 %COMPOSE% build --pull
+if errorlevel 1 goto :compose_failed
 
 echo.
 echo Restarting...
 %COMPOSE% up -d
+if errorlevel 1 goto :compose_failed
 
 echo.
-echo Waiting for startup...
+echo Waiting for health check...
 timeout /t 5 /nobreak >nul
 
+:: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
+set "STATUS=started, check logs if the app doesn't load"
+%COMPOSE% ps | findstr /i "healthy running" >nul
+if not errorlevel 1 set "STATUS=running"
+
 :: ── Summary ───────────────────────────────────────────────────
+set "SUMMARY_PORT=3000"
+if defined ENV_PORT set "SUMMARY_PORT=!ENV_PORT!"
 echo.
 echo ╔══════════════════════════════════════╗
 echo ║   Update complete.                   ║
 echo ╚══════════════════════════════════════╝
 echo.
-if not "!ACTIVE_DATA_DIR!"=="" (
-  echo   Data:   !ACTIVE_DATA_DIR!
-)
-echo   URL:    http://localhost:3000
+echo   Status:   !STATUS!
+if defined ACTIVE_DATA_DIR echo   Data:     !ACTIVE_DATA_DIR!
+echo   URL:      http://localhost:!SUMMARY_PORT!
 echo.
 echo   To check logs: %COMPOSE% logs -f
 echo.
 pause
+exit /b 0
+
+:env_update_failed
+set "BV_NEW_DATA_DIR="
+echo ERROR: could not update DATA_DIR in .env.
+echo        Edit DATA_DIR in .env by hand, then re-run update.bat.
+pause
+exit /b 1
+
+:compose_too_old
+if defined _CV (
+  echo ERROR: Docker Compose !_CV! is too old. BlackVault needs v2.20 or newer.
+) else (
+  echo ERROR: BlackVault needs Docker Compose v2.20 or newer, run as
+  echo        'docker compose' ^(the Compose v2 plugin^).
+  docker-compose version >nul 2>&1
+  if not errorlevel 1 (
+    echo        Only the old 'docker-compose' was found; it cannot read
+    echo        BlackVault's docker-compose.yml.
+  )
+)
+echo        Upgrade Docker Desktop: https://docs.docker.com/desktop/
+echo        BlackVault was not rebuilt or restarted; the running copy keeps running.
+pause
+exit /b 1
+
+:compose_failed
+echo.
+echo ERROR: docker compose failed. See the output above.
+pause
+exit /b 1
+
+:: ════════════════════════════════════════════════════════════
+:: Subroutines
+:: ════════════════════════════════════════════════════════════
+
+:: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh
+:: (install.sh and update.sh source it; batch cannot, so change all three
+:: together). docker-compose.yml uses depends_on.required: false, which needs
+:: Docker Compose v2.20 or newer: older v2 rejects the file and v1
+:: (docker-compose) cannot parse it, so the v1 fallback is gone on purpose.
+:: Sets COMPOSE=docker compose when `docker compose version --short` is at
+:: least 2.20 (a leading v is allowed), else leaves COMPOSE undefined and
+:: _CV holding the version found (empty when there is no Compose v2).
+:require_compose
+set "COMPOSE="
+set "_CV="
+set "_CMAJ="
+set "_CMIN="
+for /f "usebackq delims=" %%V in (`docker compose version --short 2^>nul`) do if not defined _CV set "_CV=%%V"
+if not defined _CV goto :eof
+set "_CV=!_CV: =!"
+if /i "!_CV:~0,1!"=="v" set "_CV=!_CV:~1!"
+for /f "tokens=1,2 delims=.-+" %%A in ("!_CV!") do (
+  set "_CMAJ=%%A"
+  set "_CMIN=%%B"
+)
+if not defined _CMAJ goto :eof
+if not defined _CMIN goto :eof
+for /f "delims=0123456789" %%X in ("!_CMAJ!!_CMIN!") do goto :eof
+if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
+if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
+goto :eof
+
+:: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
+:: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line
+:: in .env, ignoring case, whitespace and quotes. Installs made before
+:: PostgreSQL support have no such line (or no .env at all) and were always
+:: SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml ignores it.
+:provider_from_env
+set "_PV="
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
+  )
+)
+if defined _PV set "_PV=!_PV: =!"
+if defined _PV set "_PV=!_PV:	=!"
+if defined _PV set "_PV=!_PV:"=!"
+if defined _PV set "_PV=!_PV:'=!"
+set "DB_PROVIDER=sqlite"
+if not defined _PV goto :eof
+if /i "!_PV!"=="sqlite" goto :eof
+set "DB_PROVIDER=!_PV!"
+if /i "!_PV!"=="postgres" set "DB_PROVIDER=postgres"
+if /i "!_PV!"=="postgresql" set "DB_PROVIDER=postgres"
+goto :eof
+
+:: Mirrors check_postgres_env in scripts/compose-provider.sh. Warns when .env
+:: says BLACKVAULT_DB_PROVIDER=postgres but lacks a key the single compose file needs to
+:: run PostgreSQL. Only warns; never stops the script.
+:check_postgres_env
+set "_CP="
+set "_PW="
+set "_DU="
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+    if "%%A"=="COMPOSE_PROFILES" set "_CP=%%B"
+    if "%%A"=="BLACKVAULT_POSTGRES_PASSWORD" set "_PW=%%B"
+    if "%%A"=="BLACKVAULT_DATABASE_URL" set "_DU=%%B"
+  )
+)
+if defined _CP set "_CP=!_CP: =!"
+if defined _CP set "_CP=!_CP:"=!"
+if defined _DU set "_DU=!_DU:"=!"
+set "_MISSING="
+if not defined _CP (
+  set "_MISSING=!_MISSING! COMPOSE_PROFILES=postgres"
+) else (
+  if "!_CP:postgres=!"=="!_CP!" set "_MISSING=!_MISSING! COMPOSE_PROFILES=postgres"
+)
+if not defined _PW set "_MISSING=!_MISSING! BLACKVAULT_POSTGRES_PASSWORD"
+set "_DU_OK="
+if defined _DU if /i "!_DU:~0,11!"=="postgres://" set "_DU_OK=1"
+if defined _DU if /i "!_DU:~0,13!"=="postgresql://" set "_DU_OK=1"
+if not defined _DU_OK set "_MISSING=!_MISSING! BLACKVAULT_DATABASE_URL=postgresql://..."
+set "_PW="
+if not defined _MISSING goto :eof
+echo WARNING: .env says BLACKVAULT_DB_PROVIDER=postgres but is missing:!_MISSING!
+echo    A PostgreSQL install needs all four of these in .env:
+echo      COMPOSE_PROFILES=postgres
+echo      BLACKVAULT_DB_PROVIDER=postgres
+echo      BLACKVAULT_POSTGRES_PASSWORD=^<48 hex characters^>
+echo      BLACKVAULT_DATABASE_URL=postgresql://blackvault:^<same password^>@db:5432/blackvault
+echo    See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead.
+goto :eof
+
+:: Sets IS_DIR=1 when %1 is an existing directory, else clears it.
+:is_dir
+set "IS_DIR="
+set "_ATTR="
+for %%I in ("%~1") do set "_ATTR=%%~aI"
+if defined _ATTR if /i "!_ATTR:~0,1!"=="d" set "IS_DIR=1"
+goto :eof

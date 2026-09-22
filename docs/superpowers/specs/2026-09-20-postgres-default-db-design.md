@@ -1,5 +1,65 @@
 # Postgres as Default Database — Design Spec
 
+> **REVISED 2026-09-22.** The original plan (`plans/2026-09-20-postgres-default-db.md`) is
+> **superseded** by `plans/2026-09-22-postgres-default-db.md`. Read this revision block first; it
+> overrides anything below that conflicts with it.
+>
+> **1. Both Prisma clients ship in the image (user decision).** A Prisma client is
+> provider-specific, and the original design generated one at build time while users choose a
+> provider at runtime — so one published image could not serve both, and the Docker build itself
+> would fail (it prerenders against a throwaway SQLite DB while defaulting to Postgres). Now:
+> - the **Postgres** client generates to the default location, so `@prisma/client` *is* the
+>   Postgres client and the canonical type source — all existing imports keep working;
+> - the **SQLite** client generates to `node_modules/.prisma/client-sqlite`;
+> - `src/lib/prisma.ts` is the **only** file that chooses, by `DB_PROVIDER`;
+> - builds always prerender against **SQLite**, so compiling never needs a running Postgres.
+>   This supersedes "the app never loads two Prisma clients" below: the image carries two; the
+>   running process still instantiates exactly one.
+>
+> **2. Sixteen models, not fifteen.** `DateNormalizationAudit` was added by the date-only epic.
+> It is **included** in `BACKUP_MODELS` (it is provenance for normalized dates; excluding it would
+> make a restored install unable to re-convert them). Only `AppSettings` stays excluded. The
+> migrator copies all sixteen.
+>
+> **3. Restore keeps two behaviours added since this spec was written:** it runs the legacy-date
+> migration after a successful restore, and it reports success only after its transaction commits.
+>
+> **4. Scripts use** `ts-node --compiler-options '{"module":"CommonJS"}'` — the
+> `--project tsconfig.json` form fails with `ERR_MODULE_NOT_FOUND` on any `src/` import.
+>
+> **5. No CI changes.** GitHub Actions is disabled repo-wide pending a rewrite. Verification is local.
+>
+> **6. Postgres migration history** starts as a single baseline generated non-destructively with
+> `prisma migrate diff --from-empty`, so no Postgres server is needed to create it.
+
+> **7. ONE compose file, switched by `.env` (added 2026-09-22, user design).** Existing users'
+> `update.sh` runs `git pull` then bare `docker compose`. Any design where a bare `docker compose`
+> means Postgres breaks every existing SQLite user's first update, and that copy of `update.sh`
+> is already deployed. So:
+> - `docker-compose.yml` is the only compose file. The `db` service sits under
+>   `profiles: [postgres]`; the app's `depends_on` is `required: false`.
+> - With no `.env`, a bare `docker compose up -d` runs SQLite exactly as before.
+> - `COMPOSE_PROFILES=postgres` in `.env` switches it to Postgres. The installer sets this for new
+>   installs, so **Postgres remains the default for new installs.**
+> - `BLACKVAULT_POSTGRES_PASSWORD` uses `${...:-}`, never `:?` — Compose interpolates `:?` even for
+>   disabled services, which would break the SQLite default. An empty password makes the Postgres
+>   container itself refuse to start.
+> - **The compose-facing `.env` keys are `BLACKVAULT_DB_PROVIDER`, `BLACKVAULT_POSTGRES_PASSWORD`
+>   and `BLACKVAULT_DATABASE_URL`** (renamed 2026-09-22, before shipping). Compose lets a variable
+>   exported in the shell override `.env`, and `DATABASE_URL` is commonly exported by Prisma users:
+>   a relative `file:` URL gave the container a healthy, empty database. `docker-compose.yml` maps
+>   them to `DB_PROVIDER` / `DATABASE_URL` / `POSTGRES_PASSWORD` inside the containers, so app code
+>   is unchanged. `DATA_DIR`, `PORT` and `COMPOSE_PROFILES` keep their names.
+> - `depends_on.required` needs **Docker Compose 2.20+**. install/update (sh and bat) refuse older
+>   Compose, or v1 `docker-compose`, before touching anything.
+> - **`.migrated`** (in `${DATA_DIR}/db/`, visible to the app at `/app/data/.migrated`) is written by
+>   the migrator only after a verified copy. The migrator then switches `.env`. The split-brain
+>   guard warns exactly when Postgres is active, `vault.db` is non-empty, and `.migrated` is absent.
+> - `docker-compose.sqlite.yml` is removed.
+
+---
+
+
 **Date:** 2026-09-20
 **Status:** Approved
 **Epic:** B (depends on Epic A only for the vitest harness)
@@ -115,10 +175,12 @@ red test rather than silent data loss.
 
 ### Deployment shape
 
-`docker-compose.yml` becomes Postgres + app. `docker-compose.sqlite.yml` is the fallback. The
+~~`docker-compose.yml` becomes Postgres + app. `docker-compose.sqlite.yml` is the fallback. The
 installer asks which, and generates `POSTGRES_PASSWORD` when Postgres is chosen. Two files rather
 than compose profiles, because `depends_on: condition: service_healthy` cannot reference a service
-that a profile has excluded.
+that a profile has excluded.~~ **Superseded by REVISED item 7:** one compose file, the `db`
+service under `profiles: [postgres]`, `depends_on.required: false` (Compose 2.20+ resolves the
+profile problem that motivated two files).
 
 ## Migration runbook (user-facing)
 
@@ -126,7 +188,10 @@ that a profile has excluded.
 2. Start Postgres: `docker compose up -d db`
 3. `npm run migrate:to-postgres -- --dry-run` — prints per-model source counts
 4. `npm run migrate:to-postgres` — copies, then asserts per-model counts match
-5. Set `DB_PROVIDER=postgres` in `.env`, `docker compose up -d`
+5. ~~Set `DB_PROVIDER=postgres` in `.env`, `docker compose up -d`~~ *(superseded by item 7: the
+   migrator writes `.migrated` and switches `.env` to `COMPOSE_PROFILES=postgres` + the three
+   `BLACKVAULT_*` keys; the user runs `docker compose up -d --build`. See README "Moving from
+   SQLite to PostgreSQL".)*
 6. The old `vault.db` is left untouched on disk as a rollback artifact
 
 The uploads volume is never touched — documents and images are files on disk referenced by path.
@@ -141,8 +206,21 @@ The uploads volume is never touched — documents and images are files on disk r
 - [ ] Restoring a v1.0 backup (without the two new keys) succeeds, treating them as empty.
 - [ ] Restoring a v1.1 backup round-trips `MaintenanceLog` and `BatteryChangeLog` intact.
 - [ ] `/api/search` matches `Glock` when queried with `glock` on **both** providers.
-- [ ] `docker compose up -d` starts Postgres + app, app waits for the DB healthcheck.
-- [ ] `docker compose -f docker-compose.sqlite.yml up -d` still works.
+- [ ] ~~`docker compose up -d` starts Postgres + app, app waits for the DB healthcheck.~~
+      *(superseded by item 7)*
+- [ ] ~~`docker compose -f docker-compose.sqlite.yml up -d` still works.~~ *(superseded by item 7:
+      the file is removed)*
+- [ ] With no `.env`, or a legacy `.env` holding only `DATA_DIR` and `PORT`, a bare
+      `docker compose up -d` starts only the app, on SQLite at `/app/data/vault.db`.
+- [ ] With `COMPOSE_PROFILES=postgres` and the three `BLACKVAULT_*` keys in `.env`, a bare
+      `docker compose up -d` starts `db` + app, and the app waits for the DB healthcheck.
+- [ ] `DATABASE_URL`, `DB_PROVIDER` or `POSTGRES_PASSWORD` exported in the shell change neither
+      shape (`docker compose config` shows the `.env`-derived values).
+- [ ] After a verified copy into the stack's database the migrator writes `.migrated`, then
+      switches `.env` to the four keys; if the switch fails, `.migrated` is removed again.
+- [ ] The split-brain guard warns exactly when Postgres is active, `vault.db` is non-empty, and
+      `.migrated` is absent.
+- [ ] install/update refuse Docker Compose older than 2.20, or v1 only, before changing anything.
 - [ ] The migrator refuses a non-empty target without `--force`.
 - [ ] The migrator aborts loudly on any per-model count mismatch.
 - [ ] A full migration of a seeded SQLite DB reports zero mismatches across all 15 models.

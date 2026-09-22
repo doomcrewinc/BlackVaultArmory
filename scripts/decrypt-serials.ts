@@ -1,7 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+import "./load-env";
+import { prisma } from "../src/lib/prisma";
 import { decryptField } from "../src/lib/crypto";
-
-const prisma = new PrismaClient();
 
 async function main() {
   const firearms = await prisma.firearm.findMany({

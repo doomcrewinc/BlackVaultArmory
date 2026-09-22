@@ -1,3 +1,5 @@
+> **SUPERSEDED by `2026-09-22-postgres-default-db.md`.** Do not execute this plan: it generates one Prisma client at build time while users choose a provider at runtime, so one image cannot serve both, and its Docker build would fail. Kept for history.
+
 # Postgres Default Database Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
