@@ -80,4 +80,9 @@ migrateSqliteToPostgres({
   },
   dryRun,
   force,
-}).then((code) => process.exit(code));
+})
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

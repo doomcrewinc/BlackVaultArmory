@@ -6,9 +6,11 @@
  * field-for-field identical (DateTimes compared as exact ISO strings). Anything
  * else exits 1. The source is only ever read — there is no reverse path.
  *
- * The copy runs inside one interactive transaction on the target, so a failure
- * part-way (FK violation, unique conflict, dropped connection) rolls the target
- * back to where it started instead of leaving a half-migrated database.
+ * The copy AND its verification run inside one interactive transaction on the
+ * target, so any failure — FK violation, unique conflict, dropped connection, or
+ * a count/content mismatch — rolls the target back to where it started instead
+ * of leaving a half-migrated or unverified database. A final count after commit
+ * is a sanity check only.
  *
  * Kept free of Prisma imports so it can be unit-tested with in-memory fakes;
  * scripts/migrate-sqlite-to-postgres.ts supplies the real clients.
@@ -63,6 +65,14 @@ export interface MigrateOptions {
 }
 
 export const SOURCE_UNTOUCHED = "The source SQLite database was not modified.";
+export const ROLLED_BACK = "The copy was rolled back; the target was left as it was.";
+
+/** Thrown inside the transaction so a failed verification rolls the copy back. */
+class VerificationError extends Error {
+  constructor(readonly failures: string[]) {
+    super(`verification failed: ${failures.join("; ")}`);
+  }
+}
 
 function delegateOf(client: DbClient, delegate: string): ModelDelegate {
   const d = (client as unknown as Record<string, ModelDelegate | undefined>)[delegate];
@@ -168,7 +178,10 @@ export async function migrateSqliteToPostgres(opts: MigrateOptions): Promise<num
     if (occupied.length > 0 && !opts.force) {
       log("REFUSING: the target Postgres database is not empty:");
       for (const m of occupied) log(`  ${m.model}: ${before.get(m.model)} rows`);
-      log("Nothing was written. Point POSTGRES_URL at an empty, migrated database, or pass --force.");
+      log(
+        "Nothing was written. Point POSTGRES_URL at an empty, migrated database, or pass --force " +
+          "(--force does not clear existing rows; any id already present aborts and rolls back the copy).",
+      );
       log(SOURCE_UNTOUCHED);
       return 1;
     }
@@ -176,42 +189,56 @@ export async function migrateSqliteToPostgres(opts: MigrateOptions): Promise<num
 
     log(`Copying ${total} rows across ${MIGRATION_MODELS.length} models (batches of ${BATCH_SIZE})...`);
     const src = source;
-    let copied: Map<string, number>;
+    let verifiedCounts: Map<string, number>;
     try {
-      copied = await target.$transaction((tx) => copyAll(src, tx, log), TRANSACTION_OPTIONS);
+      // Copy AND verify inside one transaction: any failure throws, so the target is
+      // rolled back to how it was and never holds an unverified copy.
+      verifiedCounts = await target.$transaction(async (tx) => {
+        const copied = await copyAll(src, tx, log);
+        const finalSource = await countAll(src);
+        const after = await countAll(tx);
+        const bad = await verifyContent(src, tx);
+
+        const rows: string[][] = [["Model", "Source", "Copied", "Target", "Content", "Status"]];
+        const failures: string[] = [];
+        for (const m of MIGRATION_MODELS) {
+          const s = finalSource.get(m.model) ?? 0;
+          const c = copied.get(m.model) ?? 0;
+          const t = (after.get(m.model) ?? 0) - (before.get(m.model) ?? 0);
+          const b = bad.get(m.model) ?? 0;
+          const countsOk = s === sourceCounts.get(m.model) && c === s && t === s;
+          if (!countsOk) {
+            failures.push(
+              `${m.model}: expected ${sourceCounts.get(m.model)} (source now ${s}), copied ${c}, found ${t} on target`,
+            );
+          }
+          if (b > 0) failures.push(`${m.model}: ${b} row(s) missing or different on target`);
+          const ok = countsOk && b === 0;
+          rows.push([m.model, String(s), String(c), String(t), b === 0 ? "identical" : `${b} differ`, ok ? "OK" : "MISMATCH"]);
+        }
+        for (const line of table(rows)) log(`  ${line}`);
+        if (failures.length > 0) throw new VerificationError(failures);
+        return after;
+      }, TRANSACTION_OPTIONS);
     } catch (err) {
-      log(`COPY FAILED — the target transaction was rolled back: ${err instanceof Error ? err.message : String(err)}`);
+      if (err instanceof VerificationError) {
+        log(`MISMATCH — ${err.failures.length} check(s) failed verification:`);
+        for (const f of err.failures) log(`  ${f}`);
+      } else {
+        log(`COPY FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      log(ROLLED_BACK);
       log(SOURCE_UNTOUCHED);
       return 1;
     }
 
-    // Verification: every model is re-counted on both sides after commit.
-    const finalSource = await countAll(source);
-    const after = await countAll(target);
-    const bad = await verifyContent(source, target);
-
-    const rows: string[][] = [["Model", "Source", "Copied", "Target", "Content", "Status"]];
-    const failures: string[] = [];
-    for (const m of MIGRATION_MODELS) {
-      const s = finalSource.get(m.model) ?? 0;
-      const c = copied.get(m.model) ?? 0;
-      const t = (after.get(m.model) ?? 0) - (before.get(m.model) ?? 0);
-      const b = bad.get(m.model) ?? 0;
-      const countsOk = s === sourceCounts.get(m.model) && c === s && t === s;
-      const ok = countsOk && b === 0;
-      if (!countsOk) {
-        failures.push(
-          `${m.model}: expected ${sourceCounts.get(m.model)} (source now ${s}), copied ${c}, found ${t} on target`,
-        );
-      }
-      if (b > 0) failures.push(`${m.model}: ${b} row(s) missing or different on target`);
-      rows.push([m.model, String(s), String(c), String(t), b === 0 ? "identical" : `${b} differ`, ok ? "OK" : "MISMATCH"]);
-    }
-    for (const line of table(rows)) log(`  ${line}`);
-
-    if (failures.length > 0) {
-      log(`MISMATCH — ${failures.length} model(s) failed verification:`);
-      for (const f of failures) log(`  ${f}`);
+    // Sanity check after commit: the committed target must still hold what was verified.
+    const committed = await countAll(target);
+    const drift = MIGRATION_MODELS.filter((m) => committed.get(m.model) !== verifiedCounts.get(m.model));
+    if (drift.length > 0) {
+      log("POST-COMMIT CHECK FAILED — the committed target differs from what was verified:");
+      for (const m of drift) log(`  ${m.model}: verified ${verifiedCounts.get(m.model)}, now ${committed.get(m.model)}`);
+      log("The copy WAS committed; do not use this target until it is inspected or wiped.");
       log(SOURCE_UNTOUCHED);
       return 1;
     }

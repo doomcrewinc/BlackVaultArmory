@@ -14,11 +14,15 @@ import { BACKUP_MODELS } from "../backup/models";
 class FakeDelegate {
   rows: Row[] = [];
   countShortBy = 0;
+  /** Only applied outside a transaction: simulates the committed state drifting from what was verified. */
+  countShortOutsideTx = 0;
+  owner?: { inTx: boolean };
   createManyCalls: number[] = [];
   writeShortBy = 0;
 
   async count() {
-    return Math.max(0, this.rows.length - this.countShortBy);
+    const outside = this.owner?.inTx ? 0 : this.countShortOutsideTx;
+    return Math.max(0, this.rows.length - this.countShortBy - outside);
   }
 
   async findMany(args: FindManyArgs) {
@@ -40,12 +44,14 @@ class FakeDelegate {
 
 class FakeClient {
   disconnected = false;
+  inTx = false;
   delegates: Record<string, FakeDelegate> = {};
   order: string[] = [];
 
   constructor() {
     for (const m of MIGRATION_MODELS) {
       const d = new FakeDelegate();
+      d.owner = this;
       const origCreate = d.createMany.bind(d);
       d.createMany = async (args) => {
         this.order.push(m.model);
@@ -63,11 +69,15 @@ class FakeClient {
   /** Snapshot/rollback like a real transaction. */
   async $transaction<T>(fn: (tx: DbClient) => Promise<T>): Promise<T> {
     const snapshot = Object.fromEntries(Object.entries(this.delegates).map(([k, d]) => [k, [...d.rows]]));
+    this.inTx = true;
     try {
       return await fn(this as unknown as DbClient);
     } catch (err) {
+      // Discard every write made inside the callback, as a real rollback would.
       for (const [k, rows] of Object.entries(snapshot)) this.delegates[k].rows = rows;
       throw err;
+    } finally {
+      this.inTx = false;
     }
   }
 
@@ -166,6 +176,9 @@ describe("migrateSqliteToPostgres", () => {
     expect(out).toContain("MISMATCH");
     expect(lines.some((l) => l.includes("BatteryChangeLog") && l.includes("expected 2") && l.includes("found 1"))).toBe(true);
     expect(out).toContain(SOURCE_UNTOUCHED);
+    // The target must end as it started: a failed verification rolls the copy back.
+    for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    expect(out).toContain("rolled back");
     expect(target.disconnected).toBe(true);
   });
 
@@ -179,6 +192,9 @@ describe("migrateSqliteToPostgres", () => {
 
     expect(code).toBe(1);
     expect(out).toContain("Firearm: 2 row(s) missing or different on target");
+    // The target must end as it started: a failed verification rolls the copy back.
+    for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    expect(out).toContain("rolled back");
   });
 
   it("rolls the target back and exits 1 when a batch is written short", async () => {
@@ -188,9 +204,21 @@ describe("migrateSqliteToPostgres", () => {
     const { code, out } = await run(source, target);
 
     expect(code).toBe(1);
-    expect(out).toContain("rolled back");
+    // The target must end as it started: a failed verification rolls the copy back.
     for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    expect(out).toContain("rolled back");
     expect(source.disconnected && target.disconnected).toBe(true);
+  });
+
+  it("exits 1 when the committed target no longer matches what was verified", async () => {
+    const source = seeded();
+    const target = new FakeClient();
+    target.delegates.sessionDrill.countShortOutsideTx = 1;
+    const { code, out } = await run(source, target);
+
+    expect(code).toBe(1);
+    expect(out).toContain("POST-COMMIT CHECK FAILED");
+    expect(out).toContain("SessionDrill: verified 2, now 1");
   });
 
   it("disconnects both clients when the source fails", async () => {
