@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# .env and docker-compose.yml live next to this script: always run from here.
+cd "$(dirname "$0")"
+
 echo "╔══════════════════════════════════════╗"
 echo "║   BlackVault — Update Script         ║"
 echo "╚══════════════════════════════════════╝"
@@ -32,20 +35,23 @@ if [ ! -f ".env" ]; then
   echo ""
 fi
 
-# ── Database provider and compose file ────────────────────────
+# ── Database provider ─────────────────────────────────────────
+# There is one compose file, and plain `$COMPOSE` reads .env: COMPOSE_PROFILES=
+# postgres there runs PostgreSQL, no profile runs SQLite. The provider below
+# only drives the preflight checks.
 # shellcheck source=scripts/compose-provider.sh
-. "$(dirname "$0")/scripts/compose-provider.sh"
+. ./scripts/compose-provider.sh
 DB_PROVIDER=$(provider_from_env)
-COMPOSE_FILE=$(compose_file_for "$DB_PROVIDER")
-echo "Database provider: $DB_PROVIDER (using $COMPOSE_FILE)"
+echo "Database provider: $DB_PROVIDER"
 
 # ── Read DATA_DIR from .env ────────────────────────────────────
-ACTIVE_DATA_DIR=""
-if [ -f ".env" ]; then
-  ACTIVE_DATA_DIR=$(grep "^DATA_DIR=" .env | cut -d'=' -f2- | tr -d '[:space:]')
-fi
+# Only surrounding whitespace and quotes are stripped: paths may contain spaces.
+ACTIVE_DATA_DIR=$(env_value DATA_DIR)
 
 # ── Preflight: verify the database exists ─────────────────────
+if [ "$DB_PROVIDER" != "sqlite" ]; then
+  check_postgres_env || true
+fi
 if [ -n "$ACTIVE_DATA_DIR" ] && [ "$DB_PROVIDER" != "sqlite" ]; then
   # PostgreSQL keeps its cluster in $DATA_DIR/postgres. DATA_DIR is never
   # relocated here: moving it would bring up a new, empty database.
@@ -98,17 +104,17 @@ fi
 
 # ── Rebuild and restart ───────────────────────────────────────
 echo "Rebuilding BlackVault image..."
-$COMPOSE -f "$COMPOSE_FILE" build --pull
+$COMPOSE build --pull
 
 echo ""
 echo "Restarting..."
-$COMPOSE -f "$COMPOSE_FILE" up -d
+$COMPOSE up -d
 
 echo ""
 echo "Waiting for health check..."
 sleep 5
 
-if $COMPOSE -f "$COMPOSE_FILE" ps | grep -q "healthy\|running"; then
+if $COMPOSE ps | grep -q "healthy\|running"; then
   STATUS="running"
 else
   STATUS="started (check logs if app doesn't load)"
@@ -124,7 +130,8 @@ echo "  Status:   $STATUS"
 if [ -n "$ACTIVE_DATA_DIR" ]; then
   echo "  Data:     $ACTIVE_DATA_DIR"
 fi
-echo "  URL:      http://localhost:${PORT:-3000}"
+ENV_PORT=$(env_value PORT)
+echo "  URL:      http://localhost:${ENV_PORT:-3000}"
 echo ""
-echo "  To check logs: $COMPOSE -f $COMPOSE_FILE logs -f"
+echo "  To check logs: $COMPOSE logs -f"
 echo ""
