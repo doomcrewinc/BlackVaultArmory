@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { resolveProvider } from "@/lib/db/provider";
+import { resolveProvider } from "./db/provider";
 
 /**
  * Both Prisma clients ship in the image; this is the only place that chooses.

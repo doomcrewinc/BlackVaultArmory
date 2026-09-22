@@ -1,7 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+import "./load-env";
+import { prisma } from "../src/lib/prisma";
 import * as readline from "readline";
-
-const prisma = new PrismaClient();
 
 async function confirm(): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
