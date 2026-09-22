@@ -239,6 +239,33 @@ Mac / Linux:
 
 ## Troubleshooting
 
+### 🟡 `docker compose ps` says the container is `unhealthy`
+
+BlackVault reports itself unhealthy when its database does not answer, because the app cannot
+work without it. Ask the app directly:
+
+```bash
+curl -s http://127.0.0.1:3000/api/health
+```
+
+`{"status":"ok","database":"ok",...}` means everything is up. `{"status":"error","database":
+"unreachable",...}` (HTTP 503) means the app is running but cannot reach its database. On
+PostgreSQL, check that the database container is up (`docker compose ps`) and see why it is not:
+
+```bash
+docker compose logs db
+```
+
+The reason the app could not connect is in its own log, with the details omitted from the
+response above:
+
+```bash
+docker compose logs blackvault
+```
+
+The container returns to `healthy` on its own within about 30 seconds of the database coming
+back — no restart needed.
+
 ### ❌ Error: "unable to open database file"
 
 This is the most common issue on first launch. It means Docker couldn't create the data folders automatically. Fix it by creating them manually, then restarting.
