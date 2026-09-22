@@ -420,25 +420,25 @@ docker compose up -d
 
 ## Local Development
 
-```bash
-npm install
-```
+Run a local copy without Docker:
 
 ```bash
-npx prisma generate
+./dev.sh
 ```
+
+It installs dependencies, writes a local `.env`, generates the Prisma client, applies every
+migration, and starts the dev server on http://localhost:3000.
 
 ```bash
-npx prisma db push
+./dev.sh --fresh     # rebuild the local database from the full migration history, then seed
+./dev.sh --studio    # browse the local database in Prisma Studio
+./dev.sh --help      # all options
 ```
 
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
----
+The local database is applied with `prisma migrate deploy` — the same path production uses. Don't
+use `prisma db push`: it syncs the schema without recording migrations, and the next schema change
+will then demand a database reset. If `./dev.sh` reports a migration error on an old local
+database, run `./dev.sh --fresh`.
 
 ## License
 

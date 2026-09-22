@@ -160,30 +160,17 @@ fi
 npx prisma generate --schema "$SCHEMA" >/dev/null
 ok "Prisma client generated"
 
-# Why this branches:
+# Always `migrate deploy` — the same path production and CI use. Never
+# `db push`: it syncs the schema without recording migrations, so the next
+# schema change sees drift and `prisma migrate dev` demands a database reset.
 #
-# The dev.db committed to this repo has a _prisma_migrations ledger recording
-# only 10 of the 18 migrations on disk, yet its schema was already pushed past
-# that point (Accessory.serialNumber exists). `migrate deploy` therefore tries
-# to re-apply migration 11 and dies with P3018 "duplicate column name".
-#
-# So: a database we create ourselves gets the full, correct migration history.
-# A database that already exists gets `db push`, which syncs the schema without
-# touching the ledger — this is what README documents for local development and
-# what the committed dev.db was built with.
-#
-# `--fresh` moves the old file aside, which puts us on the migrate path.
-if [ -n "$DB_FILE" ] && [ -f "$DB_FILE" ]; then
-  npx prisma db push --schema "$SCHEMA" --skip-generate
-  ok "schema synced to the existing database"
-  if [ "$FRESH" -eq 0 ]; then
-    warn "used 'db push' because the database already exists. For a clean database"
-    warn "built from the full migration history, run: ./dev.sh --fresh"
-  fi
-else
-  npx prisma migrate deploy --schema "$SCHEMA"
-  ok "migrations applied to a fresh database"
+# A database whose migration ledger disagrees with its schema (for example one
+# built with `db push` by an older version of this script) fails here with
+# P3018. Rebuilding it from the full history fixes that.
+if ! npx prisma migrate deploy --schema "$SCHEMA"; then
+  die "migrations failed to apply. If this database predates the current migration history, rebuild it with: ./dev.sh --fresh"
 fi
+ok "migrations applied"
 
 if [ "$SEED" -eq 1 ]; then
   step "Seeding"
