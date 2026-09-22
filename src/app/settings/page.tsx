@@ -22,6 +22,8 @@ export default function SettingsPage() {
   const [backupDestinationPath, setBackupDestinationPath] = useState("");
   const [manualLanHost, setManualLanHost] = useState("");
   const [defaultAmmoAlertThreshold, setDefaultAmmoAlertThreshold] = useState<string>("");
+  const [timezone, setTimezone] = useState("");
+  const [timezoneOptions, setTimezoneOptions] = useState<string[]>([]);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -57,6 +59,7 @@ export default function SettingsPage() {
           setDefaultAmmoAlertThreshold(
             data.defaultAmmoAlertThreshold != null ? String(data.defaultAmmoAlertThreshold) : ""
           );
+          setTimezone(data.timezone ?? "");
         }
         setDataLoading(false);
       })
@@ -64,6 +67,27 @@ export default function SettingsPage() {
         setDataError("Failed to load settings");
         setDataLoading(false);
       });
+  }, []);
+
+  // Runs only after mount, never during render: the server has no notion of
+  // the browser's timezone, and using it during SSR would bake the server's
+  // zone into the HTML and desync from the client on hydration.
+  useEffect(() => {
+    if (dataLoading || timezone) return;
+    try {
+      const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (detected) setTimezone(detected);
+    } catch {
+      // Ignore: leave the field blank if detection fails.
+    }
+  }, [dataLoading, timezone]);
+
+  useEffect(() => {
+    try {
+      setTimezoneOptions(Intl.supportedValuesOf("timeZone"));
+    } catch {
+      setTimezoneOptions([]);
+    }
   }, []);
 
   useEffect(() => {
@@ -127,6 +151,7 @@ export default function SettingsPage() {
           backupDestinationPath,
           manualLanHost,
           defaultAmmoAlertThreshold: parsedThreshold,
+          timezone,
         }),
       });
 
@@ -519,6 +544,31 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Regional"
+          description="Used to interpret dates recorded by this vault."
+        >
+          <FormField
+            label="Timezone"
+            hint="Used to correct dates recorded by older versions of BlackVault."
+          >
+            <input
+              id="timezone"
+              type="text"
+              list="timezone-options"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              className={INPUT_CLASS}
+              placeholder="e.g. America/Denver"
+            />
+            <datalist id="timezone-options">
+              {timezoneOptions.map((tz) => (
+                <option key={tz} value={tz} />
+              ))}
+            </datalist>
+          </FormField>
         </SectionCard>
 
         <SectionCard
