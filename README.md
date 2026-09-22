@@ -559,7 +559,7 @@ It reads `DATA_DIR` and `BLACKVAULT_POSTGRES_PASSWORD` from `.env`, so it finds 
 and the database from Step 5 without any other settings. (To copy somewhere else, give it
 `POSTGRES_URL=... npm run migrate:to-postgres`, and `SQLITE_URL=file:...` for another source.
 These are arguments for that one command, not `.env` settings. A `DATABASE_URL` in your shell is
-used as the target only when it is a `postgres://` URL.) The first lines say whether `.env` will be
+ignored.) The first lines say whether `.env` will be
 switched after the copy. It will be if the copy goes into this install's own database.
 
 **Step 8: Real run.** It copies everything and then verifies it. It must end with

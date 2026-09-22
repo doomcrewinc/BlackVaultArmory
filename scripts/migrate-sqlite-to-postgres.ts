@@ -9,13 +9,12 @@
  *
  * SQLITE_URL   source; default file:${DATA_DIR}/db/vault.db, DATA_DIR from .env
  *              (default ./data). Only ever read.
- * POSTGRES_URL target. Falls back to DATABASE_URL, but only when that is a
- *              postgres:// URL (a file: DATABASE_URL exported for Prisma is
- *              ignored), then to the stack's database through
+ * POSTGRES_URL target. Defaults to the stack's database through
  *              docker-compose.migrate.yml: 127.0.0.1:55432 with
  *              BLACKVAULT_POSTGRES_PASSWORD from .env. Must be postgres:// or
  *              postgresql://, already migrated (`prisma migrate deploy`), and
- *              empty unless --force.
+ *              empty unless --force. DATABASE_URL is never read: it is
+ *              commonly exported in a shell for other Prisma projects.
  * --dry-run    print source row counts and exit; never connects to the target,
  *              never writes .migrated or .env.
  * --force      copy even if the target already has rows (it does not wipe them),
@@ -55,14 +54,11 @@ const stack = resolveStack(repo);
 const stackPassword = stack.env.get(ENV_PASSWORD) ?? "";
 const sqliteUrl = process.env.SQLITE_URL || `file:${stack.stackSqlitePath}`;
 const isPostgresUrl = (url: string) => /^postgres(ql)?:\/\//.test(url);
-const envDatabaseUrl = process.env.DATABASE_URL ?? "";
 const [postgresUrl, postgresUrlFrom] = process.env.POSTGRES_URL
   ? [process.env.POSTGRES_URL, "POSTGRES_URL"]
-  : isPostgresUrl(envDatabaseUrl)
-    ? [envDatabaseUrl, "DATABASE_URL"]
-    : stackPassword
-      ? [overlayUrl(stackPassword), `${ENV_PASSWORD} in .env`]
-      : ["", ""];
+  : stackPassword
+    ? [overlayUrl(stackPassword), `${ENV_PASSWORD} in .env`]
+    : ["", ""];
 
 function fail(message: string): never {
   console.error(`ERROR: ${message}`);
@@ -77,7 +73,7 @@ if (!fs.existsSync(sqlitePath)) fail(`source SQLite file does not exist: ${sqlit
 
 const postgresOk = isPostgresUrl(postgresUrl);
 if (!dryRun && !postgresOk) {
-  fail(`POSTGRES_URL (or a postgres:// DATABASE_URL, or ${ENV_PASSWORD} in .env) must give a postgres:// or postgresql:// URL`);
+  fail(`POSTGRES_URL (or ${ENV_PASSWORD} in .env) must give a postgres:// or postgresql:// URL`);
 }
 
 console.log("BlackVault SQLite -> Postgres migrator (one-way)");
@@ -85,8 +81,8 @@ console.log(`  source (SQLite):   file:${sqlitePath}`);
 console.log(
   `  target (Postgres): ${postgresOk ? `${maskUrl(postgresUrl)}  (from ${postgresUrlFrom})` : "<not set>"}${dryRun ? "  (not contacted: --dry-run)" : ""}`,
 );
-if (!process.env.POSTGRES_URL && envDatabaseUrl && !isPostgresUrl(envDatabaseUrl)) {
-  console.log("  (DATABASE_URL in this shell is not a postgres:// URL, so it is ignored)");
+if (process.env.DATABASE_URL) {
+  console.log("  (DATABASE_URL in this shell is ignored; use POSTGRES_URL to pick a target)");
 }
 if (force) console.log("  --force: a non-empty target or an existing .migrated will not be refused");
 console.log("");
