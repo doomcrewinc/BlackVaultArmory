@@ -3,7 +3,12 @@
 # `npm run migrate:to-postgres` can reach it. Use it ONLY during the
 # migration — see "Moving from SQLite to PostgreSQL" in README.md:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d db
+#   docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait db
+#
+# Naming the db service starts it even though .env has no COMPOSE_PROFILES
+# yet (the app keeps running on SQLite until the copy is verified). It needs
+# POSTGRES_PASSWORD in .env. The migrator recognises this port as the stack's
+# own database, and only then switches .env.
 #
 # Running plain `docker compose up -d` afterwards recreates the database
 # container without the published port.

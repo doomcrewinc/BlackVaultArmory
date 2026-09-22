@@ -68,9 +68,17 @@ Open the extracted folder and **double-click `install.bat`**.
 > install.bat
 > ```
 
-The installer will ask two questions — press **Enter** to accept the defaults:
+The installer will ask three questions — press **Enter** to accept the defaults:
 - Where to store your data → press Enter
 - Which port to use → press Enter
+- Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
+
+> ⚠️ PostgreSQL on Windows has not been tested yet. See
+> [Known issue: PostgreSQL on Windows](#known-issue-postgresql-on-windows-is-untested). If you
+> want the proven option on Windows, type `2` for SQLite.
+
+For PostgreSQL the installer generates a random database password and saves it in `.env`
+(it is never shown). **Keep `.env` safe** — your database cannot be opened without it.
 
 It will then build and start BlackVault. **This can take 5–10 minutes the first time.**
 
@@ -180,22 +188,23 @@ http://localhost:3000
 
 ## Stopping and Starting BlackVault
 
-> 💡 **Which database am I using?** Check `DB_PROVIDER` in `.env`. `DB_PROVIDER=postgres` is
-> PostgreSQL. `DB_PROVIDER=sqlite`, **or no `DB_PROVIDER` line at all** (installs made before
-> PostgreSQL support), is SQLite. SQLite commands add `-f docker-compose.sqlite.yml`.
+The same commands work for both databases. Run them from the BlackVault folder.
+
+> 💡 **Which database am I using?** Look in `.env`. `COMPOSE_PROFILES=postgres` with
+> `DB_PROVIDER=postgres` is PostgreSQL. No `COMPOSE_PROFILES` line (installs made before
+> PostgreSQL support, or SQLite chosen at install) is SQLite. Docker reads `.env` itself, so
+> plain `docker compose` always starts the right one.
 
 **To stop BlackVault** (your data is never affected):
 
 ```bash
-docker compose down                                  # PostgreSQL
-docker compose -f docker-compose.sqlite.yml down     # SQLite
+docker compose down
 ```
 
 **To start it again after stopping:**
 
 ```bash
-docker compose up -d                                 # PostgreSQL
-docker compose -f docker-compose.sqlite.yml up -d    # SQLite
+docker compose up -d
 ```
 
 **To update to the latest version:**
@@ -226,44 +235,20 @@ mkdir data\db
 mkdir data\uploads
 ```
 
-PostgreSQL:
-
 ```cmd
 docker compose down
 ```
 
 ```cmd
 docker compose up -d
-```
-
-SQLite:
-
-```cmd
-docker compose -f docker-compose.sqlite.yml down
-```
-
-```cmd
-docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 **Mac / Linux — run these one at a time in Terminal:**
 
 ```bash
 mkdir -p ./data/db ./data/uploads
-```
-
-PostgreSQL (the default):
-
-```bash
 docker compose down
 docker compose up -d
-```
-
-SQLite:
-
-```bash
-docker compose -f docker-compose.sqlite.yml down
-docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 **If the error still appears, check these:**
@@ -323,45 +308,42 @@ PORT=3001
 
 Save the file, then run:
 
-PostgreSQL (the default):
-
 ```bash
 docker compose down
 docker compose up -d
-```
-
-SQLite:
-
-```bash
-docker compose -f docker-compose.sqlite.yml down
-docker compose -f docker-compose.sqlite.yml up -d
 ```
 
 ---
 
 ### ❌ App loads but shows no data after updating
 
-**Nothing is lost.** If you installed BlackVault before PostgreSQL support (or chose SQLite),
-your data is in `data/db/vault.db`. Running a plain `docker compose up -d` (or following the
-old `POSTGRES_PASSWORD must be set` error by adding a password to `.env`) starts BlackVault on
-a **new, empty PostgreSQL database** instead of your SQLite file. `vault.db` is not touched.
-The container log shows a `WARNING: BlackVault is running on an EMPTY PostgreSQL database`
-banner when this happens.
+**Nothing is lost.** If you installed BlackVault before PostgreSQL support (or chose SQLite), your
+data is in `data/db/vault.db`. If `.env` was switched to PostgreSQL by hand (for example by adding
+`COMPOSE_PROFILES=postgres` or `DB_PROVIDER=postgres`) without running the migration, BlackVault
+starts on a **new, empty PostgreSQL database** instead. `vault.db` is not touched.
+
+BlackVault checks for exactly this at startup. The container log (`docker compose logs blackvault`)
+shows a `WARNING: BlackVault is running on PostgreSQL, but a SQLite database with data exists`
+banner when **all three** are true: it is running on PostgreSQL, `vault.db` exists and is not empty,
+and there is no `data/db/.migrated` file. The migration tool writes `.migrated` only after a
+verified copy, so a correctly migrated install never shows the banner. Its `vault.db` is the
+rollback copy.
 
 To get back to your data:
 
-1. Stop the PostgreSQL stack:
+1. Stop BlackVault:
    ```bash
    docker compose down
    ```
-2. Open `.env`. Set `DB_PROVIDER=sqlite`, or delete the `DB_PROVIDER` line (no line means SQLite).
+2. Open `.env`. Delete the `COMPOSE_PROFILES=postgres`, `DB_PROVIDER=postgres` and
+   `DATABASE_URL=postgresql://...` lines (or set `DB_PROVIDER=sqlite` and remove the other two).
+   `POSTGRES_PASSWORD` can stay.
 3. Start BlackVault on SQLite:
    ```bash
-   docker compose -f docker-compose.sqlite.yml up -d --remove-orphans
+   docker compose up -d --remove-orphans
    ```
 
-Your records are back. `./update.sh` reads `DB_PROVIDER` from `.env` and keeps using SQLite from
-now on. The empty `data/postgres` folder it created can be left alone or deleted. To move to
+Your records are back. The empty `data/postgres` folder can be left alone or deleted. To move to
 PostgreSQL for real, follow **"Moving from SQLite to PostgreSQL"** below.
 
 ---
@@ -379,11 +361,26 @@ See **"If two data directories exist"** in the Data & Backups section below.
 Check the logs for a specific error message:
 
 ```bash
-docker compose logs -f                                # PostgreSQL
-docker compose -f docker-compose.sqlite.yml logs -f   # SQLite
+docker compose logs -f
 ```
 
 Still stuck? Open a [GitHub issue](https://github.com/doomcrewinc/BlackVaultArmory/issues) and paste the log output.
+
+---
+
+### Known issue: PostgreSQL on Windows is untested
+
+The PostgreSQL database keeps its files in `data\postgres`, a folder on your Windows drive that
+Docker Desktop shares into the database container. This has **not been tested yet**. PostgreSQL is
+strict about who owns its data folder and how files are flushed to disk, and Windows folders shared
+into Linux containers do not always behave the way it expects. Possible symptoms:
+`blackvault-db` keeps restarting, or its log (`docker compose logs db`) mentions *permissions*,
+*ownership* or *could not fsync*.
+
+If you see that, or you just want the proven option on Windows, use SQLite: delete `.env` and the
+empty `data\postgres` folder, run `install.bat` again, and type `2` at the database question.
+SQLite on Windows works the way it always has. Please report what you see in a
+[GitHub issue](https://github.com/doomcrewinc/BlackVaultArmory/issues).
 
 ---
 
@@ -436,9 +433,10 @@ and `.env` to another drive or location in File Explorer.
 **Mac / Linux, SQLite:**
 
 ```bash
-docker compose -f docker-compose.sqlite.yml down
+docker compose down
 cp -r ./data ~/blackvault-backup-$(date +%Y%m%d)
-docker compose -f docker-compose.sqlite.yml up -d
+cp .env ~/blackvault-backup-$(date +%Y%m%d)/
+docker compose up -d
 ```
 
 **Mac / Linux, PostgreSQL:**
@@ -471,12 +469,20 @@ Your data folder is never touched during an update.
 
 ### Moving from SQLite to PostgreSQL
 
-A one-way, verified copy: every table is copied and its row count checked. **Your `vault.db` is
-never modified or deleted** — it stays on disk as your rollback. Uploaded images and documents
-stay where they are. Mac / Linux, run from the BlackVault folder; you need
+A one-way, verified copy: every table is copied, then every row is compared. **Your `vault.db` is
+never modified or deleted.** It stays on disk as your rollback. Uploaded images and documents stay
+where they are. Mac / Linux, run from the BlackVault folder. You need
 [Node.js 20+](https://nodejs.org/) for the copy step.
 
-**Step 1 — Bring your SQLite install up to the current version first.** The copy tool checks
+When the copy is verified, the tool finishes the switch for you:
+- it writes `data/db/.migrated`, a small record of what was copied, so BlackVault knows the
+  `vault.db` still on disk is your rollback copy and not data you are missing;
+- it switches `.env` to PostgreSQL. It saves the old one as `.env.pre-migration` first and
+  changes only the four database lines.
+
+If anything fails, nothing is switched, and BlackVault stays on SQLite.
+
+**Step 1: Bring your SQLite install up to the current version first.** The copy tool checks
 that `vault.db` has every current migration and stops with an error if it does not. Update, then
 open BlackVault once and confirm your records are there:
 
@@ -486,53 +492,57 @@ open BlackVault once and confirm your records are there:
 
 (`update.sh` keeps a SQLite install on SQLite.)
 
-**Step 2 — Back up first.** In BlackVault go to **Settings → Backup** and save a backup, then
-also copy the whole `data` folder (see *Backing up your data* above).
+**Step 2: Back up first.** In BlackVault go to **Settings → Backup** and save a backup, then
+also copy the whole `data` folder and `.env` (see *Backing up your data* above).
 
-**Step 3 — Stop BlackVault:**
+**Step 3: Stop BlackVault:**
 
 ```bash
-docker compose -f docker-compose.sqlite.yml down
+docker compose down
 ```
 
-**Step 4 — Configure PostgreSQL in `.env`.** Open `.env` and set these two lines (add them if
-missing, and keep only one of each):
+**Step 4: Give the new database a password.** This adds one line to `.env` and changes nothing
+else. BlackVault keeps using SQLite until the copy is verified:
 
-```
-DB_PROVIDER=postgres
-POSTGRES_PASSWORD=<paste the output of: openssl rand -hex 24>
+```bash
+grep -q '^POSTGRES_PASSWORD=.' .env || echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
 ```
 
-**Step 5 — Start only the database**, published on this machine (127.0.0.1:55432) for the copy:
+**Step 5: Start only the database.** It is published on this machine only (127.0.0.1:55432)
+for the copy:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --wait db
 ```
 
-**Step 6 — Prepare the copy tool** (installs dependencies and creates the empty tables):
+**Step 6: Prepare the copy tool.** This installs dependencies and creates the empty tables:
 
 ```bash
 npm ci && npm run db:generate
-export SQLITE_URL="file:$(grep '^DATA_DIR=' .env | cut -d= -f2-)/db/vault.db"
-export POSTGRES_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)@127.0.0.1:55432/blackvault"
-DATABASE_URL="$POSTGRES_URL" npx prisma migrate deploy --schema prisma/postgres/schema.prisma
+DATABASE_URL="postgresql://blackvault:$(grep '^POSTGRES_PASSWORD=' .env | tail -n 1 | cut -d= -f2-)@127.0.0.1:55432/blackvault" \
+  npx prisma migrate deploy --schema prisma/postgres/schema.prisma
 ```
 
-**Step 7 — Dry run.** Prints how many rows each table has. Nothing is written:
+**Step 7: Dry run.** It prints how many rows each table has. Nothing is written, not even `.env`:
 
 ```bash
 npm run migrate:to-postgres -- --dry-run
 ```
 
-**Step 8 — Real run.** Copies everything, then verifies it. It must end with
-`VERIFIED: all 16 models match`. If it reports a mismatch, the copy is rolled back — stop here
-and go back to SQLite (see *Rolling back* below).
+It reads `DATA_DIR` and `POSTGRES_PASSWORD` from `.env`, so it finds your `vault.db` and the
+database from Step 5 without any other settings. The first lines say whether `.env` will be
+switched after the copy. It will be if the copy goes into this install's own database.
+
+**Step 8: Real run.** It copies everything and then verifies it. It must end with
+`VERIFIED: all 16 models match`, followed by `Wrote .../data/db/.migrated` and `Switched .env to
+PostgreSQL` (the password is shown as `****`). If it reports a mismatch, the copy is rolled back,
+`.env` is left alone, and you are still on SQLite. Stop there, and open an issue.
 
 ```bash
 npm run migrate:to-postgres
 ```
 
-**Step 9 — Start BlackVault on PostgreSQL:**
+**Step 9: Start BlackVault on PostgreSQL:**
 
 ```bash
 docker compose up -d --build
@@ -540,9 +550,17 @@ docker compose up -d --build
 
 This also closes the temporary database port from Step 5. Check that your records are there.
 
-**Rolling back:** run `docker compose down`, set `DB_PROVIDER=sqlite` in `.env`, then
-`docker compose -f docker-compose.sqlite.yml up -d`. Your `vault.db` is exactly as you left it —
-but anything added while on PostgreSQL is not in it.
+If the tool says it **could not** switch `.env` (for example because `data/db` is owned by the
+container on Linux), it prints the exact lines to add to `.env` and the `.migrated` file to
+create. Do those by hand, then run Step 9.
+
+Running the tool again on a migrated install is refused, because `data/db/.migrated` exists.
+`--force` overrides that. Only use it if you know why.
+
+**Rolling back:** run `docker compose down`, then put the old `.env` back with
+`cp .env.pre-migration .env`, and run `docker compose up -d --remove-orphans`. Your `vault.db` is
+exactly as you left it, but anything added while on PostgreSQL is not in it. Delete
+`data/db/.migrated` too, so a later migration is not refused.
 
 ---
 
@@ -572,14 +590,14 @@ This can happen if the installer was run from different locations, or if `docker
 DATA_DIR=C:\Users\yourname\BlackVault\data
 ```
 
-**Step 3 —** Restart (SQLite):
+**Step 3 —** Restart:
 
 ```bash
-docker compose -f docker-compose.sqlite.yml down
+docker compose down
 ```
 
 ```bash
-docker compose -f docker-compose.sqlite.yml up -d
+docker compose up -d
 ```
 
 ---

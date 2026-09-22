@@ -48,7 +48,7 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
      --shadow-database-url "file:$(mktemp -d)/shadow.db" \
      --script > prisma/sqlite/migrations/$NAME/migration.sql
 
-   # needs a scratch PostgreSQL database; Prisma wipes it
+   # needs a scratch PostgreSQL database; Prisma wipes it (its name must contain shadow, scratch or test)
    mkdir -p prisma/postgres/migrations/$NAME
    npx prisma migrate diff \
      --from-migrations prisma/postgres/migrations \
@@ -59,15 +59,45 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
    Read both files. Hand-edit them where the diff cannot know your intent (renames, backfills).
 4. Run the drift check. It must pass for **both** providers before you open the PR:
    ```bash
-   SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/shadow npm run db:check-drift
+   SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/blackvault_shadow npm run db:check-drift
    ```
-   Without `SHADOW_DATABASE_URL` it checks SQLite only and says it skipped PostgreSQL.
+   Without `SHADOW_DATABASE_URL` it checks SQLite only and says it skipped PostgreSQL. Prisma
+   **wipes** the shadow database, so the check refuses a `SHADOW_DATABASE_URL` that equals
+   `DATABASE_URL` or `POSTGRES_URL`, or whose database name does not contain `shadow`, `scratch`
+   or `test`.
 
 **Why both.** At startup the container runs `prisma migrate deploy` for its own provider only.
 A SQLite migration without its PostgreSQL twin passes every SQLite test, then ships a client
 that queries columns the PostgreSQL database does not have: runtime errors for every
 PostgreSQL user (and the reverse for SQLite users). The drift check fails when a provider's
 migration history does not produce its schema.
+
+## Docker Compose
+
+There is **one** production compose file, `docker-compose.yml`, and plain `docker compose` (no
+`-f`) is correct for every install. `.env` chooses the database: `COMPOSE_PROFILES=postgres` turns
+on the `db` service, and with no profile only the app runs, on SQLite.
+
+That is deliberate. The `update.sh` already on users' machines runs `git pull` and then a bare
+`docker compose build --pull` / `up -d`. Bash keeps executing the old copy of the script, so
+those calls read whatever `docker-compose.yml` says after the pull. An existing SQLite install has
+a `.env` with only `DATA_DIR` and `PORT`, so a bare `docker compose` with no `.env` changes must
+keep meaning SQLite, forever. Keep it that way:
+
+- **Never use `${VAR:?message}` in `docker-compose.yml`.** Compose interpolates it even for a
+  service whose profile is off, so a required `POSTGRES_PASSWORD` fails the SQLite default before
+  anything starts. Use `${VAR:-default}`. An empty `POSTGRES_PASSWORD` with the profile on makes
+  the postgres container itself refuse to start, which is loud enough.
+- The app's `depends_on: db` must keep `required: false`, or SQLite installs fail to start.
+- Every app setting that differs by provider comes from `.env` with a SQLite default
+  (`DB_PROVIDER=${DB_PROVIDER:-sqlite}`, `DATABASE_URL=${DATABASE_URL:-file:...}`).
+- Check both shapes before merging a compose change:
+  ```bash
+  docker compose --env-file /dev/null config --services     # as if no .env: blackvault only
+  docker compose --env-file postgres.env config --services  # a Postgres .env: db, blackvault
+  ```
+- `docker-compose.migrate.yml` is only an overlay for the SQLite -> PostgreSQL copy, and
+  `docker-compose.dev.yml` is only for development.
 
 ## Versioning
 
