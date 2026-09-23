@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   appSettingsFindUnique: vi.fn(),
   firearmFindMany: vi.fn(),
   accessoryFindMany: vi.fn(),
+  gearFindMany: vi.fn(),
   documentFindMany: vi.fn(),
   requireAuth: vi.fn(),
 }));
@@ -19,6 +20,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     accessory: {
       findMany: mocks.accessoryFindMany,
+    },
+    gear: {
+      findMany: mocks.gearFindMany,
     },
     document: {
       findMany: mocks.documentFindMany,
@@ -56,6 +60,10 @@ describe("/api/exports/data backup metadata", () => {
         imageUrl: "/api/files/images/accessory/a1_1.webp",
       },
     ]);
+
+    // This suite is about upload references and metadata; the gear section is
+    // exercised in route.gear.test.ts.
+    mocks.gearFindMany.mockResolvedValue([]);
 
     mocks.documentFindMany.mockResolvedValue([
       {
