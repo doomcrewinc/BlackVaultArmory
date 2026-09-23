@@ -337,6 +337,7 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
         lines,
         `${index + 1}. ${row.category} ${row.name} | Serial: ${row.serialNumber || "N/A"} | Qty: ${row.quantity} | Purchase: ${row.purchasePrice ?? "N/A"} | Value: ${row.currentValue ?? "N/A"}`
       );
+      if (row.imageUrl) pushWrapped(lines, `Image Ref: ${row.imageUrl}`, "   ");
     });
   }
 

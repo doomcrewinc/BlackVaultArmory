@@ -405,8 +405,10 @@ describe("GET /api/exports/full-armory", () => {
     // path's toContain("Bugout") already does.
     expect(text).toContain("Gear");
     expect(text).toContain("1. Knife Bugout | Serial: GSN-1 | Qty: 2 | Purchase: 150 | Value: 130");
-    // The attachments line resolves a gear-linked document by name (see the
-    // GEAR branch above) rather than printing "UNATTACHED".
+    // NOTE: this guards the FIREARM branch of the attachments line, not the gear
+    // one — the beforeEach document is firearm-linked. The gear branch of
+    // `linkedItemName || linkedItemType` is pinned by the JSON-level GEAR test
+    // above, and the expression itself is type-agnostic.
     expect(text).toContain("Linked: Duty Carbine");
   });
 
@@ -417,6 +419,77 @@ describe("GET /api/exports/full-armory", () => {
     const text = extractPdfText(await (await GET(request)).text());
 
     expect(text).toContain("No gear records included");
+  });
+
+  // The PDF is the one renderer where a gear photo used to be invisible: the
+  // Inventory loop emits "Image Ref:" per row, the Gear loop did not. These
+  // three assertions fail if that line is deleted from the Gear loop.
+  it("prints the gear photo reference in the PDF exactly as inventory rows do", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-1",
+        name: "Bugout",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: "GSN-1",
+        category: "KNIFE",
+        quantity: 2,
+        purchasePrice: 150,
+        currentValue: 130,
+        acquisitionDate: new Date("2025-03-01T00:00:00.000Z"),
+        storageLocation: "Safe A",
+        notes: "EDC",
+        imageUrl: "/api/files/images/gear/gear-1.jpg",
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const text = extractPdfText(await (await GET(request)).text());
+
+    expect(text).toContain("Image Ref: /api/files/images/gear/gear-1.jpg");
+    // One for the firearm fixture, one for the gear fixture.
+    expect((text.match(/Image Ref:/g) ?? []).length).toBe(2);
+    // The line sits directly under its own gear row, indented, the way the
+    // inventory loop places it.
+    expect(text).toMatch(
+      /1\. Knife Bugout \| Serial: GSN-1 \| Qty: 2 \| Purchase: 150 \| Value: 130\n\s+Image Ref: \/api\/files\/images\/gear\/gear-1\.jpg/
+    );
+  });
+
+  it("prints no gear Image Ref line when the gear item has no photo", async () => {
+    // The beforeEach gear fixture has imageUrl: null, so only the firearm's
+    // reference may appear.
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const text = extractPdfText(await (await GET(request)).text());
+
+    expect(text).toContain("Image Ref: /api/files/images/firearms/firearm-1.jpg");
+    expect((text.match(/Image Ref:/g) ?? []).length).toBe(1);
+  });
+
+  it("prints no gear Image Ref line in the PDF when images are excluded", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-1",
+        name: "Bugout",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: "GSN-1",
+        category: "KNIFE",
+        quantity: 2,
+        purchasePrice: 150,
+        currentValue: 130,
+        acquisitionDate: new Date("2025-03-01T00:00:00.000Z"),
+        storageLocation: "Safe A",
+        notes: "EDC",
+        imageUrl: "/api/files/images/gear/gear-1.jpg",
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeImages=false");
+    const text = extractPdfText(await (await GET(request)).text());
+
+    expect(text).toContain("1. Knife Bugout");
+    expect(text).not.toContain("Image Ref:");
   });
 
   it("returns non-empty CSV output when there is no export data", async () => {
