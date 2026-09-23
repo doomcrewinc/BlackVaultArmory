@@ -53,9 +53,21 @@ export function DatabaseDownSplash({
   }, [seconds, onRecovered]);
 
   // Take focus off the page behind: it is inert, so a keyboard user left
-  // there would have nothing to tab to.
+  // there would have nothing to tab to. A cold page load clears focus again
+  // once hydration settles, so keep claiming it for a moment — but only while
+  // nothing else holds it, so the user is never yanked back here.
   useEffect(() => {
-    retryButton.current?.focus();
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const claim = () => {
+      const active = document.activeElement;
+      if (!active || active === document.body) retryButton.current?.focus();
+      if (++attempts < 6) timer = setTimeout(claim, 150);
+    };
+
+    timer = setTimeout(claim, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   // The page behind is inert, but its scroll position is not; freeze it so the
@@ -130,9 +142,10 @@ export function DatabaseDownSplash({
         <button
           type="button"
           ref={retryButton}
+          // Never disabled: disabling it mid-probe made the browser drop
+          // focus, and a repeat probe is a harmless GET anyway.
           onClick={() => setSeconds(0)}
-          disabled={checking}
-          className="rounded px-6 py-2 text-sm font-medium text-vault-bg transition-opacity hover:opacity-80 disabled:opacity-50"
+          className="rounded px-6 py-2 text-sm font-medium text-vault-bg transition-opacity hover:opacity-80"
           style={{ backgroundColor: "#00C2FF" }}
         >
           Retry now
