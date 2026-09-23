@@ -86,14 +86,11 @@ const V1_0_MODEL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Count of v1.0 models, all of which must be present in every restore payload.
- * Only models added after v1.0 may be missing from an older backup. Without
- * this, a truncated file holding just `firearms` would wipe every other table
- * and report success.
+ * Keys every restore payload must carry as arrays. Derived by NAME, never by
+ * count or array position: a truncated file holding just `firearms` must be
+ * rejected rather than wiping every other table and reporting success, and only
+ * models added after v1.0 may legitimately be missing from an older backup.
  */
-export const BACKUP_V1_0_MODEL_COUNT = V1_0_MODEL_NAMES.size;
-
-/** Keys every restore payload must carry as arrays. */
 export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.filter(
   ({ model }) => V1_0_MODEL_NAMES.has(model),
 ).map(({ key }) => key);
