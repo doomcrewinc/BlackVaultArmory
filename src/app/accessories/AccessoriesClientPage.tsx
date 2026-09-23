@@ -236,10 +236,12 @@ export function AccessoriesClientPage({
                           href={`/accessories/${accessory.id}`}
                           className="min-w-0"
                         >
-                          <p className="font-semibold text-vault-text truncate flex items-center">
-                            {accessory.name}
+                          <p className="font-semibold text-vault-text flex items-center">
+                            <span className="truncate min-w-0">
+                              {accessory.name}
+                            </span>
                             {accessory.quantity > 1 && (
-                              <span className="ml-2 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
+                              <span className="ml-2 shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
                                 ×{accessory.quantity}
                               </span>
                             )}
@@ -357,10 +359,12 @@ export function AccessoriesClientPage({
                               href={`/accessories/${accessory.id}`}
                               className="block"
                             >
-                              <p className="font-semibold text-vault-text group-hover:text-[#00C2FF] transition-colors truncate max-w-[180px] flex items-center gap-1">
-                                {accessory.name}
+                              <p className="font-semibold text-vault-text group-hover:text-[#00C2FF] transition-colors max-w-[180px] flex items-center gap-1">
+                                <span className="truncate min-w-0">
+                                  {accessory.name}
+                                </span>
                                 {accessory.quantity > 1 && (
-                                  <span className="ml-1 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
+                                  <span className="ml-1 shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
                                     ×{accessory.quantity}
                                   </span>
                                 )}
