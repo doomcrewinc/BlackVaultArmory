@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
+  findMany: vi.fn(),
   revalidateDashboardData: vi.fn(),
 }));
 
@@ -10,6 +11,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     firearm: {
       create: mocks.create,
+      findMany: mocks.findMany,
     },
   },
 }));
@@ -18,7 +20,12 @@ vi.mock("@/lib/dashboard/revalidate-dashboard", () => ({
   revalidateDashboardData: mocks.revalidateDashboardData,
 }));
 
-import { POST } from "./route";
+import { GET, POST } from "./route";
+import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
+
+function getRequest(query = "") {
+  return new NextRequest(`http://localhost/api/firearms${query}`);
+}
 
 function postRequest(body: unknown) {
   return new NextRequest("http://localhost/api/firearms", {
@@ -27,6 +34,49 @@ function postRequest(body: unknown) {
     body: JSON.stringify(body),
   });
 }
+
+describe("GET /api/firearms", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.findMany.mockResolvedValue([]);
+  });
+
+  it("narrows to the section's own where fragment for ?section=handguns", async () => {
+    await GET(getRequest("?section=handguns"));
+
+    const { where } = mocks.findMany.mock.calls[0][0];
+    // The registry is the single source of truth for what a section contains.
+    expect(where).toEqual(
+      firearmWhereForSection(sectionBySlug("handguns")!) ?? undefined,
+    );
+    expect(where).toEqual({
+      nfaClass: "NONE",
+      type: { in: ["PISTOL", "REVOLVER"] },
+    });
+  });
+
+  it("applies no filter when no section is asked for", async () => {
+    await GET(getRequest());
+
+    expect(mocks.findMany.mock.calls[0][0].where).toBeUndefined();
+  });
+
+  it("ignores an unknown slug rather than erroring", async () => {
+    const response = await GET(getRequest("?section=zzz-not-a-section"));
+
+    expect(response.status).toBe(200);
+    expect(mocks.findMany.mock.calls[0][0].where).toBeUndefined();
+  });
+
+  it("answers no firearms — not every firearm — for a gear slug", async () => {
+    const response = await GET(getRequest("?section=optics"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
+    // A section with no firearm source must not degrade into "no filter".
+    expect(mocks.findMany).not.toHaveBeenCalled();
+  });
+});
 
 describe("POST /api/firearms", () => {
   beforeEach(() => {

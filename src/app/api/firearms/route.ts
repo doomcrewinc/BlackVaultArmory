@@ -17,14 +17,19 @@ function fallbackSerialNumber() {
 // GET /api/firearms - List all firearms with build count.
 // An optional ?section=<slug> narrows the list to that category section. An
 // unknown slug is ignored rather than erroring: the page-level 404 handles a bad
-// slug, and a GET should not fail on a stray query parameter.
+// slug, and a GET should not fail on a stray query parameter. A known slug from
+// another group (a gear section) has no firearm source, and a section with no
+// firearm source contains no firearms — so it answers none, not all of them.
 export async function GET(request: NextRequest) {
   try {
     const slug = request.nextUrl.searchParams.get("section");
     const section = slug ? sectionBySlug(slug) : undefined;
-    const where = section
-      ? (firearmWhereForSection(section) ?? undefined)
-      : undefined;
+    let where: object | undefined;
+    if (section) {
+      const fragment = firearmWhereForSection(section);
+      if (!fragment) return NextResponse.json([]);
+      where = fragment;
+    }
 
     const firearms = await prisma.firearm.findMany({
       where,
