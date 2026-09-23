@@ -151,6 +151,35 @@ model Accessory {
   @@index([roundCount])
 }
 
+// Standalone kit — never mounts on a firearm, so no build slots, no round
+// count, no battery. A knife does not go in a build. Later phases add armor,
+// medical and shelter categories plus expiry; see the item-categories spec.
+model Gear {
+  id              String     @id @default(cuid())
+  name            String
+  manufacturer    String?
+  model           String?
+  serialNumber    String?
+  // GearCategory: KNIFE | CASE
+  category        String
+  // One record can stand for several identical items.
+  quantity        Int        @default(1)
+  purchasePrice   Float?
+  currentValue    Float?
+  acquisitionDate DateTime?
+  storageLocation String?
+  notes           String?
+  imageUrl        String?
+  imageSource     String?
+
+  documents       Document[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([category])
+}
+
 model Document {
   id         String    @id @default(cuid())
   name       String
@@ -161,8 +190,10 @@ model Document {
   notes      String?
   firearmId  String?
   accessoryId String?
+  gearId      String?
   firearm    Firearm?  @relation(fields: [firearmId], references: [id], onDelete: SetNull)
   accessory  Accessory? @relation(fields: [accessoryId], references: [id], onDelete: SetNull)
+  gear        Gear?      @relation(fields: [gearId], references: [id], onDelete: SetNull)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
