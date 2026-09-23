@@ -86,6 +86,36 @@ describe("PUT /api/firearms/[id]", () => {
     expect(data).not.toHaveProperty("mgRegistry");
   });
 
+  it("treats an explicit nfaClass null as absent, never as a reset to Title I", async () => {
+    mocks.findUnique.mockResolvedValue(
+      existingFirearm({ nfaClass: "MACHINE_GUN", mgRegistry: "PRE_SAMPLE" }),
+    );
+
+    await PUT(putRequest({ nfaClass: null, name: "Renamed Carbine" }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    // nfaClass is NOT NULL DEFAULT 'NONE': null has no "cleared" meaning, so
+    // the stored class must survive untouched.
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data).not.toHaveProperty("nfaClass");
+    expect(data).not.toHaveProperty("mgRegistry");
+  });
+
+  it("keeps the stored class on an explicit nfaClass null while an explicit mgRegistry null still clears", async () => {
+    mocks.findUnique.mockResolvedValue(
+      existingFirearm({ nfaClass: "MACHINE_GUN", mgRegistry: "PRE_SAMPLE" }),
+    );
+
+    await PUT(putRequest({ nfaClass: null, mgRegistry: null }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.nfaClass).toBe("MACHINE_GUN");
+    expect(data.mgRegistry).toBeNull();
+  });
+
   it("clears the registry when explicitly nulled while the class stays MACHINE_GUN", async () => {
     mocks.findUnique.mockResolvedValue(
       existingFirearm({ nfaClass: "MACHINE_GUN", mgRegistry: "PRE_SAMPLE" }),

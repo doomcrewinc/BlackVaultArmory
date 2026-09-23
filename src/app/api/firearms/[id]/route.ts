@@ -98,7 +98,13 @@ export async function PUT(
       return NextResponse.json({ error: "Firearm not found" }, { status: 404 });
     }
 
-    const touchesClass = nfaClass !== undefined || mgRegistry !== undefined;
+    // nfaClass is NOT NULL DEFAULT 'NONE', so it has no "cleared" state: an
+    // explicit null would otherwise declassify an NFA item to Title I with no
+    // audit trail, which is the one destructive edit on this route. So null is
+    // treated exactly like an absent key. mgRegistry IS nullable, so an
+    // explicit null there does correctly clear it.
+    const classProvided = nfaClass !== undefined && nfaClass !== null;
+    const touchesClass = classProvided || mgRegistry !== undefined;
 
     const updated = await prisma.firearm.update({
       where: { id },
@@ -152,10 +158,10 @@ export async function PUT(
         }),
         ...(touchesClass
           ? normalizeFirearmClassFields({
-              // ?? would also swallow an explicit null (e.g. clearing mgRegistry
-              // while leaving nfaClass as MACHINE_GUN), so absence is checked
-              // with !== undefined rather than nullish coalescing.
-              nfaClass: nfaClass !== undefined ? nfaClass : existing.nfaClass,
+              nfaClass: classProvided ? nfaClass : existing.nfaClass,
+              // Absence is checked with !== undefined rather than ?? so that an
+              // explicit null still clears the registry (e.g. dropping a stale
+              // pre-sample marking while the class stays MACHINE_GUN).
               mgRegistry:
                 mgRegistry !== undefined ? mgRegistry : existing.mgRegistry,
             })
