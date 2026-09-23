@@ -6,6 +6,9 @@ import { ThemeProvider } from "@/components/layout/ThemeProvider";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { GlobalSearch } from "@/components/search/GlobalSearch";
+import { DatabaseGate } from "@/components/layout/DatabaseGate";
+
+const APP_SHELL_ID = "bv-app-shell";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
@@ -38,19 +41,23 @@ export default function RootLayout({
       </head>
       <body className="antialiased bg-vault-bg text-vault-text">
         <ThemeProvider>
-          <div className="flex min-h-svh">
-            <Sidebar />
-            <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
-              <MobileHeader />
-              <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
-                <ErrorBoundary>
-                  {children}
-                </ErrorBoundary>
-              </main>
+          {/* Everything the user can touch lives in this element. DatabaseGate
+              marks it inert during a database outage, which is what makes the
+              app read-only. */}
+          <div id={APP_SHELL_ID}>
+            <div className="flex min-h-svh">
+              <Sidebar />
+              <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
+                <MobileHeader />
+                <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
+                  <ErrorBoundary>{children}</ErrorBoundary>
+                </main>
+              </div>
             </div>
+            <ThemeToggle />
+            <GlobalSearch />
           </div>
-          <ThemeToggle />
-          <GlobalSearch />
+          <DatabaseGate shellId={APP_SHELL_ID} />
         </ThemeProvider>
       </body>
     </html>
