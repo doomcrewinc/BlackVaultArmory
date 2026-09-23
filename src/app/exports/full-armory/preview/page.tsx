@@ -234,6 +234,52 @@ export default function FullArmoryPreviewPage() {
           </section>
         )}
 
+        <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Gear</h2>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-vault-border text-vault-text-faint">
+                  <th className="py-2 pr-4 text-left">Category</th>
+                  <th className="py-2 pr-4 text-left">Name</th>
+                  <th className="py-2 pr-4 text-left">Manufacturer</th>
+                  <th className="py-2 pr-4 text-left">Model</th>
+                  <th className="py-2 pr-4 text-left">Serial</th>
+                  <th className="py-2 pr-4 text-right">Qty</th>
+                  <th className="py-2 pr-4 text-right">Purchase</th>
+                  <th className="py-2 pr-4 text-right">Value</th>
+                  <th className="py-2 pr-4 text-left">Storage</th>
+                  <th className="py-2 text-left">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.gear.length === 0 ? (
+                  <tr>
+                    <td className="py-3 text-vault-text-faint" colSpan={10}>
+                      No gear records included for this export.
+                    </td>
+                  </tr>
+                ) : (
+                  data.gear.map((item) => (
+                    <tr key={item.gearId} className="border-b border-vault-border/60">
+                      <td className="py-2 pr-4">{item.category}</td>
+                      <td className="py-2 pr-4">{item.name}</td>
+                      <td className="py-2 pr-4">{item.manufacturer || "—"}</td>
+                      <td className="py-2 pr-4">{item.model || "—"}</td>
+                      <td className="py-2 pr-4 font-mono">{item.serialNumber || "—"}</td>
+                      <td className="py-2 pr-4 text-right">{item.quantity}</td>
+                      <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
+                      <td className="py-2 pr-4 text-right">{formatCurrency(item.currentValue)}</td>
+                      <td className="py-2 pr-4">{item.storageLocation || "—"}</td>
+                      <td className="py-2">{item.notes || "—"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         {options.includeDocuments && (
           <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Document Index</h2>

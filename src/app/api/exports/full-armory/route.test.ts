@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   findAccessories: vi.fn(),
   findDocuments: vi.fn(),
   findAmmoStocks: vi.fn(),
+  findGear: vi.fn(),
 }));
 
 vi.mock("@/lib/server/auth", () => ({
@@ -28,6 +29,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     document: {
       findMany: mocks.findDocuments,
+    },
+    gear: {
+      findMany: mocks.findGear,
     },
   },
 }));
@@ -103,6 +107,23 @@ describe("GET /api/exports/full-armory", () => {
       { id: "ammo-2", caliber: "5.56", quantity: 200 },
       { id: "ammo-3", caliber: "9mm", quantity: 120 },
     ]);
+
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-1",
+        name: "Bugout",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: "GSN-1",
+        category: "KNIFE",
+        quantity: 2,
+        purchasePrice: 150,
+        currentValue: 130,
+        acquisitionDate: new Date("2025-03-01T00:00:00.000Z"),
+        storageLocation: "Safe A",
+        notes: "EDC",
+      },
+    ]);
   });
 
   it("returns JSON payload aligned with new include toggles", async () => {
@@ -126,6 +147,65 @@ describe("GET /api/exports/full-armory", () => {
     expect(json.items[0].purchasePrice).toBeNull();
     expect(json.attachments).toHaveLength(0);
     expect(json.ammo).toHaveLength(3);
+    expect(json.gear).toHaveLength(1);
+    expect(json.gear[0].serialNumber).toBe("");
+    expect(json.gear[0].purchasePrice).toBeNull();
+    expect(json.gear[0].currentValue).toBeNull();
+    expect(json.summary.totalGear).toBe(1);
+  });
+
+  it("includes gear in the payload, totalItems, and the value totals", async () => {
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const response = await GET(request);
+    const json = await response.json();
+
+    expect(json.gear).toEqual([
+      {
+        gearId: "gear-1",
+        name: "Bugout",
+        category: "Knife",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: "GSN-1",
+        quantity: 2,
+        purchasePrice: 150,
+        currentValue: 130,
+        acquisitionDate: "2025-03-01",
+        storageLocation: "Safe A",
+        notes: "EDC",
+      },
+    ]);
+    expect(json.summary.totalGear).toBe(1);
+    // 1 firearm + 1 accessory + 1 gear item
+    expect(json.summary.totalItems).toBe(3);
+    // firearm purchase (1200) + accessory purchase (200) + gear purchase (150)
+    expect(json.summary.totalPurchaseValue).toBe(1550);
+    // firearm currentValue (1450) + gear currentValue (130); accessories never contribute
+    expect(json.summary.totalReplacementValue).toBe(1580);
+  });
+
+  it("falls back to the raw category when a gear item has an unrecognised category", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-2",
+        name: "Mystery Item",
+        manufacturer: null,
+        model: null,
+        serialNumber: null,
+        category: "ARMOR",
+        quantity: 1,
+        purchasePrice: null,
+        currentValue: null,
+        acquisitionDate: null,
+        storageLocation: null,
+        notes: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.gear[0].category).toBe("ARMOR");
   });
 
   it("returns 400 for unsupported format values", async () => {
@@ -147,6 +227,8 @@ describe("GET /api/exports/full-armory", () => {
     expect(csv).toContain("section");
     expect(csv).toContain("attachments");
     expect(csv).toContain("/api/files/documents/receipt-1.jpg");
+    expect(csv).toContain("gear");
+    expect(csv).toContain("Bugout");
   });
 
   it("returns PDF bytes for download format", async () => {
@@ -164,6 +246,7 @@ describe("GET /api/exports/full-armory", () => {
     mocks.findAccessories.mockResolvedValue([]);
     mocks.findDocuments.mockResolvedValue([]);
     mocks.findAmmoStocks.mockResolvedValue([]);
+    mocks.findGear.mockResolvedValue([]);
 
     const request = new NextRequest("http://localhost/api/exports/full-armory?format=csv");
     const response = await GET(request);

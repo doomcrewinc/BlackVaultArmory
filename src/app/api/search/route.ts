@@ -1,13 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { containsInsensitive } from "@/lib/db/text-search";
+import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+
+function gearCategoryLabel(category: string): string {
+  return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
 
 export async function GET(request: NextRequest) {
   const rawQ = request.nextUrl.searchParams.get("q") ?? "";
   // Not lowercased: containsInsensitive handles case on both providers.
   const q = rawQ.trim();
 
-  const empty = { firearms: [], accessories: [], ammo: [], builds: [] };
+  const empty = { firearms: [], accessories: [], ammo: [], builds: [], gear: [] };
 
   if (q.length < 2) {
     return NextResponse.json(empty);
@@ -58,6 +63,19 @@ export async function GET(request: NextRequest) {
     select: { id: true, name: true, firearmId: true },
   });
 
+  const gear = await prisma.gear.findMany({
+    where: {
+      OR: [
+        { name: containsInsensitive(q) },
+        { manufacturer: containsInsensitive(q) },
+        { model: containsInsensitive(q) },
+        { category: containsInsensitive(q) },
+      ],
+    },
+    take: 5,
+    select: { id: true, name: true, manufacturer: true, model: true, category: true },
+  });
+
   return NextResponse.json({
     firearms: firearms.map((f) => ({
       id: f.id,
@@ -82,6 +100,14 @@ export async function GET(request: NextRequest) {
       name: b.name,
       subtitle: "Build",
       url: `/vault/${b.firearmId}`,
+    })),
+    gear: gear.map((g) => ({
+      id: g.id,
+      name: g.name,
+      subtitle: g.manufacturer
+        ? `${g.manufacturer} · ${gearCategoryLabel(g.category)}`
+        : gearCategoryLabel(g.category),
+      url: `/gear/item/${g.id}`,
     })),
   });
 }

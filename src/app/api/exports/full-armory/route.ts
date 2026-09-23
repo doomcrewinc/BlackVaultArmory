@@ -10,6 +10,11 @@ import {
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
 import { requireAuth } from "@/lib/server/auth";
+import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+
+function gearCategoryLabel(category: string): string {
+  return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
 
 type FirearmExportRecord = {
   id: string;
@@ -60,6 +65,21 @@ type ExportAmmoRecord = {
   quantity: number;
   lowStockAlert: number | null;
   purchasePrice: number | null;
+  notes: string | null;
+};
+
+type GearExportRecord = {
+  id: string;
+  name: string;
+  manufacturer: string | null;
+  model: string | null;
+  serialNumber: string | null;
+  category: string;
+  quantity: number;
+  purchasePrice: number | null;
+  currentValue: number | null;
+  acquisitionDate: Date | null;
+  storageLocation: string | null;
   notes: string | null;
 };
 
@@ -138,6 +158,7 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     { section: "summary", key: "totalItems", value: payload.summary.totalItems },
     { section: "summary", key: "totalFirearms", value: payload.summary.totalFirearms },
     { section: "summary", key: "totalAccessories", value: payload.summary.totalAccessories },
+    { section: "summary", key: "totalGear", value: payload.summary.totalGear },
     { section: "summary", key: "totalAmmoStocks", value: payload.summary.totalAmmoStocks },
     { section: "summary", key: "totalDocuments", value: payload.summary.totalDocuments },
     { section: "summary", key: "totalReceipts", value: payload.summary.totalReceipts },
@@ -157,8 +178,12 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     section: "attachments",
     ...flattenRecord(row as unknown as Record<string, unknown>),
   }));
+  const gearRows = payload.gear.map((row) => ({
+    section: "gear",
+    ...flattenRecord(row as unknown as Record<string, unknown>),
+  }));
 
-  return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows]);
+  return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows, ...gearRows]);
 }
 
 function pdfEscape(value: string): string {
@@ -297,6 +322,18 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     });
   }
 
+  lines.push("", "Gear");
+  if (payload.gear.length === 0) {
+    lines.push("No gear records included");
+  } else {
+    payload.gear.forEach((row, index) => {
+      pushWrapped(
+        lines,
+        `${index + 1}. ${row.category} ${row.name} | Serial: ${row.serialNumber || "N/A"} | Qty: ${row.quantity} | Purchase: ${row.purchasePrice ?? "N/A"} | Value: ${row.currentValue ?? "N/A"}`
+      );
+    });
+  }
+
   return lines;
 }
 
@@ -368,6 +405,23 @@ export async function GET(request: NextRequest) {
           orderBy: [{ caliber: "asc" }, { brand: "asc" }],
         })
       : []) as ExportAmmoRecord[];
+    const gearItems = (await prisma.gear.findMany({
+      select: {
+        id: true,
+        name: true,
+        manufacturer: true,
+        model: true,
+        serialNumber: true,
+        category: true,
+        quantity: true,
+        purchasePrice: true,
+        currentValue: true,
+        acquisitionDate: true,
+        storageLocation: true,
+        notes: true,
+      },
+      orderBy: [{ manufacturer: "asc" }, { name: "asc" }],
+    })) as GearExportRecord[];
 
     const receiptDocuments = documents.filter((doc) => doc.type === "RECEIPT");
 
@@ -470,12 +524,33 @@ export async function GET(request: NextRequest) {
         }))
       : [];
 
+    const gearRows = gearItems.map((item) => ({
+      gearId: item.id,
+      name: item.name,
+      category: gearCategoryLabel(item.category),
+      manufacturer: item.manufacturer || "",
+      model: item.model || "",
+      serialNumber: exportOptions.includeSerialNumbers ? item.serialNumber || "" : "",
+      quantity: item.quantity ?? 0,
+      purchasePrice: exportOptions.includeValue ? (item.purchasePrice ?? null) : null,
+      currentValue: exportOptions.includeValue ? (item.currentValue ?? null) : null,
+      acquisitionDate: toISODate(item.acquisitionDate),
+      storageLocation: item.storageLocation || "",
+      notes: item.notes ?? "",
+    }));
+
+    // Accessories participate in totalItems and totalPurchaseValue but never carry a
+    // replacementValue (their record has no currentValue field, so that row's
+    // contribution is always 0). Gear does track currentValue, so it feeds all three
+    // the same way firearms do.
     const totalPurchaseValue = exportOptions.includeValue
-      ? itemRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
+      ? itemRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0) +
+        gearRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
       : 0;
 
     const totalReplacementValue = exportOptions.includeValue
-      ? itemRows.reduce((sum, item) => sum + (typeof item.replacementValue === "number" ? item.replacementValue : 0), 0)
+      ? itemRows.reduce((sum, item) => sum + (typeof item.replacementValue === "number" ? item.replacementValue : 0), 0) +
+        gearRows.reduce((sum, item) => sum + (typeof item.currentValue === "number" ? item.currentValue : 0), 0)
       : 0;
 
     const payload: FullArmoryExportResponse = {
@@ -486,9 +561,10 @@ export async function GET(request: NextRequest) {
         exportOptions,
       },
       summary: {
-        totalItems: itemRows.length,
+        totalItems: itemRows.length + gearRows.length,
         totalFirearms: firearms.length,
         totalAccessories: accessories.length,
+        totalGear: gearRows.length,
         totalDocuments: attachmentsRows.length,
         totalReceipts: receiptDocuments.length,
         totalAmmoStocks: ammoRows.length,
@@ -504,6 +580,7 @@ export async function GET(request: NextRequest) {
       items: itemRows,
       attachments: attachmentsRows,
       ammo: ammoRows,
+      gear: gearRows,
     };
 
     if (format === "csv") {

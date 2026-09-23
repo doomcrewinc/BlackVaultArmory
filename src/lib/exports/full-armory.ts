@@ -56,6 +56,21 @@ export interface FullArmoryAmmoRow {
   notes: string;
 }
 
+export interface FullArmoryGearRow {
+  gearId: string;
+  name: string;
+  category: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  quantity: number;
+  purchasePrice: number | null;
+  currentValue: number | null;
+  acquisitionDate: string;
+  storageLocation: string;
+  notes: string;
+}
+
 export interface FullArmoryExportResponse {
   meta: {
     generatedAt: string;
@@ -67,6 +82,7 @@ export interface FullArmoryExportResponse {
     totalItems: number;
     totalFirearms: number;
     totalAccessories: number;
+    totalGear: number;
     totalDocuments: number;
     totalReceipts: number;
     totalAmmoStocks: number;
@@ -82,6 +98,7 @@ export interface FullArmoryExportResponse {
   items: FullArmoryItemRow[];
   attachments: FullArmoryAttachmentRow[];
   ammo: FullArmoryAmmoRow[];
+  gear: FullArmoryGearRow[];
 }
 
 export interface VisualEvidenceImage {
