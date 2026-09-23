@@ -27,6 +27,14 @@ model Firearm {
   serialNumber    String   @unique
   // FirearmType: PISTOL | RIFLE | SHOTGUN | SMG | PCC | REVOLVER | BOLT_ACTION | LEVER_ACTION
   type            String
+  // NfaClass: NONE | SBR | SBS | MACHINE_GUN | AOW | DESTRUCTIVE_DEVICE
+  // How the firearm is regulated — independent of `type`. A select-fire
+  // pistol, PDW or rifle is all MACHINE_GUN. Defaults to NONE: nothing infers
+  // a legal classification from existing data.
+  nfaClass        String   @default("NONE")
+  // MgRegistry: TRANSFERABLE | PRE_SAMPLE | POST_SAMPLE
+  // Only meaningful when nfaClass = MACHINE_GUN; cleared server-side otherwise.
+  mgRegistry      String?
   acquisitionDate DateTime
   purchasePrice   Float?
   currentValue    Float?
@@ -49,6 +57,7 @@ model Firearm {
 
   @@index([caliber])
   @@index([type])
+  @@index([nfaClass])
 }
 
 // ─── BUILDS ───────────────────────────────────────────────────
@@ -115,6 +124,10 @@ model Accessory {
   // Round count persists with the accessory across all builds
   roundCount             Int             @default(0)
   roundCountLogs         RoundCountLog[]
+
+  // One record can stand for several identical items, e.g. 12 magazines.
+  // Builds still attach a specific record, so the configurator is unaffected.
+  quantity               Int             @default(1)
 
   buildSlots             BuildSlot[]
   documents              Document[]

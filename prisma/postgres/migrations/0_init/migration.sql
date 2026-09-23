@@ -8,6 +8,8 @@ CREATE TABLE "Firearm" (
     "compatibleCalibers" TEXT,
     "serialNumber" TEXT NOT NULL,
     "type" TEXT NOT NULL,
+    "nfaClass" TEXT NOT NULL DEFAULT 'NONE',
+    "mgRegistry" TEXT,
     "acquisitionDate" TIMESTAMP(3) NOT NULL,
     "purchasePrice" DOUBLE PRECISION,
     "currentValue" DOUBLE PRECISION,
@@ -66,6 +68,7 @@ CREATE TABLE "Accessory" (
     "imageUrl" TEXT,
     "imageSource" TEXT,
     "roundCount" INTEGER NOT NULL DEFAULT 0,
+    "quantity" INTEGER NOT NULL DEFAULT 1,
     "compatibleFirearmTypes" TEXT,
     "compatibleCalibers" TEXT,
     "hasBattery" BOOLEAN NOT NULL DEFAULT false,
@@ -275,6 +278,9 @@ CREATE INDEX "Firearm_caliber_idx" ON "Firearm"("caliber");
 
 -- CreateIndex
 CREATE INDEX "Firearm_type_idx" ON "Firearm"("type");
+
+-- CreateIndex
+CREATE INDEX "Firearm_nfaClass_idx" ON "Firearm"("nfaClass");
 
 -- CreateIndex
 CREATE INDEX "Build_firearmId_idx" ON "Build"("firearmId");
