@@ -38,7 +38,7 @@ export interface FullArmoryAttachmentRow {
   type: string;
   name: string;
   linkedItemId: string;
-  linkedItemType: "FIREARM" | "ACCESSORY" | "UNATTACHED";
+  linkedItemType: "FIREARM" | "ACCESSORY" | "GEAR" | "UNATTACHED";
   linkedItemName: string;
   mimeType: string;
   fileSize: number | string;

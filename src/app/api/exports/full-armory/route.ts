@@ -7,6 +7,7 @@ import {
   type ExportFormat,
   type ExportPreset,
   parseExportOptionsFromSearchParams,
+  type FullArmoryAttachmentRow,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
 import { requireAuth } from "@/lib/server/auth";
@@ -50,8 +51,10 @@ type ExportDocumentRecord = {
   name: string;
   firearmId: string | null;
   accessoryId: string | null;
+  gearId: string | null;
   firearm: { id: string; name: string } | null;
   accessory: { id: string; name: string } | null;
+  gear: { id: string; name: string } | null;
   mimeType: string | null;
   fileSize: number | null;
   fileUrl: string;
@@ -90,6 +93,7 @@ type PrismaWithOptionalDocument = typeof prisma & {
       include: {
         firearm: { select: { id: true; name: true } };
         accessory: { select: { id: true; name: true } };
+        gear: { select: { id: true; name: true } };
       };
     }) => Promise<ExportDocumentRecord[]>;
   };
@@ -103,6 +107,7 @@ async function findDocumentsForExport(): Promise<ExportDocumentRecord[]> {
     include: {
       firearm: { select: { id: true, name: true } },
       accessory: { select: { id: true, name: true } },
+      gear: { select: { id: true, name: true } },
     },
   });
 }
@@ -491,19 +496,21 @@ export async function GET(request: NextRequest) {
 
     const attachmentsRows: FullArmoryExportResponse["attachments"] = exportOptions.includeDocuments
       ? documents.map((doc) => {
-          const linkedItemType: "FIREARM" | "ACCESSORY" | "UNATTACHED" = doc.firearmId
+          const linkedItemType: FullArmoryAttachmentRow["linkedItemType"] = doc.firearmId
             ? "FIREARM"
             : doc.accessoryId
               ? "ACCESSORY"
-              : "UNATTACHED";
+              : doc.gearId
+                ? "GEAR"
+                : "UNATTACHED";
 
           return {
             documentId: doc.id,
             type: doc.type,
             name: doc.name,
-            linkedItemId: doc.firearmId || doc.accessoryId || "",
+            linkedItemId: doc.firearmId || doc.accessoryId || doc.gearId || "",
             linkedItemType,
-            linkedItemName: doc.firearm?.name || doc.accessory?.name || "",
+            linkedItemName: doc.firearm?.name || doc.accessory?.name || doc.gear?.name || "",
             mimeType: doc.mimeType ?? "",
             fileSize: doc.fileSize ?? "",
             fileUrl: doc.fileUrl,

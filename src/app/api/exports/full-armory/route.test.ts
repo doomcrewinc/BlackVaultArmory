@@ -81,8 +81,10 @@ describe("GET /api/exports/full-armory", () => {
         name: "Firearm Receipt",
         firearmId: "firearm-1",
         accessoryId: null,
+        gearId: null,
         firearm: { id: "firearm-1", name: "Duty Carbine" },
         accessory: null,
+        gear: null,
         mimeType: "image/jpeg",
         fileSize: 5120,
         fileUrl: "/api/files/documents/receipt-1.jpg",
@@ -206,6 +208,69 @@ describe("GET /api/exports/full-armory", () => {
     const json = await (await GET(request)).json();
 
     expect(json.gear[0].category).toBe("ARMOR");
+  });
+
+  it("exports a gear-attached document as GEAR with the gear id and name", async () => {
+    mocks.findDocuments.mockResolvedValue([
+      {
+        id: "doc-gear-1",
+        type: "RECEIPT",
+        name: "Knife Receipt",
+        firearmId: null,
+        accessoryId: null,
+        gearId: "gear-1",
+        firearm: null,
+        accessory: null,
+        gear: { id: "gear-1", name: "Bugout" },
+        mimeType: "image/jpeg",
+        fileSize: 2048,
+        fileUrl: "/api/files/documents/gear-receipt.jpg",
+        createdAt: new Date("2025-03-02T10:00:00.000Z"),
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.attachments).toHaveLength(1);
+    expect(json.attachments[0]).toMatchObject({
+      documentId: "doc-gear-1",
+      linkedItemType: "GEAR",
+      linkedItemId: "gear-1",
+      linkedItemName: "Bugout",
+    });
+    expect(mocks.findDocuments.mock.calls[0][0].include.gear).toEqual({
+      select: { id: true, name: true },
+    });
+  });
+
+  it("still reports an unlinked document as UNATTACHED", async () => {
+    mocks.findDocuments.mockResolvedValue([
+      {
+        id: "doc-loose-1",
+        type: "RECEIPT",
+        name: "Loose Receipt",
+        firearmId: null,
+        accessoryId: null,
+        gearId: null,
+        firearm: null,
+        accessory: null,
+        gear: null,
+        mimeType: "application/pdf",
+        fileSize: 1024,
+        fileUrl: "/api/files/documents/loose.pdf",
+        createdAt: new Date("2025-03-03T10:00:00.000Z"),
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.attachments[0]).toMatchObject({
+      linkedItemType: "UNATTACHED",
+      linkedItemId: "",
+      linkedItemName: "",
+    });
   });
 
   it("returns 400 for unsupported format values", async () => {
