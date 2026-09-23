@@ -50,6 +50,15 @@ function normalizeIncludeUploadReferences(value: unknown): boolean {
   return typeof value === "boolean" ? value : true;
 }
 
+// Firearm, Accessory and Gear are the only models this route emits that carry a
+// serialNumber. None of them may keep it when includeSerialNumbers is off —
+// including the Accessory rows nested inside a build's slots.
+function withoutSerialNumber(row: object): Record<string, unknown> {
+  const rest = { ...row } as Record<string, unknown>;
+  delete rest.serialNumber;
+  return rest;
+}
+
 function isLocalUploadUrl(url: string): boolean {
   if (!url.startsWith("/api/files/")) return false;
   if (url.includes("..")) return false;
@@ -362,17 +371,12 @@ export async function GET(request: NextRequest) {
     // Sequential queries — SQLite connection_limit=1 cannot handle concurrent reads
     if (flags.firearms) {
       const rows = await prisma.firearm.findMany({ orderBy: [{ manufacturer: "asc" }, { model: "asc" }, { name: "asc" }] });
-      payload.firearms = includeSerialNumbers
-        ? rows
-        : rows.map((row) => {
-            const rest = { ...row } as Record<string, unknown>;
-            delete rest.serialNumber;
-            return rest;
-          });
+      payload.firearms = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
     }
 
     if (flags.accessories) {
-      payload.accessories = await prisma.accessory.findMany({ orderBy: [{ manufacturer: "asc" }, { name: "asc" }] });
+      const rows = await prisma.accessory.findMany({ orderBy: [{ manufacturer: "asc" }, { name: "asc" }] });
+      payload.accessories = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
     }
 
     // Gear carries a serialNumber, so it honours includeSerialNumbers the same
@@ -380,17 +384,11 @@ export async function GET(request: NextRequest) {
     // the user asked to strip serials from.
     if (flags.gear) {
       const rows = await prisma.gear.findMany({ orderBy: [{ category: "asc" }, { manufacturer: "asc" }, { name: "asc" }] });
-      payload.gear = includeSerialNumbers
-        ? rows
-        : rows.map((row) => {
-            const rest = { ...row } as Record<string, unknown>;
-            delete rest.serialNumber;
-            return rest;
-          });
+      payload.gear = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
     }
 
     if (flags.builds) {
-      payload.builds = await prisma.build.findMany({
+      const rows = await prisma.build.findMany({
         include: {
           slots: {
             include: { accessory: true },
@@ -399,6 +397,17 @@ export async function GET(request: NextRequest) {
         },
         orderBy: [{ firearmId: "asc" }, { name: "asc" }],
       });
+      // A build slot embeds the whole Accessory row, so the same strip has to
+      // reach one level down — otherwise an accessory mounted on a build keeps
+      // the serial the top-level accessories section just dropped.
+      payload.builds = includeSerialNumbers
+        ? rows
+        : rows.map((row) => ({
+            ...row,
+            slots: row.slots.map((slot) =>
+              slot.accessory ? { ...slot, accessory: withoutSerialNumber(slot.accessory) } : slot
+            ),
+          }));
     }
 
     if (flags.ammo) {
