@@ -37,7 +37,8 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
    ```bash
    npm run gen:schemas
    ```
-3. Create a migration for **each** provider, with the same name and timestamp:
+3. Add an **incremental** SQLite migration. That history is append-only: SQLite installs
+   shipped long before PostgreSQL was an option here.
    ```bash
    NAME=20260922120000_add_widget   # <UTC timestamp>_<snake_case_name>
 
@@ -47,17 +48,29 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
      --to-schema-datamodel prisma/sqlite/schema.prisma \
      --shadow-database-url "file:$(mktemp -d)/shadow.db" \
      --script > prisma/sqlite/migrations/$NAME/migration.sql
-
-   # needs a scratch PostgreSQL database; Prisma wipes it (its name needs shadow, scratch or test as a word)
-   mkdir -p prisma/postgres/migrations/$NAME
-   npx prisma migrate diff \
-     --from-migrations prisma/postgres/migrations \
-     --to-schema-datamodel prisma/postgres/schema.prisma \
-     --shadow-database-url "$SHADOW_DATABASE_URL" \
-     --script > prisma/postgres/migrations/$NAME/migration.sql
    ```
-   Read both files. Hand-edit them where the diff cannot know your intent (renames, backfills).
-4. Run the drift check. It must pass for **both** providers before you open the PR:
+   Read the file. Hand-edit it where the diff cannot know your intent (renames, backfills).
+4. Regenerate the **squashed** PostgreSQL baseline in place. PostgreSQL has exactly one
+   migration, `prisma/postgres/migrations/0_init`, rewritten from empty on every schema
+   change. Do **not** add an incremental folder beside it — an incremental migration against
+   a squashed baseline makes the two histories disagree silently.
+   ```bash
+   npx prisma migrate diff \
+     --from-empty \
+     --to-schema-datamodel prisma/postgres/schema.prisma \
+     --script > prisma/postgres/migrations/0_init/migration.sql
+   ```
+   No shadow database is needed here: `--from-empty` replays no history.
+
+   > ⚠️ **Rewriting `0_init` in place is only safe while no tagged release has shipped
+   > PostgreSQL to a user.** `prisma migrate deploy` stores a checksum per applied migration,
+   > so once someone has applied `0_init`, changing it fails their next update with a
+   > checksum mismatch and leaves their database stuck until they intervene by hand. From the
+   > first tag that ships PostgreSQL onward, `0_init` is frozen and every PostgreSQL change
+   > becomes its own timestamped migration — `--from-migrations prisma/postgres/migrations`
+   > with a scratch `--shadow-database-url` (Prisma wipes it; its name needs `shadow`,
+   > `scratch` or `test` as a word) instead of `--from-empty`. Check `git tag` first.
+5. Run the drift check. It must pass for **both** providers before you open the PR:
    ```bash
    SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/blackvault_shadow npm run db:check-drift
    ```
