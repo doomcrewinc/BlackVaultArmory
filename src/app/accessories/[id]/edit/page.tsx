@@ -29,6 +29,7 @@ interface Accessory {
   lastBatteryChangeDate: string | null;
   replacementIntervalDays: number | null;
   roundCount: number;
+  quantity: number;
 }
 
 function toDateInputValue(dateStr: string | null): string {
@@ -57,12 +58,13 @@ export default function EditAccessoryPage() {
   const [caliberInput, setCaliberInput] = useState("");
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [quantity, setQuantity] = useState("1");
 
   const [priorRounds, setPriorRounds] = useState("");
   const [priorRoundsNote, setPriorRoundsNote] = useState("");
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
-    c.toLowerCase().includes(caliberInput.toLowerCase())
+    c.toLowerCase().includes(caliberInput.toLowerCase()),
   );
 
   useEffect(() => {
@@ -77,6 +79,7 @@ export default function EditAccessoryPage() {
           setAccessory(data);
           setCaliberInput(data.caliber ?? "");
           setImageUrl(data.imageUrl ?? "");
+          setQuantity(String(data.quantity ?? 1));
         }
         setDataLoading(false);
       })
@@ -102,15 +105,21 @@ export default function EditAccessoryPage() {
       serialNumber: (data.get("serialNumber") as string) || null,
       type: data.get("type") as string,
       caliber: caliberInput || null,
+      quantity: data.get("quantity") as string,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
-      purchasePrice: data.get("purchasePrice") ? Number(data.get("purchasePrice")) : null,
+      purchasePrice: data.get("purchasePrice")
+        ? Number(data.get("purchasePrice"))
+        : null,
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
       imageSource: imageUrl ? "uploaded" : null,
       hasBattery: data.get("hasBattery") === "on",
       batteryType: (data.get("batteryType") as string) || null,
-      lastBatteryChangeDate: (data.get("lastBatteryChangeDate") as string) || null,
-      replacementIntervalDays: data.get("replacementIntervalDays") ? Number(data.get("replacementIntervalDays")) : null,
+      lastBatteryChangeDate:
+        (data.get("lastBatteryChangeDate") as string) || null,
+      replacementIntervalDays: data.get("replacementIntervalDays")
+        ? Number(data.get("replacementIntervalDays"))
+        : null,
     };
 
     try {
@@ -164,7 +173,10 @@ export default function EditAccessoryPage() {
       <div className="flex flex-col items-center justify-center min-h-full gap-4">
         <AlertCircle className="w-10 h-10 text-[#E53935]" />
         <p className="text-[#E53935]">Invalid accessory route.</p>
-        <Link href="/accessories" className="text-sm text-[#00C2FF] hover:underline">
+        <Link
+          href="/accessories"
+          className="text-sm text-[#00C2FF] hover:underline"
+        >
           Back to Accessories
         </Link>
       </div>
@@ -176,7 +188,10 @@ export default function EditAccessoryPage() {
       <div className="flex flex-col items-center justify-center min-h-full gap-4">
         <AlertCircle className="w-10 h-10 text-[#E53935]" />
         <p className="text-[#E53935]">{dataError ?? "Accessory not found"}</p>
-        <Link href="/accessories" className="text-sm text-[#00C2FF] hover:underline">
+        <Link
+          href="/accessories"
+          className="text-sm text-[#00C2FF] hover:underline"
+        >
           Back to Accessories
         </Link>
       </div>
@@ -202,8 +217,12 @@ export default function EditAccessoryPage() {
 
       <div className="max-w-2xl mx-auto px-6 py-8">
         <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">Edit {accessory.name}</h2>
-          <p className="text-sm text-vault-text-muted">Update the details for this accessory.</p>
+          <h2 className="text-xl font-bold text-vault-text mb-1">
+            Edit {accessory.name}
+          </h2>
+          <p className="text-sm text-vault-text-muted">
+            Update the details for this accessory.
+          </p>
         </div>
 
         {error && (
@@ -319,26 +338,47 @@ export default function EditAccessoryPage() {
                     placeholder="e.g. 5.56x45mm"
                     className={INPUT_CLASS}
                   />
-                  {caliberDropdownOpen && filteredCalibers.length > 0 && caliberInput && (
-                    <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                      {filteredCalibers.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          onPointerDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setCaliberInput(c);
-                            setCaliberDropdownOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
-                        >
-                          {c}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {caliberDropdownOpen &&
+                    filteredCalibers.length > 0 &&
+                    caliberInput && (
+                      <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                        {filteredCalibers.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            onPointerDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setCaliberInput(c);
+                              setCaliberDropdownOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
+                          >
+                            {c}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                 </div>
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="quantity" className={LABEL_CLASS}>
+                Quantity
+              </label>
+              <input
+                id="quantity"
+                name="quantity"
+                type="number"
+                min={1}
+                step={1}
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+                className={INPUT_CLASS}
+              />
+              <p className="mt-1 text-[11px] text-vault-text-faint">
+                How many identical items this record stands for.
+              </p>
             </div>
           </fieldset>
 
@@ -384,8 +424,6 @@ export default function EditAccessoryPage() {
             </div>
           </fieldset>
 
-
-
           {/* Prior Use — only show if no rounds logged yet */}
           {accessory.roundCount === 0 && (
             <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
@@ -393,11 +431,14 @@ export default function EditAccessoryPage() {
                 Prior Use
               </legend>
               <p className="text-xs text-vault-text-muted">
-                If this accessory has rounds from prior use, enter them here to set a baseline round count.
+                If this accessory has rounds from prior use, enter them here to
+                set a baseline round count.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className={LABEL_CLASS}>Round Count from Prior Use</label>
+                  <label className={LABEL_CLASS}>
+                    Round Count from Prior Use
+                  </label>
                   <input
                     type="number"
                     min={1}
@@ -429,24 +470,61 @@ export default function EditAccessoryPage() {
             </legend>
 
             <label className="flex items-center gap-2 text-sm text-vault-text">
-              <input id="hasBattery" name="hasBattery" type="checkbox" defaultChecked={accessory.hasBattery} className="rounded border-vault-border" />
+              <input
+                id="hasBattery"
+                name="hasBattery"
+                type="checkbox"
+                defaultChecked={accessory.hasBattery}
+                className="rounded border-vault-border"
+              />
               This accessory uses a battery
             </label>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label htmlFor="batteryType" className={LABEL_CLASS}>Battery Type</label>
-                <input id="batteryType" name="batteryType" type="text" defaultValue={accessory.batteryType ?? ""} placeholder="e.g. CR2032" className={INPUT_CLASS} />
+                <label htmlFor="batteryType" className={LABEL_CLASS}>
+                  Battery Type
+                </label>
+                <input
+                  id="batteryType"
+                  name="batteryType"
+                  type="text"
+                  defaultValue={accessory.batteryType ?? ""}
+                  placeholder="e.g. CR2032"
+                  className={INPUT_CLASS}
+                />
               </div>
               <div>
-                <label htmlFor="replacementIntervalDays" className={LABEL_CLASS}>Replacement Interval (days)</label>
-                <input id="replacementIntervalDays" name="replacementIntervalDays" type="number" min="1" step="1" defaultValue={accessory.replacementIntervalDays ?? ""} placeholder="e.g. 180" className={INPUT_CLASS} />
+                <label
+                  htmlFor="replacementIntervalDays"
+                  className={LABEL_CLASS}
+                >
+                  Replacement Interval (days)
+                </label>
+                <input
+                  id="replacementIntervalDays"
+                  name="replacementIntervalDays"
+                  type="number"
+                  min="1"
+                  step="1"
+                  defaultValue={accessory.replacementIntervalDays ?? ""}
+                  placeholder="e.g. 180"
+                  className={INPUT_CLASS}
+                />
               </div>
             </div>
 
             <div>
-              <label htmlFor="lastBatteryChangeDate" className={LABEL_CLASS}>Last Battery Change</label>
-              <input id="lastBatteryChangeDate" name="lastBatteryChangeDate" type="date" defaultValue={toDateInputValue(accessory.lastBatteryChangeDate)} className={INPUT_CLASS} />
+              <label htmlFor="lastBatteryChangeDate" className={LABEL_CLASS}>
+                Last Battery Change
+              </label>
+              <input
+                id="lastBatteryChangeDate"
+                name="lastBatteryChangeDate"
+                type="date"
+                defaultValue={toDateInputValue(accessory.lastBatteryChangeDate)}
+                className={INPUT_CLASS}
+              />
             </div>
           </fieldset>
 
@@ -455,7 +533,11 @@ export default function EditAccessoryPage() {
             <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
               Image
             </legend>
-            <ImagePicker entityType="accessory" value={imageUrl} onChange={setImageUrl} />
+            <ImagePicker
+              entityType="accessory"
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           {/* Notes */}
