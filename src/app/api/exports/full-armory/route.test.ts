@@ -38,6 +38,14 @@ vi.mock("@/lib/prisma", () => ({
 
 import { GET } from "./route";
 
+// The generated PDF draws each line as an uncompressed `(text) Tj` operator, so
+// the text it actually puts on the page can be read straight back out.
+function extractPdfText(pdf: string): string {
+  return Array.from(pdf.matchAll(/\((.*)\) Tj/g))
+    .map((match) => match[1])
+    .join("\n");
+}
+
 describe("GET /api/exports/full-armory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -385,6 +393,30 @@ describe("GET /api/exports/full-armory", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toContain("application/pdf");
     expect(pdf.startsWith("%PDF-")).toBe(true);
+  });
+
+  it("renders the Gear section and its rows in the PDF text", async () => {
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const response = await GET(request);
+    const text = extractPdfText(await response.text());
+
+    // Asserted on the drawn text, not just the %PDF- prefix: removing the Gear
+    // block from buildExportPdfLines has to fail a test, the way the CSV
+    // path's toContain("Bugout") already does.
+    expect(text).toContain("Gear");
+    expect(text).toContain("1. Knife Bugout | Serial: GSN-1 | Qty: 2 | Purchase: 150 | Value: 130");
+    // The attachments line resolves a gear-linked document by name (see the
+    // GEAR branch above) rather than printing "UNATTACHED".
+    expect(text).toContain("Linked: Duty Carbine");
+  });
+
+  it("says so in the PDF when there is no gear to report", async () => {
+    mocks.findGear.mockResolvedValue([]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const text = extractPdfText(await (await GET(request)).text());
+
+    expect(text).toContain("No gear records included");
   });
 
   it("returns non-empty CSV output when there is no export data", async () => {
