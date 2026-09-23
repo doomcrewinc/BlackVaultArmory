@@ -31,13 +31,11 @@ vi.mock("fs", () => ({
 
 import { POST } from "./route";
 
-// Real bytes, so detectFileSignature is exercised rather than mocked.
-const PDF_BYTES = new TextEncoder().encode("%PDF-1.4\n%EOF\n");
+// Real bytes (ASCII, so the string encodes byte-for-byte), which means
+// detectFileSignature is exercised rather than mocked.
+const PDF_BYTES = "%PDF-1.4\n%EOF\n";
 
-function uploadRequest(
-  fields: Record<string, string>,
-  bytes: Uint8Array = PDF_BYTES,
-) {
+function uploadRequest(fields: Record<string, string>, bytes = PDF_BYTES) {
   const form = new FormData();
   form.set("file", new File([bytes], "receipt.pdf"));
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -108,7 +106,7 @@ describe("POST /api/documents/upload", () => {
     const response = await POST(
       uploadRequest(
         { name: "Not a PDF", gearId: "gear-1" },
-        new TextEncoder().encode("this is plain text, not a document"),
+        "this is plain text, not a document",
       ),
     );
 
