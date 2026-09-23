@@ -1,4 +1,4 @@
-import { CUSTOM_SLOT_PREFIX } from "./types";
+import { CUSTOM_SLOT_PREFIX, DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 export type SectionGroup = "vault" | "gear" | "prep";
 export type SectionSource = "firearm" | "accessory";
@@ -45,22 +45,50 @@ const GROUPED_ACCESSORIES = [
   ...MAGAZINE_TYPES,
 ];
 
+function isKnownClass(nfaClass: string): boolean {
+  return (NFA_CLASSES as readonly string[]).includes(nfaClass);
+}
+
 /** A Title I firearm on one of the listed platforms. */
 function platformSection(types: string[]): SectionMatcher {
   return {
     source: "firearm",
-    where: { nfaClass: "NONE", type: { in: types } },
-    holds: (row) => row.nfaClass === "NONE" && types.includes(row.type),
+    where: { nfaClass: DEFAULT_NFA_CLASS, type: { in: types } },
+    holds: (row) =>
+      row.nfaClass === DEFAULT_NFA_CLASS && types.includes(row.type),
   };
 }
 
-/** Everything Title I that no platform section claimed. */
+/**
+ * Everything Title I that no platform section claimed, plus anything whose
+ * stored class is not one this build knows.
+ *
+ * The class axis is gated positively everywhere else — platform sections demand
+ * exactly `NONE`, class sections demand their own value — so the second branch
+ * is what keeps the catch-all a real catch-all. Without it a row carrying an
+ * unrecognised class matches ZERO sections and disappears from every section
+ * page and nav count. Unreachable through the UI or the API (the normalizer
+ * coerces an unknown class to NONE) but reachable through backup restore's
+ * unvalidated createMany, the sqlite→postgres copier, Prisma Studio, and a
+ * backup written by a later version that added a class this build lacks.
+ *
+ * The branches cannot both fire (one needs `NONE`, the other needs a class that
+ * is not `NONE`), and an unknown class is excluded from every platform section
+ * by their `NONE` gate, so any string lands here exactly once.
+ */
 function otherPlatformsSection(): SectionMatcher {
   return {
     source: "firearm",
-    where: { nfaClass: "NONE", type: { notIn: GROUPED_PLATFORMS } },
+    where: {
+      OR: [
+        { nfaClass: DEFAULT_NFA_CLASS, type: { notIn: GROUPED_PLATFORMS } },
+        { nfaClass: { notIn: [...NFA_CLASSES] } },
+      ],
+    },
     holds: (row) =>
-      row.nfaClass === "NONE" && !GROUPED_PLATFORMS.includes(row.type),
+      (row.nfaClass === DEFAULT_NFA_CLASS &&
+        !GROUPED_PLATFORMS.includes(row.type)) ||
+      !isKnownClass(row.nfaClass),
   };
 }
 

@@ -65,6 +65,27 @@ describe("registry shape", () => {
   });
 });
 
+// Values no build knows: a typo, an empty column, the right class in the wrong
+// case, and a class a later version might add. Each must still land somewhere.
+const UNKNOWN_CLASSES = ["NOT_A_CLASS", "", "machine_gun", "ZZ_FUTURE_CLASS"];
+const UNKNOWN_TYPES = ["ZZ_MADE_UP", "", "pistol"];
+
+function vaultSectionsMatching(row: { type: string; nfaClass: string }) {
+  return sectionsForGroup("vault").filter((section) =>
+    section.sources.some(
+      (source) => source.source === "firearm" && source.holds(row),
+    ),
+  );
+}
+
+function gearSectionsMatching(row: { type: string }) {
+  return sectionsForGroup("gear").filter((section) =>
+    section.sources.some(
+      (source) => source.source === "accessory" && source.holds(row),
+    ),
+  );
+}
+
 describe("firearm placement", () => {
   it("places every platform with no class in exactly one vault section", () => {
     const platforms = [
@@ -97,6 +118,22 @@ describe("firearm placement", () => {
           ),
         );
         expect(matches, `${type} / ${nfaClass}`).toHaveLength(1);
+      }
+    }
+  });
+
+  it("places a class this build does not know in exactly one vault section", () => {
+    for (const nfaClass of UNKNOWN_CLASSES) {
+      for (const type of [
+        ...FIREARM_TYPES,
+        UNSPECIFIED_FIREARM_TYPE,
+        ...UNKNOWN_TYPES,
+      ]) {
+        const matches = vaultSectionsMatching({ type, nfaClass });
+        expect(
+          matches.map((m) => m.slug),
+          `${type} / ${nfaClass}`,
+        ).toEqual(["other-firearms"]);
       }
     }
   });
@@ -152,18 +189,22 @@ describe("accessory placement", () => {
     const types = [
       ...SLOT_TYPES,
       `${CUSTOM_SLOT_PREFIX}Cheek Riser`,
-      "ZZ_MADE_UP",
+      ...UNKNOWN_TYPES,
     ];
     for (const type of types) {
-      const matches = sectionsForGroup("gear").filter((section) =>
-        section.sources.some(
-          (source) => source.source === "accessory" && source.holds({ type }),
-        ),
-      );
       expect(
-        matches.map((m) => m.slug),
+        gearSectionsMatching({ type }).map((m) => m.slug),
         `type ${type}`,
       ).toHaveLength(1);
+    }
+  });
+
+  it("places a type this build does not know in the parts catch-all", () => {
+    for (const type of UNKNOWN_TYPES) {
+      expect(
+        gearSectionsMatching({ type }).map((m) => m.slug),
+        `type ${type}`,
+      ).toEqual(["parts"]);
     }
   });
 
@@ -194,47 +235,68 @@ describe("accessory placement", () => {
 });
 
 describe("where fragments agree with holds", () => {
-  const inWhere = (where: Record<string, unknown>, value: string): boolean => {
-    const clause = where.type as
-      { in?: string[]; notIn?: string[] } | undefined;
-    if (clause?.in) return clause.in.includes(value);
-    if (clause?.notIn) return !clause.notIn.includes(value);
-    return where.type === value;
+  type Clause = string | { in?: string[]; notIn?: string[] } | undefined;
+  type Where = Record<string, unknown>;
+
+  const fieldMatches = (clause: Clause, value: string): boolean => {
+    if (clause === undefined) return true;
+    if (typeof clause === "string") return clause === value;
+    if (clause.in) return clause.in.includes(value);
+    if (clause.notIn) return !clause.notIn.includes(value);
+    return true;
   };
 
-  it("selects the same firearms as holds, for every platform", () => {
+  // A miniature Prisma evaluator: enough of `where` for these fragments (field
+  // equality, `in`, `notIn`, and a top-level `OR`), so the row under test is
+  // never derived from the fragment it is meant to check.
+  const whereMatches = (where: Where, row: Record<string, string>): boolean =>
+    Object.entries(where).every(([field, clause]) => {
+      if (field === "OR") {
+        return (clause as Where[]).some((branch) => whereMatches(branch, row));
+      }
+      return fieldMatches(clause as Clause, row[field] ?? "");
+    });
+
+  it("selects the same firearms as holds, for every platform and every class", () => {
+    const classes = [...NFA_CLASSES, ...UNKNOWN_CLASSES];
+    const types = [
+      ...FIREARM_TYPES,
+      UNSPECIFIED_FIREARM_TYPE,
+      ...UNKNOWN_TYPES,
+    ];
     for (const section of sectionsForGroup("vault")) {
-      const where = firearmWhereForSection(section) as Record<
-        string,
-        unknown
-      > | null;
+      const where = firearmWhereForSection(section) as Where | null;
       if (!where) continue;
-      for (const type of [...FIREARM_TYPES, UNSPECIFIED_FIREARM_TYPE]) {
-        const row = { type, nfaClass: (where.nfaClass as string) ?? "NONE" };
-        const byWhere =
-          (where.nfaClass === undefined || where.nfaClass === row.nfaClass) &&
-          (where.type === undefined || inWhere(where, type));
-        const byHolds = section.sources.some(
-          (source) => source.source === "firearm" && source.holds(row),
-        );
-        expect(byWhere, `${section.slug} / ${type}`).toBe(byHolds);
+      for (const nfaClass of classes) {
+        for (const type of types) {
+          const row = { type, nfaClass };
+          const byHolds = section.sources.some(
+            (source) => source.source === "firearm" && source.holds(row),
+          );
+          expect(
+            whereMatches(where, row),
+            `${section.slug} / ${type} / ${nfaClass}`,
+          ).toBe(byHolds);
+        }
       }
     }
   });
 
   it("selects the same accessories as holds, for every slot type", () => {
     for (const section of sectionsForGroup("gear")) {
-      const where = accessoryWhereForSection(section) as Record<
-        string,
-        unknown
-      > | null;
+      const where = accessoryWhereForSection(section) as Where | null;
       if (!where) continue;
-      for (const type of SLOT_TYPES) {
-        const byWhere = where.type === undefined || inWhere(where, type);
+      for (const type of [
+        ...SLOT_TYPES,
+        `${CUSTOM_SLOT_PREFIX}Cheek Riser`,
+        ...UNKNOWN_TYPES,
+      ]) {
         const byHolds = section.sources.some(
           (source) => source.source === "accessory" && source.holds({ type }),
         );
-        expect(byWhere, `${section.slug} / ${type}`).toBe(byHolds);
+        expect(whereMatches(where, { type }), `${section.slug} / ${type}`).toBe(
+          byHolds,
+        );
       }
     }
   });
