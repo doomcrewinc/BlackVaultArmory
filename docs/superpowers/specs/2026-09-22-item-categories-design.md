@@ -425,18 +425,19 @@ gains supplies beside ammo, plus expired and expiring-soon counts.
 and expiry badges per line. Adding a line is a picker over existing inventory with a
 free-text fallback for untracked things. An over-allocated line shows its warning inline.
 
-**Detail pages** for Gear and CleaningSupply follow the Accessory detail layout, minus the
+**Detail pages** for Gear, Supply and Kit follow the Accessory detail layout, minus the
 sections that do not apply.
 
 ## Data flow, backup and export
 
-- **Backup/restore.** `Gear` and `CleaningSupply` join `BACKUP_MODELS`. The DMMF test fails
+- **Backup/restore.** `Gear`, `Supply`, `Kit` and `KitItem` join `BACKUP_MODELS`, and
+  `KitItem` restores after every model it points at. The DMMF test fails
   until they are registered, which is the guard that stops the data-loss bug we fixed from
   returning. Restore must handle a backup written before these models existed: a missing
   key is an empty table, not a failure.
 - **Full armory export** gains a Gear section and a Cleaning Supplies section, and the
   firearm rows gain the class and NFA columns.
-- **Global search** covers `Gear` and `CleaningSupply` by name, manufacturer/brand and
+- **Global search** covers `Gear`, `Supply` and `Kit` by name, manufacturer/brand and
   notes, using the existing case-insensitive helper.
 - **Migration audit.** None needed — no existing data changes.
 
@@ -464,10 +465,24 @@ Unit tests, `environment: "node"`, no new test infrastructure:
 5. **Low-stock rule.** Boundary cases for `quantity <= lowStockAlert`, including a null
    threshold meaning "never low" and a zero threshold meaning "low at zero".
 6. **Legacy SMG notice.** Appears only while `SMG` rows exist; classifies nothing.
+7. **Expiry states.** Expired, expiring-soon and fine, across the window boundary, using
+   date-only comparison in the browser's timezone — a date one day past is expired
+   wherever the user is, not wherever the server is.
+8. **Kit item source rule.** Exactly one foreign key, or none plus a `label`; two keys or
+   an empty line is rejected by the API.
+9. **Allocation maths.** Totals across kits against the item's own quantity: under, exact
+   and over. Over-allocation flags and never blocks, and the flag names the numbers.
+10. **Missing count.** `targetQuantity > quantity` counts as missing; a null target never
+    does.
+11. **Kit rollups.** Earliest expiry and the expired / expiring-soon counts, including a
+    kit whose contents have no dates at all.
+12. **Cascade behaviour.** Deleting an inventory record removes its kit lines; deleting a
+    kit touches no inventory.
 
 Verification beyond unit tests, per the lesson from the health work: the sections, the
-conditional NFA form and the nav groups are checked in a browser at desktop and 390px
-before the work is called done.
+conditional NFA form, the nav groups, the kit picker and the expiry badges are checked in a
+browser at desktop and 390px before the work is called done. Three nav groups with seven
+Preparedness sections is the case most likely to break on a phone.
 
 ## Phases
 
