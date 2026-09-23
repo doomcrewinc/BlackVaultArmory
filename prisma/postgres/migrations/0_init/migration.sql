@@ -336,6 +336,9 @@ CREATE INDEX "Document_firearmId_idx" ON "Document"("firearmId");
 CREATE INDEX "Document_accessoryId_idx" ON "Document"("accessoryId");
 
 -- CreateIndex
+CREATE INDEX "Document_gearId_idx" ON "Document"("gearId");
+
+-- CreateIndex
 CREATE INDEX "Document_type_idx" ON "Document"("type");
 
 -- CreateIndex

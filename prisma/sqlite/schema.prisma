@@ -199,6 +199,7 @@ model Document {
 
   @@index([firearmId])
   @@index([accessoryId])
+  @@index([gearId])
   @@index([type])
   @@index([createdAt])
 }
