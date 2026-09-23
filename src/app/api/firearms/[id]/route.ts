@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-
+import { normalizeFirearmClassFields } from "@/lib/nfa";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -16,7 +16,7 @@ function fallbackSerialNumber() {
 // GET /api/firearms/[id] - Get a single firearm with active build, slots, and accessories
 export async function GET(
   _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -59,7 +59,7 @@ export async function GET(
     console.error("GET /api/firearms/[id] error:", error);
     return NextResponse.json(
       { error: "Failed to fetch firearm" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -67,7 +67,7 @@ export async function GET(
 // PUT /api/firearms/[id] - Update a firearm
 export async function PUT(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -89,6 +89,8 @@ export async function PUT(
       imageSource,
       lastMaintenanceDate,
       maintenanceIntervalDays,
+      nfaClass,
+      mgRegistry,
     } = body;
 
     const existing = await prisma.firearm.findUnique({ where: { id } });
@@ -96,32 +98,64 @@ export async function PUT(
       return NextResponse.json({ error: "Firearm not found" }, { status: 404 });
     }
 
+    const touchesClass = nfaClass !== undefined || mgRegistry !== undefined;
+
     const updated = await prisma.firearm.update({
       where: { id },
       data: {
-        ...(name !== undefined && { name: normalizeString(name) || existing.name }),
-        ...(manufacturer !== undefined && { manufacturer: normalizeString(manufacturer) || "Unknown" }),
-        ...(model !== undefined && { model: normalizeString(model) || "Unknown" }),
-        ...(caliber !== undefined && { caliber: normalizeString(caliber) || "Unknown" }),
+        ...(name !== undefined && {
+          name: normalizeString(name) || existing.name,
+        }),
+        ...(manufacturer !== undefined && {
+          manufacturer: normalizeString(manufacturer) || "Unknown",
+        }),
+        ...(model !== undefined && {
+          model: normalizeString(model) || "Unknown",
+        }),
+        ...(caliber !== undefined && {
+          caliber: normalizeString(caliber) || "Unknown",
+        }),
         ...(compatibleCalibers !== undefined && {
           compatibleCalibers: compatibleCalibers
-            ? compatibleCalibers.split(",").map((s: string) => s.trim()).filter(Boolean).join(",") || null
+            ? compatibleCalibers
+                .split(",")
+                .map((s: string) => s.trim())
+                .filter(Boolean)
+                .join(",") || null
             : null,
         }),
-        ...(serialNumber !== undefined && { serialNumber: normalizeString(serialNumber) || fallbackSerialNumber() }),
-        ...(type !== undefined && { type: normalizeString(type) || "UNSPECIFIED" }),
+        ...(serialNumber !== undefined && {
+          serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
+        }),
+        ...(type !== undefined && {
+          type: normalizeString(type) || "UNSPECIFIED",
+        }),
         ...(acquisitionDate !== undefined && {
-          acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : existing.acquisitionDate,
+          acquisitionDate: acquisitionDate
+            ? toDateOnlyUTC(acquisitionDate)
+            : existing.acquisitionDate,
         }),
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(currentValue !== undefined && { currentValue }),
-        ...(notes !== undefined && { notes: notes ? normalizeString(notes) : null }),
+        ...(notes !== undefined && {
+          notes: notes ? normalizeString(notes) : null,
+        }),
         ...(imageUrl !== undefined && { imageUrl }),
         ...(imageSource !== undefined && { imageSource }),
         ...(lastMaintenanceDate !== undefined && {
-          lastMaintenanceDate: lastMaintenanceDate ? toDateOnlyUTC(lastMaintenanceDate) : null,
+          lastMaintenanceDate: lastMaintenanceDate
+            ? toDateOnlyUTC(lastMaintenanceDate)
+            : null,
         }),
-        ...(maintenanceIntervalDays !== undefined && { maintenanceIntervalDays }),
+        ...(maintenanceIntervalDays !== undefined && {
+          maintenanceIntervalDays,
+        }),
+        ...(touchesClass
+          ? normalizeFirearmClassFields({
+              nfaClass: nfaClass ?? existing.nfaClass,
+              mgRegistry: mgRegistry ?? existing.mgRegistry,
+            })
+          : {}),
       },
       include: {
         _count: {
@@ -160,12 +194,12 @@ export async function PUT(
     ) {
       return NextResponse.json(
         { error: "A firearm with that serial number already exists" },
-        { status: 409 }
+        { status: 409 },
       );
     }
     return NextResponse.json(
       { error: "Failed to update firearm" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -173,7 +207,7 @@ export async function PUT(
 // DELETE /api/firearms/[id] - Delete a firearm
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -201,9 +235,13 @@ export async function DELETE(
             where: { buildId: { in: buildIds }, accessoryId: { not: null } },
             select: { accessoryId: true },
           });
-          const accessoryIds = slots.map((s) => s.accessoryId).filter(Boolean) as string[];
+          const accessoryIds = slots
+            .map((s) => s.accessoryId)
+            .filter(Boolean) as string[];
           if (accessoryIds.length > 0) {
-            await tx.accessory.deleteMany({ where: { id: { in: accessoryIds } } });
+            await tx.accessory.deleteMany({
+              where: { id: { in: accessoryIds } },
+            });
           }
         } else {
           await tx.buildSlot.updateMany({
@@ -223,7 +261,7 @@ export async function DELETE(
     console.error("DELETE /api/firearms/[id] error:", error);
     return NextResponse.json(
       { error: "Failed to delete firearm" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
