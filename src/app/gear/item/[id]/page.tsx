@@ -10,15 +10,10 @@ import { DeleteGearButton } from "./DeleteGearButton";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
+// No `include: { documents }`: ItemDocumentPanel fetches its own list from
+// /api/documents?gearId=…, so an included set would be loaded and never read.
 async function getGear(id: string) {
-  return prisma.gear.findUnique({
-    where: { id },
-    include: {
-      documents: {
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
+  return prisma.gear.findUnique({ where: { id } });
 }
 
 function categoryLabel(category: string): string {
