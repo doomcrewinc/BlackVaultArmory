@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeFirearmClassFields } from "@/lib/nfa";
+import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -13,10 +14,20 @@ function fallbackSerialNumber() {
   return `AUTO-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
 
-// GET /api/firearms - List all firearms with build count
-export async function GET() {
+// GET /api/firearms - List all firearms with build count.
+// An optional ?section=<slug> narrows the list to that category section. An
+// unknown slug is ignored rather than erroring: the page-level 404 handles a bad
+// slug, and a GET should not fail on a stray query parameter.
+export async function GET(request: NextRequest) {
   try {
+    const slug = request.nextUrl.searchParams.get("section");
+    const section = slug ? sectionBySlug(slug) : undefined;
+    const where = section
+      ? (firearmWhereForSection(section) ?? undefined)
+      : undefined;
+
     const firearms = await prisma.firearm.findMany({
+      where,
       include: {
         _count: {
           select: { builds: true },
