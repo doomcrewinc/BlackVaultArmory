@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-
+import { normalizeQuantity } from "@/lib/quantity";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
     // Attach the name of the currently active build (if any)
     const result = accessories.map((accessory) => {
       const activeSlot = accessory.buildSlots.find(
-        (slot) => slot.build.isActive
+        (slot) => slot.build.isActive,
       );
       return {
         ...accessory,
@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
     console.error("GET /api/accessories error:", error);
     return NextResponse.json(
       { error: "Failed to fetch accessories" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -90,13 +90,14 @@ export async function POST(request: NextRequest) {
       lastBatteryChangeDate,
       replacementIntervalDays,
       initialRoundCount,
+      quantity,
     } = body;
 
     const normalizedName = normalizeString(name);
     if (!normalizedName) {
       return NextResponse.json(
         { error: "Missing required field: name" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -109,7 +110,9 @@ export async function POST(request: NextRequest) {
         type: normalizeString(type) || "UNSPECIFIED",
         caliber: caliber ?? null,
         purchasePrice: purchasePrice ?? null,
-        acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : null,
+        acquisitionDate: acquisitionDate
+          ? toDateOnlyUTC(acquisitionDate)
+          : null,
         notes: notes ?? null,
         imageUrl: imageUrl ?? null,
         imageSource: imageSource ?? null,
@@ -117,14 +120,21 @@ export async function POST(request: NextRequest) {
         compatibleCalibers: compatibleCalibers ?? null,
         hasBattery: Boolean(hasBattery),
         batteryType: batteryType ?? null,
-        lastBatteryChangeDate: lastBatteryChangeDate ? toDateOnlyUTC(lastBatteryChangeDate) : null,
+        lastBatteryChangeDate: lastBatteryChangeDate
+          ? toDateOnlyUTC(lastBatteryChangeDate)
+          : null,
         replacementIntervalDays: replacementIntervalDays ?? null,
-        roundCount: initialRoundCount ? Math.floor(Number(initialRoundCount)) : 0,
+        roundCount: initialRoundCount
+          ? Math.floor(Number(initialRoundCount))
+          : 0,
+        quantity: normalizeQuantity(quantity),
       },
     });
 
     // If initial round count was set, create a log entry for traceability
-    const parsedInitialRounds = initialRoundCount ? Math.floor(Number(initialRoundCount)) : 0;
+    const parsedInitialRounds = initialRoundCount
+      ? Math.floor(Number(initialRoundCount))
+      : 0;
     if (parsedInitialRounds > 0) {
       await prisma.roundCountLog.create({
         data: {
@@ -147,7 +157,7 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(
       { error: "Failed to create accessory" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

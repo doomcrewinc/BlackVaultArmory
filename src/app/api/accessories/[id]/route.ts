@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-
+import { normalizeQuantity } from "@/lib/quantity";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -11,7 +11,7 @@ function normalizeString(value: unknown) {
 // GET /api/accessories/[id] - Get a single accessory with roundCountLogs and current buildSlots
 export async function GET(
   _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -51,13 +51,11 @@ export async function GET(
     if (!accessory) {
       return NextResponse.json(
         { error: "Accessory not found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
-    const activeSlot = accessory.buildSlots.find(
-      (slot) => slot.build.isActive
-    );
+    const activeSlot = accessory.buildSlots.find((slot) => slot.build.isActive);
 
     return NextResponse.json({
       ...accessory,
@@ -74,7 +72,7 @@ export async function GET(
     console.error("GET /api/accessories/[id] error:", error);
     return NextResponse.json(
       { error: "Failed to fetch accessory" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -82,7 +80,7 @@ export async function GET(
 // PUT /api/accessories/[id] - Update an accessory
 export async function PUT(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -106,28 +104,39 @@ export async function PUT(
       batteryType,
       lastBatteryChangeDate,
       replacementIntervalDays,
+      quantity,
     } = body;
 
     const existing = await prisma.accessory.findUnique({ where: { id } });
     if (!existing) {
       return NextResponse.json(
         { error: "Accessory not found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
     const updated = await prisma.accessory.update({
       where: { id },
       data: {
-        ...(name !== undefined && { name: normalizeString(name) || existing.name }),
-        ...(manufacturer !== undefined && { manufacturer: normalizeString(manufacturer) || "Unknown" }),
+        ...(name !== undefined && {
+          name: normalizeString(name) || existing.name,
+        }),
+        ...(manufacturer !== undefined && {
+          manufacturer: normalizeString(manufacturer) || "Unknown",
+        }),
         ...(model !== undefined && { model: normalizeString(model) || null }),
-        ...(serialNumber !== undefined && { serialNumber: normalizeString(serialNumber) || null }),
-        ...(type !== undefined && { type: normalizeString(type) || "UNSPECIFIED" }),
+        ...(serialNumber !== undefined && {
+          serialNumber: normalizeString(serialNumber) || null,
+        }),
+        ...(type !== undefined && {
+          type: normalizeString(type) || "UNSPECIFIED",
+        }),
         ...(caliber !== undefined && { caliber }),
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(acquisitionDate !== undefined && {
-          acquisitionDate: acquisitionDate ? toDateOnlyUTC(acquisitionDate) : null,
+          acquisitionDate: acquisitionDate
+            ? toDateOnlyUTC(acquisitionDate)
+            : null,
         }),
         ...(notes !== undefined && { notes }),
         ...(imageUrl !== undefined && { imageUrl }),
@@ -137,9 +146,16 @@ export async function PUT(
         ...(hasBattery !== undefined && { hasBattery: Boolean(hasBattery) }),
         ...(batteryType !== undefined && { batteryType }),
         ...(lastBatteryChangeDate !== undefined && {
-          lastBatteryChangeDate: lastBatteryChangeDate ? toDateOnlyUTC(lastBatteryChangeDate) : null,
+          lastBatteryChangeDate: lastBatteryChangeDate
+            ? toDateOnlyUTC(lastBatteryChangeDate)
+            : null,
         }),
-        ...(replacementIntervalDays !== undefined && { replacementIntervalDays }),
+        ...(replacementIntervalDays !== undefined && {
+          replacementIntervalDays,
+        }),
+        ...(quantity !== undefined && {
+          quantity: normalizeQuantity(quantity, existing.quantity),
+        }),
       },
       include: {
         roundCountLogs: {
@@ -173,7 +189,7 @@ export async function PUT(
     }
     return NextResponse.json(
       { error: "Failed to update accessory" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -181,7 +197,7 @@ export async function PUT(
 // DELETE /api/accessories/[id] - Delete an accessory
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -190,7 +206,7 @@ export async function DELETE(
     if (!existing) {
       return NextResponse.json(
         { error: "Accessory not found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
@@ -202,7 +218,7 @@ export async function DELETE(
     console.error("DELETE /api/accessories/[id] error:", error);
     return NextResponse.json(
       { error: "Failed to delete accessory" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

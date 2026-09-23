@@ -15,6 +15,7 @@ import {
   Calendar,
   DollarSign,
   Layers,
+  Boxes,
   Plus,
   Loader2,
   AlertCircle,
@@ -81,6 +82,7 @@ interface Accessory {
   type: string;
   caliber: string | null;
   purchasePrice: number | null;
+  quantity: number;
   acquisitionDate: string | null;
   notes: string | null;
   imageUrl: string | null;
@@ -380,6 +382,18 @@ export default function AccessoryDetailPage() {
               <p className="text-sm text-vault-text-faint">Uninstalled</p>
             )}
           </div>
+
+          {/* Only worth a tile when there is more than one of the item, which
+              is also when the list views show their ×N badge. */}
+          {accessory.quantity > 1 && (
+            <div className="bg-vault-surface border border-vault-border rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Boxes className="w-3.5 h-3.5 text-vault-text-faint" />
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint">Quantity</p>
+              </div>
+              <p className="text-sm font-mono text-vault-text">×{accessory.quantity}</p>
+            </div>
+          )}
         </div>
 
         {/* Log Rounds Inline Form */}

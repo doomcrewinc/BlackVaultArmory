@@ -5,6 +5,7 @@ export const FIREARM_TYPES = [
   "SHOTGUN",
   "SMG",
   "PCC",
+  "PDW",
   "REVOLVER",
   "BOLT_ACTION",
   "LEVER_ACTION",
@@ -18,9 +19,54 @@ export const FIREARM_TYPE_LABELS: Record<FirearmType, string> = {
   SHOTGUN: "Shotgun",
   SMG: "SMG",
   PCC: "PCC",
+  PDW: "PDW",
   REVOLVER: "Revolver",
   BOLT_ACTION: "Bolt Action",
   LEVER_ACTION: "Lever Action",
+};
+
+/** The value src/app/api/firearms/route.ts writes when no type is supplied.
+ *  Deliberately NOT in FIREARM_TYPES — it is not a platform a user can pick. */
+export const UNSPECIFIED_FIREARM_TYPE = "UNSPECIFIED";
+
+// ─── NFA Classification ────────────────────────────────────────
+// How a firearm is regulated, which is independent of its platform: a
+// select-fire pistol, PDW or rifle is all MACHINE_GUN.
+export const NFA_CLASSES = [
+  "NONE",
+  "SBR",
+  "SBS",
+  "MACHINE_GUN",
+  "AOW",
+  "DESTRUCTIVE_DEVICE",
+] as const;
+
+export type NfaClass = (typeof NFA_CLASSES)[number];
+
+export const NFA_CLASS_LABELS: Record<NfaClass, string> = {
+  NONE: "Title I (non-NFA)",
+  SBR: "SBR",
+  SBS: "SBS",
+  MACHINE_GUN: "Machine Gun",
+  AOW: "AOW",
+  DESTRUCTIVE_DEVICE: "Destructive Device",
+};
+
+export const DEFAULT_NFA_CLASS: NfaClass = "NONE";
+
+// Only meaningful when nfaClass === "MACHINE_GUN".
+export const MG_REGISTRIES = [
+  "TRANSFERABLE",
+  "PRE_SAMPLE",
+  "POST_SAMPLE",
+] as const;
+
+export type MgRegistry = (typeof MG_REGISTRIES)[number];
+
+export const MG_REGISTRY_LABELS: Record<MgRegistry, string> = {
+  TRANSFERABLE: "Transferable",
+  PRE_SAMPLE: "Pre-sample",
+  POST_SAMPLE: "Post-sample",
 };
 
 // ─── Slot Types ────────────────────────────────────────────────
@@ -169,6 +215,25 @@ export const SLOTS_BY_FIREARM_TYPE: Record<FirearmType, SlotType[]> = {
     "SLING",
     "COMPENSATOR",
   ],
+  PDW: [
+    "MUZZLE",
+    "BARREL",
+    "HANDGUARD",
+    "STOCK",
+    "BUFFER_TUBE",
+    "GRIP",
+    "OPTIC",
+    "OPTIC_MOUNT",
+    "UNDERBARREL",
+    "MAGAZINE",
+    "LIGHT",
+    "LASER",
+    "CHARGING_HANDLE",
+    "TRIGGER",
+    "SUPPRESSOR",
+    "SLING",
+    "COMPENSATOR",
+  ],
   REVOLVER: [
     "BARREL",
     "GRIP",
@@ -202,16 +267,33 @@ export const SLOTS_BY_FIREARM_TYPE: Record<FirearmType, SlotType[]> = {
   ],
 };
 
-export const SUGGESTED_SLOTS_BY_FIREARM_TYPE: Record<FirearmType, SlotType[]> = {
-  RIFLE:        ["OPTIC", "BARREL", "MUZZLE", "STOCK", "HANDGUARD", "TRIGGER", "GRIP"],
-  PISTOL:       ["OPTIC", "BARREL", "SLIDE", "TRIGGER", "LIGHT", "LASER"],
-  BOLT_ACTION:  ["OPTIC", "OPTIC_MOUNT", "BARREL", "STOCK", "BIPOD", "SUPPRESSOR"],
-  SHOTGUN:      ["OPTIC", "BARREL", "STOCK", "LIGHT", "SLING"],
-  SMG:          ["OPTIC", "BARREL", "STOCK", "LIGHT", "SUPPRESSOR", "GRIP"],
-  PCC:          ["OPTIC", "BARREL", "MUZZLE", "STOCK", "HANDGUARD", "TRIGGER"],
-  REVOLVER:     ["OPTIC", "BARREL", "GRIP", "COMPENSATOR"],
-  LEVER_ACTION: ["OPTIC", "BARREL", "STOCK", "SLING"],
-};
+export const SUGGESTED_SLOTS_BY_FIREARM_TYPE: Record<FirearmType, SlotType[]> =
+  {
+    RIFLE: [
+      "OPTIC",
+      "BARREL",
+      "MUZZLE",
+      "STOCK",
+      "HANDGUARD",
+      "TRIGGER",
+      "GRIP",
+    ],
+    PISTOL: ["OPTIC", "BARREL", "SLIDE", "TRIGGER", "LIGHT", "LASER"],
+    BOLT_ACTION: [
+      "OPTIC",
+      "OPTIC_MOUNT",
+      "BARREL",
+      "STOCK",
+      "BIPOD",
+      "SUPPRESSOR",
+    ],
+    SHOTGUN: ["OPTIC", "BARREL", "STOCK", "LIGHT", "SLING"],
+    SMG: ["OPTIC", "BARREL", "STOCK", "LIGHT", "SUPPRESSOR", "GRIP"],
+    PCC: ["OPTIC", "BARREL", "MUZZLE", "STOCK", "HANDGUARD", "TRIGGER"],
+    PDW: ["OPTIC", "BARREL", "MUZZLE", "STOCK", "HANDGUARD", "TRIGGER"],
+    REVOLVER: ["OPTIC", "BARREL", "GRIP", "COMPENSATOR"],
+    LEVER_ACTION: ["OPTIC", "BARREL", "STOCK", "SLING"],
+  };
 
 // ─── Ammo Transaction Types ────────────────────────────────────
 export const TRANSACTION_TYPES = [

@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-
+import { normalizeFirearmClassFields } from "@/lib/nfa";
+import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -13,10 +14,25 @@ function fallbackSerialNumber() {
   return `AUTO-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
 
-// GET /api/firearms - List all firearms with build count
-export async function GET() {
+// GET /api/firearms - List all firearms with build count.
+// An optional ?section=<slug> narrows the list to that category section. An
+// unknown slug is ignored rather than erroring: the page-level 404 handles a bad
+// slug, and a GET should not fail on a stray query parameter. A known slug from
+// another group (a gear section) has no firearm source, and a section with no
+// firearm source contains no firearms — so it answers none, not all of them.
+export async function GET(request: NextRequest) {
   try {
+    const slug = request.nextUrl.searchParams.get("section");
+    const section = slug ? sectionBySlug(slug) : undefined;
+    let where: object | undefined;
+    if (section) {
+      const fragment = firearmWhereForSection(section);
+      if (!fragment) return NextResponse.json([]);
+      where = fragment;
+    }
+
     const firearms = await prisma.firearm.findMany({
+      where,
       include: {
         _count: {
           select: { builds: true },
@@ -41,7 +57,10 @@ export async function GET() {
 
     const result = firearms.map((firearm) => ({
       ...firearm,
-      firearmRoundCount: firearm.rangeSessions.reduce((sum, session) => sum + session.roundsFired, 0),
+      firearmRoundCount: firearm.rangeSessions.reduce(
+        (sum, session) => sum + session.roundsFired,
+        0,
+      ),
       serialNumber: decryptField(firearm.serialNumber) ?? firearm.serialNumber,
       notes: firearm.notes,
       buildCount: firearm._count.builds,
@@ -56,7 +75,7 @@ export async function GET() {
     console.error("GET /api/firearms error:", error);
     return NextResponse.json(
       { error: "Failed to fetch firearms" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -83,15 +102,19 @@ export async function POST(request: NextRequest) {
       lastMaintenanceDate,
       maintenanceIntervalDays,
       initialRoundCount,
+      nfaClass,
+      mgRegistry,
     } = body;
 
     const normalizedName = normalizeString(name);
     if (!normalizedName) {
       return NextResponse.json(
         { error: "Missing required field: name" },
-        { status: 400 }
+        { status: 400 },
       );
     }
+
+    const classFields = normalizeFirearmClassFields({ nfaClass, mgRegistry });
 
     const firearm = await prisma.firearm.create({
       data: {
@@ -100,10 +123,15 @@ export async function POST(request: NextRequest) {
         model: normalizeString(model) || "Unknown",
         caliber: normalizeString(caliber) || "Unknown",
         compatibleCalibers: compatibleCalibers
-          ? compatibleCalibers.split(",").map((s: string) => s.trim()).filter(Boolean).join(",") || null
+          ? compatibleCalibers
+              .split(",")
+              .map((s: string) => s.trim())
+              .filter(Boolean)
+              .join(",") || null
           : null,
         serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
         type: normalizeString(type) || "UNSPECIFIED",
+        ...classFields,
         // No date supplied: fall back to UTC's today. The server cannot know the
         // viewer's timezone (in Docker this container is UTC), so the client sends
         // the date whenever it has one.
@@ -115,7 +143,9 @@ export async function POST(request: NextRequest) {
         notes: notes ? normalizeString(notes) : null,
         imageUrl: imageUrl ?? null,
         imageSource: imageSource ?? null,
-        lastMaintenanceDate: lastMaintenanceDate ? toDateOnlyUTC(lastMaintenanceDate) : null,
+        lastMaintenanceDate: lastMaintenanceDate
+          ? toDateOnlyUTC(lastMaintenanceDate)
+          : null,
         maintenanceIntervalDays: maintenanceIntervalDays ?? null,
       },
       include: {
@@ -129,7 +159,9 @@ export async function POST(request: NextRequest) {
     });
 
     // If the user specified an initial round count (pre-existing use), log it as a range session
-    const parsedInitialRounds = initialRoundCount ? Math.floor(Number(initialRoundCount)) : 0;
+    const parsedInitialRounds = initialRoundCount
+      ? Math.floor(Number(initialRoundCount))
+      : 0;
     if (parsedInitialRounds > 0) {
       await prisma.rangeSession.create({
         data: {
@@ -148,7 +180,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       { ...firearm, buildCount: firearm._count.builds, _count: undefined },
-      { status: 201 }
+      { status: 201 },
     );
   } catch (error: unknown) {
     console.error("POST /api/firearms error:", error);
@@ -162,12 +194,12 @@ export async function POST(request: NextRequest) {
     ) {
       return NextResponse.json(
         { error: "A firearm with that serial number already exists" },
-        { status: 409 }
+        { status: 409 },
       );
     }
     return NextResponse.json(
       { error: "Failed to create firearm" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

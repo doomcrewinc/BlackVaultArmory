@@ -10,7 +10,8 @@ import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
-const LABEL_CLASS = "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
+const LABEL_CLASS =
+  "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
 export default function NewAccessoryPage() {
   const router = useRouter();
@@ -19,9 +20,10 @@ export default function NewAccessoryPage() {
   const [caliberInput, setCaliberInput] = useState("");
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [quantity, setQuantity] = useState("1");
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
-    c.toLowerCase().includes(caliberInput.toLowerCase())
+    c.toLowerCase().includes(caliberInput.toLowerCase()),
   );
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -33,7 +35,9 @@ export default function NewAccessoryPage() {
     const data = new FormData(form);
 
     const parsedPurchasePrice = Number(data.get("purchasePrice"));
-    const parsedReplacementInterval = Number(data.get("replacementIntervalDays"));
+    const parsedReplacementInterval = Number(
+      data.get("replacementIntervalDays"),
+    );
     const payload = {
       name: data.get("name") as string,
       manufacturer: data.get("manufacturer") as string,
@@ -41,19 +45,27 @@ export default function NewAccessoryPage() {
       serialNumber: (data.get("serialNumber") as string) || null,
       type: data.get("type") as string,
       caliber: caliberInput || null,
+      quantity: data.get("quantity") as string,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
-      purchasePrice: Number.isFinite(parsedPurchasePrice) && parsedPurchasePrice >= 0 ? parsedPurchasePrice : null,
+      purchasePrice:
+        Number.isFinite(parsedPurchasePrice) && parsedPurchasePrice >= 0
+          ? parsedPurchasePrice
+          : null,
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
       imageSource: imageUrl ? "uploaded" : null,
       hasBattery: data.get("hasBattery") === "on",
       batteryType: (data.get("batteryType") as string) || null,
-      lastBatteryChangeDate: (data.get("lastBatteryChangeDate") as string) || null,
+      lastBatteryChangeDate:
+        (data.get("lastBatteryChangeDate") as string) || null,
       replacementIntervalDays:
-        Number.isFinite(parsedReplacementInterval) && parsedReplacementInterval > 0
+        Number.isFinite(parsedReplacementInterval) &&
+        parsedReplacementInterval > 0
           ? parsedReplacementInterval
           : null,
-      initialRoundCount: data.get("initialRoundCount") ? Number(data.get("initialRoundCount")) : null,
+      initialRoundCount: data.get("initialRoundCount")
+        ? Number(data.get("initialRoundCount"))
+        : null,
     };
 
     try {
@@ -97,8 +109,12 @@ export default function NewAccessoryPage() {
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">New Accessory Entry</h2>
-          <p className="text-sm text-vault-text-muted">Register a new part or attachment in the arsenal.</p>
+          <h2 className="text-xl font-bold text-vault-text mb-1">
+            New Accessory Entry
+          </h2>
+          <p className="text-sm text-vault-text-muted">
+            Register a new part or attachment in the arsenal.
+          </p>
         </div>
 
         {error && (
@@ -203,26 +219,47 @@ export default function NewAccessoryPage() {
                     placeholder="e.g. 5.56x45mm"
                     className={INPUT_CLASS}
                   />
-                  {caliberDropdownOpen && filteredCalibers.length > 0 && caliberInput && (
-                    <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                      {filteredCalibers.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          onPointerDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setCaliberInput(c);
-                            setCaliberDropdownOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
-                        >
-                          {c}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {caliberDropdownOpen &&
+                    filteredCalibers.length > 0 &&
+                    caliberInput && (
+                      <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                        {filteredCalibers.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            onPointerDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setCaliberInput(c);
+                              setCaliberDropdownOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
+                          >
+                            {c}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                 </div>
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="quantity" className={LABEL_CLASS}>
+                Quantity
+              </label>
+              <input
+                id="quantity"
+                name="quantity"
+                type="number"
+                min={1}
+                step={1}
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+                className={INPUT_CLASS}
+              />
+              <p className="mt-1 text-[11px] text-vault-text-faint">
+                How many identical items this record stands for.
+              </p>
             </div>
           </fieldset>
 
@@ -249,7 +286,9 @@ export default function NewAccessoryPage() {
                   Purchase Price
                 </label>
                 <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-vault-text-faint text-sm">$</span>
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-vault-text-faint text-sm">
+                    $
+                  </span>
                   <input
                     id="purchasePrice"
                     name="purchasePrice"
@@ -263,8 +302,6 @@ export default function NewAccessoryPage() {
               </div>
             </div>
           </fieldset>
-
-
 
           {/* Prior Use */}
           <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
@@ -295,24 +332,57 @@ export default function NewAccessoryPage() {
             </legend>
 
             <label className="flex items-center gap-2 text-sm text-vault-text">
-              <input id="hasBattery" name="hasBattery" type="checkbox" className="rounded border-vault-border" />
+              <input
+                id="hasBattery"
+                name="hasBattery"
+                type="checkbox"
+                className="rounded border-vault-border"
+              />
               This accessory uses a battery
             </label>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label htmlFor="batteryType" className={LABEL_CLASS}>Battery Type</label>
-                <input id="batteryType" name="batteryType" type="text" placeholder="e.g. CR2032" className={INPUT_CLASS} />
+                <label htmlFor="batteryType" className={LABEL_CLASS}>
+                  Battery Type
+                </label>
+                <input
+                  id="batteryType"
+                  name="batteryType"
+                  type="text"
+                  placeholder="e.g. CR2032"
+                  className={INPUT_CLASS}
+                />
               </div>
               <div>
-                <label htmlFor="replacementIntervalDays" className={LABEL_CLASS}>Replacement Interval (days)</label>
-                <input id="replacementIntervalDays" name="replacementIntervalDays" type="number" min="1" step="1" placeholder="e.g. 180" className={INPUT_CLASS} />
+                <label
+                  htmlFor="replacementIntervalDays"
+                  className={LABEL_CLASS}
+                >
+                  Replacement Interval (days)
+                </label>
+                <input
+                  id="replacementIntervalDays"
+                  name="replacementIntervalDays"
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="e.g. 180"
+                  className={INPUT_CLASS}
+                />
               </div>
             </div>
 
             <div>
-              <label htmlFor="lastBatteryChangeDate" className={LABEL_CLASS}>Last Battery Change</label>
-              <input id="lastBatteryChangeDate" name="lastBatteryChangeDate" type="date" className={INPUT_CLASS} />
+              <label htmlFor="lastBatteryChangeDate" className={LABEL_CLASS}>
+                Last Battery Change
+              </label>
+              <input
+                id="lastBatteryChangeDate"
+                name="lastBatteryChangeDate"
+                type="date"
+                className={INPUT_CLASS}
+              />
             </div>
           </fieldset>
 
@@ -321,7 +391,11 @@ export default function NewAccessoryPage() {
             <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
               Image
             </legend>
-            <ImagePicker entityType="accessory" value={imageUrl} onChange={setImageUrl} />
+            <ImagePicker
+              entityType="accessory"
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           {/* Notes */}
