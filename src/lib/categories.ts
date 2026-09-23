@@ -1,10 +1,11 @@
 import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 export type SectionGroup = "vault" | "gear" | "prep";
-export type SectionSource = "firearm" | "accessory";
+export type SectionSource = "firearm" | "accessory" | "gear";
 
 export type FirearmRow = { type: string; nfaClass: string };
 export type AccessoryRow = { type: string };
+export type GearRow = { category: string };
 
 export type SectionMatcher =
   | { source: "firearm"; where: object; holds: (row: FirearmRow) => boolean }
@@ -12,6 +13,11 @@ export type SectionMatcher =
       source: "accessory";
       where: object;
       holds: (row: AccessoryRow) => boolean;
+    }
+  | {
+      source: "gear";
+      where: object;
+      holds: (row: GearRow) => boolean;
     };
 
 export type CategorySection = {
@@ -119,6 +125,35 @@ function partsSection(): SectionMatcher {
     source: "accessory",
     where: { type: { notIn: GROUPED_ACCESSORIES } },
     holds: (row) => !GROUPED_ACCESSORIES.includes(row.type),
+  };
+}
+
+const KNIFE_CATEGORIES = ["KNIFE"];
+const CASE_CATEGORIES = ["CASE"];
+const GROUPED_GEAR = [...KNIFE_CATEGORIES, ...CASE_CATEGORIES];
+
+function gearSection(categories: string[]): SectionMatcher {
+  return {
+    source: "gear",
+    where: { category: { in: categories } },
+    holds: (row) => categories.includes(row.category),
+  };
+}
+
+/**
+ * Anything no gear section claimed — a category added to the schema before
+ * its section exists (Phase 5 adds many more) must still be reachable, not
+ * invisible. Rides on `cases` rather than a standalone "Other Gear" section
+ * so the registry stays exactly-one today without inventing a section Phase 5
+ * will restructure anyway. Mutually exclusive with `gearSection(CASE_CATEGORIES)`
+ * on the same section (one demands membership in GROUPED_GEAR, the other demands
+ * exclusion from it), so the two matchers never both fire.
+ */
+function otherGearSection(): SectionMatcher {
+  return {
+    source: "gear",
+    where: { category: { notIn: GROUPED_GEAR } },
+    holds: (row) => !GROUPED_GEAR.includes(row.category),
   };
 }
 
@@ -243,6 +278,22 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     icon: "Settings2",
     sources: [partsSection()],
   },
+  {
+    slug: "knives",
+    label: "Knives",
+    description: "Blades & multitools",
+    group: "gear",
+    icon: "Crosshair",
+    sources: [gearSection(KNIFE_CATEGORIES)],
+  },
+  {
+    slug: "cases",
+    label: "Cases",
+    description: "Cases & storage",
+    group: "gear",
+    icon: "Layers",
+    sources: [gearSection(CASE_CATEGORIES), otherGearSection()],
+  },
 ];
 
 export function sectionBySlug(slug: string): CategorySection | undefined {
@@ -286,6 +337,21 @@ export function gearSectionForAccessory(
   return sectionsForGroup("gear").find((section) =>
     section.sources.some(
       (source) => source.source === "accessory" && source.holds(row),
+    ),
+  );
+}
+
+export function gearWhereForSection(section: CategorySection): object | null {
+  const matchers = section.sources.filter((source) => source.source === "gear");
+  if (matchers.length === 0) return null;
+  if (matchers.length === 1) return matchers[0].where;
+  return { OR: matchers.map((matcher) => matcher.where) };
+}
+
+export function gearSectionForItem(row: GearRow): CategorySection | undefined {
+  return sectionsForGroup("gear").find((section) =>
+    section.sources.some(
+      (source) => source.source === "gear" && source.holds(row),
     ),
   );
 }

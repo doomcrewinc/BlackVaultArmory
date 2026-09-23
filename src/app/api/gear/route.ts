@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { GearCategory, normalizeGearCategory } from "@/lib/gear";
+import { normalizeGearCategory } from "@/lib/gear";
 import { normalizeQuantity } from "@/lib/quantity";
-import { sectionBySlug } from "@/lib/categories";
+import { gearWhereForSection, sectionBySlug } from "@/lib/categories";
 
 export const dynamic = "force-dynamic";
 
@@ -11,42 +11,23 @@ function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-/**
- * Gear-backed sections (knives, cases, ...) are not in the category registry
- * yet — `src/lib/categories.ts` only knows firearm- and accessory-sourced
- * sections until a later task adds a "gear" source and a `gearWhereForSection`
- * helper. Until that lands, resolve a gear section's categories here.
- *
- * To swap in the helper later: replace the two lookups below (the
- * `sectionBySlug` early-return and this map) with:
- *   const where = gearWhereForSection(section) ...
- * following the same shape as `accessoryWhereForSection`.
- */
-const GEAR_SECTION_CATEGORIES: Record<string, GearCategory[]> = {
-  knives: ["KNIFE"],
-  cases: ["CASE"],
-};
-
 // GET /api/gear - List all gear, optionally filtered by category section
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const sectionSlug = normalizeString(searchParams.get("section"));
 
-    let where: { category: { in: GearCategory[] } } | undefined;
+    let where: object | undefined;
 
     if (sectionSlug) {
-      // A slug already registered as a firearm- or accessory-sourced section
-      // (e.g. "optics") has no gear source — return early rather than
-      // querying with no filter, which would return every gear item instead
-      // of none.
-      if (sectionBySlug(sectionSlug)) {
-        return NextResponse.json([]);
-      }
-
-      const categories = GEAR_SECTION_CATEGORIES[sectionSlug];
-      if (categories) {
-        where = { category: { in: categories } };
+      const section = sectionBySlug(sectionSlug);
+      if (section) {
+        const gearWhere = gearWhereForSection(section);
+        // A slug already registered but with no gear source (e.g. "optics")
+        // holds no gear — return early rather than querying with no filter,
+        // which would return every gear item instead of none.
+        if (!gearWhere) return NextResponse.json([]);
+        where = gearWhere;
       }
       // else: unrecognised slug — ignore it and apply no filter.
     }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const firearmCount = vi.fn();
 const accessoryCount = vi.fn();
+const gearCount = vi.fn();
 
 // Every count goes through here so the test can watch how many are in flight.
 let inFlight = 0;
@@ -22,6 +23,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     firearm: { count: (args: unknown) => tracked(firearmCount(args)) },
     accessory: { count: (args: unknown) => tracked(accessoryCount(args)) },
+    gear: { count: (args: unknown) => tracked(gearCount(args)) },
   },
 }));
 
@@ -31,6 +33,7 @@ describe("GET /api/categories/counts", () => {
   beforeEach(() => {
     firearmCount.mockReset().mockResolvedValue(3);
     accessoryCount.mockReset().mockResolvedValue(5);
+    gearCount.mockReset().mockResolvedValue(7);
     inFlight = 0;
     maxInFlight = 0;
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -48,6 +51,15 @@ describe("GET /api/categories/counts", () => {
     const body = await (await GET()).json();
     expect(body.counts.handguns).toBe(3);
     expect(body.counts.optics).toBe(5);
+  });
+
+  it("counts gear for gear-backed sections (knives, cases)", async () => {
+    const body = await (await GET()).json();
+    expect(body.counts.knives).toBe(7);
+    expect(body.counts.cases).toBe(7);
+    expect(gearCount).toHaveBeenCalledWith({
+      where: { category: { in: ["KNIFE"] } },
+    });
   });
 
   it("reports the legacy SMG count separately, unclassified rows only", async () => {

@@ -4,6 +4,7 @@ import {
   CATEGORY_SECTIONS,
   accessoryWhereForSection,
   firearmWhereForSection,
+  gearWhereForSection,
 } from "@/lib/categories";
 
 // Counts change with every write, so never prerender or cache this.
@@ -16,11 +17,13 @@ export async function GET() {
     for (const section of CATEGORY_SECTIONS) {
       const firearmWhere = firearmWhereForSection(section);
       const accessoryWhere = accessoryWhereForSection(section);
+      const gearWhere = gearWhereForSection(section);
       let total = 0;
       if (firearmWhere)
         total += await prisma.firearm.count({ where: firearmWhere });
       if (accessoryWhere)
         total += await prisma.accessory.count({ where: accessoryWhere });
+      if (gearWhere) total += await prisma.gear.count({ where: gearWhere });
       counts[section.slug] = total;
     }
 
