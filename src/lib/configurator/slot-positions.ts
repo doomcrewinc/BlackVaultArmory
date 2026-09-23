@@ -102,6 +102,26 @@ export const SLOT_POSITIONS: Record<
     OPTIC_MOUNT: { x: 47, y: 28 },
   },
 
+  PDW: {
+    MUZZLE: { x: 4, y: 46 },
+    BARREL: { x: 20, y: 43 },
+    HANDGUARD: { x: 33, y: 44 },
+    OPTIC: { x: 47, y: 22 },
+    CHARGING_HANDLE: { x: 60, y: 38 },
+    STOCK: { x: 82, y: 44 },
+    BUFFER_TUBE: { x: 74, y: 44 },
+    MAGAZINE: { x: 52, y: 70 },
+    GRIP: { x: 64, y: 62 },
+    UNDERBARREL: { x: 33, y: 65 },
+    LIGHT: { x: 28, y: 65 },
+    LASER: { x: 23, y: 65 },
+    SUPPRESSOR: { x: 2, y: 44 },
+    TRIGGER: { x: 58, y: 54 },
+    SLING: { x: 50, y: 60 },
+    COMPENSATOR: { x: 4, y: 46 },
+    OPTIC_MOUNT: { x: 47, y: 28 },
+  },
+
   REVOLVER: {
     BARREL: { x: 25, y: 43 },
     GRIP: { x: 60, y: 70 },
