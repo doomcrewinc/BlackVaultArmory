@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { probeDatabase, RETRY_SECONDS, type DbStatus } from "@/lib/db-status";
 
 type Outage = Exclude<DbStatus, "ok">;
@@ -32,6 +32,7 @@ export function DatabaseDownSplash({
   const [seconds, setSeconds] = useState(RETRY_SECONDS);
   // A zero countdown *is* the probe running; no second piece of state to skew.
   const checking = seconds === 0;
+  const retryButton = useRef<HTMLButtonElement>(null);
 
   // Counts down, then probes; a failed probe starts the countdown again.
   useEffect(() => {
@@ -50,6 +51,12 @@ export function DatabaseDownSplash({
       cancelled = true;
     };
   }, [seconds, onRecovered]);
+
+  // Take focus off the page behind: it is inert, so a keyboard user left
+  // there would have nothing to tab to.
+  useEffect(() => {
+    retryButton.current?.focus();
+  }, []);
 
   // The page behind is inert, but its scroll position is not; freeze it so the
   // notice cannot be scrolled away from.
@@ -122,7 +129,7 @@ export function DatabaseDownSplash({
 
         <button
           type="button"
-          autoFocus
+          ref={retryButton}
           onClick={() => setSeconds(0)}
           disabled={checking}
           className="rounded px-6 py-2 text-sm font-medium text-vault-bg transition-opacity hover:opacity-80 disabled:opacity-50"
