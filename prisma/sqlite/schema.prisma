@@ -25,7 +25,7 @@ model Firearm {
   caliber             String
   compatibleCalibers  String?
   serialNumber    String   @unique
-  // FirearmType: PISTOL | RIFLE | SHOTGUN | SMG | PCC | REVOLVER | BOLT_ACTION | LEVER_ACTION
+  // FirearmType: PISTOL | RIFLE | SHOTGUN | SMG | PCC | PDW | REVOLVER | BOLT_ACTION | LEVER_ACTION
   type            String
   // NfaClass: NONE | SBR | SBS | MACHINE_GUN | AOW | DESTRUCTIVE_DEVICE
   // How the firearm is regulated — independent of `type`. A select-fire
