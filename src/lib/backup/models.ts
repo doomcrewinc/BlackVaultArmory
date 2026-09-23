@@ -23,32 +23,80 @@ export const BACKUP_MODELS: BackupModel[] = [
   { model: "Firearm", delegate: "firearm", key: "firearms" },
   { model: "Accessory", delegate: "accessory", key: "accessories" },
   { model: "AmmoStock", delegate: "ammoStock", key: "ammoStocks" },
+  { model: "Gear", delegate: "gear", key: "gear" },
   { model: "Build", delegate: "build", key: "builds" },
   { model: "BuildSlot", delegate: "buildSlot", key: "buildSlots" },
   { model: "Document", delegate: "document", key: "documents" },
   { model: "ImageCache", delegate: "imageCache", key: "imageCache" },
   { model: "RangeSession", delegate: "rangeSession", key: "rangeSessions" },
-  { model: "RangeSessionAmmoLink", delegate: "rangeSessionAmmoLink", key: "rangeSessionAmmoLinks" },
-  { model: "AmmoTransaction", delegate: "ammoTransaction", key: "ammoTransactions" },
+  {
+    model: "RangeSessionAmmoLink",
+    delegate: "rangeSessionAmmoLink",
+    key: "rangeSessionAmmoLinks",
+  },
+  {
+    model: "AmmoTransaction",
+    delegate: "ammoTransaction",
+    key: "ammoTransactions",
+  },
   { model: "RoundCountLog", delegate: "roundCountLog", key: "roundCountLogs" },
   { model: "SessionDrill", delegate: "sessionDrill", key: "sessionDrills" },
-  { model: "MaintenanceLog", delegate: "maintenanceLog", key: "maintenanceLogs" },
-  { model: "BatteryChangeLog", delegate: "batteryChangeLog", key: "batteryChangeLogs" },
-  { model: "DateNormalizationAudit", delegate: "dateNormalizationAudit", key: "dateNormalizationAudits" },
+  {
+    model: "MaintenanceLog",
+    delegate: "maintenanceLog",
+    key: "maintenanceLogs",
+  },
+  {
+    model: "BatteryChangeLog",
+    delegate: "batteryChangeLog",
+    key: "batteryChangeLogs",
+  },
+  {
+    model: "DateNormalizationAudit",
+    delegate: "dateNormalizationAudit",
+    key: "dateNormalizationAudits",
+  },
 ];
 
 /**
- * The first 12 registry entries are the v1.0 backup format and must be present
- * in every restore payload. Only models added after v1.0 (appended after these)
- * may be missing from an older backup. Without this, a truncated file holding
- * just `firearms` would wipe every other table and report success.
+ * The v1.0 backup format's models, named explicitly rather than taken from
+ * BACKUP_MODELS' first N entries.
+ *
+ * Restore order (above) and required-ness (here) are different concerns and
+ * can't both be derived from array position: Gear (added after v1.0) has a
+ * child, Document, that predates it, so Gear must sit before Document above
+ * for FK-safe restore — which lands it ahead of position 12. A positional
+ * "first N are required" rule would then silently evict SessionDrill (a real
+ * v1.0 model) from the required set and wrongly require Gear in every old
+ * backup. Naming the v1.0 set by model name avoids that.
  */
-export const BACKUP_V1_0_MODEL_COUNT = 12;
+const V1_0_MODEL_NAMES: ReadonlySet<string> = new Set([
+  "Firearm",
+  "Accessory",
+  "AmmoStock",
+  "Build",
+  "BuildSlot",
+  "Document",
+  "ImageCache",
+  "RangeSession",
+  "RangeSessionAmmoLink",
+  "AmmoTransaction",
+  "RoundCountLog",
+  "SessionDrill",
+]);
+
+/**
+ * Count of v1.0 models, all of which must be present in every restore payload.
+ * Only models added after v1.0 may be missing from an older backup. Without
+ * this, a truncated file holding just `firearms` would wipe every other table
+ * and report success.
+ */
+export const BACKUP_V1_0_MODEL_COUNT = V1_0_MODEL_NAMES.size;
 
 /** Keys every restore payload must carry as arrays. */
-export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.slice(0, BACKUP_V1_0_MODEL_COUNT).map(
-  ({ key }) => key,
-);
+export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.filter(
+  ({ model }) => V1_0_MODEL_NAMES.has(model),
+).map(({ key }) => key);
 
 /** AppSettings is excluded: restore must not clobber local LAN host, paths, keys, or timezone. */
 export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings"];

@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { Prisma } from "@prisma/client";
-import { BACKUP_EXCLUDED_MODELS, BACKUP_MODELS } from "./models";
+import {
+  BACKUP_EXCLUDED_MODELS,
+  BACKUP_MODELS,
+  REQUIRED_BACKUP_KEYS,
+} from "./models";
 
 const schemaModels = Prisma.dmmf.datamodel.models;
-const indexOf = (model: string) => BACKUP_MODELS.findIndex((m) => m.model === model);
+const indexOf = (model: string) =>
+  BACKUP_MODELS.findIndex((m) => m.model === model);
 
 describe("BACKUP_MODELS registry", () => {
   it("covers every schema model exactly once, registry plus exclusions", () => {
-    const registered = [...BACKUP_MODELS.map((m) => m.model), ...BACKUP_EXCLUDED_MODELS].sort();
+    const registered = [
+      ...BACKUP_MODELS.map((m) => m.model),
+      ...BACKUP_EXCLUDED_MODELS,
+    ].sort();
     const inSchema = schemaModels.map((m) => m.name).sort();
     expect(registered).toEqual(inSchema);
   });
@@ -33,7 +41,9 @@ describe("BACKUP_MODELS registry", () => {
 
   it("uses the camelCase model name as each delegate", () => {
     for (const m of BACKUP_MODELS) {
-      expect(m.delegate).toBe(m.model.charAt(0).toLowerCase() + m.model.slice(1));
+      expect(m.delegate).toBe(
+        m.model.charAt(0).toLowerCase() + m.model.slice(1),
+      );
     }
   });
 
@@ -50,12 +60,31 @@ describe("BACKUP_MODELS registry", () => {
     expect(indexOf(child)).toBeGreaterThan(indexOf(parent));
   });
 
+  it("restores Gear before Document, because a document can point at gear", () => {
+    const gearIndex = BACKUP_MODELS.findIndex(
+      (entry) => entry.model === "Gear",
+    );
+    const documentIndex = BACKUP_MODELS.findIndex(
+      (entry) => entry.model === "Document",
+    );
+    expect(gearIndex).toBeGreaterThanOrEqual(0);
+    expect(gearIndex).toBeLessThan(documentIndex);
+  });
+
+  it("does not require gear in an older backup payload", () => {
+    expect(REQUIRED_BACKUP_KEYS).not.toContain("gear");
+  });
+
   it("orders every schema FK parent before its child", () => {
     for (const model of schemaModels) {
       if (BACKUP_EXCLUDED_MODELS.includes(model.name)) continue;
       for (const field of model.fields) {
-        if (field.kind !== "object" || !field.relationFromFields?.length) continue;
-        expect(indexOf(field.type), `${field.type} before ${model.name}`).toBeLessThan(indexOf(model.name));
+        if (field.kind !== "object" || !field.relationFromFields?.length)
+          continue;
+        expect(
+          indexOf(field.type),
+          `${field.type} before ${model.name}`,
+        ).toBeLessThan(indexOf(model.name));
       }
     }
   });

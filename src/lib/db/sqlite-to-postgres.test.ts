@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { BATCH_SIZE, MIGRATION_MODELS, SOURCE_UNTOUCHED, migrateSqliteToPostgres } from "./sqlite-to-postgres";
+import {
+  BATCH_SIZE,
+  MIGRATION_MODELS,
+  SOURCE_UNTOUCHED,
+  migrateSqliteToPostgres,
+} from "./sqlite-to-postgres";
 import { BACKUP_MODELS } from "../backup/models";
 import { FakeClient, seeded } from "./fake-db";
 
-async function run(source: FakeClient, target: FakeClient, extra: { dryRun?: boolean; force?: boolean } = {}) {
+async function run(
+  source: FakeClient,
+  target: FakeClient,
+  extra: { dryRun?: boolean; force?: boolean } = {},
+) {
   const lines: string[] = [];
   const connectTarget = vi.fn(() => target.asDb());
   const code = await migrateSqliteToPostgres({
@@ -17,9 +26,12 @@ async function run(source: FakeClient, target: FakeClient, extra: { dryRun?: boo
 }
 
 describe("MIGRATION_MODELS", () => {
-  it("is AppSettings followed by every backup model, in registry order (16 total)", () => {
-    expect(MIGRATION_MODELS.map((m) => m.model)).toEqual(["AppSettings", ...BACKUP_MODELS.map((m) => m.model)]);
-    expect(MIGRATION_MODELS).toHaveLength(16);
+  it("is AppSettings followed by every backup model, in registry order (17 total)", () => {
+    expect(MIGRATION_MODELS.map((m) => m.model)).toEqual([
+      "AppSettings",
+      ...BACKUP_MODELS.map((m) => m.model),
+    ]);
+    expect(MIGRATION_MODELS).toHaveLength(17);
   });
 });
 
@@ -30,21 +42,27 @@ describe("migrateSqliteToPostgres", () => {
     const { code, out } = await run(source, target);
 
     expect(code).toBe(0);
-    expect(out).toContain("VERIFIED: all 16 models match");
+    expect(out).toContain("VERIFIED: all 17 models match");
     for (const m of MIGRATION_MODELS) {
-      expect(target.delegates[m.delegate].rows).toEqual(source.delegates[m.delegate].rows);
+      expect(target.delegates[m.delegate].rows).toEqual(
+        source.delegates[m.delegate].rows,
+      );
     }
-    expect([...new Set(target.order)]).toEqual(MIGRATION_MODELS.map((m) => m.model));
+    expect([...new Set(target.order)]).toEqual(
+      MIGRATION_MODELS.map((m) => m.model),
+    );
     expect(source.order).toEqual([]); // source never written
     expect(source.disconnected && target.disconnected).toBe(true);
   });
 
   it("dry run reports counts and never connects to the target", async () => {
     const source = seeded();
-    const { code, out, connectTarget } = await run(source, new FakeClient(), { dryRun: true });
+    const { code, out, connectTarget } = await run(source, new FakeClient(), {
+      dryRun: true,
+    });
     expect(code).toBe(0);
     expect(connectTarget).not.toHaveBeenCalled();
-    expect(out).toContain("32 rows across 16 models would be copied");
+    expect(out).toContain("34 rows across 17 models would be copied");
   });
 
   it("refuses a non-empty target without --force and writes nothing", async () => {
@@ -62,7 +80,9 @@ describe("migrateSqliteToPostgres", () => {
 
   it("copies in batches of 500", async () => {
     const source = new FakeClient();
-    source.delegates.firearm.rows = Array.from({ length: 1201 }, (_, i) => ({ id: `f${String(i).padStart(5, "0")}` }));
+    source.delegates.firearm.rows = Array.from({ length: 1201 }, (_, i) => ({
+      id: `f${String(i).padStart(5, "0")}`,
+    }));
     const target = new FakeClient();
     const { code } = await run(source, target);
 
@@ -80,10 +100,18 @@ describe("migrateSqliteToPostgres", () => {
 
     expect(code).toBe(1);
     expect(out).toContain("MISMATCH");
-    expect(lines.some((l) => l.includes("BatteryChangeLog") && l.includes("expected 2") && l.includes("found 1"))).toBe(true);
+    expect(
+      lines.some(
+        (l) =>
+          l.includes("BatteryChangeLog") &&
+          l.includes("expected 2") &&
+          l.includes("found 1"),
+      ),
+    ).toBe(true);
     expect(out).toContain(SOURCE_UNTOUCHED);
     // The target must end as it started: a failed verification rolls the copy back.
-    for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    for (const m of MIGRATION_MODELS)
+      expect(target.delegates[m.delegate].rows).toEqual([]);
     expect(out).toContain("rolled back");
     expect(target.disconnected).toBe(true);
   });
@@ -91,15 +119,23 @@ describe("migrateSqliteToPostgres", () => {
   it("exits 1 when a copied DateTime differs by even one millisecond", async () => {
     const source = seeded();
     const target = new FakeClient();
-    const orig = target.delegates.firearm.createMany.bind(target.delegates.firearm);
+    const orig = target.delegates.firearm.createMany.bind(
+      target.delegates.firearm,
+    );
     target.delegates.firearm.createMany = async ({ data }) =>
-      orig({ data: data.map((r) => ({ ...r, createdAt: new Date((r.createdAt as Date).getTime() + 1) })) });
+      orig({
+        data: data.map((r) => ({
+          ...r,
+          createdAt: new Date((r.createdAt as Date).getTime() + 1),
+        })),
+      });
     const { code, out } = await run(source, target);
 
     expect(code).toBe(1);
     expect(out).toContain("Firearm: 2 row(s) missing or different on target");
     // The target must end as it started: a failed verification rolls the copy back.
-    for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    for (const m of MIGRATION_MODELS)
+      expect(target.delegates[m.delegate].rows).toEqual([]);
     expect(out).toContain("rolled back");
   });
 
@@ -111,7 +147,8 @@ describe("migrateSqliteToPostgres", () => {
 
     expect(code).toBe(1);
     // The target must end as it started: a failed verification rolls the copy back.
-    for (const m of MIGRATION_MODELS) expect(target.delegates[m.delegate].rows).toEqual([]);
+    for (const m of MIGRATION_MODELS)
+      expect(target.delegates[m.delegate].rows).toEqual([]);
     expect(out).toContain("rolled back");
     expect(source.disconnected && target.disconnected).toBe(true);
   });
@@ -141,7 +178,11 @@ describe("migrateSqliteToPostgres", () => {
 });
 
 describe("onVerified", () => {
-  async function withHook(source: FakeClient, target: FakeClient, dryRun = false) {
+  async function withHook(
+    source: FakeClient,
+    target: FakeClient,
+    dryRun = false,
+  ) {
     const onVerified = vi.fn();
     const code = await migrateSqliteToPostgres({
       source: source.asDb(),
@@ -159,16 +200,20 @@ describe("onVerified", () => {
     expect(code).toBe(0);
     expect(onVerified).toHaveBeenCalledTimes(1);
     const [counts, total] = onVerified.mock.calls[0];
-    expect(total).toBe(32);
+    expect(total).toBe(34);
     expect(counts.get("Firearm")).toBe(2);
   });
 
   it("is not called on a dry run, a refusal, a rollback or a post-commit failure", async () => {
-    expect((await withHook(seeded(), new FakeClient(), true)).onVerified).not.toHaveBeenCalled();
+    expect(
+      (await withHook(seeded(), new FakeClient(), true)).onVerified,
+    ).not.toHaveBeenCalled();
 
     const occupied = new FakeClient();
     occupied.delegates.firearm.rows = [{ id: "existing" }];
-    expect((await withHook(seeded(), occupied)).onVerified).not.toHaveBeenCalled();
+    expect(
+      (await withHook(seeded(), occupied)).onVerified,
+    ).not.toHaveBeenCalled();
 
     const short = new FakeClient();
     short.delegates.build.writeShortBy = 1;
@@ -176,6 +221,8 @@ describe("onVerified", () => {
 
     const drifting = new FakeClient();
     drifting.delegates.sessionDrill.countShortOutsideTx = 1;
-    expect((await withHook(seeded(), drifting)).onVerified).not.toHaveBeenCalled();
+    expect(
+      (await withHook(seeded(), drifting)).onVerified,
+    ).not.toHaveBeenCalled();
   });
 });
