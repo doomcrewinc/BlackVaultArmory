@@ -154,7 +154,7 @@ export async function PUT(
           replacementIntervalDays,
         }),
         ...(quantity !== undefined && {
-          quantity: normalizeQuantity(quantity),
+          quantity: normalizeQuantity(quantity, existing.quantity),
         }),
       },
       include: {
