@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { probeDatabase, type DbStatus } from "@/lib/db-status";
-import { DatabaseDownSplash } from "@/components/layout/DatabaseDownSplash";
+import { probeDatabase } from "@/lib/db-status";
+import { useDatabaseStatus } from "@/components/layout/DatabaseStatusProvider";
 
 /**
  * Route-level error boundary. A page whose data fetch hit a dead database
- * throws during render, so ask health what happened: an outage gets the same
- * blocking notice the rest of the app uses, and anything else gets a plain
- * error with a way out.
+ * throws during render, so ask health what happened: an outage is handed to
+ * DatabaseStatusProvider, which owns the notice and makes the app read-only,
+ * and anything else gets a plain error with a way out.
  */
 export default function AppError({
   error,
@@ -17,25 +17,38 @@ export default function AppError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
-  const [status, setStatus] = useState<DbStatus | "checking">("checking");
+  const { reportOutage } = useDatabaseStatus();
+  const [verdict, setVerdict] = useState<"checking" | "outage" | "app-error">(
+    "checking",
+  );
 
   useEffect(() => {
     console.error("[error boundary]", error);
     let cancelled = false;
-    void probeDatabase().then((next) => {
-      if (!cancelled) setStatus(next);
+    void probeDatabase().then((status) => {
+      if (cancelled) return;
+      if (status === "ok") {
+        setVerdict("app-error");
+      } else {
+        setVerdict("outage");
+        // The provider shows the notice and re-renders this route once the
+        // database is back.
+        reportOutage(status, reset);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [error]);
+  }, [error, reportOutage, reset]);
 
-  if (status === "checking") {
-    return <div className="min-h-svh bg-vault-bg" aria-busy="true" />;
-  }
-
-  if (status !== "ok") {
-    return <DatabaseDownSplash status={status} onRecovered={reset} />;
+  if (verdict !== "app-error") {
+    // Either still asking, or the provider's notice is covering the screen.
+    return (
+      <div
+        className="min-h-svh bg-vault-bg"
+        aria-busy={verdict === "checking"}
+      />
+    );
   }
 
   return (

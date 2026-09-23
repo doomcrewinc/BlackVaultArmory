@@ -6,9 +6,7 @@ import { ThemeProvider } from "@/components/layout/ThemeProvider";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { GlobalSearch } from "@/components/search/GlobalSearch";
-import { DatabaseGate } from "@/components/layout/DatabaseGate";
-
-const APP_SHELL_ID = "bv-app-shell";
+import { DatabaseStatusProvider } from "@/components/layout/DatabaseStatusProvider";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
@@ -41,10 +39,10 @@ export default function RootLayout({
       </head>
       <body className="antialiased bg-vault-bg text-vault-text">
         <ThemeProvider>
-          {/* Everything the user can touch lives in this element. DatabaseGate
-              marks it inert during a database outage, which is what makes the
-              app read-only. */}
-          <div id={APP_SHELL_ID}>
+          {/* Everything the user can touch lives inside this provider, which
+              marks it inert during a database outage — that is what makes the
+              app read-only — and renders the notice outside it. */}
+          <DatabaseStatusProvider>
             <div className="flex min-h-svh">
               <Sidebar />
               <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
@@ -56,8 +54,7 @@ export default function RootLayout({
             </div>
             <ThemeToggle />
             <GlobalSearch />
-          </div>
-          <DatabaseGate shellId={APP_SHELL_ID} />
+          </DatabaseStatusProvider>
         </ThemeProvider>
       </body>
     </html>
