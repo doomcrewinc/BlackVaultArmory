@@ -68,6 +68,14 @@ export interface FullArmoryGearRow {
   currentValue: number | null;
   acquisitionDate: string;
   storageLocation: string;
+  receiptCount: number;
+  documentCount: number;
+  hasPhoto: boolean;
+  imageUrl: string;
+  missingSerial: boolean;
+  missingReceipt: boolean;
+  missingPhoto: boolean;
+  missingValue: boolean;
   notes: string;
 }
 

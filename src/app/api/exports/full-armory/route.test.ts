@@ -124,6 +124,7 @@ describe("GET /api/exports/full-armory", () => {
         acquisitionDate: new Date("2025-03-01T00:00:00.000Z"),
         storageLocation: "Safe A",
         notes: "EDC",
+        imageUrl: null,
       },
     ]);
   });
@@ -174,6 +175,14 @@ describe("GET /api/exports/full-armory", () => {
         currentValue: 130,
         acquisitionDate: "2025-03-01",
         storageLocation: "Safe A",
+        receiptCount: 0,
+        documentCount: 0,
+        hasPhoto: false,
+        imageUrl: "",
+        missingSerial: false,
+        missingReceipt: true,
+        missingPhoto: true,
+        missingValue: false,
         notes: "EDC",
       },
     ]);
@@ -184,6 +193,77 @@ describe("GET /api/exports/full-armory", () => {
     expect(json.summary.totalPurchaseValue).toBe(1550);
     // firearm currentValue (1450) + gear currentValue (130); accessories never contribute
     expect(json.summary.totalReplacementValue).toBe(1580);
+  });
+
+  it("counts gear in every missingEvidence figure, matching totalItems", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-1",
+        name: "Bugout",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: "GSN-1",
+        category: "KNIFE",
+        quantity: 2,
+        purchasePrice: 150,
+        currentValue: 130,
+        acquisitionDate: new Date("2025-03-01T00:00:00.000Z"),
+        storageLocation: "Safe A",
+        notes: "EDC",
+        imageUrl: null,
+      },
+      {
+        id: "gear-bare",
+        name: "Nameless Case",
+        manufacturer: null,
+        model: null,
+        serialNumber: null,
+        category: "CASE",
+        quantity: 1,
+        purchasePrice: null,
+        currentValue: null,
+        acquisitionDate: null,
+        storageLocation: null,
+        notes: null,
+        imageUrl: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    // 1 firearm + 1 accessory + 2 gear
+    expect(json.summary.totalItems).toBe(4);
+    expect(json.summary.missingEvidence).toEqual({
+      // accessory (no receipt) + both gear items (no receipt)
+      missingReceipts: 3,
+      // accessory (no image) + both gear items (no image)
+      missingPhotos: 3,
+      // gear-bare alone: no purchasePrice and no currentValue
+      missingValues: 1,
+      // gear-bare alone: firearm has a serial, accessories never carry one
+      missingSerials: 1,
+    });
+  });
+
+  it("zeroes the gear missingEvidence flags when the matching toggle is off", async () => {
+    const request = new NextRequest(
+      "http://localhost/api/exports/full-armory?includeSerialNumbers=false&includeValue=false&includeImages=false&includeDocuments=false"
+    );
+    const json = await (await GET(request)).json();
+
+    expect(json.gear[0]).toMatchObject({
+      missingSerial: false,
+      missingReceipt: false,
+      missingPhoto: false,
+      missingValue: false,
+    });
+    expect(json.summary.missingEvidence).toEqual({
+      missingReceipts: 0,
+      missingPhotos: 0,
+      missingValues: 0,
+      missingSerials: 0,
+    });
   });
 
   it("falls back to the raw category when a gear item has an unrecognised category", async () => {
@@ -201,6 +281,7 @@ describe("GET /api/exports/full-armory", () => {
         acquisitionDate: null,
         storageLocation: null,
         notes: null,
+        imageUrl: null,
       },
     ]);
 

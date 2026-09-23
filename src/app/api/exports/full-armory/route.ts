@@ -84,6 +84,7 @@ type GearExportRecord = {
   acquisitionDate: Date | null;
   storageLocation: string | null;
   notes: string | null;
+  imageUrl: string | null;
 };
 
 type PrismaWithOptionalDocument = typeof prisma & {
@@ -424,6 +425,7 @@ export async function GET(request: NextRequest) {
         acquisitionDate: true,
         storageLocation: true,
         notes: true,
+        imageUrl: true,
       },
       orderBy: [{ manufacturer: "asc" }, { name: "asc" }],
     })) as GearExportRecord[];
@@ -531,20 +533,40 @@ export async function GET(request: NextRequest) {
         }))
       : [];
 
-    const gearRows = gearItems.map((item) => ({
-      gearId: item.id,
-      name: item.name,
-      category: gearCategoryLabel(item.category),
-      manufacturer: item.manufacturer || "",
-      model: item.model || "",
-      serialNumber: exportOptions.includeSerialNumbers ? item.serialNumber || "" : "",
-      quantity: item.quantity ?? 0,
-      purchasePrice: exportOptions.includeValue ? (item.purchasePrice ?? null) : null,
-      currentValue: exportOptions.includeValue ? (item.currentValue ?? null) : null,
-      acquisitionDate: toISODate(item.acquisitionDate),
-      storageLocation: item.storageLocation || "",
-      notes: item.notes ?? "",
-    }));
+    // Gear carries a serial, a value, documents and a photo, so every
+    // missing-evidence counter applies to it exactly as it does to a firearm.
+    // totalItems counts gear (below), so the counters must too — otherwise the
+    // preview can say "13 items, 0 missing values" while a gear item has none.
+    const gearRows = gearItems.map((item) => {
+      const itemDocs = documents.filter((doc) => doc.gearId === item.id);
+      const receiptCount = itemDocs.filter((doc) => doc.type === "RECEIPT").length;
+      const hasPhoto = exportOptions.includeImages && !!item.imageUrl;
+
+      return {
+        gearId: item.id,
+        name: item.name,
+        category: gearCategoryLabel(item.category),
+        manufacturer: item.manufacturer || "",
+        model: item.model || "",
+        serialNumber: exportOptions.includeSerialNumbers ? item.serialNumber || "" : "",
+        quantity: item.quantity ?? 0,
+        purchasePrice: exportOptions.includeValue ? (item.purchasePrice ?? null) : null,
+        currentValue: exportOptions.includeValue ? (item.currentValue ?? null) : null,
+        acquisitionDate: toISODate(item.acquisitionDate),
+        storageLocation: item.storageLocation || "",
+        receiptCount: exportOptions.includeDocuments ? receiptCount : 0,
+        documentCount: exportOptions.includeDocuments ? itemDocs.length : 0,
+        hasPhoto,
+        imageUrl: hasPhoto ? item.imageUrl ?? "" : "",
+        missingSerial: exportOptions.includeSerialNumbers ? !item.serialNumber : false,
+        missingReceipt: exportOptions.includeDocuments ? receiptCount === 0 : false,
+        missingPhoto: exportOptions.includeImages ? !hasPhoto : false,
+        missingValue: exportOptions.includeValue
+          ? item.currentValue == null && item.purchasePrice == null
+          : false,
+        notes: item.notes ?? "",
+      };
+    });
 
     // Accessories participate in totalItems and totalPurchaseValue but never carry a
     // replacementValue (their record has no currentValue field, so that row's
@@ -578,10 +600,14 @@ export async function GET(request: NextRequest) {
         totalPurchaseValue,
         totalReplacementValue,
         missingEvidence: {
-          missingReceipts: itemRows.filter((i) => i.missingReceipt).length,
-          missingPhotos: itemRows.filter((i) => i.missingPhoto).length,
-          missingValues: itemRows.filter((i) => i.missingValue).length,
-          missingSerials: itemRows.filter((i) => i.missingSerial).length,
+          missingReceipts:
+            itemRows.filter((i) => i.missingReceipt).length + gearRows.filter((g) => g.missingReceipt).length,
+          missingPhotos:
+            itemRows.filter((i) => i.missingPhoto).length + gearRows.filter((g) => g.missingPhoto).length,
+          missingValues:
+            itemRows.filter((i) => i.missingValue).length + gearRows.filter((g) => g.missingValue).length,
+          missingSerials:
+            itemRows.filter((i) => i.missingSerial).length + gearRows.filter((g) => g.missingSerial).length,
         },
       },
       items: itemRows,
