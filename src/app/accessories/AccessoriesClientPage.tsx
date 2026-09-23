@@ -36,12 +36,17 @@ const SLOT_TYPE_LABELS: Record<string, string> = {
 
 const BARREL_TYPES = new Set(["BARREL", "SUPPRESSOR", "MUZZLE", "COMPENSATOR"]);
 
-function roundCountColor(roundCount: number, slotType: string): { text: string; bar: string } {
+function roundCountColor(
+  roundCount: number,
+  slotType: string,
+): { text: string; bar: string } {
   const isHighWearPart = BARREL_TYPES.has(slotType);
   const threshold = isHighWearPart ? 5000 : 20000;
 
-  if (roundCount >= threshold) return { text: "text-[#E53935]", bar: "bg-[#E53935]" };
-  if (roundCount >= threshold * 0.6) return { text: "text-[#F5A623]", bar: "bg-[#F5A623]" };
+  if (roundCount >= threshold)
+    return { text: "text-[#E53935]", bar: "bg-[#E53935]" };
+  if (roundCount >= threshold * 0.6)
+    return { text: "text-[#F5A623]", bar: "bg-[#F5A623]" };
   return { text: "text-[#00C853]", bar: "bg-[#00C853]" };
 }
 
@@ -65,12 +70,20 @@ interface AccessoryWithBuild {
 
 interface Props {
   accessories: AccessoryWithBuild[];
+  heading?: string;
+  subheading?: string;
 }
 
-export function AccessoriesClientPage({ accessories }: Props) {
+export function AccessoriesClientPage({
+  accessories,
+  heading = "ACCESSORIES",
+  subheading,
+}: Props) {
   const [selectedType, setSelectedType] = useState<string | null>(null);
 
-  const usedTypes = [...new Set(accessories.map((a) => a.type).filter(Boolean))].sort((a, b) => {
+  const usedTypes = [
+    ...new Set(accessories.map((a) => a.type).filter(Boolean)),
+  ].sort((a, b) => {
     const labelA = SLOT_TYPE_LABELS[a] ?? a;
     const labelB = SLOT_TYPE_LABELS[b] ?? b;
     return labelA.localeCompare(labelB);
@@ -85,8 +98,11 @@ export function AccessoriesClientPage({ accessories }: Props) {
   return (
     <div className="min-h-full">
       <PageHeader
-        title="ACCESSORIES"
-        subtitle={`${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`}
+        title={heading}
+        subtitle={
+          subheading ??
+          `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
+        }
         actions={
           <Link
             href="/accessories/new"
@@ -102,13 +118,21 @@ export function AccessoriesClientPage({ accessories }: Props) {
         {/* Summary bar */}
         <div className="flex flex-wrap items-center gap-4 sm:gap-6 mb-6 bg-vault-surface border border-vault-border rounded-lg px-4 sm:px-5 py-3">
           <div>
-            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">Total Parts</p>
-            <p className="text-lg font-bold font-mono text-vault-text">{formatNumber(accessories.length)}</p>
+            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">
+              Total Parts
+            </p>
+            <p className="text-lg font-bold font-mono text-vault-text">
+              {formatNumber(accessories.length)}
+            </p>
           </div>
           <div className="w-px h-8 bg-vault-border" />
           <div>
-            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">Total Rounds Through</p>
-            <p className="text-lg font-bold font-mono text-[#00C2FF]">{formatNumber(totalRounds)}</p>
+            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">
+              Total Rounds Through
+            </p>
+            <p className="text-lg font-bold font-mono text-[#00C2FF]">
+              {formatNumber(totalRounds)}
+            </p>
           </div>
         </div>
 
@@ -128,7 +152,9 @@ export function AccessoriesClientPage({ accessories }: Props) {
             {usedTypes.map((type) => (
               <button
                 key={type}
-                onClick={() => setSelectedType(type === selectedType ? null : type)}
+                onClick={() =>
+                  setSelectedType(type === selectedType ? null : type)
+                }
                 className={
                   selectedType === type
                     ? "bg-[#00C2FF]/10 border border-[#00C2FF] text-[#00C2FF] rounded-full px-3 py-1 text-xs font-medium"
@@ -149,9 +175,12 @@ export function AccessoriesClientPage({ accessories }: Props) {
                 <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
                   <Crosshair className="w-8 h-8 text-[#00C2FF]" />
                 </div>
-                <h3 className="text-lg font-semibold text-vault-text mb-2">No accessories yet</h3>
+                <h3 className="text-lg font-semibold text-vault-text mb-2">
+                  No accessories yet
+                </h3>
                 <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-                  Add parts, optics, suppressors and other attachments to track round counts and build configurations.
+                  Add parts, optics, suppressors and other attachments to track
+                  round counts and build configurations.
                 </p>
                 <Link
                   href="/accessories/new"
@@ -185,18 +214,30 @@ export function AccessoriesClientPage({ accessories }: Props) {
                   className="rounded-lg border border-vault-border bg-vault-surface p-3"
                 >
                   <div className="flex items-start gap-3">
-                    <Link href={`/accessories/${accessory.id}`} className="w-11 h-11 rounded bg-vault-bg border border-vault-border overflow-hidden flex items-center justify-center shrink-0">
+                    <Link
+                      href={`/accessories/${accessory.id}`}
+                      className="w-11 h-11 rounded bg-vault-bg border border-vault-border overflow-hidden flex items-center justify-center shrink-0"
+                    >
                       {accessory.imageUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={accessory.imageUrl} alt={accessory.name} className="w-full h-full object-cover" />
+                        <img
+                          src={accessory.imageUrl}
+                          alt={accessory.name}
+                          className="w-full h-full object-cover"
+                        />
                       ) : (
                         <Shield className="w-4 h-4 text-vault-text-faint" />
                       )}
                     </Link>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <Link href={`/accessories/${accessory.id}`} className="min-w-0">
-                          <p className="font-semibold text-vault-text truncate">{accessory.name}</p>
+                        <Link
+                          href={`/accessories/${accessory.id}`}
+                          className="min-w-0"
+                        >
+                          <p className="font-semibold text-vault-text truncate">
+                            {accessory.name}
+                          </p>
                         </Link>
                         <Link
                           href={`/accessories/${accessory.id}/edit`}
@@ -208,10 +249,15 @@ export function AccessoriesClientPage({ accessories }: Props) {
                       </div>
                       <p className="text-xs text-vault-text-faint truncate">
                         {SLOT_TYPE_LABELS[accessory.type] ?? accessory.type}
-                        {accessory.manufacturer ? ` · ${accessory.manufacturer}` : ""}
+                        {accessory.manufacturer
+                          ? ` · ${accessory.manufacturer}`
+                          : ""}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <RoundCountBadge roundCount={accessory.roundCount} className="text-xs" />
+                        <RoundCountBadge
+                          roundCount={accessory.roundCount}
+                          className="text-xs"
+                        />
                         <span className="text-xs font-mono text-vault-text-muted">
                           {formatCurrency(accessory.purchasePrice)}
                         </span>
@@ -220,7 +266,9 @@ export function AccessoriesClientPage({ accessories }: Props) {
                             {accessory.currentBuild.firearm.name}
                           </span>
                         ) : (
-                          <span className="text-xs text-vault-text-faint">Uninstalled</span>
+                          <span className="text-xs text-vault-text-faint">
+                            Uninstalled
+                          </span>
                         )}
                       </div>
                     </div>
@@ -264,9 +312,17 @@ export function AccessoriesClientPage({ accessories }: Props) {
                   </thead>
                   <tbody className="divide-y divide-vault-border">
                     {displayed.map((accessory) => {
-                      const colors = roundCountColor(accessory.roundCount, accessory.type);
-                      const maxRounds = BARREL_TYPES.has(accessory.type) ? 5000 : 20000;
-                      const pct = Math.min((accessory.roundCount / maxRounds) * 100, 100);
+                      const colors = roundCountColor(
+                        accessory.roundCount,
+                        accessory.type,
+                      );
+                      const maxRounds = BARREL_TYPES.has(accessory.type)
+                        ? 5000
+                        : 20000;
+                      const pct = Math.min(
+                        (accessory.roundCount / maxRounds) * 100,
+                        100,
+                      );
 
                       return (
                         <tr
@@ -291,7 +347,10 @@ export function AccessoriesClientPage({ accessories }: Props) {
 
                           {/* Name */}
                           <td className="px-4 py-3">
-                            <Link href={`/accessories/${accessory.id}`} className="block">
+                            <Link
+                              href={`/accessories/${accessory.id}`}
+                              className="block"
+                            >
                               <p className="font-semibold text-vault-text group-hover:text-[#00C2FF] transition-colors truncate max-w-[180px] flex items-center gap-1">
                                 {accessory.name}
                                 <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
@@ -307,7 +366,8 @@ export function AccessoriesClientPage({ accessories }: Props) {
                           {/* Type */}
                           <td className="px-4 py-3 hidden md:table-cell">
                             <span className="text-xs px-2 py-0.5 rounded border border-vault-border text-vault-text-muted font-mono uppercase">
-                              {SLOT_TYPE_LABELS[accessory.type] ?? accessory.type}
+                              {SLOT_TYPE_LABELS[accessory.type] ??
+                                accessory.type}
                             </span>
                           </td>
 
@@ -321,7 +381,10 @@ export function AccessoriesClientPage({ accessories }: Props) {
                           {/* Round count */}
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-3">
-                              <RoundCountBadge roundCount={accessory.roundCount} className="text-xs" />
+                              <RoundCountBadge
+                                roundCount={accessory.roundCount}
+                                className="text-xs"
+                              />
                               <div className="w-20 bg-vault-border rounded-full h-1 hidden sm:block">
                                 <div
                                   className={`h-1 rounded-full ${colors.bar} transition-all`}
@@ -343,7 +406,9 @@ export function AccessoriesClientPage({ accessories }: Props) {
                                 </p>
                               </div>
                             ) : (
-                              <p className="text-xs text-vault-text-faint">Uninstalled</p>
+                              <p className="text-xs text-vault-text-faint">
+                                Uninstalled
+                              </p>
                             )}
                           </td>
 
