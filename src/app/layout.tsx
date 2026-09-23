@@ -6,6 +6,7 @@ import { ThemeProvider } from "@/components/layout/ThemeProvider";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { GlobalSearch } from "@/components/search/GlobalSearch";
+import { DatabaseStatusProvider } from "@/components/layout/DatabaseStatusProvider";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
@@ -38,19 +39,22 @@ export default function RootLayout({
       </head>
       <body className="antialiased bg-vault-bg text-vault-text">
         <ThemeProvider>
-          <div className="flex min-h-svh">
-            <Sidebar />
-            <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
-              <MobileHeader />
-              <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
-                <ErrorBoundary>
-                  {children}
-                </ErrorBoundary>
-              </main>
+          {/* Everything the user can touch lives inside this provider, which
+              marks it inert during a database outage — that is what makes the
+              app read-only — and renders the notice outside it. */}
+          <DatabaseStatusProvider>
+            <div className="flex min-h-svh">
+              <Sidebar />
+              <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
+                <MobileHeader />
+                <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
+                  <ErrorBoundary>{children}</ErrorBoundary>
+                </main>
+              </div>
             </div>
-          </div>
-          <ThemeToggle />
-          <GlobalSearch />
+            <ThemeToggle />
+            <GlobalSearch />
+          </DatabaseStatusProvider>
         </ThemeProvider>
       </body>
     </html>
