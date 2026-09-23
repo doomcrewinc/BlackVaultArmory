@@ -8,6 +8,7 @@ import {
   GEAR_CATEGORY_LABELS,
   DEFAULT_GEAR_CATEGORY,
 } from "@/lib/gear";
+import ImagePicker from "@/components/shared/ImagePicker";
 import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
@@ -20,6 +21,7 @@ export default function NewGearPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -48,6 +50,8 @@ export default function NewGearPage() {
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       storageLocation: (data.get("storageLocation") as string) || null,
       notes: (data.get("notes") as string) || null,
+      imageUrl: imageUrl || null,
+      imageSource: imageUrl ? "uploaded" : null,
     };
 
     try {
@@ -277,6 +281,18 @@ export default function NewGearPage() {
                 </div>
               </div>
             </div>
+          </fieldset>
+
+          {/* Image */}
+          <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
+            <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
+              Image
+            </legend>
+            <ImagePicker
+              entityType="gear"
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           {/* Notes */}

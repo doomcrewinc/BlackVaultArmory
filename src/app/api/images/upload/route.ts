@@ -15,6 +15,7 @@ const ALLOWED_ENTITY_TYPES = new Set([
   "accessory",
   "ammo",
   "build",
+  "gear",
 ]);
 const MAX_SIZE = 10 * 1024 * 1024;
 const SAFE_ENTITY_ID = /^[a-zA-Z0-9_-]{1,64}$/;

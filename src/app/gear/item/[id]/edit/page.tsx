@@ -9,6 +9,7 @@ import {
   DEFAULT_GEAR_CATEGORY,
 } from "@/lib/gear";
 import { toISODate } from "@/lib/date";
+import ImagePicker from "@/components/shared/ImagePicker";
 import { ArrowLeft, Save, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
@@ -29,6 +30,8 @@ interface GearItem {
   acquisitionDate: string | null;
   storageLocation: string | null;
   notes: string | null;
+  imageUrl: string | null;
+  imageSource: string | null;
 }
 
 export default function EditGearPage() {
@@ -49,6 +52,7 @@ export default function EditGearPage() {
   // record's values, never the form's own uninitialised defaults.
   const [category, setCategory] = useState<string>(DEFAULT_GEAR_CATEGORY);
   const [quantity, setQuantity] = useState("1");
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!gearId) return;
@@ -62,6 +66,7 @@ export default function EditGearPage() {
           setGear(data);
           setCategory(data.category ?? DEFAULT_GEAR_CATEGORY);
           setQuantity(String(data.quantity ?? 1));
+          setImageUrl(data.imageUrl ?? null);
         }
         setDataLoading(false);
       })
@@ -96,6 +101,8 @@ export default function EditGearPage() {
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       storageLocation: (data.get("storageLocation") as string) || null,
       notes: (data.get("notes") as string) || null,
+      imageUrl: imageUrl || null,
+      imageSource: imageUrl ? "uploaded" : null,
     };
 
     try {
@@ -373,6 +380,19 @@ export default function EditGearPage() {
                 </div>
               </div>
             </div>
+          </fieldset>
+
+          {/* Image */}
+          <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
+            <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
+              Image
+            </legend>
+            <ImagePicker
+              entityType="gear"
+              entityId={gear.id}
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           {/* Notes */}

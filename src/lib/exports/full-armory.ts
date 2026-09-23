@@ -171,7 +171,8 @@ function isImageAttachment(row: FullArmoryAttachmentRow): boolean {
 }
 
 export function selectVisualEvidence(
-  payload: Pick<FullArmoryExportResponse, "items" | "attachments">,
+  payload: Pick<FullArmoryExportResponse, "items" | "attachments"> &
+    Partial<Pick<FullArmoryExportResponse, "gear">>,
   options: FullArmoryExportOptions
 ): VisualEvidenceImage[] {
   const images: VisualEvidenceImage[] = [];
@@ -186,6 +187,23 @@ export function selectVisualEvidence(
         imageUrl: item.imageUrl,
         linkedItemId: item.itemId,
         linkedItemName: item.model || item.manufacturer || item.itemId,
+      });
+    }
+
+    // Gear counts toward totalItems and the value totals, so its photos are
+    // part of the same evidence set. Keyed `item:` like the rows above: gear
+    // ids and firearm/accessory ids are all cuids from separate tables, so a
+    // separate prefix would only make the two look like different kinds of
+    // evidence in the renderers.
+    for (const item of payload.gear ?? []) {
+      if (!item.imageUrl) continue;
+      images.push({
+        id: `item:${item.gearId}`,
+        source: "ITEM_PHOTO",
+        title: `GEAR: ${item.manufacturer} ${item.name}`.trim(),
+        imageUrl: item.imageUrl,
+        linkedItemId: item.gearId,
+        linkedItemName: item.name || item.manufacturer || item.gearId,
       });
     }
   }
