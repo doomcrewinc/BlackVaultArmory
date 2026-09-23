@@ -1,9 +1,13 @@
+"use client";
+
 export type CategoryCounts = {
   counts: Record<string, number>;
   legacySmgCount: number;
 };
 
-// Module-scoped, not a cache: it exists only to fold concurrent callers (the
+// Module-scoped and mutable, which is why this module is client-only: imported
+// from a server component the promise would be shared across every request in
+// the process. It is not a cache — it exists only to fold concurrent callers (the
 // desktop rail and the mobile drawer both mount `Sidebar`, and each wants
 // these counts on every navigation) onto a single underlying request. It is
 // cleared as soon as the request settles, so the next call always fetches
