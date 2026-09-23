@@ -14,7 +14,7 @@ const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
 const MAX_SIZE = 20 * 1024 * 1024; // 20MB
 
 // POST /api/documents/upload
-// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, notes?
+// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?, notes?
 // Saves to /storage/uploads/documents/{uuid}.{ext}
 // Creates a Document record and returns it.
 export async function POST(request: NextRequest) {
@@ -24,11 +24,15 @@ export async function POST(request: NextRequest) {
   try {
     // Rate limiting
     const ip = getClientIp(request);
-    const rate = await enforceRateLimit({ key: `upload:documents:${ip}`, windowMs: 60_000, maxAttempts: 20 });
+    const rate = await enforceRateLimit({
+      key: `upload:documents:${ip}`,
+      windowMs: 60_000,
+      maxAttempts: 20,
+    });
     if (!rate.allowed) {
       return NextResponse.json(
         { error: "Too many upload attempts. Please wait a minute." },
-        { status: 429 }
+        { status: 429 },
       );
     }
 
@@ -39,17 +43,27 @@ export async function POST(request: NextRequest) {
     const type = (formData.get("type") as string | null) || "RECEIPT";
     const firearmId = formData.get("firearmId") as string | null;
     const accessoryId = formData.get("accessoryId") as string | null;
+    const gearId = formData.get("gearId") as string | null;
     const notes = formData.get("notes") as string | null;
 
     if (!file) {
-      return NextResponse.json({ error: "Missing required field: file" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing required field: file" },
+        { status: 400 },
+      );
     }
     if (!name) {
-      return NextResponse.json({ error: "Missing required field: name" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing required field: name" },
+        { status: 400 },
+      );
     }
 
     if (file.size > MAX_SIZE) {
-      return NextResponse.json({ error: "File too large. Maximum size is 20MB." }, { status: 400 });
+      return NextResponse.json(
+        { error: "File too large. Maximum size is 20MB." },
+        { status: 400 },
+      );
     }
 
     const arrayBuffer = await file.arrayBuffer();
@@ -58,8 +72,10 @@ export async function POST(request: NextRequest) {
 
     if (!detected || !ALLOWED_EXTENSIONS.has(detected.extension)) {
       return NextResponse.json(
-        { error: `Invalid file type. Allowed: ${Array.from(ALLOWED_EXTENSIONS).join(", ")}` },
-        { status: 400 }
+        {
+          error: `Invalid file type. Allowed: ${Array.from(ALLOWED_EXTENSIONS).join(", ")}`,
+        },
+        { status: 400 },
       );
     }
 
@@ -86,16 +102,21 @@ export async function POST(request: NextRequest) {
         notes: notes || null,
         firearmId: firearmId || null,
         accessoryId: accessoryId || null,
+        gearId: gearId || null,
       },
       include: {
         firearm: { select: { id: true, name: true } },
         accessory: { select: { id: true, name: true } },
+        gear: { select: { id: true, name: true } },
       },
     });
 
     return NextResponse.json(doc, { status: 201 });
   } catch (error) {
     console.error("POST /api/documents/upload error:", error);
-    return NextResponse.json({ error: "Failed to upload document" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to upload document" },
+      { status: 500 },
+    );
   }
 }

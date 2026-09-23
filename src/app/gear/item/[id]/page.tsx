@@ -7,6 +7,7 @@ import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { DeleteGearButton } from "./DeleteGearButton";
+import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 async function getGear(id: string) {
@@ -162,6 +163,12 @@ export default async function GearDetailPage({
             </p>
           </div>
         )}
+
+        <ItemDocumentPanel
+          entityType="gear"
+          entityId={gear.id}
+          title="Gear Documents"
+        />
       </div>
     </div>
   );
