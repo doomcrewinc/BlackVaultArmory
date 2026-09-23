@@ -44,6 +44,16 @@ describe("GET /api/gear", () => {
     });
   });
 
+  it("filters by the literal OR shape for a multi-matcher section", async () => {
+    await GET(request("http://localhost/api/gear?section=cases") as never);
+    expect(mocks.findMany.mock.calls[0][0].where).toEqual({
+      OR: [
+        { category: { in: ["CASE"] } },
+        { category: { notIn: ["KNIFE", "CASE"] } },
+      ],
+    });
+  });
+
   it("returns nothing for a section that holds no gear", async () => {
     const response = await GET(
       request("http://localhost/api/gear?section=optics") as never,

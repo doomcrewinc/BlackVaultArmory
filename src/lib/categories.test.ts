@@ -304,6 +304,29 @@ describe("where fragments agree with holds", () => {
       }
     }
   });
+
+  it("selects the same gear as holds, for every gear category — including cases' OR fragment", () => {
+    const categories = [
+      ...GEAR_CATEGORIES,
+      "ZZ_JUNK",
+      "",
+      "knife", // wrong case
+      "ARMOR",
+    ];
+    for (const section of sectionsForGroup("gear")) {
+      const where = gearWhereForSection(section) as Where | null;
+      if (!where) continue;
+      for (const category of categories) {
+        const row = { category };
+        const byHolds = section.sources.some(
+          (source) => source.source === "gear" && source.holds(row),
+        );
+        expect(whereMatches(where, row), `${section.slug} / ${category}`).toBe(
+          byHolds,
+        );
+      }
+    }
+  });
 });
 
 describe("gear-backed sections", () => {
@@ -357,6 +380,16 @@ describe("gear-backed sections", () => {
 
     const optics = sectionBySlug("optics")!;
     expect(gearWhereForSection(optics)).toBeNull();
+  });
+
+  it("combines cases' two matchers into a literal OR, not flattened or reordered", () => {
+    const cases = sectionBySlug("cases")!;
+    expect(gearWhereForSection(cases)).toEqual({
+      OR: [
+        { category: { in: ["CASE"] } },
+        { category: { notIn: ["KNIFE", "CASE"] } },
+      ],
+    });
   });
 
   it("no section uses a slug that would collide with a gear route segment", () => {

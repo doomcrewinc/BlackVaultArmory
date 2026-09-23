@@ -33,7 +33,23 @@ describe("GET /api/categories/counts", () => {
   beforeEach(() => {
     firearmCount.mockReset().mockResolvedValue(3);
     accessoryCount.mockReset().mockResolvedValue(5);
-    gearCount.mockReset().mockResolvedValue(7);
+    // Where-aware: a mock that answers the same number to every query can't
+    // tell a right query from a wrong one. `knives`' where is a bare
+    // `{ category: { in: [...] } }`; `cases`' where is the `{ OR: [...] }`
+    // combination — distinguish them so a regression that sends the wrong
+    // fragment to the wrong section shows up as a wrong count, not a match.
+    gearCount.mockReset().mockImplementation(
+      (args: {
+        where?: {
+          category?: { in?: string[]; notIn?: string[] };
+          OR?: unknown[];
+        };
+      }) => {
+        if (args?.where?.OR) return Promise.resolve(11);
+        if (args?.where?.category?.in) return Promise.resolve(7);
+        return Promise.resolve(0);
+      },
+    );
     inFlight = 0;
     maxInFlight = 0;
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -53,12 +69,20 @@ describe("GET /api/categories/counts", () => {
     expect(body.counts.optics).toBe(5);
   });
 
-  it("counts gear for gear-backed sections (knives, cases)", async () => {
+  it("counts gear for gear-backed sections (knives, cases), each from its own where", async () => {
     const body = await (await GET()).json();
     expect(body.counts.knives).toBe(7);
-    expect(body.counts.cases).toBe(7);
+    expect(body.counts.cases).toBe(11);
     expect(gearCount).toHaveBeenCalledWith({
       where: { category: { in: ["KNIFE"] } },
+    });
+    expect(gearCount).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { category: { in: ["CASE"] } },
+          { category: { notIn: ["KNIFE", "CASE"] } },
+        ],
+      },
     });
   });
 
