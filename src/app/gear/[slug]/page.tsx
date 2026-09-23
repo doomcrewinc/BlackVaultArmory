@@ -93,11 +93,17 @@ export default async function GearSectionPage({
     );
   }
 
+  // A gear-group section must carry a gear matcher (handled above) or an
+  // accessory matcher — `?? undefined` here would otherwise turn "no
+  // matcher for this source" into "no filter", pulling in every accessory.
+  // Every section in the registry today has one or the other, so reaching
+  // neither is a registry defect, not a legitimate empty state.
+  const accessoryWhere = accessoryWhereForSection(section);
+  if (!accessoryWhere) notFound();
+
   let accessories: Awaited<ReturnType<typeof getSectionAccessories>>;
   try {
-    accessories = await getSectionAccessories(
-      accessoryWhereForSection(section) ?? undefined,
-    );
+    accessories = await getSectionAccessories(accessoryWhere);
   } catch {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
