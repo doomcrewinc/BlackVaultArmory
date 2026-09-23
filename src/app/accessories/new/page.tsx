@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import { parseOptionalNumber } from "@/lib/forms";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
 import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
@@ -34,7 +35,6 @@ export default function NewAccessoryPage() {
     const form = e.currentTarget;
     const data = new FormData(form);
 
-    const parsedPurchasePrice = Number(data.get("purchasePrice"));
     const parsedReplacementInterval = Number(
       data.get("replacementIntervalDays"),
     );
@@ -47,10 +47,7 @@ export default function NewAccessoryPage() {
       caliber: caliberInput || null,
       quantity: data.get("quantity") as string,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
-      purchasePrice:
-        Number.isFinite(parsedPurchasePrice) && parsedPurchasePrice >= 0
-          ? parsedPurchasePrice
-          : null,
+      purchasePrice: parseOptionalNumber(data.get("purchasePrice")),
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
       imageSource: imageUrl ? "uploaded" : null,
