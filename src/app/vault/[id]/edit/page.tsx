@@ -4,7 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
-import { FIREARM_TYPES, FIREARM_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import {
+  FIREARM_TYPES,
+  FIREARM_TYPE_LABELS,
+  COMMON_CALIBERS,
+  MG_REGISTRIES,
+  MG_REGISTRY_LABELS,
+  NFA_CLASSES,
+  NFA_CLASS_LABELS,
+} from "@/lib/types";
 import { ArrowLeft, Save, Loader2, AlertCircle, Trash2 } from "lucide-react";
 
 const INPUT_CLASS =
@@ -38,6 +46,8 @@ interface Firearm {
   imageUrl: string | null;
   lastMaintenanceDate: string | null;
   maintenanceIntervalDays: number | null;
+  nfaClass: string | null;
+  mgRegistry: string | null;
   builds: Build[];
   rangeSessionCount: number;
 }
@@ -69,25 +79,38 @@ export default function EditFirearmPage() {
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [compatCaliberTags, setCompatCaliberTags] = useState<string[]>([]);
   const [compatCaliberInput, setCompatCaliberInput] = useState("");
-  const [compatCaliberDropdownOpen, setCompatCaliberDropdownOpen] = useState(false);
+  const [compatCaliberDropdownOpen, setCompatCaliberDropdownOpen] =
+    useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [nfaClass, setNfaClass] = useState("NONE");
+  const [mgRegistry, setMgRegistry] = useState("");
   const caliberRef = useRef<HTMLDivElement>(null);
 
   // Delete firearm state
   const [showDeleteFirearmModal, setShowDeleteFirearmModal] = useState(false);
-  const [deleteFirearmAccessories, setDeleteFirearmAccessories] = useState<"keep" | "delete">("keep");
+  const [deleteFirearmAccessories, setDeleteFirearmAccessories] = useState<
+    "keep" | "delete"
+  >("keep");
   const [deletingFirearm, setDeletingFirearm] = useState(false);
 
   // Delete build state
-  const [deleteBuildTarget, setDeleteBuildTarget] = useState<{ id: string; name: string; accessoryCount: number } | null>(null);
-  const [deleteBuildAccessories, setDeleteBuildAccessories] = useState<"keep" | "delete">("keep");
+  const [deleteBuildTarget, setDeleteBuildTarget] = useState<{
+    id: string;
+    name: string;
+    accessoryCount: number;
+  } | null>(null);
+  const [deleteBuildAccessories, setDeleteBuildAccessories] = useState<
+    "keep" | "delete"
+  >("keep");
   const [deletingBuild, setDeletingBuild] = useState(false);
 
-  const [deleteFirearmError, setDeleteFirearmError] = useState<string | null>(null);
+  const [deleteFirearmError, setDeleteFirearmError] = useState<string | null>(
+    null,
+  );
   const [deleteBuildError, setDeleteBuildError] = useState<string | null>(null);
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
-    c.toLowerCase().includes(caliberInput.toLowerCase())
+    c.toLowerCase().includes(caliberInput.toLowerCase()),
   );
 
   useEffect(() => {
@@ -103,10 +126,15 @@ export default function EditFirearmPage() {
           setCaliberInput(data.caliber ?? "");
           setCompatCaliberTags(
             data.compatibleCalibers
-              ? data.compatibleCalibers.split(",").map((s: string) => s.trim()).filter(Boolean)
-              : []
+              ? data.compatibleCalibers
+                  .split(",")
+                  .map((s: string) => s.trim())
+                  .filter(Boolean)
+              : [],
           );
           setImageUrl(data.imageUrl ?? "");
+          setNfaClass(data.nfaClass ?? "NONE");
+          setMgRegistry(data.mgRegistry ?? "");
         }
         setDataLoading(false);
       })
@@ -130,17 +158,26 @@ export default function EditFirearmPage() {
       manufacturer: data.get("manufacturer") as string,
       model: data.get("model") as string,
       caliber: caliberInput,
-      compatibleCalibers: compatCaliberTags.length > 0 ? compatCaliberTags.join(",") : null,
+      compatibleCalibers:
+        compatCaliberTags.length > 0 ? compatCaliberTags.join(",") : null,
       serialNumber: data.get("serialNumber") as string,
       type: data.get("type") as string,
+      nfaClass,
+      mgRegistry: mgRegistry || null,
       acquisitionDate: data.get("acquisitionDate") as string,
-      purchasePrice: data.get("purchasePrice") ? Number(data.get("purchasePrice")) : null,
-      currentValue: data.get("currentValue") ? Number(data.get("currentValue")) : null,
+      purchasePrice: data.get("purchasePrice")
+        ? Number(data.get("purchasePrice"))
+        : null,
+      currentValue: data.get("currentValue")
+        ? Number(data.get("currentValue"))
+        : null,
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
       imageSource: imageUrl ? "uploaded" : null,
       lastMaintenanceDate: (data.get("lastMaintenanceDate") as string) || null,
-      maintenanceIntervalDays: data.get("maintenanceIntervalDays") ? Number(data.get("maintenanceIntervalDays")) : null,
+      maintenanceIntervalDays: data.get("maintenanceIntervalDays")
+        ? Number(data.get("maintenanceIntervalDays"))
+        : null,
     };
 
     try {
@@ -176,7 +213,9 @@ export default function EditFirearmPage() {
       const res = await fetch(`/api/firearms/${firearm.id}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deleteAccessories: deleteFirearmAccessories === "delete" }),
+        body: JSON.stringify({
+          deleteAccessories: deleteFirearmAccessories === "delete",
+        }),
       });
       if (res.ok) {
         router.push("/vault");
@@ -197,10 +236,16 @@ export default function EditFirearmPage() {
       const res = await fetch(`/api/builds/${buildId}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deleteAccessories: deleteBuildAccessories === "delete" }),
+        body: JSON.stringify({
+          deleteAccessories: deleteBuildAccessories === "delete",
+        }),
       });
       if (res.ok) {
-        setFirearm((prev) => prev ? { ...prev, builds: prev.builds.filter((b) => b.id !== buildId) } : prev);
+        setFirearm((prev) =>
+          prev
+            ? { ...prev, builds: prev.builds.filter((b) => b.id !== buildId) }
+            : prev,
+        );
         setDeleteBuildTarget(null);
         setDeleteBuildAccessories("keep");
         setDeleteBuildError(null);
@@ -246,7 +291,7 @@ export default function EditFirearmPage() {
 
   const totalAccessoryCount = firearm.builds.reduce(
     (sum, b) => sum + b.slots.filter((s) => s.accessory).length,
-    0
+    0,
   );
 
   return (
@@ -268,8 +313,12 @@ export default function EditFirearmPage() {
 
       <div className="max-w-2xl mx-auto px-6 py-8">
         <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">Edit {firearm.name}</h2>
-          <p className="text-sm text-vault-text-muted">Update the details for this firearm.</p>
+          <h2 className="text-xl font-bold text-vault-text mb-1">
+            Edit {firearm.name}
+          </h2>
+          <p className="text-sm text-vault-text-muted">
+            Update the details for this firearm.
+          </p>
         </div>
 
         {error && (
@@ -337,9 +386,7 @@ export default function EditFirearmPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Caliber Combobox */}
               <div>
-                <label className={LABEL_CLASS}>
-                  Caliber
-                </label>
+                <label className={LABEL_CLASS}>Caliber</label>
                 <div className="relative" ref={caliberRef}>
                   <input
                     type="text"
@@ -349,7 +396,9 @@ export default function EditFirearmPage() {
                       setCaliberDropdownOpen(true);
                     }}
                     onFocus={() => setCaliberDropdownOpen(true)}
-                    onBlur={() => setTimeout(() => setCaliberDropdownOpen(false), 150)}
+                    onBlur={() =>
+                      setTimeout(() => setCaliberDropdownOpen(false), 150)
+                    }
                     placeholder="e.g. 9mm Luger"
                     className={INPUT_CLASS}
                   />
@@ -394,11 +443,57 @@ export default function EditFirearmPage() {
               </div>
             </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Classification */}
+              <div>
+                <label htmlFor="nfaClass" className={LABEL_CLASS}>
+                  Classification
+                </label>
+                <select
+                  id="nfaClass"
+                  name="nfaClass"
+                  value={nfaClass}
+                  onChange={(event) => setNfaClass(event.target.value)}
+                  className={INPUT_CLASS}
+                >
+                  {NFA_CLASSES.map((value) => (
+                    <option key={value} value={value}>
+                      {NFA_CLASS_LABELS[value]}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-vault-text-faint">
+                  Select-fire is a Machine Gun whatever the platform.
+                </p>
+              </div>
+
+              {/* Machine Gun Registry */}
+              {nfaClass === "MACHINE_GUN" && (
+                <div>
+                  <label htmlFor="mgRegistry" className={LABEL_CLASS}>
+                    Registry
+                  </label>
+                  <select
+                    id="mgRegistry"
+                    name="mgRegistry"
+                    value={mgRegistry}
+                    onChange={(event) => setMgRegistry(event.target.value)}
+                    className={INPUT_CLASS}
+                  >
+                    <option value="">Not recorded</option>
+                    {MG_REGISTRIES.map((value) => (
+                      <option key={value} value={value}>
+                        {MG_REGISTRY_LABELS[value]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
             {/* Compatible Calibers Tag Input */}
             <div>
-              <label className={LABEL_CLASS}>
-                Compatible Calibers
-              </label>
+              <label className={LABEL_CLASS}>Compatible Calibers</label>
               {compatCaliberTags.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
                   {compatCaliberTags.map((tag) => (
@@ -409,7 +504,11 @@ export default function EditFirearmPage() {
                       {tag}
                       <button
                         type="button"
-                        onClick={() => setCompatCaliberTags((prev) => prev.filter((t) => t !== tag))}
+                        onClick={() =>
+                          setCompatCaliberTags((prev) =>
+                            prev.filter((t) => t !== tag),
+                          )
+                        }
                         className="hover:text-white transition-colors ml-0.5"
                         aria-label={`Remove ${tag}`}
                       >
@@ -428,14 +527,19 @@ export default function EditFirearmPage() {
                     setCompatCaliberDropdownOpen(true);
                   }}
                   onFocus={() => setCompatCaliberDropdownOpen(true)}
-                  onBlur={() => setTimeout(() => setCompatCaliberDropdownOpen(false), 150)}
+                  onBlur={() =>
+                    setTimeout(() => setCompatCaliberDropdownOpen(false), 150)
+                  }
                   onKeyDown={(e) => {
                     if (e.key === "Backspace" && compatCaliberInput === "") {
                       e.preventDefault();
-                      setCompatCaliberTags(prev => prev.slice(0, -1));
+                      setCompatCaliberTags((prev) => prev.slice(0, -1));
                       return;
                     }
-                    if ((e.key === "Enter" || e.key === ",") && compatCaliberInput.trim()) {
+                    if (
+                      (e.key === "Enter" || e.key === ",") &&
+                      compatCaliberInput.trim()
+                    ) {
                       e.preventDefault();
                       const val = compatCaliberInput.trim().replace(/,$/, "");
                       if (val && !compatCaliberTags.includes(val)) {
@@ -448,48 +552,57 @@ export default function EditFirearmPage() {
                   placeholder="e.g. .223 Rem (press Enter to add)"
                   className={INPUT_CLASS}
                 />
-                {compatCaliberDropdownOpen && compatCaliberInput.trim() !== "" && (
-                  <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                    {COMMON_CALIBERS.filter(
-                      (c) =>
-                        c.toLowerCase().includes(compatCaliberInput.toLowerCase()) &&
-                        !compatCaliberTags.includes(c)
-                    ).map((c) => (
-                      <button
-                        key={c}
-                        type="button"
-                        onClick={() => {
-                          if (!compatCaliberTags.includes(c)) {
-                            setCompatCaliberTags((prev) => [...prev, c]);
-                          }
-                          setCompatCaliberInput("");
-                          setCompatCaliberDropdownOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
-                      >
-                        {c}
-                      </button>
-                    ))}
-                    {!COMMON_CALIBERS.some((c) => c.toLowerCase() === compatCaliberInput.toLowerCase().trim()) && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const val = compatCaliberInput.trim();
-                          if (val && !compatCaliberTags.includes(val)) {
-                            setCompatCaliberTags((prev) => [...prev, val]);
-                          }
-                          setCompatCaliberInput("");
-                          setCompatCaliberDropdownOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm text-[#00C2FF] hover:bg-vault-border transition-colors font-mono border-t border-vault-border"
-                      >
-                        + Use &quot;{compatCaliberInput.trim()}&quot;
-                      </button>
-                    )}
-                  </div>
-                )}
+                {compatCaliberDropdownOpen &&
+                  compatCaliberInput.trim() !== "" && (
+                    <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {COMMON_CALIBERS.filter(
+                        (c) =>
+                          c
+                            .toLowerCase()
+                            .includes(compatCaliberInput.toLowerCase()) &&
+                          !compatCaliberTags.includes(c),
+                      ).map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => {
+                            if (!compatCaliberTags.includes(c)) {
+                              setCompatCaliberTags((prev) => [...prev, c]);
+                            }
+                            setCompatCaliberInput("");
+                            setCompatCaliberDropdownOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm text-vault-text hover:bg-vault-border hover:text-[#00C2FF] transition-colors font-mono"
+                        >
+                          {c}
+                        </button>
+                      ))}
+                      {!COMMON_CALIBERS.some(
+                        (c) =>
+                          c.toLowerCase() ===
+                          compatCaliberInput.toLowerCase().trim(),
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const val = compatCaliberInput.trim();
+                            if (val && !compatCaliberTags.includes(val)) {
+                              setCompatCaliberTags((prev) => [...prev, val]);
+                            }
+                            setCompatCaliberInput("");
+                            setCompatCaliberDropdownOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm text-[#00C2FF] hover:bg-vault-border transition-colors font-mono border-t border-vault-border"
+                        >
+                          + Use &quot;{compatCaliberInput.trim()}&quot;
+                        </button>
+                      )}
+                    </div>
+                  )}
               </div>
-              <p className="text-xs text-vault-text-faint mt-1">Other calibers this firearm can safely fire. Optional.</p>
+              <p className="text-xs text-vault-text-faint mt-1">
+                Other calibers this firearm can safely fire. Optional.
+              </p>
             </div>
 
             <div>
@@ -577,12 +690,34 @@ export default function EditFirearmPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label htmlFor="lastMaintenanceDate" className={LABEL_CLASS}>Last Maintenance</label>
-                <input id="lastMaintenanceDate" name="lastMaintenanceDate" type="date" defaultValue={toDateInputValue(firearm.lastMaintenanceDate)} className={INPUT_CLASS} />
+                <label htmlFor="lastMaintenanceDate" className={LABEL_CLASS}>
+                  Last Maintenance
+                </label>
+                <input
+                  id="lastMaintenanceDate"
+                  name="lastMaintenanceDate"
+                  type="date"
+                  defaultValue={toDateInputValue(firearm.lastMaintenanceDate)}
+                  className={INPUT_CLASS}
+                />
               </div>
               <div>
-                <label htmlFor="maintenanceIntervalDays" className={LABEL_CLASS}>Maintenance Interval (days)</label>
-                <input id="maintenanceIntervalDays" name="maintenanceIntervalDays" type="number" min="1" step="1" defaultValue={firearm.maintenanceIntervalDays ?? ""} placeholder="e.g. 180" className={INPUT_CLASS} />
+                <label
+                  htmlFor="maintenanceIntervalDays"
+                  className={LABEL_CLASS}
+                >
+                  Maintenance Interval (days)
+                </label>
+                <input
+                  id="maintenanceIntervalDays"
+                  name="maintenanceIntervalDays"
+                  type="number"
+                  min="1"
+                  step="1"
+                  defaultValue={firearm.maintenanceIntervalDays ?? ""}
+                  placeholder="e.g. 180"
+                  className={INPUT_CLASS}
+                />
               </div>
             </div>
           </fieldset>
@@ -592,7 +727,11 @@ export default function EditFirearmPage() {
             <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
               Image
             </legend>
-            <ImagePicker entityType="firearm" value={imageUrl} onChange={setImageUrl} />
+            <ImagePicker
+              entityType="firearm"
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           {/* Notes */}
@@ -640,7 +779,9 @@ export default function EditFirearmPage() {
 
         {/* Builds section */}
         <div className="mt-8 border-t border-vault-border pt-6">
-          <h3 className="text-xs font-mono uppercase tracking-widest text-vault-text-muted mb-3">Builds</h3>
+          <h3 className="text-xs font-mono uppercase tracking-widest text-vault-text-muted mb-3">
+            Builds
+          </h3>
           {firearm.builds.length === 0 ? (
             <p className="text-sm text-vault-text-faint">No builds</p>
           ) : (
@@ -652,11 +793,17 @@ export default function EditFirearmPage() {
                     key={build.id}
                     className="flex items-center justify-between bg-vault-surface border border-vault-border rounded-md px-4 py-2.5"
                   >
-                    <span className="text-sm text-vault-text">{build.name}</span>
+                    <span className="text-sm text-vault-text">
+                      {build.name}
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
-                        setDeleteBuildTarget({ id: build.id, name: build.name, accessoryCount: accCount });
+                        setDeleteBuildTarget({
+                          id: build.id,
+                          name: build.name,
+                          accessoryCount: accCount,
+                        });
                         setDeleteBuildAccessories("keep");
                       }}
                       className="text-vault-text-muted hover:text-[#E53935] transition-colors p-1"
@@ -692,42 +839,66 @@ export default function EditFirearmPage() {
               <div className="w-9 h-9 rounded-full bg-[#E53935]/10 flex items-center justify-center shrink-0">
                 <Trash2 className="w-4 h-4 text-[#E53935]" />
               </div>
-              <h2 className="text-base font-semibold text-vault-text">Delete Firearm</h2>
+              <h2 className="text-base font-semibold text-vault-text">
+                Delete Firearm
+              </h2>
             </div>
 
             {(firearm.builds.length > 0 || totalAccessoryCount > 0) && (
               <p className="text-sm text-vault-text-muted mb-4">
                 This firearm has{" "}
-                <span className="text-vault-text font-medium">{firearm.builds.length} build{firearm.builds.length !== 1 ? "s" : ""}</span>
+                <span className="text-vault-text font-medium">
+                  {firearm.builds.length} build
+                  {firearm.builds.length !== 1 ? "s" : ""}
+                </span>
                 {totalAccessoryCount > 0 && (
-                  <> and{" "}
-                    <span className="text-vault-text font-medium">{totalAccessoryCount} accessor{totalAccessoryCount !== 1 ? "ies" : "y"}</span>
+                  <>
+                    {" "}
+                    and{" "}
+                    <span className="text-vault-text font-medium">
+                      {totalAccessoryCount} accessor
+                      {totalAccessoryCount !== 1 ? "ies" : "y"}
+                    </span>
                   </>
-                )}.
+                )}
+                .
               </p>
             )}
 
             {firearm.rangeSessionCount > 0 && (
               <p className="text-sm text-[#E53935]/80 mb-4">
                 This will also delete{" "}
-                <span className="font-medium">{firearm.rangeSessionCount} range session{firearm.rangeSessionCount !== 1 ? "s" : ""}</span> for this firearm.
+                <span className="font-medium">
+                  {firearm.rangeSessionCount} range session
+                  {firearm.rangeSessionCount !== 1 ? "s" : ""}
+                </span>{" "}
+                for this firearm.
               </p>
             )}
 
-            {(firearm.builds.length > 0 || totalAccessoryCount > 0) ? (
+            {firearm.builds.length > 0 || totalAccessoryCount > 0 ? (
               <div className="space-y-2 mb-5">
-                <p className="text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-2">What should happen to the accessories?</p>
+                <p className="text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-2">
+                  What should happen to the accessories?
+                </p>
                 {[
                   { value: "keep", label: "Keep accessories in vault" },
                   { value: "delete", label: "Delete accessories too" },
                 ].map((opt) => (
-                  <label key={opt.value} className="flex items-center gap-3 cursor-pointer">
+                  <label
+                    key={opt.value}
+                    className="flex items-center gap-3 cursor-pointer"
+                  >
                     <input
                       type="radio"
                       name="deleteFirearmAccessories"
                       value={opt.value}
                       checked={deleteFirearmAccessories === opt.value}
-                      onChange={() => setDeleteFirearmAccessories(opt.value as "keep" | "delete")}
+                      onChange={() =>
+                        setDeleteFirearmAccessories(
+                          opt.value as "keep" | "delete",
+                        )
+                      }
                       className="accent-[#00C2FF]"
                     />
                     <span className="text-sm text-vault-text">{opt.label}</span>
@@ -735,7 +906,9 @@ export default function EditFirearmPage() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-vault-text-muted mb-5">This cannot be undone.</p>
+              <p className="text-sm text-vault-text-muted mb-5">
+                This cannot be undone.
+              </p>
             )}
 
             {deleteFirearmError && (
@@ -759,7 +932,11 @@ export default function EditFirearmPage() {
                 disabled={deletingFirearm}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-[#E53935]/10 border border-[#E53935]/40 text-[#E53935] rounded-md hover:bg-[#E53935]/20 transition-colors disabled:opacity-50"
               >
-                {deletingFirearm ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                {deletingFirearm ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
                 {deletingFirearm ? "Deleting..." : "Delete Firearm"}
               </button>
             </div>
@@ -775,38 +952,62 @@ export default function EditFirearmPage() {
               <div className="w-9 h-9 rounded-full bg-[#E53935]/10 flex items-center justify-center shrink-0">
                 <Trash2 className="w-4 h-4 text-[#E53935]" />
               </div>
-              <h2 className="text-base font-semibold text-vault-text">Delete Build</h2>
+              <h2 className="text-base font-semibold text-vault-text">
+                Delete Build
+              </h2>
             </div>
 
             {deleteBuildTarget.accessoryCount > 0 ? (
               <>
                 <p className="text-sm text-vault-text-muted mb-4">
-                  <span className="text-vault-text font-medium">{deleteBuildTarget.name}</span> has{" "}
-                  <span className="text-vault-text font-medium">{deleteBuildTarget.accessoryCount} accessor{deleteBuildTarget.accessoryCount !== 1 ? "ies" : "y"}</span>.
+                  <span className="text-vault-text font-medium">
+                    {deleteBuildTarget.name}
+                  </span>{" "}
+                  has{" "}
+                  <span className="text-vault-text font-medium">
+                    {deleteBuildTarget.accessoryCount} accessor
+                    {deleteBuildTarget.accessoryCount !== 1 ? "ies" : "y"}
+                  </span>
+                  .
                 </p>
                 <div className="space-y-2 mb-5">
-                  <p className="text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-2">What should happen to the accessories?</p>
+                  <p className="text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-2">
+                    What should happen to the accessories?
+                  </p>
                   {[
                     { value: "keep", label: "Keep accessories in vault" },
                     { value: "delete", label: "Delete accessories too" },
                   ].map((opt) => (
-                    <label key={opt.value} className="flex items-center gap-3 cursor-pointer">
+                    <label
+                      key={opt.value}
+                      className="flex items-center gap-3 cursor-pointer"
+                    >
                       <input
                         type="radio"
                         name="deleteBuildAccessories"
                         value={opt.value}
                         checked={deleteBuildAccessories === opt.value}
-                        onChange={() => setDeleteBuildAccessories(opt.value as "keep" | "delete")}
+                        onChange={() =>
+                          setDeleteBuildAccessories(
+                            opt.value as "keep" | "delete",
+                          )
+                        }
                         className="accent-[#00C2FF]"
                       />
-                      <span className="text-sm text-vault-text">{opt.label}</span>
+                      <span className="text-sm text-vault-text">
+                        {opt.label}
+                      </span>
                     </label>
                   ))}
                 </div>
               </>
             ) : (
               <p className="text-sm text-vault-text-muted mb-5">
-                Delete <span className="text-vault-text font-medium">{deleteBuildTarget.name}</span>? This cannot be undone.
+                Delete{" "}
+                <span className="text-vault-text font-medium">
+                  {deleteBuildTarget.name}
+                </span>
+                ? This cannot be undone.
               </p>
             )}
 
@@ -819,7 +1020,10 @@ export default function EditFirearmPage() {
             <div className="flex gap-3">
               <button
                 type="button"
-                onClick={() => { setDeleteBuildTarget(null); setDeleteBuildAccessories("keep"); }}
+                onClick={() => {
+                  setDeleteBuildTarget(null);
+                  setDeleteBuildAccessories("keep");
+                }}
                 disabled={deletingBuild}
                 className="flex-1 px-4 py-2 text-sm text-vault-text-muted border border-vault-border rounded-md hover:border-vault-text-muted/40 transition-colors disabled:opacity-50"
               >
@@ -831,7 +1035,11 @@ export default function EditFirearmPage() {
                 disabled={deletingBuild}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-[#E53935]/10 border border-[#E53935]/40 text-[#E53935] rounded-md hover:bg-[#E53935]/20 transition-colors disabled:opacity-50"
               >
-                {deletingBuild ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                {deletingBuild ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
                 {deletingBuild ? "Deleting..." : "Delete Build"}
               </button>
             </div>
