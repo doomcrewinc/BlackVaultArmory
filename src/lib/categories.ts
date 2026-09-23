@@ -1,4 +1,4 @@
-import { CUSTOM_SLOT_PREFIX, DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
+import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 export type SectionGroup = "vault" | "gear" | "prep";
 export type SectionSource = "firearm" | "accessory";
@@ -19,7 +19,11 @@ export type CategorySection = {
   label: string;
   description: string;
   group: SectionGroup;
-  /** lucide-react icon name, resolved by the nav and the page headers. */
+  /**
+   * lucide-react icon name. Declared for the later phases that give the section
+   * list and its page headers their own icons; nothing renders it today — the
+   * nav uses one icon per group and the section pages use `PageHeader`.
+   */
   icon: string;
   sources: SectionMatcher[];
 };
@@ -285,6 +289,3 @@ export function gearSectionForAccessory(
     ),
   );
 }
-
-/** Exported for the Parts section header copy and for tests. */
-export const CUSTOM_ACCESSORY_PREFIX = CUSTOM_SLOT_PREFIX;
