@@ -24,6 +24,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
 import { sectionsForGroup } from "@/lib/categories";
+import { fetchCategoryCounts } from "@/lib/category-counts";
 
 const PRIMARY_NAV_ITEMS = [
   { label: "Command", href: "/", icon: Zap, description: "Overview & stats" },
@@ -214,14 +215,9 @@ export function Sidebar({
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/categories/counts")
-      .then((response) => (response.ok ? response.json() : null))
-      .then((body) => {
-        if (!cancelled && body?.counts) setCounts(body.counts);
-      })
-      .catch(() => {
-        // A missing count shows as blank; the nav still works.
-      });
+    fetchCategoryCounts().then((body) => {
+      if (!cancelled && body?.counts) setCounts(body.counts);
+    });
     return () => {
       cancelled = true;
     };
