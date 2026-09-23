@@ -152,8 +152,12 @@ export async function PUT(
         }),
         ...(touchesClass
           ? normalizeFirearmClassFields({
-              nfaClass: nfaClass ?? existing.nfaClass,
-              mgRegistry: mgRegistry ?? existing.mgRegistry,
+              // ?? would also swallow an explicit null (e.g. clearing mgRegistry
+              // while leaving nfaClass as MACHINE_GUN), so absence is checked
+              // with !== undefined rather than nullish coalescing.
+              nfaClass: nfaClass !== undefined ? nfaClass : existing.nfaClass,
+              mgRegistry:
+                mgRegistry !== undefined ? mgRegistry : existing.mgRegistry,
             })
           : {}),
       },
