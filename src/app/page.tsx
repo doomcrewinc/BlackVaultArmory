@@ -19,6 +19,9 @@ async function getDashboardData() {
     ),
     recentFirearms: stats.recent.firearms,
     ammoStocks: stats.ammo.stocks,
+    lowStockSupplies: stats.supplies.lowStockItems,
+    expiredSupplyCount: stats.supplies.expiredCount,
+    expiringSoonSupplyCount: stats.supplies.expiringSoonCount,
   };
 }
 
