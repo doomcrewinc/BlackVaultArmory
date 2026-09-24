@@ -476,6 +476,7 @@ export function Sidebar({
     <>
       {!mobileOnly && (
         <aside
+          data-print-hide
           className={cn(
             "hidden md:flex flex-col h-svh border-r border-vault-border bg-vault-surface transition-all duration-300 ease-in-out shrink-0",
             collapsed ? "w-16" : "w-56",
@@ -497,6 +498,7 @@ export function Sidebar({
         <div className="absolute inset-0 bg-black/60" onClick={onMobileClose} />
         <aside
           id="mobile-navigation"
+          data-print-hide
           className={cn(
             "absolute inset-y-0 left-0 flex h-svh max-h-svh w-72 max-w-[88vw] flex-col overflow-hidden border-r border-vault-border bg-vault-surface shadow-2xl transition-transform duration-200",
             mobileOpen ? "translate-x-0" : "-translate-x-full",

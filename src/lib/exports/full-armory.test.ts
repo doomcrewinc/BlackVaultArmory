@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  hasNfaPaperwork,
   nfaClassLabel,
   nfaTransferMethodLabel,
   selectVisualEvidence,
@@ -161,5 +162,41 @@ describe("nfaTransferMethodLabel", () => {
   it("returns blank for no method and the raw token for an unknown one", () => {
     expect(nfaTransferMethodLabel("")).toBe("");
     expect(nfaTransferMethodLabel("FORM_9")).toBe("FORM_9");
+  });
+});
+
+// Shared by the PDF renderer and the preview's NFA Paperwork section, which is
+// the section that makes the paperwork survive a print.
+describe("hasNfaPaperwork", () => {
+  it("is false for a row with no paperwork at all", () => {
+    expect(hasNfaPaperwork(itemRow())).toBe(false);
+  });
+
+  it("is true on any single field, including a zero tax", () => {
+    expect(hasNfaPaperwork(itemRow({ nfaTransferMethod: "FORM_1" }))).toBe(
+      true,
+    );
+    expect(hasNfaPaperwork(itemRow({ nfaControlNumber: "2024-1" }))).toBe(true);
+    expect(hasNfaPaperwork(itemRow({ nfaApprovalDate: "2024-06-10" }))).toBe(
+      true,
+    );
+    expect(hasNfaPaperwork(itemRow({ nfaRegisteredTo: "A Trust" }))).toBe(true);
+    // A $0 tax is a recorded fact (a Form 1 on a tax-exempt transfer), not an
+    // absence — so it must not read as "no paperwork".
+    expect(hasNfaPaperwork(itemRow({ nfaTaxPaid: 0 }))).toBe(true);
+  });
+
+  it("is true when only the withheld control number is missing", () => {
+    // What the export looks like with serials excluded: the row is still a
+    // registered item and still has to print.
+    expect(
+      hasNfaPaperwork(
+        itemRow({
+          nfaControlNumber: "",
+          nfaTransferMethod: "FORM_4",
+          nfaApprovalDate: "2025-02-20",
+        }),
+      ),
+    ).toBe(true);
   });
 });

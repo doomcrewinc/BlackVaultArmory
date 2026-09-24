@@ -7,6 +7,7 @@ import {
   type ExportFormat,
   type ExportPreset,
   parseExportOptionsFromSearchParams,
+  hasNfaPaperwork,
   nfaClassLabel,
   nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
@@ -347,17 +348,6 @@ function wrapText(line: string, maxChars = 98): string[] {
 function pushWrapped(lines: string[], line: string, indent = ""): void {
   const wrapped = wrapText(line);
   wrapped.forEach((part, index) => lines.push(index === 0 ? `${indent}${part}` : `${indent}  ${part}`));
-}
-
-/**
- * Whether a row has any paperwork worth a line of its own. Deliberately not
- * keyed on nfaControlNumber alone: that field is withheld when serials are
- * excluded, and the rest of the paperwork still has to print.
- */
-function hasNfaPaperwork(item: FullArmoryExportResponse["items"][number]): boolean {
-  return Boolean(
-    item.nfaTransferMethod || item.nfaControlNumber || item.nfaApprovalDate || item.nfaTaxPaid != null || item.nfaRegisteredTo
-  );
 }
 
 function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {

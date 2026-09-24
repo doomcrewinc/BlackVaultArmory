@@ -159,3 +159,58 @@ body {
   background: rgba(0, 194, 255, 0.25);
   color: var(--vault-text);
 }
+
+/* ── Print ────────────────────────────────────────────────── */
+/* The full-armory export preview advertises itself as the PDF flow ("Use your
+   browser print flow to save this page as a PDF", window.print()), so what the
+   printer produces is a real output of this app rather than an afterthought.
+   Two things have to hold for it: the app chrome must not eat a quarter of the
+   sheet, and no table may be wider than the paper — a table in an
+   overflow-x-auto wrapper does not scroll on paper, it truncates, and the
+   columns past the fold simply do not exist in the printout.
+
+   `armory-preview-print` used to be an undefined class on that page. These are
+   the rules it was named for. */
+@media print {
+  @page {
+    size: letter;
+    margin: 0.4in;
+  }
+
+  /* Nav, mobile header and the floating theme toggle. Marked with an
+     attribute rather than a utility class so the rule wins outright against
+     whatever display the element carries at its current breakpoint. */
+  [data-print-hide] {
+    display: none !important;
+  }
+
+  /* With the chrome gone the sheet is the container, so the centred max-width
+     no longer buys anything — give the tables the whole page. */
+  .armory-preview-print {
+    max-width: none !important;
+  }
+
+  /* Horizontal scroll is a screen affordance; on paper it is a cliff. */
+  .armory-print-scroll {
+    overflow: visible !important;
+  }
+
+  .armory-page-break {
+    break-before: page;
+  }
+
+  /* A printer drops background colours by default, so the app's dark theme
+     would put pale grey text on white paper — present in the DOM, unreadable
+     on the sheet. The preview is the one page whose printout is a deliverable,
+     so it prints as ink on paper. */
+  body {
+    background: #fff !important;
+  }
+
+  .armory-preview-print,
+  .armory-preview-print * {
+    color: #000 !important;
+    background: transparent !important;
+    border-color: #999 !important;
+  }
+}

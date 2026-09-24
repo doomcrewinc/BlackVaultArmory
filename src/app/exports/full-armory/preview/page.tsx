@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Printer, RefreshCw } from "lucide-react";
 import {
   buildExportQueryString,
+  hasNfaPaperwork,
   nfaClassLabel,
   nfaTransferMethodLabel,
   parseExportOptionsFromSearchParams,
@@ -58,6 +59,14 @@ export default function FullArmoryPreviewPage() {
     if (!data) return [];
     return selectVisualEvidence(data, options);
   }, [data, options]);
+
+  // The registered items, for the NFA Paperwork section below. Only the rows
+  // that have paperwork: a section repeating "—" for every Title I firearm
+  // would be longer than the inventory and say nothing.
+  const nfaItems = useMemo(() => {
+    if (!data) return [];
+    return data.items.filter(hasNfaPaperwork);
+  }, [data]);
 
   if (loading) {
     return (
@@ -162,7 +171,7 @@ export default function FullArmoryPreviewPage() {
 
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Master Inventory</h2>
-          <div className="mt-3 overflow-x-auto">
+          <div className="armory-print-scroll mt-3 overflow-x-auto">
             <table className="w-full text-xs border-collapse">
               <thead>
                 <tr className="border-b border-vault-border text-vault-text-faint">
@@ -174,11 +183,16 @@ export default function FullArmoryPreviewPage() {
                   <th className="py-2 pr-4 text-left">Serial</th>
                   <th className="py-2 pr-4 text-right">Purchase</th>
                   <th className="py-2 pr-4 text-right">Replacement</th>
-                  <th className="py-2 pr-4 text-left">Transfer Method</th>
-                  <th className="py-2 pr-4 text-left">Control Number</th>
-                  <th className="py-2 pr-4 text-left">Approval Date</th>
-                  <th className="py-2 pr-4 text-right">Tax Paid</th>
-                  <th className="py-2 pr-4 text-left">Registered To</th>
+                  {/* The paperwork half of this table is screen-only: 14 columns
+                      do not fit on letter paper, and an overflow-x-auto table does
+                      not scroll on paper — it truncates, which silently dropped
+                      every one of these columns out of the printout. In print they
+                      are the NFA Paperwork section below instead. */}
+                  <th className="print:hidden py-2 pr-4 text-left">Transfer Method</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Control Number</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Approval Date</th>
+                  <th className="print:hidden py-2 pr-4 text-right">Tax Paid</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Registered To</th>
                   <th className="py-2 text-right">Docs</th>
                 </tr>
               </thead>
@@ -204,15 +218,14 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4 font-mono">{item.serialNumber || "—"}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.replacementValue)}</td>
-                      <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
-                      {/* Withheld with serials, so the payload has no key to read — the
-                          dash is the same thing the Serial cell shows when hidden. */}
-                      <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
-                      <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
-                      <td className="py-2 pr-4 text-right">
-                        {item.nfaTaxPaid == null ? "—" : formatCurrency(item.nfaTaxPaid)}
-                      </td>
-                      <td className="py-2 pr-4">{item.nfaRegisteredTo || "—"}</td>
+                      <td className="print:hidden py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
+                      {/* Blanked with serials rather than dropped, the same as the
+                          Serial cell — the dash means "withheld or none on file", and
+                          the options badges above say which. */}
+                      <td className="print:hidden py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
+                      <td className="print:hidden py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
+                      <td className="print:hidden py-2 pr-4 text-right">{formatCurrency(item.nfaTaxPaid)}</td>
+                      <td className="print:hidden py-2 pr-4">{item.nfaRegisteredTo || "—"}</td>
                       <td className="py-2 text-right">{item.receiptCount}/{item.documentCount}</td>
                     </tr>
                   ))
@@ -222,10 +235,50 @@ export default function FullArmoryPreviewPage() {
           </div>
         </section>
 
+        {nfaItems.length > 0 && (
+          <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">NFA Paperwork</h2>
+            <p className="text-xs text-vault-text-faint mt-1">
+              {nfaItems.length} registered {nfaItems.length === 1 ? "item" : "items"}. These columns also appear in
+              Master Inventory on screen; on paper they live here, where they fit.
+            </p>
+            <div className="armory-print-scroll mt-3 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-vault-border text-vault-text-faint">
+                    <th className="py-2 pr-4 text-left">Item</th>
+                    <th className="py-2 pr-4 text-left">Class</th>
+                    <th className="py-2 pr-4 text-left">Transfer Method</th>
+                    <th className="py-2 pr-4 text-left">Control Number</th>
+                    <th className="py-2 pr-4 text-left">Approval Date</th>
+                    <th className="py-2 pr-4 text-right">Tax Paid</th>
+                    <th className="py-2 text-left">Registered To</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nfaItems.map((item) => (
+                    <tr key={item.itemId} className="border-b border-vault-border/60 break-inside-avoid">
+                      <td className="py-2 pr-4">
+                        {[item.manufacturer, item.model].filter(Boolean).join(" ") || item.entityType}
+                      </td>
+                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || item.category || "—"}</td>
+                      <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
+                      <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
+                      <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
+                      <td className="py-2 pr-4 text-right">{formatCurrency(item.nfaTaxPaid)}</td>
+                      <td className="py-2">{item.nfaRegisteredTo || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
         {options.includeAmmo && (
           <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Ammo Inventory</h2>
-            <div className="mt-3 overflow-x-auto">
+            <div className="armory-print-scroll mt-3 overflow-x-auto">
               <table className="w-full text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-vault-border text-vault-text-faint">
@@ -260,7 +313,7 @@ export default function FullArmoryPreviewPage() {
 
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Gear</h2>
-          <div className="mt-3 overflow-x-auto">
+          <div className="armory-print-scroll mt-3 overflow-x-auto">
             <table className="w-full text-xs border-collapse">
               <thead>
                 <tr className="border-b border-vault-border text-vault-text-faint">
@@ -307,7 +360,7 @@ export default function FullArmoryPreviewPage() {
         {options.includeDocuments && (
           <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Document Index</h2>
-            <div className="mt-3 overflow-x-auto">
+            <div className="armory-print-scroll mt-3 overflow-x-auto">
               <table className="w-full text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-vault-border text-vault-text-faint">

@@ -161,6 +161,33 @@ export interface VisualEvidenceImage {
 }
 
 /**
+ * Whether an item row has any paperwork worth printing. Deliberately not keyed
+ * on nfaControlNumber alone: that field is withheld when serials are excluded,
+ * and the rest of the paperwork still has to print.
+ *
+ * Shared by the PDF renderer and the preview's NFA Paperwork section so the
+ * two agree on which items are "registered".
+ */
+export function hasNfaPaperwork(
+  item: Pick<
+    FullArmoryItemRow,
+    | "nfaTransferMethod"
+    | "nfaControlNumber"
+    | "nfaApprovalDate"
+    | "nfaTaxPaid"
+    | "nfaRegisteredTo"
+  >
+): boolean {
+  return Boolean(
+    item.nfaTransferMethod ||
+      item.nfaControlNumber ||
+      item.nfaApprovalDate ||
+      item.nfaTaxPaid != null ||
+      item.nfaRegisteredTo
+  );
+}
+
+/**
  * The human labels for the two NFA enum columns, for the two human-facing
  * renderers (the PDF an adjuster reads and the print preview). JSON and CSV
  * keep the raw tokens their machine consumers parse.
