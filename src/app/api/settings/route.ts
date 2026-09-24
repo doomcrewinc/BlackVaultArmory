@@ -63,6 +63,7 @@ export async function GET() {
       manualLanHost: settings.manualLanHost,
       defaultCurrency: settings.defaultCurrency,
       defaultAmmoAlertThreshold: settings.defaultAmmoAlertThreshold,
+      expiryWarningDays: settings.expiryWarningDays,
       timezone: settings.timezone,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt,
@@ -100,6 +101,7 @@ export async function PUT(request: NextRequest) {
       manualLanHost,
       defaultCurrency,
       defaultAmmoAlertThreshold,
+      expiryWarningDays,
       timezone,
     } = body;
 
@@ -192,6 +194,21 @@ export async function PUT(request: NextRequest) {
       }
     }
 
+    if (expiryWarningDays !== undefined) {
+      if (expiryWarningDays === null) {
+        updateData.expiryWarningDays = null;
+      } else {
+        const parsed = Number.parseInt(String(expiryWarningDays), 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          return NextResponse.json(
+            { error: "expiryWarningDays must be a non-negative integer or null." },
+            { status: 400 }
+          );
+        }
+        updateData.expiryWarningDays = parsed;
+      }
+    }
+
     if (timezone !== undefined && timezone !== null && timezone !== "") {
       if (typeof timezone !== "string" || !isValidTimeZone(timezone)) {
         return NextResponse.json({ error: `Unknown timezone: ${String(timezone)}` }, { status: 400 });
@@ -238,6 +255,7 @@ export async function PUT(request: NextRequest) {
       manualLanHost: settings.manualLanHost,
       defaultCurrency: settings.defaultCurrency,
       defaultAmmoAlertThreshold: settings.defaultAmmoAlertThreshold,
+      expiryWarningDays: settings.expiryWarningDays,
       timezone: settings.timezone,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt,

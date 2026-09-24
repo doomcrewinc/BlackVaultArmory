@@ -24,17 +24,90 @@ const DAY_MS = 86_400_000;
  */
 export const USER_EDITED = "user-edited";
 
+/**
+ * Every column that holds a calendar DAY rather than an instant.
+ *
+ * Guarded from Prisma's DMMF, not by a hand-maintained expectation: the test
+ * requires every `DateTime` column in the schema to appear either here or in
+ * DATE_ONLY_EXCLUDED_FIELDS below, so adding a date column to the schema
+ * fails the suite until somebody decides which it is. Until that guard landed
+ * this list had silently fallen three columns behind the schema
+ * (Supply.expirationDate, Supply.purchaseDate, Gear.acquisitionDate) while
+ * its test — a hardcoded literal of the same ten names it was checking —
+ * passed, which is the exact shape of the hand-maintained list that caused
+ * the backup data-loss bug.
+ */
 export const DATE_ONLY_FIELDS = [
   { model: "Firearm", delegate: "firearm", field: "acquisitionDate" },
   { model: "Firearm", delegate: "firearm", field: "lastMaintenanceDate" },
+  { model: "Firearm", delegate: "firearm", field: "nfaApprovalDate" },
   { model: "Accessory", delegate: "accessory", field: "acquisitionDate" },
   { model: "Accessory", delegate: "accessory", field: "lastBatteryChangeDate" },
+  { model: "Accessory", delegate: "accessory", field: "nfaApprovalDate" },
+  { model: "Gear", delegate: "gear", field: "acquisitionDate" },
+  { model: "Supply", delegate: "supply", field: "expirationDate" },
+  { model: "Supply", delegate: "supply", field: "purchaseDate" },
   { model: "AmmoStock", delegate: "ammoStock", field: "purchaseDate" },
   { model: "AmmoTransaction", delegate: "ammoTransaction", field: "purchaseDate" },
   { model: "RangeSession", delegate: "rangeSession", field: "sessionDate" },
   { model: "SessionDrill", delegate: "sessionDrill", field: "drillDate" },
   { model: "MaintenanceLog", delegate: "maintenanceLog", field: "date" },
   { model: "BatteryChangeLog", delegate: "batteryChangeLog", field: "changedAt" },
+] as const;
+
+/**
+ * DateTime columns that are deliberately NOT date-only, each excluded for a
+ * stated reason. The counterpart to DATE_ONLY_FIELDS: between them they must
+ * account for every `DateTime` column in the schema, which is what the DMMF
+ * guard in date-migration.test.ts asserts.
+ *
+ * Note that `@default(now())` is NOT the discriminator — BatteryChangeLog
+ * .changedAt has it and IS date-only (the user picks the day a battery was
+ * changed; the default is just a convenience). Each entry below is a real
+ * instant because something reads its time-of-day or its ordering, not
+ * because of how it is defaulted.
+ */
+export const DATE_ONLY_EXCLUDED_FIELDS = [
+  // Row bookkeeping. Written by Prisma (@default(now()) / @updatedAt), read
+  // for ordering ("recent acquisitions", "5 most recently updated"), never
+  // presented as a calendar day the user chose. Converting one to local
+  // midnight would reorder those lists.
+  "Firearm.createdAt",
+  "Firearm.updatedAt",
+  "Build.createdAt",
+  "Build.updatedAt",
+  "Accessory.createdAt",
+  "Accessory.updatedAt",
+  "Gear.createdAt",
+  "Gear.updatedAt",
+  "Supply.createdAt",
+  "Supply.updatedAt",
+  "Document.createdAt",
+  "Document.updatedAt",
+  "AmmoStock.createdAt",
+  "AmmoStock.updatedAt",
+  "RangeSession.createdAt",
+  "RangeSession.updatedAt",
+  "RangeSessionAmmoLink.createdAt",
+  "SessionDrill.createdAt",
+  "AmmoTransaction.transactedAt",
+  "BatteryChangeLog.createdAt",
+  "MaintenanceLog.createdAt",
+  "MaintenanceLog.updatedAt",
+  "AppSettings.createdAt",
+  "AppSettings.updatedAt",
+  "DateNormalizationAudit.createdAt",
+  "DateNormalizationAudit.updatedAt",
+  // A log entry's own moment, not a day the user picked.
+  "RoundCountLog.loggedAt",
+  // Cache freshness: a true instant, compared against a TTL.
+  "ImageCache.cachedAt",
+  // This migration's own audit trail. `originalValue` is by definition the
+  // legacy instant being preserved, and `appliedValue` is a copy of what was
+  // written; normalizing either would destroy the record that lets a run with
+  // a provisional zone be corrected later.
+  "DateNormalizationAudit.originalValue",
+  "DateNormalizationAudit.appliedValue",
 ] as const;
 
 export interface MigrationSummary {

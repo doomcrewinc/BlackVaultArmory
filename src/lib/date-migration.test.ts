@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
 import {
+  DATE_ONLY_EXCLUDED_FIELDS,
   DATE_ONLY_FIELDS,
   isValidTimeZone,
   normalizeInstant,
@@ -57,21 +59,58 @@ describe("normalizeInstant", () => {
 });
 
 describe("DATE_ONLY_FIELDS", () => {
-  it("covers all ten date-only fields", () => {
-    expect(DATE_ONLY_FIELDS.map((f) => `${f.model}.${f.field}`).sort()).toEqual(
-      [
-        "Accessory.acquisitionDate",
-        "Accessory.lastBatteryChangeDate",
-        "AmmoStock.purchaseDate",
-        "AmmoTransaction.purchaseDate",
-        "BatteryChangeLog.changedAt",
-        "Firearm.acquisitionDate",
-        "Firearm.lastMaintenanceDate",
-        "MaintenanceLog.date",
-        "RangeSession.sessionDate",
-        "SessionDrill.drillDate",
-      ].sort()
+  // Derived from Prisma's DMMF, the way BACKUP_MODELS' guard is
+  // (lib/backup/models.test.ts). The previous version of this test asserted
+  // the list equalled a hardcoded literal of the same ten names — it pinned
+  // the list against itself and could never fail because a column had been
+  // added, which is how Supply.expirationDate, Supply.purchaseDate and
+  // Gear.acquisitionDate went missing. Same hand-maintained shape as the
+  // backup list that cost this repo a data-loss bug.
+  const schemaDateFields = Prisma.dmmf.datamodel.models.flatMap((model) =>
+    model.fields
+      .filter((field) => field.type === "DateTime")
+      .map((field) => `${model.name}.${field.name}`)
+  );
+  const registered = DATE_ONLY_FIELDS.map((f) => `${f.model}.${f.field}`);
+
+  it("sees the schema it is asserting against", () => {
+    // Guards the guard: an empty DMMF read would make every assertion below
+    // trivially true.
+    expect(schemaDateFields.length).toBeGreaterThan(20);
+    expect(schemaDateFields).toContain("Supply.expirationDate");
+  });
+
+  it("accounts for every DateTime column, as date-only or explicitly excluded", () => {
+    expect([...registered, ...DATE_ONLY_EXCLUDED_FIELDS].sort()).toEqual(
+      [...schemaDateFields].sort()
     );
+  });
+
+  it("registers the columns the hand-maintained list had dropped", () => {
+    expect(registered).toContain("Supply.expirationDate");
+    expect(registered).toContain("Supply.purchaseDate");
+    expect(registered).toContain("Gear.acquisitionDate");
+  });
+
+  it("lists no field twice, and never on both sides", () => {
+    const all = [...registered, ...DATE_ONLY_EXCLUDED_FIELDS];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("uses the camelCase model name as each delegate", () => {
+    for (const entry of DATE_ONLY_FIELDS) {
+      expect(entry.delegate).toBe(
+        entry.model.charAt(0).toLowerCase() + entry.model.slice(1)
+      );
+    }
+  });
+
+  it("excludes no column the schema does not have", () => {
+    for (const excluded of DATE_ONLY_EXCLUDED_FIELDS) {
+      expect(schemaDateFields, `${excluded} is not a schema column`).toContain(
+        excluded
+      );
+    }
   });
 });
 

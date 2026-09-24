@@ -122,6 +122,38 @@ export interface FullArmoryGearRow {
   notes: string;
 }
 
+export interface FullArmorySupplyRow {
+  supplyId: string;
+  name: string;
+  brand: string;
+  /** The human label (e.g. "Medical"), matching how gear's category is exported. */
+  category: string;
+  /** A decimal, never floored — solvent comes in fractions of an ounce. */
+  quantity: number;
+  /** The human unit label (e.g. "oz"), matching how gear's category is exported. */
+  unit: string;
+  lowStockAlert: number | null;
+  expirationDate: string;
+  /**
+   * "none" | "fine" | "soon" | "expired", resolved server-side against a
+   * single `today` the caller reads once — see expiryStatus/todayForExpiry
+   * in lib/supply.ts. Never recomputed per row against the live clock.
+   */
+  expiryStatus: string;
+  purchasePrice: number | null;
+  purchaseDate: string;
+  storageLocation: string;
+  /**
+   * A supply has no serial, no photo and no Document relation, so only the
+   * value counter meaningfully applies to it — unlike gear, which carries
+   * all four missing* signals. missingSerial/missingPhoto/missingReceipt are
+   * deliberately absent from this row rather than hardcoded false: those
+   * concepts do not exist for a supply at all.
+   */
+  missingValue: boolean;
+  notes: string;
+}
+
 export interface FullArmoryExportResponse {
   meta: {
     generatedAt: string;
@@ -134,6 +166,7 @@ export interface FullArmoryExportResponse {
     totalFirearms: number;
     totalAccessories: number;
     totalGear: number;
+    totalSupplies: number;
     totalDocuments: number;
     totalReceipts: number;
     totalAmmoStocks: number;
@@ -150,6 +183,7 @@ export interface FullArmoryExportResponse {
   attachments: FullArmoryAttachmentRow[];
   ammo: FullArmoryAmmoRow[];
   gear: FullArmoryGearRow[];
+  supplies: FullArmorySupplyRow[];
 }
 
 export interface VisualEvidenceImage {

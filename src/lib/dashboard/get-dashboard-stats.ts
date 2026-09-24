@@ -1,4 +1,10 @@
 import { prisma } from "@/lib/prisma";
+import {
+  DEFAULT_EXPIRY_WARNING_DAYS,
+  expiryStatus,
+  isLowStock,
+  todayForExpiry,
+} from "@/lib/supply";
 
 export interface DashboardStatsResponse {
   totals: {
@@ -40,6 +46,26 @@ export interface DashboardStatsResponse {
       quantity: number;
       lowStockAlert: number | null;
     }>;
+  };
+  supplies: {
+    lowStockItems: Array<{
+      id: string;
+      name: string;
+      category: string;
+      quantity: number;
+      unit: string;
+      lowStockAlert: number | null;
+    }>;
+    lowStockCount: number;
+    expiredCount: number;
+    expiringSoonCount: number;
+    /**
+     * False while AppSettings.timezone is unset, which is its state out of the
+     * box. The expiry verdicts above are then resolved in the SERVER's
+     * timezone — in a container, UTC — so the dashboard says so rather than
+     * quietly reporting a day-shifted verdict. See todayForExpiry.
+     */
+    timezoneConfigured: boolean;
   };
   recent: {
     firearms: Array<{
@@ -138,6 +164,23 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       updatedAt: true,
     },
   });
+  // AppSettings is read ONCE here, not per supply row, matching
+  // getSupplySectionItems — today and the expiry warning window are both
+  // resolved from this single read.
+  const settings = await prisma.appSettings.findUnique({
+    where: { id: "singleton" },
+  });
+  const supplies = await prisma.supply.findMany({
+    select: {
+      id: true,
+      name: true,
+      category: true,
+      quantity: true,
+      unit: true,
+      lowStockAlert: true,
+      expirationDate: true,
+    },
+  });
 
   const ammoByCaliber: Record<
     string,
@@ -187,6 +230,18 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       s.quantity <= s.lowStockAlert
   );
 
+  const today = todayForExpiry(settings?.timezone ?? null, new Date());
+  const warningDays = settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+
+  const lowStockSupplies = supplies.filter((s) => isLowStock(s));
+  let expiredSupplyCount = 0;
+  let expiringSoonSupplyCount = 0;
+  for (const supply of supplies) {
+    const status = expiryStatus(supply.expirationDate, today, warningDays);
+    if (status === "expired") expiredSupplyCount += 1;
+    if (status === "soon") expiringSoonSupplyCount += 1;
+  }
+
   return {
     totals: {
       firearms: firearmCount,
@@ -222,6 +277,20 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
         quantity: s.quantity,
         lowStockAlert: s.lowStockAlert,
       })),
+    },
+    supplies: {
+      lowStockItems: lowStockSupplies.map((s) => ({
+        id: s.id,
+        name: s.name,
+        category: s.category,
+        quantity: s.quantity,
+        unit: s.unit,
+        lowStockAlert: s.lowStockAlert,
+      })),
+      lowStockCount: lowStockSupplies.length,
+      expiredCount: expiredSupplyCount,
+      expiringSoonCount: expiringSoonSupplyCount,
+      timezoneConfigured: Boolean(settings?.timezone),
     },
     recent: {
       firearms: recentFirearms,

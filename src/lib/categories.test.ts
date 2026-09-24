@@ -1,15 +1,23 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CATEGORY_SECTIONS,
+  SECTION_GROUPS,
   accessoryWhereForSection,
   firearmWhereForSection,
   gearSectionForAccessory,
   gearWhereForSection,
+  groupHref,
   sectionBySlug,
+  sectionHref,
   sectionsForGroup,
+  supplySectionForItem,
+  supplyWhereForSection,
   vaultSectionForFirearm,
 } from "./categories";
 import { GEAR_CATEGORIES } from "./gear";
+import { SUPPLY_CATEGORIES } from "./supply";
 import {
   CUSTOM_SLOT_PREFIX,
   FIREARM_TYPES,
@@ -65,6 +73,11 @@ describe("registry shape", () => {
       "parts",
       "knives",
       "cases",
+      "cleaning",
+    ]);
+    expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
+      "medical",
+      "food-water",
     ]);
   });
 });
@@ -327,10 +340,35 @@ describe("where fragments agree with holds", () => {
       }
     }
   });
+
+  it("selects the same supplies as holds, for every supply category — including food-water's OR fragment", () => {
+    const categories = [
+      ...SUPPLY_CATEGORIES,
+      "ZZ_JUNK",
+      "",
+      "cleaning", // wrong case
+      "ARMOR",
+    ];
+    // Supply-backed sections span two groups (cleaning is "gear", medical and
+    // food-water are "prep"), so check every section, not one group's.
+    for (const section of CATEGORY_SECTIONS) {
+      const where = supplyWhereForSection(section) as Where | null;
+      if (!where) continue;
+      for (const category of categories) {
+        const row = { category };
+        const byHolds = section.sources.some(
+          (source) => source.source === "supply" && source.holds(row),
+        );
+        expect(whereMatches(where, row), `${section.slug} / ${category}`).toBe(
+          byHolds,
+        );
+      }
+    }
+  });
 });
 
 describe("gear-backed sections", () => {
-  it("adds knives and cases to the gear group, after the accessory sections", () => {
+  it("adds knives, cases and cleaning to the gear group, after the accessory sections", () => {
     expect(sectionsForGroup("gear").map((s) => s.slug)).toEqual([
       "optics",
       "suppressors",
@@ -340,6 +378,7 @@ describe("gear-backed sections", () => {
       "parts",
       "knives",
       "cases",
+      "cleaning",
     ]);
   });
 
@@ -396,6 +435,181 @@ describe("gear-backed sections", () => {
     const reserved = ["new", "item"];
     for (const section of CATEGORY_SECTIONS) {
       expect(reserved).not.toContain(section.slug);
+    }
+  });
+});
+
+describe("supply-backed sections", () => {
+  // Junk, an empty column, and the right category in the wrong case — same
+  // shape as UNKNOWN_TYPES/UNKNOWN_CLASSES above.
+  const UNKNOWN_SUPPLY_CATEGORIES = ["ZZ_JUNK", "", "cleaning", "ARMOR"];
+
+  function supplySectionsMatching(row: { category: string }) {
+    // Cleaning is "gear", medical and food-water are "prep" — search every
+    // section, not one group's, the same reason supplySectionForItem does.
+    return CATEGORY_SECTIONS.filter((section) =>
+      section.sources.some(
+        (source) => source.source === "supply" && source.holds(row),
+      ),
+    );
+  }
+
+  it("places every supply category in exactly one section", () => {
+    for (const category of SUPPLY_CATEGORIES) {
+      const matches = supplySectionsMatching({ category });
+      expect(
+        matches.map((m) => m.slug),
+        `category ${category}`,
+      ).toHaveLength(1);
+    }
+  });
+
+  it("never loses a supply with an unrecognised category", () => {
+    for (const category of UNKNOWN_SUPPLY_CATEGORIES) {
+      const matches = supplySectionsMatching({ category });
+      expect(
+        matches.map((m) => m.slug),
+        `category ${category}`,
+      ).toHaveLength(1);
+    }
+  });
+
+  it("groups the supply categories the way the spec says", () => {
+    expect(supplySectionForItem({ category: "CLEANING" })?.slug).toBe(
+      "cleaning",
+    );
+    expect(supplySectionForItem({ category: "MEDICAL" })?.slug).toBe("medical");
+    expect(supplySectionForItem({ category: "FOOD" })?.slug).toBe("food-water");
+    expect(supplySectionForItem({ category: "WATER" })?.slug).toBe(
+      "food-water",
+    );
+    expect(supplySectionForItem({ category: "FILTER" })?.slug).toBe(
+      "food-water",
+    );
+    // The catch-all: categories with no section of their own yet, deliberately
+    // and temporarily homed under food-water until phase 5.
+    for (const category of [
+      "BATTERY",
+      "FUEL",
+      "SANITATION",
+      "CBRN_FILTER",
+      "SIGNAL",
+      "OTHER",
+    ]) {
+      expect(supplySectionForItem({ category })?.slug, category).toBe(
+        "food-water",
+      );
+    }
+  });
+
+  it("keeps supply sections free of gear/accessory/firearm rows and vice versa", () => {
+    const cleaning = sectionBySlug("cleaning")!;
+    expect(gearWhereForSection(cleaning)).toBeNull();
+    expect(accessoryWhereForSection(cleaning)).toBeNull();
+    expect(firearmWhereForSection(cleaning)).toBeNull();
+    expect(supplyWhereForSection(cleaning)).toEqual({
+      category: { in: ["CLEANING"] },
+    });
+
+    const cases = sectionBySlug("cases")!;
+    expect(supplyWhereForSection(cases)).toBeNull();
+  });
+
+  it("resolves cleaning and medical to a bare category fragment", () => {
+    expect(supplyWhereForSection(sectionBySlug("cleaning")!)).toEqual({
+      category: { in: ["CLEANING"] },
+    });
+    expect(supplyWhereForSection(sectionBySlug("medical")!)).toEqual({
+      category: { in: ["MEDICAL"] },
+    });
+  });
+
+  it("combines food-water's two matchers into a literal OR, not flattened or reordered", () => {
+    const foodWater = sectionBySlug("food-water")!;
+    expect(supplyWhereForSection(foodWater)).toEqual({
+      OR: [
+        { category: { in: ["FOOD", "WATER", "FILTER"] } },
+        {
+          category: {
+            notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+          },
+        },
+      ],
+    });
+  });
+});
+
+// ── reachability ─────────────────────────────────────────────
+//
+// Everything above this line is about MATCHING: which rows a section claims.
+// None of it says a section can be OPENED. `/prep` shipped as a 404 that the
+// sidebar linked to from every page — and in the collapsed rail it was the
+// only Preparedness affordance — while all 500-odd tests stayed green,
+// because no test ever asked whether a href resolves to a route.
+//
+// The paths below are DERIVED from the registry (SECTION_GROUPS plus
+// CATEGORY_SECTIONS, through the same groupHref/sectionHref the sidebar
+// uses) and checked against the filesystem. Nothing here is hand-listed: a
+// group or section added to the registry is checked the moment it exists,
+// which is the point — a hardcoded list of expected routes would be the same
+// maintenance liability that let /prep through.
+
+const APP_DIR = path.join(__dirname, "..", "app");
+
+/**
+ * Resolves a URL path the way the App Router does: a literal directory wins,
+ * otherwise a dynamic segment (`[slug]`, `[...slug]`) at that level takes it.
+ * Returns the `page.tsx` that would serve the path, or null if nothing does.
+ */
+function resolveRouteFile(href: string): string | null {
+  let dir = APP_DIR;
+  for (const segment of href.split("/").filter(Boolean)) {
+    const literal = path.join(dir, segment);
+    if (fs.existsSync(literal) && fs.statSync(literal).isDirectory()) {
+      dir = literal;
+      continue;
+    }
+    const dynamic = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\[.+\]$/.test(entry.name))
+      .map((entry) => entry.name);
+    if (dynamic.length === 0) return null;
+    dir = path.join(dir, dynamic[0]);
+  }
+  const page = path.join(dir, "page.tsx");
+  return fs.existsSync(page) ? page : null;
+}
+
+describe("route reachability", () => {
+  it("can see the app directory it is asserting against", () => {
+    // Guards the guard: a wrong APP_DIR would make every assertion below
+    // fail loudly, but a resolver that silently found nothing anywhere would
+    // be indistinguishable from a repo with no routes at all.
+    expect(fs.existsSync(path.join(APP_DIR, "page.tsx"))).toBe(true);
+    expect(resolveRouteFile("/definitely-not-a-route")).toBeNull();
+  });
+
+  it.each([...SECTION_GROUPS])(
+    "serves the %s group's own landing page",
+    (group) => {
+      const href = groupHref(group);
+      expect(resolveRouteFile(href), `${href} has no page.tsx`).not.toBeNull();
+    },
+  );
+
+  it.each(CATEGORY_SECTIONS.map((section) => [section.slug, section] as const))(
+    "serves the %s section",
+    (_slug, section) => {
+      const href = sectionHref(section);
+      expect(resolveRouteFile(href), `${href} has no page.tsx`).not.toBeNull();
+    },
+  );
+
+  it("covers every group and every section, so the checks above cannot silently empty out", () => {
+    expect(SECTION_GROUPS.length).toBeGreaterThan(0);
+    expect(CATEGORY_SECTIONS.length).toBeGreaterThan(0);
+    for (const section of CATEGORY_SECTIONS) {
+      expect(SECTION_GROUPS).toContain(section.group);
     }
   });
 });

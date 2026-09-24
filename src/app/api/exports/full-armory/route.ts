@@ -15,9 +15,26 @@ import {
 } from "@/lib/exports/full-armory";
 import { requireAuth } from "@/lib/server/auth";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import {
+  SUPPLY_CATEGORY_LABELS,
+  SUPPLY_UNIT_LABELS,
+  DEFAULT_EXPIRY_WARNING_DAYS,
+  expiryStatus,
+  todayForExpiry,
+  type SupplyCategory,
+  type SupplyUnit,
+} from "@/lib/supply";
 
 function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
+
+function supplyCategoryLabel(category: string): string {
+  return SUPPLY_CATEGORY_LABELS[category as SupplyCategory] ?? category;
+}
+
+function supplyUnitLabel(unit: string): string {
+  return SUPPLY_UNIT_LABELS[unit as SupplyUnit] ?? unit;
 }
 
 /** The paperwork group as it comes off a firearm or an accessory row. */
@@ -154,6 +171,21 @@ type GearExportRecord = {
   imageUrl: string | null;
 };
 
+type SupplyExportRecord = {
+  id: string;
+  name: string;
+  brand: string | null;
+  category: string;
+  quantity: number;
+  unit: string;
+  lowStockAlert: number | null;
+  expirationDate: Date | null;
+  purchasePrice: number | null;
+  purchaseDate: Date | null;
+  storageLocation: string | null;
+  notes: string | null;
+};
+
 type PrismaWithOptionalDocument = typeof prisma & {
   document?: {
     findMany: (args: {
@@ -232,6 +264,7 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     { section: "summary", key: "totalFirearms", value: payload.summary.totalFirearms },
     { section: "summary", key: "totalAccessories", value: payload.summary.totalAccessories },
     { section: "summary", key: "totalGear", value: payload.summary.totalGear },
+    { section: "summary", key: "totalSupplies", value: payload.summary.totalSupplies },
     { section: "summary", key: "totalAmmoStocks", value: payload.summary.totalAmmoStocks },
     { section: "summary", key: "totalDocuments", value: payload.summary.totalDocuments },
     { section: "summary", key: "totalReceipts", value: payload.summary.totalReceipts },
@@ -255,8 +288,19 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     section: "gear",
     ...flattenRecord(row as unknown as Record<string, unknown>),
   }));
+  const supplyRows = payload.supplies.map((row) => ({
+    section: "supplies",
+    ...flattenRecord(row as unknown as Record<string, unknown>),
+  }));
 
-  return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows, ...gearRows]);
+  return rowsToCsv([
+    ...metaRows,
+    ...itemRows,
+    ...ammoRows,
+    ...attachmentRows,
+    ...gearRows,
+    ...supplyRows,
+  ]);
 }
 
 function pdfEscape(value: string): string {
@@ -426,6 +470,18 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     });
   }
 
+  lines.push("", "Supplies");
+  if (payload.supplies.length === 0) {
+    lines.push("No supply records included");
+  } else {
+    payload.supplies.forEach((row, index) => {
+      pushWrapped(
+        lines,
+        `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"} | Expiry: ${row.expirationDate || "N/A"} (${row.expiryStatus}) | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
+      );
+    });
+  }
+
   return lines;
 }
 
@@ -526,6 +582,30 @@ export async function GET(request: NextRequest) {
       },
       orderBy: [{ manufacturer: "asc" }, { name: "asc" }],
     })) as GearExportRecord[];
+
+    // Resolved once, not per row: expiryStatus must never read the clock
+    // itself, matching getSupplySectionItems.ts's own resolution of "today".
+    const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
+    const today = todayForExpiry(settings?.timezone ?? null, new Date());
+    const expiryWarningDays = settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+
+    const supplies = (await prisma.supply.findMany({
+      select: {
+        id: true,
+        name: true,
+        brand: true,
+        category: true,
+        quantity: true,
+        unit: true,
+        lowStockAlert: true,
+        expirationDate: true,
+        purchasePrice: true,
+        purchaseDate: true,
+        storageLocation: true,
+        notes: true,
+      },
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+    })) as SupplyExportRecord[];
 
     const receiptDocuments = documents.filter((doc) => doc.type === "RECEIPT");
 
@@ -679,13 +759,41 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    // A supply has no serial, no photo and no Document relation, so only
+    // missingValue meaningfully applies to it — missingSerial/missingPhoto/
+    // missingReceipt are not modelled on this row at all rather than
+    // hardcoded false, because those concepts don't exist for a supply.
+    // totalItems counts supplies (below) exactly as it counts gear, so
+    // missingValues must too, for the same reason the gear fix applied:
+    // the headline count and its missing counters have to share a
+    // denominator or the preview can quote a "missing" figure computed over
+    // a narrower set than the total it sits beside.
+    const supplyRows = supplies.map((supply) => ({
+      supplyId: supply.id,
+      name: supply.name,
+      brand: supply.brand || "",
+      category: supplyCategoryLabel(supply.category),
+      quantity: supply.quantity ?? 0,
+      unit: supplyUnitLabel(supply.unit),
+      lowStockAlert: supply.lowStockAlert ?? null,
+      expirationDate: toISODate(supply.expirationDate),
+      expiryStatus: expiryStatus(supply.expirationDate, today, expiryWarningDays),
+      purchasePrice: exportOptions.includeValue ? (supply.purchasePrice ?? null) : null,
+      purchaseDate: toISODate(supply.purchaseDate),
+      storageLocation: supply.storageLocation || "",
+      missingValue: exportOptions.includeValue ? supply.purchasePrice == null : false,
+      notes: supply.notes ?? "",
+    }));
+
     // Accessories participate in totalItems and totalPurchaseValue but never carry a
     // replacementValue (their record has no currentValue field, so that row's
     // contribution is always 0). Gear does track currentValue, so it feeds all three
-    // the same way firearms do.
+    // the same way firearms do. Supplies have a purchasePrice but no replacement-value
+    // equivalent, so — like accessories — they feed totalPurchaseValue only.
     const totalPurchaseValue = exportOptions.includeValue
       ? itemRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0) +
-        gearRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
+        gearRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0) +
+        supplyRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
       : 0;
 
     const totalReplacementValue = exportOptions.includeValue
@@ -701,10 +809,11 @@ export async function GET(request: NextRequest) {
         exportOptions,
       },
       summary: {
-        totalItems: itemRows.length + gearRows.length,
+        totalItems: itemRows.length + gearRows.length + supplyRows.length,
         totalFirearms: firearms.length,
         totalAccessories: accessories.length,
         totalGear: gearRows.length,
+        totalSupplies: supplyRows.length,
         totalDocuments: attachmentsRows.length,
         totalReceipts: receiptDocuments.length,
         totalAmmoStocks: ammoRows.length,
@@ -716,7 +825,9 @@ export async function GET(request: NextRequest) {
           missingPhotos:
             itemRows.filter((i) => i.missingPhoto).length + gearRows.filter((g) => g.missingPhoto).length,
           missingValues:
-            itemRows.filter((i) => i.missingValue).length + gearRows.filter((g) => g.missingValue).length,
+            itemRows.filter((i) => i.missingValue).length +
+            gearRows.filter((g) => g.missingValue).length +
+            supplyRows.filter((s) => s.missingValue).length,
           missingSerials:
             itemRows.filter((i) => i.missingSerial).length + gearRows.filter((g) => g.missingSerial).length,
         },
@@ -725,6 +836,7 @@ export async function GET(request: NextRequest) {
       attachments: attachmentsRows,
       ammo: ammoRows,
       gear: gearRows,
+      supplies: supplyRows,
     };
 
     if (format === "csv") {

@@ -190,6 +190,36 @@ model Gear {
   @@index([category])
 }
 
+// Consumable stores: cleaning, medical, food, water, batteries. One model
+// because they share a shape — an amount, a unit, a threshold, and usually a
+// date after which the stock is no good. Levels are set by hand; nothing
+// deducts automatically (guessing how much CLP a cleaning used would make the
+// numbers worse, not better).
+model Supply {
+  id              String    @id @default(cuid())
+  name            String
+  brand           String?
+  // SupplyCategory: CLEANING | MEDICAL | FOOD | WATER | FILTER | BATTERY |
+  //                 FUEL | SANITATION | CBRN_FILTER | SIGNAL | OTHER
+  category        String
+  // A decimal, unlike AmmoStock.quantity: solvent comes in fractions of an
+  // ounce and water in fractions of a gallon.
+  quantity        Float     @default(0)
+  // SupplyUnit: COUNT | OZ | ML | L | GAL | LB | KIT | CAL
+  unit            String
+  lowStockAlert   Float?
+  expirationDate  DateTime?
+  purchasePrice   Float?
+  purchaseDate    DateTime?
+  storageLocation String?
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([category])
+  @@index([expirationDate])
+}
+
 model Document {
   id         String    @id @default(cuid())
   name       String
@@ -413,6 +443,10 @@ model AppSettings {
   defaultCurrency         String   @default("USD")
   appPassword             String?
   defaultAmmoAlertThreshold Int?
+  // Days ahead to warn that a supply is expiring. One fixed window would be
+  // wrong for both milk and body armor, so it is a setting. null = use the
+  // default in src/lib/supply.ts.
+  expiryWarningDays       Int?
   // IANA timezone, e.g. "America/Denver". null = unset.
   // Used to convert legacy date-only instants to the day their author meant.
   timezone                String?

@@ -11,6 +11,7 @@ import { SettingToggleCard } from "@/components/settings/SettingToggleCard";
 import { FormField, INPUT_CLASS } from "@/components/shared/FormField";
 import { StandardButton, buttonClassName } from "@/components/shared/StandardButton";
 import { APP_VERSION } from "@/lib/version";
+import { DEFAULT_EXPIRY_WARNING_DAYS } from "@/lib/supply";
 
 export default function SettingsPage() {
   const [dataLoading, setDataLoading] = useState(true);
@@ -22,6 +23,7 @@ export default function SettingsPage() {
   const [backupDestinationPath, setBackupDestinationPath] = useState("");
   const [manualLanHost, setManualLanHost] = useState("");
   const [defaultAmmoAlertThreshold, setDefaultAmmoAlertThreshold] = useState<string>("");
+  const [expiryWarningDays, setExpiryWarningDays] = useState<string>("");
   const [timezone, setTimezone] = useState("");
   const [timezoneOptions, setTimezoneOptions] = useState<string[]>([]);
 
@@ -58,6 +60,9 @@ export default function SettingsPage() {
           setManualLanHost(data.manualLanHost ?? "");
           setDefaultAmmoAlertThreshold(
             data.defaultAmmoAlertThreshold != null ? String(data.defaultAmmoAlertThreshold) : ""
+          );
+          setExpiryWarningDays(
+            data.expiryWarningDays != null ? String(data.expiryWarningDays) : ""
           );
           setTimezone(data.timezone ?? "");
         }
@@ -140,6 +145,17 @@ export default function SettingsPage() {
       }
     }
 
+    const trimmedExpiryWarningDays = expiryWarningDays.trim();
+    let parsedExpiryWarningDays: number | null = null;
+    if (trimmedExpiryWarningDays !== "") {
+      parsedExpiryWarningDays = Number.parseInt(trimmedExpiryWarningDays, 10);
+      if (Number.isNaN(parsedExpiryWarningDays) || parsedExpiryWarningDays < 0) {
+        setSaveError("Expiry warning window must be a non-negative whole number.");
+        setSaving(false);
+        return;
+      }
+    }
+
     try {
       const res = await fetch("/api/settings", {
         method: "PUT",
@@ -151,6 +167,7 @@ export default function SettingsPage() {
           backupDestinationPath,
           manualLanHost,
           defaultAmmoAlertThreshold: parsedThreshold,
+          expiryWarningDays: parsedExpiryWarningDays,
           timezone,
         }),
       });
@@ -588,6 +605,27 @@ export default function SettingsPage() {
               onChange={(e) => setDefaultAmmoAlertThreshold(e.target.value)}
               className={INPUT_CLASS}
               placeholder="e.g. 200 (leave blank for none)"
+            />
+          </FormField>
+        </SectionCard>
+
+        <SectionCard
+          title="Supplies"
+          description="Default behavior for expiry warnings on supplies."
+        >
+          <FormField
+            label="Expiry Warning Window"
+            hint={`Supplies expiring within this many days are flagged as expiring soon. Leave blank to use the default (${DEFAULT_EXPIRY_WARNING_DAYS} days).`}
+          >
+            <input
+              id="expiryWarningDays"
+              type="number"
+              min={0}
+              step={1}
+              value={expiryWarningDays}
+              onChange={(e) => setExpiryWarningDays(e.target.value)}
+              className={INPUT_CLASS}
+              placeholder={`e.g. 90 (leave blank for the ${DEFAULT_EXPIRY_WARNING_DAYS}-day default)`}
             />
           </FormField>
         </SectionCard>

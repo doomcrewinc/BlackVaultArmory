@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   findAmmoStocks: vi.fn(),
   findBuilds: vi.fn(),
   findGear: vi.fn(),
+  findSupplies: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -16,6 +17,7 @@ vi.mock("@/lib/prisma", () => ({
     ammoStock: { findMany: mocks.findAmmoStocks },
     build: { findMany: mocks.findBuilds },
     gear: { findMany: mocks.findGear },
+    supply: { findMany: mocks.findSupplies },
   },
 }));
 
@@ -29,6 +31,7 @@ vi.mock("@/lib/db/text-search", async (importOriginal) => {
 
 import { GET } from "./route";
 import { containsInsensitive } from "@/lib/db/text-search";
+import { GEAR_CATEGORIES, GEAR_CATEGORY_LABELS } from "@/lib/gear";
 
 function request(query: string): NextRequest {
   return new NextRequest(
@@ -50,6 +53,14 @@ describe("GET /api/search", () => {
         manufacturer: "Benchmade",
         model: "535",
         category: "KNIFE",
+      },
+    ]);
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Bug Out Bandages",
+        brand: "MedCo",
+        category: "MEDICAL",
       },
     ]);
   });
@@ -100,7 +111,132 @@ describe("GET /api/search", () => {
       ammo: [],
       builds: [],
       gear: [],
+      supplies: [],
     });
     expect(mocks.findGear).not.toHaveBeenCalled();
+  });
+
+  it("returns a supplies key alongside the existing sections", async () => {
+    const response = await GET(request("bug"));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json).toHaveProperty("supplies");
+    expect(json.supplies).toEqual([
+      {
+        id: "supply-1",
+        name: "Bug Out Bandages",
+        subtitle: "MedCo · Medical",
+        url: "/supplies/item/supply-1",
+      },
+    ]);
+  });
+
+  it("searches supply name, brand, notes and category through containsInsensitive", async () => {
+    await GET(request("bug"));
+
+    expect(mocks.findSupplies).toHaveBeenCalledTimes(1);
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("bug") },
+      { brand: containsInsensitive("bug") },
+      { notes: containsInsensitive("bug") },
+      { category: containsInsensitive("bug") },
+    ]);
+
+    // Every field in the supply OR clause was produced by the spied helper, not a
+    // bare `{ contains: "bug" }` literal that would bypass Postgres's insensitive mode.
+    const supplyCallArgs = vi
+      .mocked(containsInsensitive)
+      .mock.calls.filter(([value]) => value === "bug");
+    expect(supplyCallArgs.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("matches a supply category by its human label, not just the stored token", async () => {
+    // "cbrn filter" is what the badge, the detail page and the export all
+    // show; the column stores CBRN_FILTER, so a substring match against the
+    // column alone found nothing.
+    await GET(request("cbrn filter"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ category: { in: ["CBRN_FILTER"] } });
+    // The substring clause on the column stays, for a category stored outside
+    // the enum by a restore, which has no label to match.
+    expect(where.OR).toContainEqual({
+      category: containsInsensitive("cbrn filter"),
+    });
+  });
+
+  it("matches every category whose label contains the query", async () => {
+    await GET(request("filter"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({
+      category: { in: ["FILTER", "CBRN_FILTER"] },
+    });
+  });
+
+  it("omits the category-label clause when no label matches", async () => {
+    await GET(request("zzzz"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("zzzz") },
+      { brand: containsInsensitive("zzzz") },
+      { notes: containsInsensitive("zzzz") },
+      { category: containsInsensitive("zzzz") },
+    ]);
+  });
+
+  it("does not query supplies for a short query", async () => {
+    await GET(request("a"));
+    expect(mocks.findSupplies).not.toHaveBeenCalled();
+  });
+
+  // Derived from GEAR_CATEGORIES, not a hardcoded pair. Today's two labels
+  // ("Knife", "Case") differ from their tokens only by case, so this passes
+  // pre-fix for them; it is here so the day phase 5 adds a multi-word
+  // category (FIRST_AID -> "First Aid") it is covered without anyone
+  // remembering to extend the test.
+  it.each([...GEAR_CATEGORIES])(
+    "finds the %s gear category by its human label",
+    async (category) => {
+      await GET(request(GEAR_CATEGORY_LABELS[category]));
+
+      const where = mocks.findGear.mock.calls[0][0].where;
+      const inClause = where.OR.find(
+        (clause: Record<string, unknown>) =>
+          typeof clause.category === "object" &&
+          clause.category !== null &&
+          "in" in (clause.category as object),
+      );
+      expect(inClause).toBeDefined();
+      expect(inClause.category.in).toContain(category);
+    },
+  );
+
+  it("adds a gear category-label clause the same way supplies does", async () => {
+    await GET(request("knife"));
+
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("knife") },
+      { manufacturer: containsInsensitive("knife") },
+      { model: containsInsensitive("knife") },
+      { category: containsInsensitive("knife") },
+      { category: { in: ["KNIFE"] } },
+    ]);
+  });
+
+  it("omits the gear category-label clause when no label matches", async () => {
+    await GET(request("zzzz"));
+
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("zzzz") },
+      { manufacturer: containsInsensitive("zzzz") },
+      { model: containsInsensitive("zzzz") },
+      { category: containsInsensitive("zzzz") },
+    ]);
   });
 });

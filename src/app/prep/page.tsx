@@ -2,12 +2,15 @@ import Link from "next/link";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { sectionHref, sectionsForGroup } from "@/lib/categories";
 
-export default function GearPage() {
-  const sections = sectionsForGroup("gear");
+export default function PrepPage() {
+  const sections = sectionsForGroup("prep");
 
   return (
     <div className="px-4 py-6 sm:px-6">
-      <PageHeader title="GEAR" subtitle="Everything that is not a firearm" />
+      <PageHeader
+        title="PREPAREDNESS"
+        subtitle="Medical, food & water stores"
+      />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {sections.map((section) => (
           <Link

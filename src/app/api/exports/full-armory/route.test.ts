@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   findDocuments: vi.fn(),
   findAmmoStocks: vi.fn(),
   findGear: vi.fn(),
+  findSupplies: vi.fn(),
+  findAppSettings: vi.fn(),
 }));
 
 vi.mock("@/lib/server/auth", () => ({
@@ -16,7 +18,7 @@ vi.mock("@/lib/server/auth", () => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     appSettings: {
-      findUnique: vi.fn().mockResolvedValue(null),
+      findUnique: mocks.findAppSettings,
     },
     firearm: {
       findMany: mocks.findFirearms,
@@ -32,6 +34,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     gear: {
       findMany: mocks.findGear,
+    },
+    supply: {
+      findMany: mocks.findSupplies,
     },
   },
 }));
@@ -58,6 +63,12 @@ function extractPdfFlatText(pdf: string): string {
 describe("GET /api/exports/full-armory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
+    mocks.findAppSettings.mockResolvedValue(null);
+    // Empty by default so the many pre-existing assertions below (totalItems,
+    // totalPurchaseValue, missingEvidence, etc.) are unaffected; the supply
+    // tests further down override this mock and their own expectations.
+    mocks.findSupplies.mockResolvedValue([]);
 
     mocks.findFirearms.mockResolvedValue([
       {
@@ -308,6 +319,225 @@ describe("GET /api/exports/full-armory", () => {
     expect(json.gear[0].category).toBe("ARMOR");
   });
 
+  // ─── Supplies ───────────────────────────────────────────────────────────
+  // Supplies have no serial, no photo and no Document relation — unlike gear,
+  // which carries all four missing* signals. Only missingValue meaningfully
+  // applies. totalItems counts supplies (below) exactly as it counts gear, so
+  // missingValues must count them too, for the same reason gear's fix
+  // applied: a headline count and its "missing" counters must share a
+  // denominator, or the preview can quote a figure computed over a narrower
+  // set than the total sitting beside it. missingReceipts/missingPhotos/
+  // missingSerials stay at their pre-supply values, because a supply can
+  // never contribute to them.
+  it("includes supplies in the payload, totalItems, totalPurchaseValue, and only the missingValues figure", async () => {
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Iodine Tablets",
+        brand: "PotableAid",
+        category: "MEDICAL",
+        quantity: 50,
+        unit: "COUNT",
+        lowStockAlert: 10,
+        expirationDate: null,
+        purchasePrice: 25,
+        purchaseDate: new Date("2025-05-01T00:00:00.000Z"),
+        storageLocation: "Pantry",
+        notes: "First aid kit",
+      },
+      {
+        id: "supply-bare",
+        name: "Nameless Jug",
+        brand: null,
+        category: "WATER",
+        quantity: 5,
+        unit: "GAL",
+        lowStockAlert: null,
+        expirationDate: null,
+        purchasePrice: null,
+        purchaseDate: null,
+        storageLocation: null,
+        notes: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.supplies).toEqual([
+      {
+        supplyId: "supply-1",
+        name: "Iodine Tablets",
+        brand: "PotableAid",
+        category: "Medical",
+        quantity: 50,
+        unit: "Count",
+        lowStockAlert: 10,
+        expirationDate: "",
+        expiryStatus: "none",
+        purchasePrice: 25,
+        purchaseDate: "2025-05-01",
+        storageLocation: "Pantry",
+        missingValue: false,
+        notes: "First aid kit",
+      },
+      {
+        supplyId: "supply-bare",
+        name: "Nameless Jug",
+        brand: "",
+        category: "Water",
+        quantity: 5,
+        unit: "gal",
+        lowStockAlert: null,
+        expirationDate: "",
+        expiryStatus: "none",
+        purchasePrice: null,
+        purchaseDate: "",
+        storageLocation: "",
+        missingValue: true,
+        notes: "",
+      },
+    ]);
+
+    // 1 firearm + 1 accessory + 1 gear (beforeEach fixtures) + 2 supplies
+    expect(json.summary.totalItems).toBe(5);
+    expect(json.summary.totalSupplies).toBe(2);
+    // firearm (1200) + accessory (200) + gear (150) + supply-1 (25); supply-bare contributes 0
+    expect(json.summary.totalPurchaseValue).toBe(1575);
+    // Unaffected by supplies — no replacement-value equivalent, like accessories.
+    expect(json.summary.totalReplacementValue).toBe(1580);
+
+    expect(json.summary.missingEvidence).toEqual({
+      // accessory (no receipt) + gear-1 (no receipt); supplies never contribute.
+      missingReceipts: 2,
+      // accessory (no image) + gear-1 (no image); supplies never contribute.
+      missingPhotos: 2,
+      // supply-bare alone: firearm/accessory/gear-1 all have a value.
+      missingValues: 1,
+      // firearm and gear-1 both have a serial, accessory never carries one,
+      // and supplies never contribute.
+      missingSerials: 0,
+    });
+  });
+
+  it("zeroes the supply missingValue flag and nulls purchasePrice when includeValue is off", async () => {
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Iodine Tablets",
+        brand: "PotableAid",
+        category: "MEDICAL",
+        quantity: 50,
+        unit: "COUNT",
+        lowStockAlert: 10,
+        expirationDate: null,
+        purchasePrice: 25,
+        purchaseDate: null,
+        storageLocation: null,
+        notes: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory?includeValue=false");
+    const json = await (await GET(request)).json();
+
+    expect(json.supplies[0]).toMatchObject({
+      purchasePrice: null,
+      missingValue: false,
+    });
+    expect(json.summary.missingEvidence.missingValues).toBe(0);
+    expect(json.summary.totalPurchaseValue).toBe(0);
+  });
+
+  it("falls back to the raw category and unit when a supply has an unrecognised value", async () => {
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-odd",
+        name: "Mystery Consumable",
+        brand: null,
+        category: "SHELTER",
+        quantity: 1,
+        unit: "CRATE",
+        lowStockAlert: null,
+        expirationDate: null,
+        purchasePrice: null,
+        purchaseDate: null,
+        storageLocation: null,
+        notes: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.supplies[0].category).toBe("SHELTER");
+    expect(json.supplies[0].unit).toBe("CRATE");
+  });
+
+  it("resolves a supply's expiry status once via todayForExpiry, honoring settings.timezone and settings.expiryWarningDays", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+      mocks.findSupplies.mockResolvedValue([
+        {
+          id: "supply-expired",
+          name: "Old Bandages",
+          brand: null,
+          category: "MEDICAL",
+          quantity: 1,
+          unit: "KIT",
+          lowStockAlert: null,
+          expirationDate: new Date("2026-01-01T00:00:00.000Z"),
+          purchasePrice: null,
+          purchaseDate: null,
+          storageLocation: null,
+          notes: null,
+        },
+        {
+          id: "supply-soon",
+          name: "Water Jug",
+          brand: null,
+          category: "WATER",
+          quantity: 1,
+          unit: "GAL",
+          lowStockAlert: null,
+          // +5 days — inside the 10-day warning window.
+          expirationDate: new Date("2026-06-20T00:00:00.000Z"),
+          purchasePrice: null,
+          purchaseDate: null,
+          storageLocation: null,
+          notes: null,
+        },
+        {
+          id: "supply-fine",
+          name: "Canned Beans",
+          brand: null,
+          category: "FOOD",
+          quantity: 1,
+          unit: "COUNT",
+          lowStockAlert: null,
+          expirationDate: new Date("2027-01-01T00:00:00.000Z"),
+          purchasePrice: null,
+          purchaseDate: null,
+          storageLocation: null,
+          notes: null,
+        },
+      ]);
+
+      const request = new NextRequest("http://localhost/api/exports/full-armory");
+      const json = await (await GET(request)).json();
+
+      expect(mocks.findAppSettings).toHaveBeenCalledWith({ where: { id: "singleton" } });
+      expect(
+        json.supplies.map((s: { expiryStatus: string }) => s.expiryStatus)
+      ).toEqual(["expired", "soon", "fine"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("exports a gear-attached document as GEAR with the gear id and name", async () => {
     mocks.findDocuments.mockResolvedValue([
       {
@@ -381,6 +611,23 @@ describe("GET /api/exports/full-armory", () => {
   });
 
   it("returns downloadable CSV with structured section rows", async () => {
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Iodine Tablets",
+        brand: "PotableAid",
+        category: "MEDICAL",
+        quantity: 50,
+        unit: "COUNT",
+        lowStockAlert: 10,
+        expirationDate: null,
+        purchasePrice: 25,
+        purchaseDate: null,
+        storageLocation: "Pantry",
+        notes: null,
+      },
+    ]);
+
     const request = new NextRequest("http://localhost/api/exports/full-armory?format=csv");
     const response = await GET(request);
     const csv = await response.text();
@@ -392,6 +639,9 @@ describe("GET /api/exports/full-armory", () => {
     expect(csv).toContain("/api/files/documents/receipt-1.jpg");
     expect(csv).toContain("gear");
     expect(csv).toContain("Bugout");
+    expect(csv).toContain("supplies");
+    expect(csv).toContain("Iodine Tablets");
+    expect(csv).toContain("totalSupplies");
   });
 
   it("returns PDF bytes for download format", async () => {
@@ -499,6 +749,44 @@ describe("GET /api/exports/full-armory", () => {
 
     expect(text).toContain("1. Knife Bugout");
     expect(text).not.toContain("Image Ref:");
+  });
+
+  it("renders the Supplies section and its rows in the PDF text", async () => {
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Iodine Tablets",
+        brand: "PotableAid",
+        category: "MEDICAL",
+        quantity: 12.5,
+        unit: "OZ",
+        lowStockAlert: 2,
+        expirationDate: null,
+        purchasePrice: 25,
+        purchaseDate: null,
+        storageLocation: "Pantry",
+        notes: "First aid kit",
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const text = extractPdfFlatText(await (await GET(request)).text());
+
+    // Asserted on the drawn text, not just the %PDF- prefix — removing the
+    // Supplies block from buildExportPdfLines would still leave a valid PDF.
+    expect(text).toContain("Supplies");
+    // The decimal quantity is not floored in the PDF line either.
+    expect(text).toContain(
+      "1. Medical Iodine Tablets | Brand: PotableAid | Qty: 12.5 oz | Threshold: 2 | Expiry: N/A (none) | Price: 25 | Storage: Pantry"
+    );
+  });
+
+  it("says so in the PDF when there are no supplies to report", async () => {
+    const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf");
+    const text = extractPdfText(await (await GET(request)).text());
+
+    // beforeEach leaves supplies empty by default.
+    expect(text).toContain("No supply records included");
   });
 
   it("returns non-empty CSV output when there is no export data", async () => {

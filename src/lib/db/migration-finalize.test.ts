@@ -78,9 +78,9 @@ describe("runMigration", () => {
     const record = JSON.parse(fs.readFileSync(marker(), "utf8"));
     expect(record.migratedAt).toBe("2026-09-22T12:00:00.000Z");
     expect(record.source).toBe(path.join(repo, "data", "db", "vault.db"));
-    expect(record.totalRows).toBe(34);
+    expect(record.totalRows).toBe(36);
     expect(record.counts.Firearm).toBe(2);
-    expect(Object.keys(record.counts)).toHaveLength(17);
+    expect(Object.keys(record.counts)).toHaveLength(18);
     expect(record.target).not.toContain(PASSWORD);
 
     const env = parseEnv(envText());

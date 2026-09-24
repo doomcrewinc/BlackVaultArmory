@@ -20,6 +20,8 @@ import { CSS } from "@dnd-kit/utilities";
 import { StatCard } from "@/components/shared/StatCard";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
+import { SUPPLY_UNIT_LABELS, type SupplyUnit } from "@/lib/supply";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import {
   Shield,
   Crosshair,
@@ -33,6 +35,7 @@ import {
   Settings,
   X,
   Package,
+  Boxes,
 } from "lucide-react";
 
 const FIREARM_TYPE_LABELS: Record<string, string> = {
@@ -57,7 +60,14 @@ const TYPE_BADGE_COLORS: Record<string, string> = {
   LEVER_ACTION: "border-[#FF7043]/40 text-[#FF7043]",
 };
 
-const DEFAULT_ORDER = ["stats", "maintenance-due", "low-ammo", "recent", "ammo-summary"];
+const DEFAULT_ORDER = [
+  "stats",
+  "maintenance-due",
+  "low-ammo",
+  "supply-alerts",
+  "recent",
+  "ammo-summary",
+];
 const STORAGE_KEY = "vault-dashboard-layout";
 
 interface AmmoStockItem {
@@ -69,6 +79,19 @@ interface AmmoStockItem {
   lowStockAlert: number | null;
   grainWeight: number | null;
   bulletType: string | null;
+}
+
+interface SupplyAlertItem {
+  id: string;
+  name: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  lowStockAlert: number | null;
+}
+
+function supplyUnitLabel(unit: string): string {
+  return SUPPLY_UNIT_LABELS[unit as SupplyUnit] ?? unit;
 }
 
 interface RecentFirearm {
@@ -338,6 +361,11 @@ interface DashboardData {
   lowStockItems: AmmoStockItem[];
   recentFirearms: RecentFirearm[];
   ammoStocks: AmmoStockItem[];
+  lowStockSupplies: SupplyAlertItem[];
+  expiredSupplyCount: number;
+  expiringSoonSupplyCount: number;
+  /** False while AppSettings.timezone is unset — see SupplyAlertsWidget. */
+  supplyTimezoneConfigured: boolean;
 }
 
 interface StatsResponse {
@@ -352,6 +380,12 @@ interface StatsResponse {
   ammo?: {
     stocks?: AmmoStockItem[];
     lowStockItems?: AmmoStockItem[];
+  };
+  supplies?: {
+    lowStockItems?: SupplyAlertItem[];
+    expiredCount?: number;
+    expiringSoonCount?: number;
+    timezoneConfigured?: boolean;
   };
   recent?: {
     firearms?: RecentFirearm[];
@@ -524,6 +558,128 @@ function LowAmmoWidget({ items, totalStocks }: { items: AmmoStockItem[]; totalSt
           </Link>
         </div>
       )}
+    </section>
+  );
+}
+
+function SupplyAlertsWidget({
+  items,
+  expiredCount,
+  expiringSoonCount,
+  timezoneConfigured,
+}: {
+  items: SupplyAlertItem[];
+  expiredCount: number;
+  expiringSoonCount: number;
+  /**
+   * From the server. The notice owns its own mount gate and its own
+   * localStorage dismissal — shared with the section and detail pages, so one
+   * dismissal covers every surface that shows an expiry badge.
+   */
+  timezoneConfigured: boolean;
+}) {
+  const totalAlerts = items.length + expiredCount + expiringSoonCount;
+
+  return (
+    <section>
+      {/* Only where the badges it explains actually appear — the same gate
+          SupplyClientPage uses on `items.length`. With no alerts this widget
+          renders its empty state and there is no verdict for the notice to
+          qualify, so a fresh install with no supplies at all was getting an
+          amber warning about expiry dates that do not exist. */}
+      {totalAlerts > 0 && (
+        <SupplyTimezoneNotice
+          timezoneConfigured={timezoneConfigured}
+          className="mb-3"
+        />
+      )}
+      <div className="flex items-center gap-2 mb-3">
+        <AlertTriangle className="w-4 h-4 text-[#F5A623]" />
+        <h2 className="text-sm font-semibold tracking-widest uppercase text-[#F5A623]">
+          Supply Alerts
+        </h2>
+        {totalAlerts > 0 && (
+          <span className="ml-auto text-xs font-mono bg-[#F5A623]/10 border border-[#F5A623]/30 text-[#F5A623] px-2 py-0.5 rounded">
+            {totalAlerts} alerts
+          </span>
+        )}
+      </div>
+
+      {(expiredCount > 0 || expiringSoonCount > 0) && (
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="bg-vault-surface border border-[#E53935]/30 rounded-lg p-3">
+            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+              Expired
+            </p>
+            <p className="text-lg font-mono font-bold text-[#E53935]">
+              {formatNumber(expiredCount)}
+            </p>
+          </div>
+          <div className="bg-vault-surface border border-[#F5A623]/30 rounded-lg p-3">
+            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+              Expiring Soon
+            </p>
+            <p className="text-lg font-mono font-bold text-[#F5A623]">
+              {formatNumber(expiringSoonCount)}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-vault-surface border border-vault-border rounded-lg overflow-hidden">
+        {items.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="w-10 h-10 rounded-full bg-[#00C853]/10 border border-[#00C853]/20 flex items-center justify-center mx-auto mb-3">
+              <Boxes className="w-5 h-5 text-[#00C853]" />
+            </div>
+            <p className="text-sm text-vault-text-muted">
+              All supplies are well stocked
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-vault-border">
+            {items.map((item) => {
+              const pct = item.lowStockAlert
+                ? Math.round((item.quantity / item.lowStockAlert) * 100)
+                : 100;
+              const isCritical =
+                item.lowStockAlert != null && item.quantity <= item.lowStockAlert / 2;
+              const statusColor =
+                item.quantity === 0 || isCritical ? "text-[#E53935]" : "text-[#F5A623]";
+              const barColor =
+                item.quantity === 0 || isCritical ? "bg-[#E53935]" : "bg-[#F5A623]";
+              return (
+                <div key={item.id} className="flex items-center gap-4 px-4 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="shrink-0 text-[9px] font-mono uppercase tracking-widest text-vault-text-faint border border-vault-border rounded px-1 py-0.5">
+                        Supply
+                      </span>
+                      <span className="text-sm font-mono font-semibold text-vault-text truncate min-w-0">
+                        {item.name}
+                      </span>
+                    </div>
+                    <div className="w-full bg-vault-border rounded-full h-1">
+                      <div
+                        className={`h-1 rounded-full transition-all ${barColor}`}
+                        style={{ width: `${Math.min(pct, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className={`text-sm font-mono font-bold ${statusColor}`}>
+                      {formatNumber(item.quantity)} {supplyUnitLabel(item.unit)}
+                    </p>
+                    <p className="text-xs text-vault-text-faint">
+                      alert: {formatNumber(item.lowStockAlert ?? 0)}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -706,7 +862,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
       const response = await fetch("/api/stats", { cache: "no-store" });
       if (!response.ok) return;
       const stats: StatsResponse = await response.json();
-      setLiveData({
+      setLiveData((previous) => ({
         firearmCount: stats.totals?.firearms ?? 0,
         accessoryCount: stats.totals?.accessories ?? 0,
         totalAmmoRounds: stats.totals?.ammoRounds ?? 0,
@@ -714,7 +870,20 @@ export function DashboardClient({ data }: { data: DashboardData }) {
         lowStockItems: stats.ammo?.lowStockItems ?? [],
         recentFirearms: stats.recent?.firearms ?? [],
         ammoStocks: stats.ammo?.stocks ?? [],
-      });
+        lowStockSupplies: stats.supplies?.lowStockItems ?? [],
+        expiredSupplyCount: stats.supplies?.expiredCount ?? 0,
+        expiringSoonSupplyCount: stats.supplies?.expiringSoonCount ?? 0,
+        // NOT defaulted, unlike the counts above. `StatsResponse` types the
+        // raw /api/stats payload, so every field is optional there — but
+        // falling back to a literal would be guessing about the one setting
+        // this notice exists to report. Keeping the previous value preserves
+        // what the server render already established (page.tsx types it as
+        // required), so a payload that omits the field changes nothing rather
+        // than silently deciding the notice should or should not show.
+        supplyTimezoneConfigured:
+          stats.supplies?.timezoneConfigured ??
+          previous.supplyTimezoneConfigured,
+      }));
       setLastUpdated(new Date());
     } catch {
       // Keep server-provided data when refresh fails.
@@ -787,6 +956,15 @@ export function DashboardClient({ data }: { data: DashboardData }) {
         return <MaintenanceDueWidget />;
       case "low-ammo":
         return <LowAmmoWidget items={liveData.lowStockItems} totalStocks={liveData.ammoStocks.length} />;
+      case "supply-alerts":
+        return (
+          <SupplyAlertsWidget
+            items={liveData.lowStockSupplies}
+            expiredCount={liveData.expiredSupplyCount}
+            expiringSoonCount={liveData.expiringSoonSupplyCount}
+            timezoneConfigured={liveData.supplyTimezoneConfigured}
+          />
+        );
       case "recent":
         return <RecentWidget firearms={liveData.recentFirearms} />;
       case "ammo-summary":

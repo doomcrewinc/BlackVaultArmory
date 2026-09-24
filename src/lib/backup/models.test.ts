@@ -75,6 +75,10 @@ describe("BACKUP_MODELS registry", () => {
     expect(REQUIRED_BACKUP_KEYS).not.toContain("gear");
   });
 
+  it("does not require supplies in an older backup payload", () => {
+    expect(REQUIRED_BACKUP_KEYS).not.toContain("supplies");
+  });
+
   it("orders every schema FK parent before its child", () => {
     for (const model of schemaModels) {
       if (BACKUP_EXCLUDED_MODELS.includes(model.name)) continue;

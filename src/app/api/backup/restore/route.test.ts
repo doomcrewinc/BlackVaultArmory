@@ -348,6 +348,7 @@ describe("POST /api/backup/restore", () => {
     expect(optionalKeys.sort()).toEqual(
       [
         "gear",
+        "supplies",
         "maintenanceLogs",
         "batteryChangeLogs",
         "dateNormalizationAudits",
