@@ -64,6 +64,15 @@ interface NfaFieldsetProps {
 export function NfaFieldset({ variant, value, onChange }: NfaFieldsetProps) {
   const hasStamp = value.nfaTransferMethod !== "FORM_4473";
   const itemNoun = variant === "firearm" ? "firearm" : "suppressor";
+  // Switching to 4473 hides the three stamp fields but keeps whatever was
+  // typed, so toggling back shows it intact — the forgiving choice. Saving,
+  // though, clears those columns server-side, and that has to be said out
+  // loud while there is still something to lose.
+  const willDiscardStampEntries =
+    !hasStamp &&
+    Boolean(
+      value.nfaControlNumber || value.nfaApprovalDate || value.nfaTaxPaid,
+    );
 
   return (
     <div className="space-y-4 pt-4 border-t border-vault-border">
@@ -176,6 +185,15 @@ export function NfaFieldset({ variant, value, onChange }: NfaFieldsetProps) {
           This {itemNoun} moved on a 4473, not an NFA form — there is no
           stamp, so the control number, approval date and tax paid are not
           tracked.
+          {willDiscardStampEntries && (
+            <>
+              {" "}
+              <span className="text-[#E53935]">
+                Saving will clear the control number, approval date and tax
+                paid you entered.
+              </span>
+            </>
+          )}
         </p>
       )}
     </div>

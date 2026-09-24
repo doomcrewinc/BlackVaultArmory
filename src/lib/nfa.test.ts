@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   isKnownNfaClass,
   normalizeAccessoryNfaFields,
@@ -219,6 +219,8 @@ describe("whitespace-only input reads as blank everywhere in the group", () => {
     ).toBeNull();
   });
 
+  // Now guarded explicitly in normalizeDateOnly rather than only because
+  // toDateOnlyUTC's regex rejects a blank and the catch swallowed the throw.
   it("nfaApprovalDate: a whitespace-only date is null, not a thrown/guessed date", () => {
     expect(
       normalizeFirearmNfaFields({ ...FULL, nfaApprovalDate: WHITESPACE })
@@ -295,5 +297,40 @@ describe("isKnownNfaClass", () => {
     expect(isKnownNfaClass(null)).toBe(false);
     expect(isKnownNfaClass(undefined)).toBe(false);
     expect(isKnownNfaClass(7)).toBe(false);
+  });
+});
+
+// normalizeDateOnly only turns a date THAT IS WRONG into null. An error of any
+// other kind means something is broken in the date helpers, and swallowing it
+// would empty a paperwork column silently instead of failing the request.
+describe("normalizeDateOnly error handling", () => {
+  it("nulls an InvalidDateError and rethrows anything else", async () => {
+    vi.resetModules();
+    vi.doMock("./date", async () => {
+      const actual = await vi.importActual<typeof import("./date")>("./date");
+      return {
+        ...actual,
+        toDateOnlyUTC: (input: Date | string) => {
+          if (input === "boom") throw new TypeError("bug in the date helpers");
+          return actual.toDateOnlyUTC(input);
+        },
+      };
+    });
+
+    const { normalizeFirearmNfaFields: normalize } = await import("./nfa");
+
+    // A malformed date is user input being wrong: null.
+    expect(
+      normalize({ nfaClass: "SBR", nfaApprovalDate: "not-a-date" })
+        .nfaApprovalDate,
+    ).toBeNull();
+
+    // Anything else propagates to the route's error handler.
+    expect(() =>
+      normalize({ nfaClass: "SBR", nfaApprovalDate: "boom" }),
+    ).toThrow(TypeError);
+
+    vi.doUnmock("./date");
+    vi.resetModules();
   });
 });

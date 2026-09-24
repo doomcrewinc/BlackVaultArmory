@@ -1,4 +1,4 @@
-import { toDateOnlyUTC } from "./date";
+import { InvalidDateError, toDateOnlyUTC } from "./date";
 import {
   DEFAULT_NFA_CLASS,
   MG_REGISTRIES,
@@ -43,16 +43,28 @@ function normalizeMoney(value: unknown): number | null {
 /**
  * A date-only value, or null. Delegates to toDateOnlyUTC, which throws on
  * anything malformed rather than guessing at a calendar day — that throw is
- * caught here and turned into null, since a paperwork field has no other way
- * to say "not recorded" versus "recorded wrong".
+ * turned into null here, since a paperwork field has no other way to say
+ * "not recorded" versus "recorded wrong".
+ *
+ * Two deliberately explicit details, both of the "implicit correctness" shape
+ * that let the normalizeMoney whitespace bug ship three times:
+ *
+ * - blank input is its own guard, including whitespace-only. It used to be
+ *   handled only because toDateOnlyUTC's regex rejects a blank and the catch
+ *   swallowed the throw — correct by accident, two functions apart.
+ * - only InvalidDateError becomes null. Anything else (a programming error in
+ *   the date helpers, say) propagates, so the routes' 500 handler sees it
+ *   instead of a paperwork column quietly going empty.
  */
 function normalizeDateOnly(value: unknown): Date | null {
-  if (value === undefined || value === null || value === "") return null;
+  if (value === undefined || value === null) return null;
   if (typeof value !== "string" && !(value instanceof Date)) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   try {
     return toDateOnlyUTC(value);
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof InvalidDateError) return null;
+    throw error;
   }
 }
 
@@ -93,8 +105,13 @@ function normalizeClassAndRegistry(input: {
   return { nfaClass, mgRegistry };
 }
 
-/** The paperwork behind an NFA item's transfer — independent of platform. */
-export type NfaPaperwork = {
+/**
+ * The paperwork behind an NFA item's transfer — independent of platform.
+ *
+ * Not exported: it names the return type of the two exported normalizers, and
+ * every call site gets it by inference. Nothing imported it.
+ */
+type NfaPaperwork = {
   nfaTransferMethod: NfaTransferMethod | null;
   nfaControlNumber: string | null;
   nfaApprovalDate: Date | null;
