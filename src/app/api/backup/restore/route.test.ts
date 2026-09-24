@@ -183,6 +183,44 @@ describe("POST /api/backup/restore", () => {
     expect(row.nfaRegisteredTo).toBeNull();
   });
 
+  // The other side of that rule. An unknown class is not a hand-edited file:
+  // it is a backup from a later build that added an NFA class, which the
+  // category registry's catch-all section documents and accommodates.
+  // Coercing it to NONE would drop mgRegistry and all five paperwork columns
+  // on a data-recovery path — silently, and for input the write routes answer
+  // 400 for rather than perform.
+  it("leaves a firearm with an unknown nfaClass and its paperwork untouched", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        firearms: [
+          {
+            id: "firearms-1",
+            name: "Future Class Item",
+            type: "RIFLE",
+            nfaClass: "SHORT_BARRELED_SHOTGUN_MK2",
+            mgRegistry: "PRE_SAMPLE",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "12345",
+            nfaApprovalDate: "2024-03-12T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("firearm") as Record<string, unknown>[];
+    expect(row.nfaClass).toBe("SHORT_BARRELED_SHOTGUN_MK2");
+    expect(row.mgRegistry).toBe("PRE_SAMPLE");
+    expect(row.nfaTransferMethod).toBe("FORM_4");
+    expect(row.nfaControlNumber).toBe("12345");
+    expect(row.nfaTaxPaid).toBe(200);
+    expect(row.nfaRegisteredTo).toBe("Doe Family Trust");
+    // Verbatim, not re-derived: the date is still the string from the file.
+    expect(row.nfaApprovalDate).toBe("2024-03-12T00:00:00.000Z");
+  });
+
   it("clears paperwork carried by a non-suppressor accessory in the payload", async () => {
     await POST(
       restoreRequest({

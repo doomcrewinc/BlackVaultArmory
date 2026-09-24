@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/server/auth";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 import {
+  isKnownNfaClass,
   normalizeAccessoryNfaFields,
   normalizeFirearmNfaFields,
 } from "@/lib/nfa";
@@ -52,11 +53,27 @@ function isRowObject(row: unknown): row is Record<string, unknown> {
  *
  * The SQLite→Postgres migrator deliberately does NOT do this: a faithful
  * whole-row copy is its entire job, and it verifies the rows it wrote.
+ *
+ * A firearm whose stored class is not one THIS BUILD KNOWS is passed through
+ * untouched, class and paperwork alike. Normalizing it would coerce the class
+ * to NONE and take mgRegistry and all five paperwork columns with it —
+ * silently, on a data-recovery path, which is exactly the outcome the write
+ * routes now answer 400 for rather than perform. And it is not a
+ * hand-edited-file scenario: a backup written by a later build that added an
+ * NFA class is the case src/lib/categories.ts's catch-all section documents
+ * and deliberately accommodates ("a backup written by a later version that
+ * added a class this build lacks"). Phase 1 chose "visible in the wrong-ish
+ * place" over "silently altered"; restore now agrees with it. Backups whose
+ * classes this build understands are still normalized, which is the hole this
+ * function was written to close.
  */
 function normalizeNfaGroups(rows: Record<string, unknown[]>): void {
-  rows.firearms = rows.firearms.map((row) =>
-    isRowObject(row) ? { ...row, ...normalizeFirearmNfaFields(row) } : row
-  );
+  rows.firearms = rows.firearms.map((row) => {
+    if (!isRowObject(row)) return row;
+    const classIsPresent = row.nfaClass !== undefined && row.nfaClass !== null;
+    if (classIsPresent && !isKnownNfaClass(row.nfaClass)) return row;
+    return { ...row, ...normalizeFirearmNfaFields(row) };
+  });
   rows.accessories = rows.accessories.map((row) =>
     isRowObject(row)
       ? { ...row, ...normalizeAccessoryNfaFields(row.type, row) }
