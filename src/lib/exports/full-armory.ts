@@ -51,17 +51,19 @@ export interface FullArmoryItemRow {
    * NFA paperwork, carried for a firearm with a class and for a suppressor.
    * Blank string / null on an item that has none.
    *
-   * nfaControlNumber is OPTIONAL because it identifies a registered item as
-   * precisely as a serial number does: it is gated behind
-   * includeSerialNumbers, and the key is omitted rather than blanked so the
-   * CSV never grows a column the export does not answer.
+   * nfaControlNumber is gated behind includeSerialNumbers, because it
+   * identifies a registered item as precisely as a serial number does. It is
+   * blanked and keeps its key, the same way serialNumber is — the gate's
+   * rationale is "as precisely as a serial", so the mechanism matches it, the
+   * CSV header stays the same shape between exports, and no consumer has an
+   * optional property to narrow.
    *
    * nfaTaxPaid is gated behind includeValue, like purchasePrice and
    * replacementValue: it is a dollar amount, and it is nulled rather than
    * dropped so the column keeps its shape.
    */
   nfaTransferMethod: string;
-  nfaControlNumber?: string;
+  nfaControlNumber: string;
   nfaApprovalDate: string;
   nfaTaxPaid: number | null;
   nfaRegisteredTo: string;

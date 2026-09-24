@@ -688,9 +688,9 @@ describe("GET /api/exports/full-armory", () => {
   });
 
   // The control number identifies a registered item as precisely as a serial
-  // does, so it is gated behind includeSerialNumbers. The other four fields
-  // are not identifiers and ride unconditionally.
-  it("drops nfaControlNumber from firearm and accessory rows when serials are excluded", async () => {
+  // does, so it is gated behind includeSerialNumbers. The other three fields
+  // are neither identifiers nor amounts and ride unconditionally.
+  it("blanks nfaControlNumber but keeps its key when serials are excluded, exactly as it treats a serial", async () => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
     mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
 
@@ -703,12 +703,21 @@ describe("GET /api/exports/full-armory", () => {
     const withoutSerials = await (
       await GET(new NextRequest("http://localhost/api/exports/full-armory?includeSerialNumbers=false"))
     ).json();
-    expect("nfaControlNumber" in withoutSerials.items[0]).toBe(false);
-    expect("nfaControlNumber" in withoutSerials.items[1]).toBe(false);
+    // Blanked with the key present — the same withholding mechanism the serial
+    // uses, which is the rationale the gate was justified with. This pins the
+    // two against each other so the asymmetry cannot come back.
+    expect("nfaControlNumber" in withoutSerials.items[0]).toBe(true);
+    expect("nfaControlNumber" in withoutSerials.items[1]).toBe(true);
+    expect(withoutSerials.items[0].nfaControlNumber).toBe("");
+    expect(withoutSerials.items[1].nfaControlNumber).toBe("");
+    expect("serialNumber" in withoutSerials.items[0]).toBe(true);
+    expect(withoutSerials.items[0].serialNumber).toBe("");
     expect(JSON.stringify(withoutSerials)).not.toContain("2024-12345");
     expect(JSON.stringify(withoutSerials)).not.toContain("SUP-98765");
+    expect(JSON.stringify(withoutSerials)).not.toContain("SBR-0001");
 
-    // The other four survive the exclusion.
+    // The other three survive the exclusion, plus the tax, which travels with
+    // includeValue instead.
     expect(withoutSerials.items[0]).toMatchObject({
       nfaTransferMethod: "FORM_1",
       nfaApprovalDate: "2024-06-10",
@@ -802,9 +811,13 @@ describe("GET /api/exports/full-armory", () => {
       await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv&includeSerialNumbers=false"))
     ).text();
 
-    // The column itself has to be gone, not blank: a header the reader can see
-    // is a claim that the export covers that field.
-    expect(redactedCsv.split("\n")[0].split(",")).not.toContain("nfaControlNumber");
+    // The header keeps its shape between two exports of the same armory —
+    // serialNumber has always stayed and been blanked, and the control number
+    // now matches it rather than changing the CSV's columns.
+    const redactedHeader = redactedCsv.split("\n")[0].split(",");
+    expect(redactedHeader).toContain("nfaControlNumber");
+    expect(redactedHeader).toContain("serialNumber");
+    expect(redactedHeader).toEqual(header);
     expect(redactedCsv).not.toContain("2024-12345");
     expect(redactedCsv).not.toContain("SUP-98765");
     expect(redactedCsv).toContain("FORM_1");

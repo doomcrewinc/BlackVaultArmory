@@ -83,8 +83,11 @@ function firearmExportNfaClass(firearm: Pick<FirearmExportRecord, "nfaClass">): 
  *
  * nfaControlNumber unless serials are included — it identifies a registered
  * item as precisely as a serial number does, and a user who excluded serials
- * asked not to publish identifiers. The key is dropped rather than blanked, so
- * the CSV header never advertises a column this export declines to answer.
+ * asked not to publish identifiers. It is blanked and keeps its key, which is
+ * exactly what the export does to serialNumber: the rationale for gating it
+ * was "as precisely as a serial", so the mechanism matches the rationale. That
+ * also keeps the CSV header stable between two exports of the same armory and
+ * spares every consumer an optional property to narrow.
  *
  * nfaTaxPaid unless values are included — it is a dollar amount, and an export
  * that hides every purchase price and replacement value while printing a $200
@@ -102,7 +105,7 @@ function nfaPaperworkColumns(
 ) {
   return {
     nfaTransferMethod: record.nfaTransferMethod ?? "",
-    ...(includeControlNumber ? { nfaControlNumber: record.nfaControlNumber ?? "" } : {}),
+    nfaControlNumber: includeControlNumber ? (record.nfaControlNumber ?? "") : "",
     nfaApprovalDate: toISODate(record.nfaApprovalDate),
     nfaTaxPaid: includeValue ? (record.nfaTaxPaid ?? null) : null,
     nfaRegisteredTo: record.nfaRegisteredTo ?? "",

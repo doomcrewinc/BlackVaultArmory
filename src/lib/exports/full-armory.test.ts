@@ -43,6 +43,7 @@ function itemRow(
     missingValue: false,
     notes: "",
     nfaTransferMethod: "",
+    nfaControlNumber: "",
     nfaApprovalDate: "",
     nfaTaxPaid: null,
     nfaRegisteredTo: "",
