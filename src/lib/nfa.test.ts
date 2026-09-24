@@ -177,3 +177,96 @@ describe("normalizeAccessoryNfaFields", () => {
     expect(result.nfaRegisteredTo).toBe("Doe Family Trust");
   });
 });
+
+// A blank field must read as absent no matter which of the module's shapes it
+// arrives in — an empty string, or the whitespace a human actually types when
+// they clear a form field with a trailing space or a stray tab. The bug this
+// module was written to close (normalizeMoney testing `value === ""`, so
+// `Number(" ")` — which is 0, not NaN — slipped a fabricated "$0 tax paid"
+// past it) has now shipped THREE times in this repo under three different
+// names (the accessories create form, the gear create form, and this
+// module), always because the check tested exact-empty-string rather than
+// blank-after-trim. So this covers every string-ish field in the group at
+// once, not just nfaTaxPaid, on the theory that a bug that recurs three times
+// is a class of bug, not an instance.
+describe("whitespace-only input reads as blank everywhere in the group", () => {
+  const WHITESPACE = "   ";
+
+  it("nfaTaxPaid: a whitespace-only tax field is null, not a fabricated $0 [FAILS pre-fix: Number('   ') is 0]", () => {
+    expect(
+      normalizeFirearmNfaFields({ ...FULL, nfaTaxPaid: WHITESPACE }).nfaTaxPaid,
+    ).toBeNull();
+  });
+
+  it("nfaControlNumber: a whitespace-only control number is null, not '   '", () => {
+    expect(
+      normalizeFirearmNfaFields({ ...FULL, nfaControlNumber: WHITESPACE })
+        .nfaControlNumber,
+    ).toBeNull();
+  });
+
+  it("nfaRegisteredTo: a whitespace-only owner is null, not '   '", () => {
+    expect(
+      normalizeFirearmNfaFields({ ...FULL, nfaRegisteredTo: WHITESPACE })
+        .nfaRegisteredTo,
+    ).toBeNull();
+  });
+
+  it("nfaApprovalDate: a whitespace-only date is null, not a thrown/guessed date", () => {
+    expect(
+      normalizeFirearmNfaFields({ ...FULL, nfaApprovalDate: WHITESPACE })
+        .nfaApprovalDate,
+    ).toBeNull();
+  });
+
+  it("nfaTransferMethod: a whitespace-only method is null, not an accidental match", () => {
+    expect(
+      normalizeFirearmNfaFields({ ...FULL, nfaTransferMethod: WHITESPACE })
+        .nfaTransferMethod,
+    ).toBeNull();
+  });
+
+  it("nfaClass: a whitespace-only class falls back to NONE, clearing the group, not a crash or a stray class", () => {
+    const result = normalizeFirearmNfaFields({
+      ...FULL,
+      nfaClass: WHITESPACE,
+    });
+    expect(result.nfaClass).toBe("NONE");
+    expect(result.mgRegistry).toBeNull();
+    expect(result.nfaTransferMethod).toBeNull();
+  });
+
+  it("mgRegistry: a whitespace-only registry on a machine gun is null, not '   '", () => {
+    expect(
+      normalizeFirearmNfaFields({
+        ...FULL,
+        nfaClass: "MACHINE_GUN",
+        mgRegistry: WHITESPACE,
+      }).mgRegistry,
+    ).toBeNull();
+  });
+
+  it("normalizeAccessoryNfaFields: a whitespace-only type is treated as ineligible, clearing the group", () => {
+    expect(normalizeAccessoryNfaFields(WHITESPACE, FULL)).toEqual({
+      nfaTransferMethod: null,
+      nfaControlNumber: null,
+      nfaApprovalDate: null,
+      nfaTaxPaid: null,
+      nfaRegisteredTo: null,
+    });
+  });
+
+  it("normalizeAccessoryNfaFields: whitespace-only paperwork fields on an eligible SUPPRESSOR are null, not stored verbatim", () => {
+    const result = normalizeAccessoryNfaFields("SUPPRESSOR", {
+      ...FULL,
+      nfaTaxPaid: WHITESPACE,
+      nfaControlNumber: WHITESPACE,
+      nfaRegisteredTo: WHITESPACE,
+      nfaApprovalDate: WHITESPACE,
+    });
+    expect(result.nfaTaxPaid).toBeNull();
+    expect(result.nfaControlNumber).toBeNull();
+    expect(result.nfaRegisteredTo).toBeNull();
+    expect(result.nfaApprovalDate).toBeNull();
+  });
+});

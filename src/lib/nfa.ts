@@ -33,7 +33,8 @@ function normalizeText(value: unknown): string | null {
  * create form and the gear form).
  */
 function normalizeMoney(value: unknown): number | null {
-  if (value === undefined || value === null || value === "") return null;
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return null;
   return parsed;
