@@ -486,7 +486,11 @@ export function Sidebar({
         </aside>
       )}
 
+      {/* The whole drawer, scrim included: the scrim is a sibling of the
+          <aside>, and this wrapper only hides itself with opacity-0, which is
+          not "not printed". */}
       <div
+        data-print-hide
         className={cn(
           "fixed inset-0 z-[420] md:hidden transition-opacity",
           mobileOpen
