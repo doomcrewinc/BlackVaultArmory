@@ -131,7 +131,7 @@ describe("GET /api/search", () => {
     ]);
   });
 
-  it("searches supply name, brand and category through containsInsensitive", async () => {
+  it("searches supply name, brand, notes and category through containsInsensitive", async () => {
     await GET(request("bug"));
 
     expect(mocks.findSupplies).toHaveBeenCalledTimes(1);
@@ -139,6 +139,7 @@ describe("GET /api/search", () => {
     expect(where.OR).toEqual([
       { name: containsInsensitive("bug") },
       { brand: containsInsensitive("bug") },
+      { notes: containsInsensitive("bug") },
       { category: containsInsensitive("bug") },
     ]);
 
@@ -147,7 +148,43 @@ describe("GET /api/search", () => {
     const supplyCallArgs = vi
       .mocked(containsInsensitive)
       .mock.calls.filter(([value]) => value === "bug");
-    expect(supplyCallArgs.length).toBeGreaterThanOrEqual(3);
+    expect(supplyCallArgs.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("matches a supply category by its human label, not just the stored token", async () => {
+    // "cbrn filter" is what the badge, the detail page and the export all
+    // show; the column stores CBRN_FILTER, so a substring match against the
+    // column alone found nothing.
+    await GET(request("cbrn filter"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ category: { in: ["CBRN_FILTER"] } });
+    // The substring clause on the column stays, for a category stored outside
+    // the enum by a restore, which has no label to match.
+    expect(where.OR).toContainEqual({
+      category: containsInsensitive("cbrn filter"),
+    });
+  });
+
+  it("matches every category whose label contains the query", async () => {
+    await GET(request("filter"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({
+      category: { in: ["FILTER", "CBRN_FILTER"] },
+    });
+  });
+
+  it("omits the category-label clause when no label matches", async () => {
+    await GET(request("zzzz"));
+
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("zzzz") },
+      { brand: containsInsensitive("zzzz") },
+      { notes: containsInsensitive("zzzz") },
+      { category: containsInsensitive("zzzz") },
+    ]);
   });
 
   it("does not query supplies for a short query", async () => {
