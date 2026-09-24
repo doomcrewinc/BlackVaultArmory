@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeFirearmClassFields } from "@/lib/nfa";
+import { normalizeFirearmNfaFields } from "@/lib/nfa";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -91,6 +91,11 @@ export async function PUT(
       maintenanceIntervalDays,
       nfaClass,
       mgRegistry,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
     } = body;
 
     const existing = await prisma.firearm.findUnique({ where: { id } });
@@ -101,10 +106,30 @@ export async function PUT(
     // nfaClass is NOT NULL DEFAULT 'NONE', so it has no "cleared" state: an
     // explicit null would otherwise declassify an NFA item to Title I with no
     // audit trail, which is the one destructive edit on this route. So null is
-    // treated exactly like an absent key. mgRegistry IS nullable, so an
-    // explicit null there does correctly clear it.
+    // treated exactly like an absent key. Every other field in the group
+    // (mgRegistry and the five paperwork columns) IS nullable, so an explicit
+    // null on any of those does clear it.
+    //
+    // The group is gated as a whole, not field-by-field: a write mentioning
+    // NONE of the seven columns must leave all seven alone (a `name`-only PUT
+    // must not touch paperwork), but a write mentioning ANY of them re-derives
+    // the whole group through normalizeFirearmNfaFields — merging in the
+    // stored value for every column the body didn't mention — so that dropping
+    // nfaClass to NONE clears paperwork it never named, and normalizing FORM_4473
+    // still clears the stamp fields even though only nfaTransferMethod was sent.
+    // Deriving the whole group together (rather than gating each column on its
+    // own presence) is what makes both rules hold at once: the class-drop rule
+    // needs fields that weren't mentioned to still be cleared, so "mentioned"
+    // has to gate entry into the derivation, not membership in the result.
     const classProvided = nfaClass !== undefined && nfaClass !== null;
-    const touchesClass = classProvided || mgRegistry !== undefined;
+    const touchesNfaGroup =
+      classProvided ||
+      mgRegistry !== undefined ||
+      nfaTransferMethod !== undefined ||
+      nfaControlNumber !== undefined ||
+      nfaApprovalDate !== undefined ||
+      nfaTaxPaid !== undefined ||
+      nfaRegisteredTo !== undefined;
 
     const updated = await prisma.firearm.update({
       where: { id },
@@ -156,14 +181,33 @@ export async function PUT(
         ...(maintenanceIntervalDays !== undefined && {
           maintenanceIntervalDays,
         }),
-        ...(touchesClass
-          ? normalizeFirearmClassFields({
+        ...(touchesNfaGroup
+          ? normalizeFirearmNfaFields({
               nfaClass: classProvided ? nfaClass : existing.nfaClass,
-              // Absence is checked with !== undefined rather than ?? so that an
-              // explicit null still clears the registry (e.g. dropping a stale
-              // pre-sample marking while the class stays MACHINE_GUN).
+              // Absence is checked with !== undefined rather than ?? for every
+              // field below so that an explicit null still clears a nullable
+              // column (e.g. dropping a stale pre-sample marking while the
+              // class stays MACHINE_GUN, or clearing just nfaControlNumber).
               mgRegistry:
                 mgRegistry !== undefined ? mgRegistry : existing.mgRegistry,
+              nfaTransferMethod:
+                nfaTransferMethod !== undefined
+                  ? nfaTransferMethod
+                  : existing.nfaTransferMethod,
+              nfaControlNumber:
+                nfaControlNumber !== undefined
+                  ? nfaControlNumber
+                  : existing.nfaControlNumber,
+              nfaApprovalDate:
+                nfaApprovalDate !== undefined
+                  ? nfaApprovalDate
+                  : existing.nfaApprovalDate,
+              nfaTaxPaid:
+                nfaTaxPaid !== undefined ? nfaTaxPaid : existing.nfaTaxPaid,
+              nfaRegisteredTo:
+                nfaRegisteredTo !== undefined
+                  ? nfaRegisteredTo
+                  : existing.nfaRegisteredTo,
             })
           : {}),
       },

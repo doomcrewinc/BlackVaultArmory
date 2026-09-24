@@ -60,11 +60,10 @@ function normalizeDateOnly(value: unknown): Date | null {
  * A registry only survives on a machine gun: a record must not keep a
  * pre-sample marking after its class changes, however the write arrives.
  *
- * Superseded by normalizeFirearmNfaFields, which wraps this and adds the
- * paperwork group. Kept exported because the firearms routes still call this
- * directly; they switch over in a later task.
+ * Private: the only caller is normalizeFirearmNfaFields, which wraps this and
+ * adds the paperwork group. The firearms routes call that instead.
  */
-export function normalizeFirearmClassFields(input: {
+function normalizeClassAndRegistry(input: {
   nfaClass?: unknown;
   mgRegistry?: unknown;
 }): { nfaClass: NfaClass; mgRegistry: MgRegistry | null } {
@@ -145,7 +144,7 @@ export function normalizeFirearmNfaFields(
     mgRegistry?: unknown;
   } & NfaPaperworkInput,
 ): { nfaClass: NfaClass; mgRegistry: MgRegistry | null } & NfaPaperwork {
-  const { nfaClass, mgRegistry } = normalizeFirearmClassFields(input);
+  const { nfaClass, mgRegistry } = normalizeClassAndRegistry(input);
   const paperwork = normalizePaperwork(input, nfaClass !== "NONE");
   return { nfaClass, mgRegistry, ...paperwork };
 }

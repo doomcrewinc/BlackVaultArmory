@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeFirearmClassFields } from "@/lib/nfa";
+import { normalizeFirearmNfaFields } from "@/lib/nfa";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
@@ -104,6 +104,11 @@ export async function POST(request: NextRequest) {
       initialRoundCount,
       nfaClass,
       mgRegistry,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
     } = body;
 
     const normalizedName = normalizeString(name);
@@ -114,7 +119,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const classFields = normalizeFirearmClassFields({ nfaClass, mgRegistry });
+    const nfaFields = normalizeFirearmNfaFields({
+      nfaClass,
+      mgRegistry,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
+    });
 
     const firearm = await prisma.firearm.create({
       data: {
@@ -131,7 +144,7 @@ export async function POST(request: NextRequest) {
           : null,
         serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
         type: normalizeString(type) || "UNSPECIFIED",
-        ...classFields,
+        ...nfaFields,
         // No date supplied: fall back to UTC's today. The server cannot know the
         // viewer's timezone (in Docker this container is UTC), so the client sends
         // the date whenever it has one.

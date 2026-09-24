@@ -92,12 +92,41 @@ describe("POST /api/firearms", () => {
     );
   });
 
-  it("defaults nfaClass to NONE and mgRegistry to null when no class info is sent", async () => {
+  it("defaults nfaClass to NONE and nulls every paperwork/registry field when no NFA info is sent", async () => {
     await POST(postRequest({ name: "New Rifle" }));
 
     expect(mocks.create).toHaveBeenCalledTimes(1);
     const { data } = mocks.create.mock.calls[0][0];
     expect(data.nfaClass).toBe("NONE");
     expect(data.mgRegistry).toBeNull();
+    expect(data.nfaTransferMethod).toBeNull();
+    expect(data.nfaControlNumber).toBeNull();
+    expect(data.nfaApprovalDate).toBeNull();
+    expect(data.nfaTaxPaid).toBeNull();
+    expect(data.nfaRegisteredTo).toBeNull();
+  });
+
+  it("stores every paperwork field for a full Form 4 SBR", async () => {
+    await POST(
+      postRequest({
+        name: "Suppressed SBR",
+        nfaClass: "SBR",
+        nfaTransferMethod: "FORM_4",
+        nfaControlNumber: "12345",
+        nfaApprovalDate: "2024-03-12",
+        nfaTaxPaid: 200,
+        nfaRegisteredTo: "Doe Family Trust",
+      }),
+    );
+
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.nfaClass).toBe("SBR");
+    expect(data.mgRegistry).toBeNull(); // only machine guns
+    expect(data.nfaTransferMethod).toBe("FORM_4");
+    expect(data.nfaControlNumber).toBe("12345");
+    expect(data.nfaTaxPaid).toBe(200);
+    expect(data.nfaRegisteredTo).toBe("Doe Family Trust");
+    expect(data.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
   });
 });

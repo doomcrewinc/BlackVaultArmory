@@ -1,76 +1,11 @@
 import { describe, expect, it } from "vitest";
-import {
-  normalizeAccessoryNfaFields,
-  normalizeFirearmClassFields,
-  normalizeFirearmNfaFields,
-} from "./nfa";
+import { normalizeAccessoryNfaFields, normalizeFirearmNfaFields } from "./nfa";
 
-describe("normalizeFirearmClassFields", () => {
-  it("defaults to NONE with no registry", () => {
-    expect(normalizeFirearmClassFields({})).toEqual({
-      nfaClass: "NONE",
-      mgRegistry: null,
-    });
-  });
-
-  it("keeps a machine gun's registry", () => {
-    expect(
-      normalizeFirearmClassFields({
-        nfaClass: "MACHINE_GUN",
-        mgRegistry: "PRE_SAMPLE",
-      }),
-    ).toEqual({ nfaClass: "MACHINE_GUN", mgRegistry: "PRE_SAMPLE" });
-  });
-
-  it("clears the registry when the class is not MACHINE_GUN", () => {
-    expect(
-      normalizeFirearmClassFields({
-        nfaClass: "SBR",
-        mgRegistry: "TRANSFERABLE",
-      }),
-    ).toEqual({ nfaClass: "SBR", mgRegistry: null });
-    expect(
-      normalizeFirearmClassFields({
-        nfaClass: "NONE",
-        mgRegistry: "TRANSFERABLE",
-      }),
-    ).toEqual({ nfaClass: "NONE", mgRegistry: null });
-  });
-
-  it("rejects an unknown class by falling back to NONE", () => {
-    expect(normalizeFirearmClassFields({ nfaClass: "MADE_UP" })).toEqual({
-      nfaClass: "NONE",
-      mgRegistry: null,
-    });
-  });
-
-  it("rejects an unknown registry rather than storing it", () => {
-    expect(
-      normalizeFirearmClassFields({
-        nfaClass: "MACHINE_GUN",
-        mgRegistry: "MADE_UP",
-      }),
-    ).toEqual({ nfaClass: "MACHINE_GUN", mgRegistry: null });
-  });
-
-  it("trims and upper-cases what the client sends", () => {
-    expect(
-      normalizeFirearmClassFields({
-        nfaClass: " machine_gun ",
-        mgRegistry: " post_sample ",
-      }),
-    ).toEqual({ nfaClass: "MACHINE_GUN", mgRegistry: "POST_SAMPLE" });
-  });
-
-  it("ignores non-string input", () => {
-    expect(
-      normalizeFirearmClassFields({ nfaClass: 7, mgRegistry: {} }),
-    ).toEqual({
-      nfaClass: "NONE",
-      mgRegistry: null,
-    });
-  });
-});
+// normalizeFirearmClassFields was deleted once the firearms routes switched to
+// normalizeFirearmNfaFields (which wraps the same class/registry logic
+// internally); its class/registry edge cases — default-to-NONE, registry only
+// surviving on MACHINE_GUN, unknown-value rejection, trim/upper-case, and
+// non-string input — are exercised below through that wrapper instead.
 
 const FULL = {
   nfaClass: "SBR",
@@ -102,6 +37,42 @@ describe("normalizeFirearmNfaFields", () => {
       nfaClass: "MACHINE_GUN",
     });
     expect(result.mgRegistry).toBe("TRANSFERABLE");
+  });
+
+  it("rejects an unknown class by falling back to NONE, clearing the group", () => {
+    const result = normalizeFirearmNfaFields({ ...FULL, nfaClass: "MADE_UP" });
+    expect(result.nfaClass).toBe("NONE");
+    expect(result.mgRegistry).toBeNull();
+    expect(result.nfaTransferMethod).toBeNull();
+  });
+
+  it("rejects an unknown registry rather than storing it", () => {
+    const result = normalizeFirearmNfaFields({
+      ...FULL,
+      nfaClass: "MACHINE_GUN",
+      mgRegistry: "MADE_UP",
+    });
+    expect(result.mgRegistry).toBeNull();
+  });
+
+  it("trims and upper-cases the class and registry", () => {
+    const result = normalizeFirearmNfaFields({
+      ...FULL,
+      nfaClass: " machine_gun ",
+      mgRegistry: " post_sample ",
+    });
+    expect(result.nfaClass).toBe("MACHINE_GUN");
+    expect(result.mgRegistry).toBe("POST_SAMPLE");
+  });
+
+  it("ignores non-string class/registry input", () => {
+    const result = normalizeFirearmNfaFields({
+      ...FULL,
+      nfaClass: 7,
+      mgRegistry: {},
+    });
+    expect(result.nfaClass).toBe("NONE");
+    expect(result.mgRegistry).toBeNull();
   });
 
   it("clears the ENTIRE group when the class drops to NONE", () => {
