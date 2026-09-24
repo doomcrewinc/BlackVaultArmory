@@ -4,7 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
-import { NFA_CLASSES } from "@/lib/types";
+import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -178,7 +178,7 @@ export async function PUT(
           serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
         }),
         ...(type !== undefined && {
-          type: normalizeString(type) || "UNSPECIFIED",
+          type: normalizeTypeToken(type) || "UNSPECIFIED",
         }),
         ...(acquisitionDate !== undefined && {
           acquisitionDate: acquisitionDate

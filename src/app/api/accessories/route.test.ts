@@ -72,6 +72,26 @@ describe("POST /api/accessories", () => {
     expect(data.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
   });
 
+  // The normalizer upper-cases internally to decide eligibility, but the column
+  // used to store whatever case the caller sent — so a lower-case "suppressor"
+  // kept its paperwork and then missed the Suppressors section filter, which is
+  // an exact match, and fell into the Parts catch-all instead. Both halves are
+  // asserted here: the stored token and the paperwork.
+  it("upper-cases a lower-case type so eligibility and section placement agree", async () => {
+    await POST(
+      postRequest({
+        name: "Quiet Can",
+        type: "  suppressor  ",
+        ...FULL_PAPERWORK,
+      }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.type).toBe("SUPPRESSOR");
+    expect(data.nfaTransferMethod).toBe("FORM_4");
+    expect(data.nfaControlNumber).toBe("12345");
+  });
+
   it("nulls all five paperwork fields when type is OPTIC, even though paperwork was sent", async () => {
     await POST(
       postRequest({

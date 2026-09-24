@@ -4,7 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
-import { NFA_CLASSES } from "@/lib/types";
+import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
@@ -162,7 +162,7 @@ export async function POST(request: NextRequest) {
               .join(",") || null
           : null,
         serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
-        type: normalizeString(type) || "UNSPECIFIED",
+        type: normalizeTypeToken(type) || "UNSPECIFIED",
         ...nfaFields,
         // No date supplied: fall back to UTC's today. The server cannot know the
         // viewer's timezone (in Docker this container is UTC), so the client sends

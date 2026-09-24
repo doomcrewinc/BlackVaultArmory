@@ -187,6 +187,16 @@ describe("PUT /api/firearms/[id]", () => {
   // The blast radius is what makes this a 400 rather than a fallback: one
   // typo'd enum used to declassify a documented SBR and null six columns,
   // answering 200.
+  it("upper-cases a lower-case platform on update", async () => {
+    mocks.findUnique.mockResolvedValue(existingFirearm());
+
+    await PUT(putRequest({ type: "pistol" }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    expect(mocks.update.mock.calls[0][0].data.type).toBe("PISTOL");
+  });
+
   it("rejects an out-of-enum nfaClass with a 400 and writes nothing", async () => {
     mocks.findUnique.mockResolvedValue(storedFormFourSbr());
 

@@ -109,6 +109,38 @@ describe("POST /api/firearms", () => {
   // The fallback for an unrecognised class is NONE, and NONE clears mgRegistry
   // and all five paperwork columns — so a typo'd enum must not be accepted and
   // quietly turned into a Title I firearm.
+  // The accessory side has had this test since the paperwork landed; the
+  // firearm side did not, and the behaviour is just as surprising: paperwork
+  // sent for a Title I firearm is accepted with a 201 and silently discarded.
+  it("discards paperwork sent for a Title I firearm rather than storing it", async () => {
+    await POST(
+      postRequest({
+        name: "Plain Rifle",
+        type: "RIFLE",
+        nfaTransferMethod: "FORM_4",
+        nfaControlNumber: "12345",
+        nfaApprovalDate: "2024-03-12",
+        nfaTaxPaid: 200,
+        nfaRegisteredTo: "Doe Family Trust",
+      }),
+    );
+
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.nfaClass).toBe("NONE");
+    expect(data.nfaTransferMethod).toBeNull();
+    expect(data.nfaControlNumber).toBeNull();
+    expect(data.nfaApprovalDate).toBeNull();
+    expect(data.nfaTaxPaid).toBeNull();
+    expect(data.nfaRegisteredTo).toBeNull();
+  });
+
+  it("upper-cases a lower-case platform so the Title I sections can match it", async () => {
+    await POST(postRequest({ name: "Plain Rifle", type: " rifle " }));
+
+    expect(mocks.create.mock.calls[0][0].data.type).toBe("RIFLE");
+  });
+
   it("rejects an out-of-enum nfaClass with a 400 rather than defaulting it to NONE", async () => {
     const response = await POST(
       postRequest({

@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeQuantity } from "@/lib/quantity";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
+import { normalizeTypeToken } from "@/lib/types";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -112,7 +113,7 @@ export async function POST(request: NextRequest) {
     // normalizeAccessoryNfaFields is handed that exact value (not the raw,
     // un-normalized `type` from the body) so eligibility is decided from what
     // actually gets persisted, not from whatever the caller happened to send.
-    const resolvedType = normalizeString(type) || "UNSPECIFIED";
+    const resolvedType = normalizeTypeToken(type) || "UNSPECIFIED";
     const nfaFields = normalizeAccessoryNfaFields(resolvedType, {
       nfaTransferMethod,
       nfaControlNumber,

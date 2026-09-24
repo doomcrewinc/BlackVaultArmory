@@ -29,6 +29,25 @@ export const FIREARM_TYPE_LABELS: Record<FirearmType, string> = {
  *  Deliberately NOT in FIREARM_TYPES — it is not a platform a user can pick. */
 export const UNSPECIFIED_FIREARM_TYPE = "UNSPECIFIED";
 
+/**
+ * A stored type token — a firearm's platform or an accessory's type — trimmed
+ * and upper-cased, or "" when there is nothing to store.
+ *
+ * Every token in FIREARM_TYPES and SLOT_TYPES is upper-case, and the category
+ * sections filter on exact matches against them. The NFA normalizers, though,
+ * upper-case internally before deciding eligibility. So a body sending
+ * `type: "suppressor"` was judged NFA-eligible and kept its paperwork while
+ * the column stored lower-case — which missed the Suppressors filter and left
+ * a registered suppressor in the Parts catch-all. Same divergence on a
+ * firearm's `type` and the Title I sections.
+ *
+ * Upper-casing on write makes eligibility and section placement agree by
+ * construction rather than by the caller's shift key.
+ */
+export function normalizeTypeToken(value: unknown): string {
+  return typeof value === "string" ? value.trim().toUpperCase() : "";
+}
+
 // ─── NFA Classification ────────────────────────────────────────
 // How a firearm is regulated, which is independent of its platform: a
 // select-fire pistol, PDW or rifle is all MACHINE_GUN.

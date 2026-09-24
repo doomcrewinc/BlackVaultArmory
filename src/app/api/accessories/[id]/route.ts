@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeQuantity } from "@/lib/quantity";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
+import { normalizeTypeToken } from "@/lib/types";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -141,7 +142,7 @@ export async function PUT(
       nfaRegisteredTo !== undefined;
     const resolvedType =
       type !== undefined
-        ? normalizeString(type) || "UNSPECIFIED"
+        ? normalizeTypeToken(type) || "UNSPECIFIED"
         : existing.type;
 
     const updated = await prisma.accessory.update({

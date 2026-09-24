@@ -163,6 +163,19 @@ describe("PUT /api/accessories/[id] — NFA paperwork", () => {
     expect(data.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
   });
 
+  it("upper-cases a lower-case type on update, keeping eligibility and placement in step", async () => {
+    mocks.findUnique.mockResolvedValue(existingAccessory({ type: "OPTIC" }));
+
+    await PUT(putRequest({ type: "suppressor", ...FULL_PAPERWORK }), {
+      params: Promise.resolve({ id: "accessory-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.type).toBe("SUPPRESSOR");
+    expect(data.nfaTransferMethod).toBe("FORM_4");
+    expect(data.nfaControlNumber).toBe("12345");
+  });
+
   it("setting nfaTransferMethod to FORM_4473 on a suppressor clears the stamp fields but keeps the owner", async () => {
     mocks.findUnique.mockResolvedValue(storedSuppressor());
 
