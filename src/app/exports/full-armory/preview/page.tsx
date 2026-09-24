@@ -247,6 +247,7 @@ export default function FullArmoryPreviewPage() {
                 <thead>
                   <tr className="border-b border-vault-border text-vault-text-faint">
                     <th className="py-2 pr-4 text-left">Item</th>
+                    <th className="py-2 pr-4 text-left">Platform</th>
                     <th className="py-2 pr-4 text-left">Class</th>
                     <th className="py-2 pr-4 text-left">Transfer Method</th>
                     <th className="py-2 pr-4 text-left">Control Number</th>
@@ -261,7 +262,14 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4">
                         {[item.manufacturer, item.model].filter(Boolean).join(" ") || item.entityType}
                       </td>
-                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || item.category || "—"}</td>
+                      <td className="py-2 pr-4">{item.category || "—"}</td>
+                      {/* No fallback to the platform: a firearm carrying paperwork
+                          with class NONE would otherwise print "RIFLE" under a
+                          Class header, which is the misreading the separate class
+                          column exists to remove. Platform has its own cell above,
+                          so nothing is lost — an accessory reads SUPPRESSOR there
+                          and a dash here, because it has no class. */}
+                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || "—"}</td>
                       <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
                       <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
