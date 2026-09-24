@@ -2,6 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import ImagePicker from "@/components/shared/ImagePicker";
+import {
+  NfaFieldset,
+  EMPTY_NFA_FIELDSET_VALUE,
+  type NfaFieldsetValue,
+  type NfaFieldsetField,
+} from "@/components/shared/NfaFieldset";
+import { toISODate } from "@/lib/date";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -48,6 +55,11 @@ interface Firearm {
   maintenanceIntervalDays: number | null;
   nfaClass: string | null;
   mgRegistry: string | null;
+  nfaTransferMethod: string | null;
+  nfaControlNumber: string | null;
+  nfaApprovalDate: string | null;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string | null;
   builds: Build[];
   rangeSessionCount: number;
 }
@@ -84,7 +96,14 @@ export default function EditFirearmPage() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [nfaClass, setNfaClass] = useState("NONE");
   const [mgRegistry, setMgRegistry] = useState("");
+  const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
+    EMPTY_NFA_FIELDSET_VALUE,
+  );
   const caliberRef = useRef<HTMLDivElement>(null);
+
+  function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
+    setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
+  }
 
   // Delete firearm state
   const [showDeleteFirearmModal, setShowDeleteFirearmModal] = useState(false);
@@ -135,6 +154,13 @@ export default function EditFirearmPage() {
           setImageUrl(data.imageUrl ?? "");
           setNfaClass(data.nfaClass ?? "NONE");
           setMgRegistry(data.mgRegistry ?? "");
+          setNfaPaperwork({
+            nfaTransferMethod: data.nfaTransferMethod ?? "",
+            nfaControlNumber: data.nfaControlNumber ?? "",
+            nfaApprovalDate: toISODate(data.nfaApprovalDate),
+            nfaTaxPaid: data.nfaTaxPaid != null ? String(data.nfaTaxPaid) : "",
+            nfaRegisteredTo: data.nfaRegisteredTo ?? "",
+          });
         }
         setDataLoading(false);
       })
@@ -164,6 +190,11 @@ export default function EditFirearmPage() {
       type: data.get("type") as string,
       nfaClass,
       mgRegistry: mgRegistry || null,
+      nfaTransferMethod: nfaPaperwork.nfaTransferMethod || null,
+      nfaControlNumber: nfaPaperwork.nfaControlNumber || null,
+      nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
+      nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
+      nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
       acquisitionDate: data.get("acquisitionDate") as string,
       purchasePrice: data.get("purchasePrice")
         ? Number(data.get("purchasePrice"))
@@ -490,6 +521,14 @@ export default function EditFirearmPage() {
                 </div>
               )}
             </div>
+
+            {nfaClass !== "NONE" && (
+              <NfaFieldset
+                variant="firearm"
+                value={nfaPaperwork}
+                onChange={handleNfaFieldChange}
+              />
+            )}
 
             {/* Compatible Calibers Tag Input */}
             <div>

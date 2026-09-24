@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
+import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -23,6 +24,7 @@ import {
   ChevronUp,
   Pencil,
   BatteryCharging,
+  Stamp,
 } from "lucide-react";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
@@ -92,6 +94,11 @@ interface Accessory {
   hasBattery: boolean;
   batteryType: string | null;
   batteryChangeLogs: BatteryChangeLog[];
+  nfaTransferMethod: string | null;
+  nfaControlNumber: string | null;
+  nfaApprovalDate: string | null;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string | null;
 }
 
 const BARREL_TYPES = new Set(["BARREL", "SUPPRESSOR", "MUZZLE", "COMPENSATOR"]);
@@ -250,6 +257,12 @@ export default function AccessoryDetailPage() {
   }
 
   const roundColor = roundCountColor(accessory.roundCount, accessory.type);
+  const hasNfaPaperwork =
+    accessory.nfaTransferMethod != null ||
+    accessory.nfaControlNumber != null ||
+    accessory.nfaApprovalDate != null ||
+    accessory.nfaTaxPaid != null ||
+    accessory.nfaRegisteredTo != null;
   const visibleLogs = historyExpanded ? accessory.roundCountLogs : accessory.roundCountLogs.slice(0, 5);
   const imageFilename = accessory.imageUrl ? accessory.imageUrl.split("/").pop() ?? "" : "";
 
@@ -458,6 +471,62 @@ export default function AccessoryDetailPage() {
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* NFA Paperwork */}
+        {hasNfaPaperwork && (
+          <div className="bg-vault-surface border border-vault-border rounded-lg p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-vault-text-muted mb-3 flex items-center gap-2">
+              <Stamp className="w-3.5 h-3.5" />
+              NFA Paperwork
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Transfer Method
+                </p>
+                <p className="text-sm text-vault-text">
+                  {accessory.nfaTransferMethod
+                    ? (NFA_TRANSFER_METHOD_LABELS[
+                        accessory.nfaTransferMethod as NfaTransferMethod
+                      ] ?? accessory.nfaTransferMethod)
+                    : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Control Number
+                </p>
+                <p className="text-sm font-mono text-vault-text">
+                  {accessory.nfaControlNumber ?? "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Approval Date
+                </p>
+                <p className="text-sm text-vault-text">
+                  {formatDateOnly(accessory.nfaApprovalDate)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Tax Paid
+                </p>
+                <p className="text-sm font-mono text-vault-text">
+                  {formatCurrency(accessory.nfaTaxPaid)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Registered To
+                </p>
+                <p className="text-sm text-vault-text">
+                  {accessory.nfaRegisteredTo ?? "—"}
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
