@@ -24,6 +24,7 @@ export const BACKUP_MODELS: BackupModel[] = [
   { model: "Accessory", delegate: "accessory", key: "accessories" },
   { model: "AmmoStock", delegate: "ammoStock", key: "ammoStocks" },
   { model: "Gear", delegate: "gear", key: "gear" },
+  { model: "Supply", delegate: "supply", key: "supplies" },
   { model: "Build", delegate: "build", key: "builds" },
   { model: "BuildSlot", delegate: "buildSlot", key: "buildSlots" },
   { model: "Document", delegate: "document", key: "documents" },

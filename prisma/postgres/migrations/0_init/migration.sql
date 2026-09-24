@@ -114,6 +114,26 @@ CREATE TABLE "Gear" (
 );
 
 -- CreateTable
+CREATE TABLE "Supply" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "brand" TEXT,
+    "category" TEXT NOT NULL,
+    "quantity" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "unit" TEXT NOT NULL,
+    "lowStockAlert" DOUBLE PRECISION,
+    "expirationDate" TIMESTAMP(3),
+    "purchasePrice" DOUBLE PRECISION,
+    "purchaseDate" TIMESTAMP(3),
+    "storageLocation" TEXT,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Supply_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "Document" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -296,6 +316,7 @@ CREATE TABLE "AppSettings" (
     "defaultCurrency" TEXT NOT NULL DEFAULT 'USD',
     "appPassword" TEXT,
     "defaultAmmoAlertThreshold" INTEGER,
+    "expiryWarningDays" INTEGER,
     "timezone" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -338,6 +359,12 @@ CREATE INDEX "Accessory_roundCount_idx" ON "Accessory"("roundCount");
 
 -- CreateIndex
 CREATE INDEX "Gear_category_idx" ON "Gear"("category");
+
+-- CreateIndex
+CREATE INDEX "Supply_category_idx" ON "Supply"("category");
+
+-- CreateIndex
+CREATE INDEX "Supply_expirationDate_idx" ON "Supply"("expirationDate");
 
 -- CreateIndex
 CREATE INDEX "Document_firearmId_idx" ON "Document"("firearmId");
