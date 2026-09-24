@@ -6,6 +6,7 @@ import {
   normalizeSupplyCategory,
   normalizeSupplyUnit,
 } from "@/lib/supply";
+import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -116,6 +117,10 @@ export async function PUT(
       },
     });
 
+    // A quantity, threshold or expiry edit changes the dashboard's Supply
+    // Alerts; see the note in the POST handler.
+    revalidateDashboardData();
+
     return NextResponse.json(updated);
   } catch (error) {
     console.error("PUT /api/supplies/[id] error:", error);
@@ -143,6 +148,8 @@ export async function DELETE(
     }
 
     await prisma.supply.delete({ where: { id } });
+
+    revalidateDashboardData();
 
     return NextResponse.json({ success: true, id });
   } catch (error) {

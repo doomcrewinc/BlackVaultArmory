@@ -7,6 +7,7 @@ import {
   normalizeSupplyUnit,
 } from "@/lib/supply";
 import { sectionBySlug, supplyWhereForSection } from "@/lib/categories";
+import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -94,6 +95,12 @@ export async function POST(request: NextRequest) {
         notes: notes ?? null,
       },
     });
+
+    // Supplies feed the dashboard's Supply Alerts widget, and `/` is a static
+    // prerender with no time revalidation — without this the server-rendered
+    // counts sit at their build-time values until some unrelated write
+    // revalidates the page. Matches firearms, accessories, ammo and builds.
+    revalidateDashboardData();
 
     return NextResponse.json(supply, { status: 201 });
   } catch (error) {

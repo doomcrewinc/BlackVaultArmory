@@ -4,6 +4,7 @@ const mocks = {
   findUnique: vi.fn(),
   update: vi.fn(),
   delete: vi.fn(),
+  revalidateDashboardData: vi.fn(),
 };
 
 vi.mock("@/lib/prisma", () => ({
@@ -14,6 +15,10 @@ vi.mock("@/lib/prisma", () => ({
       delete: (args: unknown) => mocks.delete(args),
     },
   },
+}));
+
+vi.mock("@/lib/dashboard/revalidate-dashboard", () => ({
+  revalidateDashboardData: () => mocks.revalidateDashboardData(),
 }));
 
 import { DELETE, GET, PUT } from "./route";
@@ -42,6 +47,7 @@ describe("PUT /api/supplies/[id]", () => {
   beforeEach(() => {
     mocks.findUnique.mockReset().mockResolvedValue(stored);
     mocks.update.mockReset().mockResolvedValue({ ...stored });
+    mocks.revalidateDashboardData.mockReset();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -123,6 +129,12 @@ describe("PUT /api/supplies/[id]", () => {
     );
     expect(response.status).toBe(404);
     expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.revalidateDashboardData).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the dashboard, whose Supply Alerts widget reads these rows", async () => {
+    await PUT(putRequest({ quantity: 1 }) as never, { params } as never);
+    expect(mocks.revalidateDashboardData).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -130,6 +142,7 @@ describe("GET and DELETE /api/supplies/[id]", () => {
   beforeEach(() => {
     mocks.findUnique.mockReset().mockResolvedValue(stored);
     mocks.delete.mockReset().mockResolvedValue(stored);
+    mocks.revalidateDashboardData.mockReset();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -167,5 +180,17 @@ describe("GET and DELETE /api/supplies/[id]", () => {
     );
     expect(response.status).toBe(200);
     expect(mocks.delete).toHaveBeenCalledWith({ where: { id: "s1" } });
+    expect(mocks.revalidateDashboardData).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not revalidate the dashboard when there was nothing to delete", async () => {
+    mocks.findUnique.mockResolvedValue(null);
+    await DELETE(
+      new Request("http://localhost/api/supplies/s1") as never,
+      {
+        params,
+      } as never,
+    );
+    expect(mocks.revalidateDashboardData).not.toHaveBeenCalled();
   });
 });

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = {
   findMany: vi.fn(),
   create: vi.fn(),
+  revalidateDashboardData: vi.fn(),
 };
 
 vi.mock("@/lib/prisma", () => ({
@@ -12,6 +13,10 @@ vi.mock("@/lib/prisma", () => ({
       create: (args: unknown) => mocks.create(args),
     },
   },
+}));
+
+vi.mock("@/lib/dashboard/revalidate-dashboard", () => ({
+  revalidateDashboardData: () => mocks.revalidateDashboardData(),
 }));
 
 import { GET, POST } from "./route";
@@ -97,6 +102,7 @@ describe("GET /api/supplies", () => {
 describe("POST /api/supplies", () => {
   beforeEach(() => {
     mocks.create.mockReset().mockResolvedValue({ id: "s1" });
+    mocks.revalidateDashboardData.mockReset();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -147,5 +153,20 @@ describe("POST /api/supplies", () => {
     const data = mocks.create.mock.calls[0][0].data;
     expect(data.category).toBe("OTHER");
     expect(data.unit).toBe("COUNT");
+  });
+
+  it("revalidates the dashboard, whose Supply Alerts widget reads these rows", async () => {
+    await POST(
+      request("http://localhost/api/supplies", {
+        name: "Bandages",
+        category: "MEDICAL",
+      }) as never,
+    );
+    expect(mocks.revalidateDashboardData).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not revalidate when the write was rejected", async () => {
+    await POST(request("http://localhost/api/supplies", {}) as never);
+    expect(mocks.revalidateDashboardData).not.toHaveBeenCalled();
   });
 });
