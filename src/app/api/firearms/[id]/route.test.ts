@@ -184,6 +184,24 @@ describe("PUT /api/firearms/[id]", () => {
     expect(data.nfaRegisteredTo).toBeNull();
   });
 
+  // The blast radius is what makes this a 400 rather than a fallback: one
+  // typo'd enum used to declassify a documented SBR and null six columns,
+  // answering 200.
+  it("rejects an out-of-enum nfaClass with a 400 and writes nothing", async () => {
+    mocks.findUnique.mockResolvedValue(storedFormFourSbr());
+
+    const response = await PUT(
+      putRequest({ nfaClass: "SHORT_BARRELED_RIFLE" }),
+      {
+        params: Promise.resolve({ id: "firearm-1" }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("Invalid nfaClass");
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
   it("nulls control number, approval date and tax — but keeps the registered owner — on a FORM_4473 switch", async () => {
     mocks.findUnique.mockResolvedValue(storedFormFourSbr());
 

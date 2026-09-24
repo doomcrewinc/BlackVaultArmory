@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeFirearmNfaFields } from "@/lib/nfa";
+import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
+import { NFA_CLASSES } from "@/lib/types";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
@@ -115,6 +116,24 @@ export async function POST(request: NextRequest) {
     if (!normalizedName) {
       return NextResponse.json(
         { error: "Missing required field: name" },
+        { status: 400 },
+      );
+    }
+
+    // A class that is present but not a known one is rejected rather than
+    // normalized: the fallback for an unrecognised class is NONE, and NONE
+    // clears mgRegistry and the whole paperwork group. Absent (or explicitly
+    // null) still means "no class supplied" and defaults to NONE, which loses
+    // nothing.
+    if (
+      nfaClass !== undefined &&
+      nfaClass !== null &&
+      !isKnownNfaClass(nfaClass)
+    ) {
+      return NextResponse.json(
+        {
+          error: `Invalid nfaClass. Supported values: ${NFA_CLASSES.join(", ")}`,
+        },
         { status: 400 },
       );
     }

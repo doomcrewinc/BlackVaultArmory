@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeFirearmNfaFields } from "@/lib/nfa";
+import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
+import { NFA_CLASSES } from "@/lib/types";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -97,6 +98,24 @@ export async function PUT(
       nfaTaxPaid,
       nfaRegisteredTo,
     } = body;
+
+    // Input validation before the read: a class that is present but not a
+    // known one is rejected rather than normalized, because the fallback for
+    // an unrecognised class is NONE and NONE clears mgRegistry and all five
+    // paperwork columns. Absent or explicitly null still means "not supplied"
+    // (see the classProvided note below) and changes nothing.
+    if (
+      nfaClass !== undefined &&
+      nfaClass !== null &&
+      !isKnownNfaClass(nfaClass)
+    ) {
+      return NextResponse.json(
+        {
+          error: `Invalid nfaClass. Supported values: ${NFA_CLASSES.join(", ")}`,
+        },
+        { status: 400 },
+      );
+    }
 
     const existing = await prisma.firearm.findUnique({ where: { id } });
     if (!existing) {

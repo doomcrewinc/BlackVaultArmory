@@ -57,6 +57,22 @@ function normalizeDateOnly(value: unknown): Date | null {
 }
 
 /**
+ * Whether a supplied nfaClass names a known class.
+ *
+ * normalizeClassAndRegistry falls back to NONE for anything it does not
+ * recognise, which is the right answer for an ABSENT class and a destructive
+ * one for a junk class: NONE clears mgRegistry and all five paperwork columns
+ * with it. So `PUT { nfaClass: "SHORT_BARRELED_RIFLE" }` on a fully documented
+ * SBR would wipe six columns and answer 200.
+ *
+ * The write routes call this and reject instead, the same way they reject a
+ * malformed date. The fallback stays for absent input, where nothing is lost.
+ */
+export function isKnownNfaClass(value: unknown): value is NfaClass {
+  return normalizeEnum<NfaClass>(value, NFA_CLASSES) !== null;
+}
+
+/**
  * The single place the class fields are decided, so every write path agrees.
  * A registry only survives on a machine gun: a record must not keep a
  * pre-sample marking after its class changes, however the write arrives.

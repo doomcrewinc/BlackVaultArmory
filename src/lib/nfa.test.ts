@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeAccessoryNfaFields, normalizeFirearmNfaFields } from "./nfa";
+import {
+  isKnownNfaClass,
+  normalizeAccessoryNfaFields,
+  normalizeFirearmNfaFields,
+} from "./nfa";
 
 // normalizeFirearmClassFields was deleted once the firearms routes switched to
 // normalizeFirearmNfaFields (which wraps the same class/registry logic
@@ -39,6 +43,9 @@ describe("normalizeFirearmNfaFields", () => {
     expect(result.mgRegistry).toBe("TRANSFERABLE");
   });
 
+  // The fallback itself is deliberate for ABSENT input. It is destructive for
+  // junk input, which is why the write routes gate on isKnownNfaClass and
+  // answer 400 before ever reaching this function.
   it("rejects an unknown class by falling back to NONE, clearing the group", () => {
     const result = normalizeFirearmNfaFields({ ...FULL, nfaClass: "MADE_UP" });
     expect(result.nfaClass).toBe("NONE");
@@ -268,5 +275,25 @@ describe("whitespace-only input reads as blank everywhere in the group", () => {
     expect(result.nfaControlNumber).toBeNull();
     expect(result.nfaRegisteredTo).toBeNull();
     expect(result.nfaApprovalDate).toBeNull();
+  });
+});
+
+// The guard the firearm write routes use to turn that destructive fallback
+// into a 400.
+describe("isKnownNfaClass", () => {
+  it("accepts every class in the enum, trimmed and in any case", () => {
+    expect(isKnownNfaClass("NONE")).toBe(true);
+    expect(isKnownNfaClass("SBR")).toBe(true);
+    expect(isKnownNfaClass("machine_gun")).toBe(true);
+    expect(isKnownNfaClass("  AOW  ")).toBe(true);
+  });
+
+  it("rejects anything else, including the shapes a hand-rolled request sends", () => {
+    expect(isKnownNfaClass("SHORT_BARRELED_RIFLE")).toBe(false);
+    expect(isKnownNfaClass("")).toBe(false);
+    expect(isKnownNfaClass("   ")).toBe(false);
+    expect(isKnownNfaClass(null)).toBe(false);
+    expect(isKnownNfaClass(undefined)).toBe(false);
+    expect(isKnownNfaClass(7)).toBe(false);
   });
 });
