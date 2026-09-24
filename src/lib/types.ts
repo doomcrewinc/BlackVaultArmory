@@ -69,6 +69,28 @@ export const MG_REGISTRY_LABELS: Record<MgRegistry, string> = {
   POST_SAMPLE: "Post-sample",
 };
 
+// How an NFA item came to be owned. FORM_4473 is here because an SBR, SBS or
+// suppressor can transfer on an ordinary 4473 rather than an NFA form — in
+// which case there is no stamp, so there is no control number, approval date
+// or tax to record.
+export const NFA_TRANSFER_METHODS = [
+  "FORM_1",
+  "FORM_3",
+  "FORM_4",
+  "FORM_4473",
+  "OTHER",
+] as const;
+
+export type NfaTransferMethod = (typeof NFA_TRANSFER_METHODS)[number];
+
+export const NFA_TRANSFER_METHOD_LABELS: Record<NfaTransferMethod, string> = {
+  FORM_1: "Form 1 (make)",
+  FORM_3: "Form 3 (dealer to dealer)",
+  FORM_4: "Form 4 (transfer)",
+  FORM_4473: "4473 (no stamp)",
+  OTHER: "Other",
+};
+
 // ─── Slot Types ────────────────────────────────────────────────
 export const SLOT_TYPES = [
   "MUZZLE",
