@@ -582,10 +582,17 @@ function SupplyAlertsWidget({
 
   return (
     <section>
-      <SupplyTimezoneNotice
-        timezoneConfigured={timezoneConfigured}
-        className="mb-3"
-      />
+      {/* Only where the badges it explains actually appear — the same gate
+          SupplyClientPage uses on `items.length`. With no alerts this widget
+          renders its empty state and there is no verdict for the notice to
+          qualify, so a fresh install with no supplies at all was getting an
+          amber warning about expiry dates that do not exist. */}
+      {totalAlerts > 0 && (
+        <SupplyTimezoneNotice
+          timezoneConfigured={timezoneConfigured}
+          className="mb-3"
+        />
+      )}
       <div className="flex items-center gap-2 mb-3">
         <AlertTriangle className="w-4 h-4 text-[#F5A623]" />
         <h2 className="text-sm font-semibold tracking-widest uppercase text-[#F5A623]">
@@ -855,7 +862,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
       const response = await fetch("/api/stats", { cache: "no-store" });
       if (!response.ok) return;
       const stats: StatsResponse = await response.json();
-      setLiveData({
+      setLiveData((previous) => ({
         firearmCount: stats.totals?.firearms ?? 0,
         accessoryCount: stats.totals?.accessories ?? 0,
         totalAmmoRounds: stats.totals?.ammoRounds ?? 0,
@@ -866,11 +873,17 @@ export function DashboardClient({ data }: { data: DashboardData }) {
         lowStockSupplies: stats.supplies?.lowStockItems ?? [],
         expiredSupplyCount: stats.supplies?.expiredCount ?? 0,
         expiringSoonSupplyCount: stats.supplies?.expiringSoonCount ?? 0,
-        // Defaults to TRUE, unlike the counts above: a response from an older
-        // server that does not carry the field must not raise a notice about
-        // a setting it never reported on.
-        supplyTimezoneConfigured: stats.supplies?.timezoneConfigured ?? true,
-      });
+        // NOT defaulted, unlike the counts above. `StatsResponse` types the
+        // raw /api/stats payload, so every field is optional there — but
+        // falling back to a literal would be guessing about the one setting
+        // this notice exists to report. Keeping the previous value preserves
+        // what the server render already established (page.tsx types it as
+        // required), so a payload that omits the field changes nothing rather
+        // than silently deciding the notice should or should not show.
+        supplyTimezoneConfigured:
+          stats.supplies?.timezoneConfigured ??
+          previous.supplyTimezoneConfigured,
+      }));
       setLastUpdated(new Date());
     } catch {
       // Keep server-provided data when refresh fails.

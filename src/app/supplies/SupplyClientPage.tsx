@@ -17,11 +17,14 @@ import type { SupplySectionItem } from "./getSupplySectionItems";
 interface Props {
   items: SupplySectionItem[];
   /**
-   * From the server. Drives the expiry-timezone notice below; defaults to
-   * true so a caller that does not know renders no notice rather than a
-   * misleading one.
+   * From the server, via getSupplySectionItems. REQUIRED, with no default:
+   * an optional prop defaulting to `true` is fail-open, so a new surface that
+   * renders supply badges and forgets to pass it would lose the notice
+   * silently — the exact failure this notice exists to prevent, and one tsc
+   * cannot catch through a default. Phase 5 adds five more Preparedness
+   * sections, i.e. five more chances to omit it.
    */
-  timezoneConfigured?: boolean;
+  timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
 }
@@ -95,7 +98,7 @@ function hasBadges(expiry: ExpiryStatus, isLow: boolean): boolean {
 
 export function SupplyClientPage({
   items,
-  timezoneConfigured = true,
+  timezoneConfigured,
   heading = "SUPPLIES",
   subheading,
 }: Props) {
