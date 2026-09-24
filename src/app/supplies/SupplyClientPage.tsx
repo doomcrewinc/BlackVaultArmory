@@ -5,8 +5,10 @@ import { Plus, Boxes, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { formatNumber } from "@/lib/utils";
 import {
+  SUPPLY_CATEGORY_LABELS,
   SUPPLY_UNIT_LABELS,
   type ExpiryStatus,
+  type SupplyCategory,
   type SupplyUnit,
 } from "@/lib/supply";
 import type { SupplySectionItem } from "./getSupplySectionItems";
@@ -19,6 +21,34 @@ interface Props {
 
 function unitLabel(unit: string): string {
   return SUPPLY_UNIT_LABELS[unit as SupplyUnit] ?? unit;
+}
+
+/**
+ * Falls back to the raw stored token, matching the detail page and the
+ * exports: a category this build does not recognise must still print
+ * something, since the catch-all deliberately keeps such a row visible.
+ */
+function categoryLabel(category: string): string {
+  return SUPPLY_CATEGORY_LABELS[category as SupplyCategory] ?? category;
+}
+
+/**
+ * Why every supply list names its category: Food & Water is the catch-all for
+ * the six categories phase 5 has not built sections for yet, so a BATTERY
+ * supply legitimately lands there. Without this badge a user saw batteries
+ * filed under "Food & Water" with nothing on the page saying they were
+ * batteries — the placement was not "visibly odd", it was invisible.
+ *
+ * `shrink-0`, and a SIBLING of the truncating name element rather than a
+ * descendant: `truncate` plus `flex` on one element hides its siblings, and a
+ * badge vanishing for a long name shipped in phase 1.
+ */
+function CategoryBadge({ category }: { category: string }) {
+  return (
+    <span className="shrink-0 rounded border border-vault-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-vault-text-muted">
+      {categoryLabel(category)}
+    </span>
+  );
 }
 
 function quantityLabel(item: SupplySectionItem): string {
@@ -123,11 +153,12 @@ export function SupplyClientPage({
                       >
                         <p className="font-semibold text-vault-text flex items-center gap-2">
                           <span className="truncate min-w-0">{item.name}</span>
-                          {hasBadges(item.expiry, item.isLow) && (
-                            <span className="flex shrink-0 items-center gap-1">
+                          <span className="flex shrink-0 items-center gap-1">
+                            <CategoryBadge category={item.category} />
+                            {hasBadges(item.expiry, item.isLow) && (
                               <StatusBadges item={item} />
-                            </span>
-                          )}
+                            )}
+                          </span>
                         </p>
                       </Link>
                       <p className="text-xs text-vault-text-faint truncate">
@@ -152,6 +183,12 @@ export function SupplyClientPage({
                     <tr className="border-b border-vault-border">
                       <th className="text-left px-4 py-3 text-[10px] uppercase tracking-widest text-vault-text-faint font-medium">
                         Name
+                      </th>
+                      {/* No responsive `hidden` class, unlike Brand and
+                          Storage: a column that disappears at some widths
+                          cannot be what makes the catch-all visible. */}
+                      <th className="text-left px-4 py-3 text-[10px] uppercase tracking-widest text-vault-text-faint font-medium">
+                        Category
                       </th>
                       <th className="text-left px-4 py-3 text-[10px] uppercase tracking-widest text-vault-text-faint font-medium hidden lg:table-cell">
                         Brand
@@ -189,6 +226,11 @@ export function SupplyClientPage({
                               <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
                             </p>
                           </Link>
+                        </td>
+
+                        {/* Category */}
+                        <td className="px-4 py-3">
+                          <CategoryBadge category={item.category} />
                         </td>
 
                         {/* Brand */}
