@@ -17,7 +17,16 @@ function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
 }
 
-type FirearmExportRecord = {
+/** The paperwork group as it comes off a firearm or an accessory row. */
+type NfaPaperworkRecord = {
+  nfaTransferMethod: string | null;
+  nfaControlNumber: string | null;
+  nfaApprovalDate: Date | null;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string | null;
+};
+
+type FirearmExportRecord = NfaPaperworkRecord & {
   id: string;
   name: string;
   manufacturer: string | null;
@@ -25,6 +34,7 @@ type FirearmExportRecord = {
   caliber: string | null;
   serialNumber: string | null;
   type: string | null;
+  nfaClass: string | null;
   acquisitionDate: Date | null;
   purchasePrice: number | null;
   currentValue: number | null;
@@ -32,7 +42,7 @@ type FirearmExportRecord = {
   imageUrl: string | null;
 };
 
-type AccessoryExportRecord = {
+type AccessoryExportRecord = NfaPaperworkRecord & {
   id: string;
   name: string;
   manufacturer: string | null;
@@ -44,6 +54,42 @@ type AccessoryExportRecord = {
   notes: string | null;
   imageUrl: string | null;
 };
+
+/**
+ * What the item legally is, which is the one thing a claims or insurance
+ * reader cannot be told wrong. An SBR is a RIFLE by platform and an SBR by
+ * law, and a select-fire PDW is a MACHINE_GUN; reporting the platform there
+ * misstates the record. So the class wins wherever a firearm has one, and the
+ * platform answers for a Title I firearm, which has no class to report.
+ *
+ * Emitted as the stored token (SBR, MACHINE_GUN, AOW), matching the raw
+ * platform tokens this column has always carried.
+ */
+function firearmExportCategory(firearm: Pick<FirearmExportRecord, "nfaClass" | "type">): string {
+  const nfaClass = (firearm.nfaClass ?? "").trim().toUpperCase();
+  if (nfaClass && nfaClass !== "NONE") return nfaClass;
+  return firearm.type || "";
+}
+
+/**
+ * The five paperwork columns, shared by firearm and accessory rows.
+ *
+ * nfaControlNumber is withheld unless serials are included: it identifies a
+ * registered item as precisely as a serial number does, and a user who
+ * excluded serials asked not to publish identifiers. The key is dropped
+ * rather than blanked, so the CSV header never advertises a column this
+ * export declines to answer. The other four are not identifiers and ride
+ * unconditionally.
+ */
+function nfaPaperworkColumns(record: NfaPaperworkRecord, includeControlNumber: boolean) {
+  return {
+    nfaTransferMethod: record.nfaTransferMethod ?? "",
+    ...(includeControlNumber ? { nfaControlNumber: record.nfaControlNumber ?? "" } : {}),
+    nfaApprovalDate: toISODate(record.nfaApprovalDate),
+    nfaTaxPaid: record.nfaTaxPaid ?? null,
+    nfaRegisteredTo: record.nfaRegisteredTo ?? "",
+  };
+}
 
 type ExportDocumentRecord = {
   id: string;
@@ -286,6 +332,17 @@ function pushWrapped(lines: string[], line: string, indent = ""): void {
   wrapped.forEach((part, index) => lines.push(index === 0 ? `${indent}${part}` : `${indent}  ${part}`));
 }
 
+/**
+ * Whether a row has any paperwork worth a line of its own. Deliberately not
+ * keyed on nfaControlNumber alone: that field is withheld when serials are
+ * excluded, and the rest of the paperwork still has to print.
+ */
+function hasNfaPaperwork(item: FullArmoryExportResponse["items"][number]): boolean {
+  return Boolean(
+    item.nfaTransferMethod || item.nfaControlNumber || item.nfaApprovalDate || item.nfaTaxPaid != null || item.nfaRegisteredTo
+  );
+}
+
 function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   const lines: string[] = [
     "Project BlackVault - Full Armory Export",
@@ -304,8 +361,19 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   payload.items.forEach((item, index) => {
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Class: ${item.category || "N/A"} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
+    // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
+    // line under every Title I item would double the page count to say nothing.
+    // Control reads N/A when serials are excluded, matching the Serial field
+    // above rather than inventing a third convention for a withheld value.
+    if (hasNfaPaperwork(item)) {
+      pushWrapped(
+        lines,
+        `NFA: ${item.nfaTransferMethod || "N/A"} | Control: ${item.nfaControlNumber || "N/A"} | Approved: ${item.nfaApprovalDate || "N/A"} | Tax: ${item.nfaTaxPaid ?? "N/A"} | Registered To: ${item.nfaRegisteredTo || "N/A"}`,
+        "   "
+      );
+    }
     if (item.imageUrl) pushWrapped(lines, `Image Ref: ${item.imageUrl}`, "   ");
   });
 
@@ -372,6 +440,12 @@ export async function GET(request: NextRequest) {
         caliber: true,
         serialNumber: true,
         type: true,
+        nfaClass: true,
+        nfaTransferMethod: true,
+        nfaControlNumber: true,
+        nfaApprovalDate: true,
+        nfaTaxPaid: true,
+        nfaRegisteredTo: true,
         acquisitionDate: true,
         purchasePrice: true,
         currentValue: true,
@@ -388,6 +462,11 @@ export async function GET(request: NextRequest) {
         model: true,
         type: true,
         caliber: true,
+        nfaTransferMethod: true,
+        nfaControlNumber: true,
+        nfaApprovalDate: true,
+        nfaTaxPaid: true,
+        nfaRegisteredTo: true,
         acquisitionDate: true,
         purchasePrice: true,
         notes: true,
@@ -445,7 +524,7 @@ export async function GET(request: NextRequest) {
         return {
           itemId: firearm.id,
           entityType: "FIREARM" as const,
-          category: firearm.type || "",
+          category: firearmExportCategory(firearm),
           manufacturer: firearm.manufacturer || "",
           model: firearm.model || firearm.name,
           caliber: firearm.caliber || "",
@@ -465,6 +544,7 @@ export async function GET(request: NextRequest) {
             ? firearm.currentValue == null && firearm.purchasePrice == null
             : false,
           notes: firearm.notes ?? "",
+          ...nfaPaperworkColumns(firearm, exportOptions.includeSerialNumbers),
         };
       }),
       ...accessories.map((accessory) => {
@@ -493,6 +573,7 @@ export async function GET(request: NextRequest) {
           missingPhoto: exportOptions.includeImages ? !hasPhoto : false,
           missingValue: exportOptions.includeValue ? accessory.purchasePrice == null : false,
           notes: accessory.notes ?? "",
+          ...nfaPaperworkColumns(accessory, exportOptions.includeSerialNumbers),
         };
       }),
     ];

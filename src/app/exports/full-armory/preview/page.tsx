@@ -9,7 +9,7 @@ import {
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
 import { formatCurrency } from "@/lib/utils";
-import { formatTimestamp } from "@/lib/date";
+import { formatDateOnly, formatTimestamp } from "@/lib/date";
 
 export default function FullArmoryPreviewPage() {
   const [queryString, setQueryString] = useState("");
@@ -165,18 +165,24 @@ export default function FullArmoryPreviewPage() {
               <thead>
                 <tr className="border-b border-vault-border text-vault-text-faint">
                   <th className="py-2 pr-4 text-left">Type</th>
+                  <th className="py-2 pr-4 text-left">Class</th>
                   <th className="py-2 pr-4 text-left">Manufacturer</th>
                   <th className="py-2 pr-4 text-left">Model</th>
                   <th className="py-2 pr-4 text-left">Serial</th>
                   <th className="py-2 pr-4 text-right">Purchase</th>
                   <th className="py-2 pr-4 text-right">Replacement</th>
+                  <th className="py-2 pr-4 text-left">Transfer Method</th>
+                  <th className="py-2 pr-4 text-left">Control Number</th>
+                  <th className="py-2 pr-4 text-left">Approval Date</th>
+                  <th className="py-2 pr-4 text-right">Tax Paid</th>
+                  <th className="py-2 pr-4 text-left">Registered To</th>
                   <th className="py-2 text-right">Docs</th>
                 </tr>
               </thead>
               <tbody>
                 {data.items.length === 0 ? (
                   <tr>
-                    <td className="py-3 text-vault-text-faint" colSpan={7}>
+                    <td className="py-3 text-vault-text-faint" colSpan={13}>
                       No inventory items included for this export.
                     </td>
                   </tr>
@@ -184,11 +190,23 @@ export default function FullArmoryPreviewPage() {
                   data.items.map((item) => (
                     <tr key={item.itemId} className="border-b border-vault-border/60">
                       <td className="py-2 pr-4">{item.entityType}</td>
+                      {/* The NFA class where the item has one, the platform otherwise —
+                          an SBR must not read as a plain RIFLE on a claims sheet. */}
+                      <td className="py-2 pr-4">{item.category || "—"}</td>
                       <td className="py-2 pr-4">{item.manufacturer || "—"}</td>
                       <td className="py-2 pr-4">{item.model || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.serialNumber || "—"}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.replacementValue)}</td>
+                      <td className="py-2 pr-4">{item.nfaTransferMethod || "—"}</td>
+                      {/* Withheld with serials, so the payload has no key to read — the
+                          dash is the same thing the Serial cell shows when hidden. */}
+                      <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
+                      <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
+                      <td className="py-2 pr-4 text-right">
+                        {item.nfaTaxPaid == null ? "—" : formatCurrency(item.nfaTaxPaid)}
+                      </td>
+                      <td className="py-2 pr-4">{item.nfaRegisteredTo || "—"}</td>
                       <td className="py-2 text-right">{item.receiptCount}/{item.documentCount}</td>
                     </tr>
                   ))

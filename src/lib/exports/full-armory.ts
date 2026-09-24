@@ -31,6 +31,20 @@ export interface FullArmoryItemRow {
   missingPhoto: boolean;
   missingValue: boolean;
   notes: string;
+  /**
+   * NFA paperwork, carried for a firearm with a class and for a suppressor.
+   * Blank string / null on an item that has none.
+   *
+   * nfaControlNumber is OPTIONAL because it identifies a registered item as
+   * precisely as a serial number does: it is gated behind
+   * includeSerialNumbers, and the key is omitted rather than blanked so the
+   * CSV never grows a column the export does not answer.
+   */
+  nfaTransferMethod: string;
+  nfaControlNumber?: string;
+  nfaApprovalDate: string;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string;
 }
 
 export interface FullArmoryAttachmentRow {

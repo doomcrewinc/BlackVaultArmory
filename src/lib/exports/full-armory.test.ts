@@ -39,6 +39,10 @@ function itemRow(
     missingPhoto: false,
     missingValue: false,
     notes: "",
+    nfaTransferMethod: "",
+    nfaApprovalDate: "",
+    nfaTaxPaid: null,
+    nfaRegisteredTo: "",
     ...overrides,
   };
 }
