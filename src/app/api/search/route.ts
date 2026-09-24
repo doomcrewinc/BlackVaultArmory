@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { containsInsensitive } from "@/lib/db/text-search";
-import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import {
+  GEAR_CATEGORIES,
+  GEAR_CATEGORY_LABELS,
+  type GearCategory,
+} from "@/lib/gear";
 import {
   SUPPLY_CATEGORIES,
   SUPPLY_CATEGORY_LABELS,
@@ -10,6 +14,26 @@ import {
 
 function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
+
+/**
+ * The gear categories whose HUMAN LABEL matches `q`. Same treatment as
+ * supplies below, and for the same reason: the column stores the token while
+ * every surface displays the label.
+ *
+ * Today's two labels ("Knife", "Case") differ from their tokens only by case,
+ * which containsInsensitive already handles — so this changes no result yet.
+ * It is here because the moment phase 5 adds a multi-word category the
+ * gear.ts header already promises (armor, medical, shelter...), `FIRST_AID`
+ * would be unfindable as "first aid", which is exactly the bug supplies had.
+ * The test is derived from GEAR_CATEGORIES, so it starts covering that
+ * category the day it is added.
+ */
+function gearCategoriesMatchingLabel(q: string): GearCategory[] {
+  const needle = q.toLowerCase();
+  return GEAR_CATEGORIES.filter((category) =>
+    GEAR_CATEGORY_LABELS[category].toLowerCase().includes(needle),
+  );
 }
 
 function supplyCategoryLabel(category: string): string {
@@ -94,13 +118,20 @@ export async function GET(request: NextRequest) {
     select: { id: true, name: true, firearmId: true },
   });
 
+  const gearCategoryMatches = gearCategoriesMatchingLabel(q);
   const gear = await prisma.gear.findMany({
     where: {
       OR: [
         { name: containsInsensitive(q) },
         { manufacturer: containsInsensitive(q) },
         { model: containsInsensitive(q) },
+        // The substring clause on the column stays alongside the label clause
+        // below, and is not redundant: restore inserts gear rows unvalidated,
+        // so a category outside the enum can be stored and has no label.
         { category: containsInsensitive(q) },
+        ...(gearCategoryMatches.length > 0
+          ? [{ category: { in: gearCategoryMatches } }]
+          : []),
       ],
     },
     take: 5,

@@ -31,6 +31,7 @@ vi.mock("@/lib/db/text-search", async (importOriginal) => {
 
 import { GET } from "./route";
 import { containsInsensitive } from "@/lib/db/text-search";
+import { GEAR_CATEGORIES, GEAR_CATEGORY_LABELS } from "@/lib/gear";
 
 function request(query: string): NextRequest {
   return new NextRequest(
@@ -190,5 +191,52 @@ describe("GET /api/search", () => {
   it("does not query supplies for a short query", async () => {
     await GET(request("a"));
     expect(mocks.findSupplies).not.toHaveBeenCalled();
+  });
+
+  // Derived from GEAR_CATEGORIES, not a hardcoded pair. Today's two labels
+  // ("Knife", "Case") differ from their tokens only by case, so this passes
+  // pre-fix for them; it is here so the day phase 5 adds a multi-word
+  // category (FIRST_AID -> "First Aid") it is covered without anyone
+  // remembering to extend the test.
+  it.each([...GEAR_CATEGORIES])(
+    "finds the %s gear category by its human label",
+    async (category) => {
+      await GET(request(GEAR_CATEGORY_LABELS[category]));
+
+      const where = mocks.findGear.mock.calls[0][0].where;
+      const inClause = where.OR.find(
+        (clause: Record<string, unknown>) =>
+          typeof clause.category === "object" &&
+          clause.category !== null &&
+          "in" in (clause.category as object),
+      );
+      expect(inClause).toBeDefined();
+      expect(inClause.category.in).toContain(category);
+    },
+  );
+
+  it("adds a gear category-label clause the same way supplies does", async () => {
+    await GET(request("knife"));
+
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("knife") },
+      { manufacturer: containsInsensitive("knife") },
+      { model: containsInsensitive("knife") },
+      { category: containsInsensitive("knife") },
+      { category: { in: ["KNIFE"] } },
+    ]);
+  });
+
+  it("omits the gear category-label clause when no label matches", async () => {
+    await GET(request("zzzz"));
+
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("zzzz") },
+      { manufacturer: containsInsensitive("zzzz") },
+      { model: containsInsensitive("zzzz") },
+      { category: containsInsensitive("zzzz") },
+    ]);
   });
 });
