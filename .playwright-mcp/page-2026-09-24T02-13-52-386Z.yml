@@ -1,0 +1,91 @@
+- main [ref=f1e5]:
+  - generic [ref=f1e6]:
+    - generic [ref=f1e9]:
+      - heading "COMMAND CENTER" [level=1] [ref=f1e10]
+      - paragraph [ref=f1e11]: BlackVault Armory Platform — Tactical Inventory Overview
+    - generic [ref=f1e13]:
+      - generic [ref=f1e15]:
+        - link [ref=f1e16] [cursor=pointer]:
+          - /url: /vault
+          - generic [ref=f1e19]:
+            - paragraph [ref=f1e20]: Total Firearms
+            - paragraph [ref=f1e21]: "4"
+            - paragraph [ref=f1e22]: in vault
+        - link [ref=f1e26] [cursor=pointer]:
+          - /url: /accessories
+          - generic [ref=f1e29]:
+            - paragraph [ref=f1e30]: Total Accessories
+            - paragraph [ref=f1e31]: "8"
+            - paragraph [ref=f1e32]: parts & attachments
+        - link [ref=f1e36] [cursor=pointer]:
+          - /url: /ammo
+          - generic [ref=f1e39]:
+            - paragraph [ref=f1e40]: Total Ammo Rounds
+            - paragraph [ref=f1e41]: 5,550
+            - paragraph [ref=f1e42]: across all calibers
+        - link [ref=f1e48] [cursor=pointer]:
+          - /url: /vault
+          - generic [ref=f1e51]:
+            - paragraph [ref=f1e52]: Total Investment
+            - paragraph [ref=f1e53]: $8,093
+            - paragraph [ref=f1e54]: firearms + accessories
+      - generic [ref=f1e59]:
+        - heading "Maintenance Due" [level=2] [ref=f1e64]
+        - paragraph [ref=f1e67]: No firearms currently due for maintenance
+      - generic [ref=f1e69]:
+        - heading "Low Ammo Alerts" [level=2] [ref=f1e73]
+        - paragraph [ref=f1e81]: All stocks are well supplied
+      - generic [ref=f1e83]:
+        - heading "Recent Acquisitions" [level=2] [ref=f1e88]
+        - generic [ref=f1e90]:
+          - link "Ruger 10/22 Rifle Ruger · .22 LR Aug 5, 2020" [ref=f1e91] [cursor=pointer]:
+            - /url: /vault/cmuc1pfc6000311801nrugllk
+            - generic [ref=f1e95]:
+              - generic [ref=f1e96]:
+                - paragraph [ref=f1e97]: Ruger 10/22
+                - generic [ref=f1e98]: Rifle
+              - paragraph [ref=f1e99]: Ruger · .22 LR
+            - paragraph [ref=f1e101]: Aug 5, 2020
+          - link "Remington 870 Shotgun Remington · 12 Gauge Mar 20, 2021" [ref=f1e104] [cursor=pointer]:
+            - /url: /vault/cmuc1pfc400021180xp49t815
+            - generic [ref=f1e108]:
+              - generic [ref=f1e109]:
+                - paragraph [ref=f1e110]: Remington 870
+                - generic [ref=f1e111]: Shotgun
+              - paragraph [ref=f1e112]: Remington · 12 Gauge
+            - paragraph [ref=f1e114]: Mar 20, 2021
+          - link "Glock 19 Gen5 Pistol Glock · 9mm Luger Jun 10, 2022" [ref=f1e117] [cursor=pointer]:
+            - /url: /vault/cmuc1pfc30001118026nhbjdd
+            - generic [ref=f1e121]:
+              - generic [ref=f1e122]:
+                - paragraph [ref=f1e123]: Glock 19 Gen5
+                - generic [ref=f1e124]: Pistol
+              - paragraph [ref=f1e125]: Glock · 9mm Luger
+            - paragraph [ref=f1e127]: Jun 10, 2022
+          - link "Daniel Defense MK18 Rifle Daniel Defense · 5.56x45mm NATO Jan 15, 2023" [ref=f1e130] [cursor=pointer]:
+            - /url: /vault/cmuc1pfc000001180l7zurcin
+            - generic [ref=f1e134]:
+              - generic [ref=f1e135]:
+                - paragraph [ref=f1e136]: Daniel Defense MK18
+                - generic [ref=f1e137]: Rifle
+              - paragraph [ref=f1e138]: Daniel Defense · 5.56x45mm NATO
+            - paragraph [ref=f1e140]: Jan 15, 2023
+        - link "View Full Vault" [ref=f1e144] [cursor=pointer]:
+          - /url: /vault
+      - generic [ref=f1e148]:
+        - heading "Ammo by Caliber" [level=2] [ref=f1e154]
+        - generic [ref=f1e156]:
+          - generic [ref=f1e159]:
+            - generic [ref=f1e160]: .22 LR
+            - generic [ref=f1e161]: 2,500
+          - generic [ref=f1e166]:
+            - generic [ref=f1e167]: 5.56x45mm NATO
+            - generic [ref=f1e168]: 1,800
+          - generic [ref=f1e173]:
+            - generic [ref=f1e174]: 9mm Luger
+            - generic [ref=f1e175]: 1,150
+          - generic [ref=f1e180]:
+            - generic [ref=f1e181]: 12 Gauge
+            - generic [ref=f1e182]: "100"
+        - link "View Ammo Depot" [ref=f1e186] [cursor=pointer]:
+          - /url: /ammo

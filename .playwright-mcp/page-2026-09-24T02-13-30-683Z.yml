@@ -1,0 +1,153 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - complementary [ref=e4]:
+        - generic [ref=e9]:
+          - paragraph [ref=e10]: BlackVault
+          - paragraph [ref=e11]: Armory Platform
+        - navigation [ref=e12]:
+          - button "Search" [ref=e13]
+          - paragraph [ref=e18]: Navigation
+          - link "Command Overview & stats" [ref=e19] [cursor=pointer]:
+            - /url: /
+            - generic [ref=e23]:
+              - generic [ref=e24]: Command
+              - generic [ref=e25]: Overview & stats
+          - link "Builds Build configurations" [ref=e26] [cursor=pointer]:
+            - /url: /builds
+            - generic [ref=e31]:
+              - generic [ref=e32]: Builds
+              - generic [ref=e33]: Build configurations
+          - link "Ammo Ammunition storage" [ref=e34] [cursor=pointer]:
+            - /url: /ammo
+            - generic [ref=e39]:
+              - generic [ref=e40]: Ammo
+              - generic [ref=e41]: Ammunition storage
+          - generic [ref=e43]:
+            - link "Vault Firearms inventory" [ref=e44] [cursor=pointer]:
+              - /url: /vault
+              - generic [ref=e47]:
+                - generic [ref=e48]: Vault
+                - generic [ref=e49]: Firearms inventory
+            - button "Expand Vault sections" [ref=e50]
+          - generic [ref=e54]:
+            - link "Gear Optics, parts & more" [ref=e55] [cursor=pointer]:
+              - /url: /gear
+              - generic [ref=e58]:
+                - generic [ref=e59]: Gear
+                - generic [ref=e60]: Optics, parts & more
+            - button "Expand Gear sections" [ref=e61]
+          - button "Range Sessions & drills" [ref=e65]:
+            - generic [ref=e70]:
+              - generic [ref=e71]: Range
+              - generic [ref=e72]: Sessions & drills
+          - generic [ref=e75]:
+            - link "Accessories All accessories" [ref=e76] [cursor=pointer]:
+              - /url: /accessories
+              - generic [ref=e79]:
+                - generic [ref=e80]: Accessories
+                - generic [ref=e81]: All accessories
+            - link "Documents Document library" [ref=e82] [cursor=pointer]:
+              - /url: /documents
+              - generic [ref=e86]:
+                - generic [ref=e87]: Documents
+                - generic [ref=e88]: Document library
+            - link "Settings Configuration" [ref=e89] [cursor=pointer]:
+              - /url: /settings
+              - generic [ref=e93]:
+                - generic [ref=e94]: Settings
+                - generic [ref=e95]: Configuration
+        - button "Collapse" [ref=e97]
+      - main [ref=e102]:
+        - generic [ref=e103]:
+          - generic [ref=e106]:
+            - heading "COMMAND CENTER" [level=1] [ref=e107]
+            - paragraph [ref=e108]: BlackVault Armory Platform — Tactical Inventory Overview
+          - generic [ref=e110]:
+            - generic [ref=e112]:
+              - link [ref=e113] [cursor=pointer]:
+                - /url: /vault
+                - generic [ref=e116]:
+                  - paragraph [ref=e117]: Total Firearms
+                  - paragraph [ref=e118]: "4"
+                  - paragraph [ref=e119]: in vault
+              - link [ref=e123] [cursor=pointer]:
+                - /url: /accessories
+                - generic [ref=e126]:
+                  - paragraph [ref=e127]: Total Accessories
+                  - paragraph [ref=e128]: "8"
+                  - paragraph [ref=e129]: parts & attachments
+              - link [ref=e133] [cursor=pointer]:
+                - /url: /ammo
+                - generic [ref=e136]:
+                  - paragraph [ref=e137]: Total Ammo Rounds
+                  - paragraph [ref=e138]: 5,550
+                  - paragraph [ref=e139]: across all calibers
+              - link [ref=e145] [cursor=pointer]:
+                - /url: /vault
+                - generic [ref=e148]:
+                  - paragraph [ref=e149]: Total Investment
+                  - paragraph [ref=e150]: $8,093
+                  - paragraph [ref=e151]: firearms + accessories
+            - generic [ref=e156]:
+              - heading "Maintenance Due" [level=2] [ref=e161]
+              - paragraph [ref=e164]: No firearms currently due for maintenance
+            - generic [ref=e166]:
+              - heading "Low Ammo Alerts" [level=2] [ref=e170]
+              - paragraph [ref=e178]: All stocks are well supplied
+            - generic [ref=e180]:
+              - heading "Recent Acquisitions" [level=2] [ref=e185]
+              - generic [ref=e187]:
+                - link "Ruger 10/22 Rifle Ruger · .22 LR Aug 5, 2020" [ref=e188] [cursor=pointer]:
+                  - /url: /vault/cmuc1pfc6000311801nrugllk
+                  - generic [ref=e192]:
+                    - generic [ref=e193]:
+                      - paragraph [ref=e194]: Ruger 10/22
+                      - generic [ref=e195]: Rifle
+                    - paragraph [ref=e196]: Ruger · .22 LR
+                  - paragraph [ref=e198]: Aug 5, 2020
+                - link "Remington 870 Shotgun Remington · 12 Gauge Mar 20, 2021" [ref=e201] [cursor=pointer]:
+                  - /url: /vault/cmuc1pfc400021180xp49t815
+                  - generic [ref=e205]:
+                    - generic [ref=e206]:
+                      - paragraph [ref=e207]: Remington 870
+                      - generic [ref=e208]: Shotgun
+                    - paragraph [ref=e209]: Remington · 12 Gauge
+                  - paragraph [ref=e211]: Mar 20, 2021
+                - link "Glock 19 Gen5 Pistol Glock · 9mm Luger Jun 10, 2022" [ref=e214] [cursor=pointer]:
+                  - /url: /vault/cmuc1pfc30001118026nhbjdd
+                  - generic [ref=e218]:
+                    - generic [ref=e219]:
+                      - paragraph [ref=e220]: Glock 19 Gen5
+                      - generic [ref=e221]: Pistol
+                    - paragraph [ref=e222]: Glock · 9mm Luger
+                  - paragraph [ref=e224]: Jun 10, 2022
+                - link "Daniel Defense MK18 Rifle Daniel Defense · 5.56x45mm NATO Jan 15, 2023" [ref=e227] [cursor=pointer]:
+                  - /url: /vault/cmuc1pfc000001180l7zurcin
+                  - generic [ref=e231]:
+                    - generic [ref=e232]:
+                      - paragraph [ref=e233]: Daniel Defense MK18
+                      - generic [ref=e234]: Rifle
+                    - paragraph [ref=e235]: Daniel Defense · 5.56x45mm NATO
+                  - paragraph [ref=e237]: Jan 15, 2023
+              - link "View Full Vault" [ref=e241] [cursor=pointer]:
+                - /url: /vault
+            - generic [ref=e245]:
+              - heading "Ammo by Caliber" [level=2] [ref=e251]
+              - generic [ref=e253]:
+                - generic [ref=e256]:
+                  - generic [ref=e257]: .22 LR
+                  - generic [ref=e258]: 2,500
+                - generic [ref=e263]:
+                  - generic [ref=e264]: 5.56x45mm NATO
+                  - generic [ref=e265]: 1,800
+                - generic [ref=e270]:
+                  - generic [ref=e271]: 9mm Luger
+                  - generic [ref=e272]: 1,150
+                - generic [ref=e277]:
+                  - generic [ref=e278]: 12 Gauge
+                  - generic [ref=e279]: "100"
+              - link "View Ammo Depot" [ref=e283] [cursor=pointer]:
+                - /url: /ammo
+    - button "Switch to light mode" [ref=e286]
+  - button "Open Next.js Dev Tools" [ref=e298] [cursor=pointer]

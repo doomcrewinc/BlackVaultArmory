@@ -202,8 +202,14 @@ body {
   /* A printer drops background colours by default, so the app's dark theme
      would put pale grey text on white paper — present in the DOM, unreadable
      on the sheet. The preview is the one page whose printout is a deliverable,
-     so it prints as ink on paper. */
-  body {
+     so it prints as ink on paper.
+
+     The body rule is scoped to the page that carries the preview, exactly as
+     the colour rule below is. Unscoped, it whitened the body of EVERY page
+     while leaving their text light — measured white-on-white on `/` — so any
+     other page printed with background graphics enabled went from readable
+     light-on-dark to invisible. */
+  body:has(.armory-preview-print) {
     background: #fff !important;
   }
 
