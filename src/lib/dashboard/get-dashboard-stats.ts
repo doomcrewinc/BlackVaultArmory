@@ -59,6 +59,13 @@ export interface DashboardStatsResponse {
     lowStockCount: number;
     expiredCount: number;
     expiringSoonCount: number;
+    /**
+     * False while AppSettings.timezone is unset, which is its state out of the
+     * box. The expiry verdicts above are then resolved in the SERVER's
+     * timezone — in a container, UTC — so the dashboard says so rather than
+     * quietly reporting a day-shifted verdict. See todayForExpiry.
+     */
+    timezoneConfigured: boolean;
   };
   recent: {
     firearms: Array<{
@@ -283,6 +290,7 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       lowStockCount: lowStockSupplies.length,
       expiredCount: expiredSupplyCount,
       expiringSoonCount: expiringSoonSupplyCount,
+      timezoneConfigured: Boolean(settings?.timezone),
     },
     recent: {
       firearms: recentFirearms,

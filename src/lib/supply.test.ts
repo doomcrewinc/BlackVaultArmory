@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EXPIRY_WARNING_DAYS,
   DEFAULT_SUPPLY_CATEGORY,
@@ -195,14 +195,67 @@ describe("todayForExpiry", () => {
     expect(correctVerdict).toBe("soon");
   });
 
-  it("falls back to UTC when timezone is null", () => {
-    // UTC day here is the 16th — distinct from Denver's 15th above, so this
-    // proves null falls back to UTC rather than silently defaulting to some
-    // other zone.
-    expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
+  it("falls back to the HOST timezone when timezone is null, not to UTC", () => {
+    // AppSettings.timezone is NULL out of the box and stays NULL on any
+    // install whose owner never opened Settings, so this is the DEFAULT path,
+    // not an edge case. Hardcoding UTC here re-opened the off-by-one above:
+    // west of UTC, every evening, a supply expiring today read `expired`.
+    //
+    // This suite runs with TZ=America/Denver (vitest.config.ts), so the host
+    // day for this instant is the 15th while the UTC day is already the 16th
+    // — the two answers are distinguishable, which is what makes the
+    // assertion meaningful.
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(
+      "America/Denver",
+    );
+    expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-15"));
+    expect(todayForExpiry(null, eveningInDenver)).toEqual(
+      todayForExpiry("America/Denver", eveningInDenver),
+    );
   });
 
-  it("falls back to UTC on an unrecognised timezone rather than throwing", () => {
+  it("falls back to UTC when the host cannot name a timezone", () => {
+    // The floor under the host-zone fallback. Only the zero-argument call —
+    // the one systemTimeZone() makes — is stubbed; the explicit-zone lookup
+    // must keep working, or this would pass for the wrong reason.
+    const real = Intl.DateTimeFormat;
+    const spy = vi
+      .spyOn(Intl, "DateTimeFormat")
+      .mockImplementation(((...args: unknown[]) =>
+        args.length === 0
+          ? {
+              resolvedOptions: () => {
+                throw new Error("no Intl data");
+              },
+            }
+          : new (real as unknown as new (
+              ...a: unknown[]
+            ) => Intl.DateTimeFormat)(...args)) as never);
+    try {
+      expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("falls back to UTC when the host names a timezone Intl does not recognise", () => {
+    const real = Intl.DateTimeFormat;
+    const spy = vi
+      .spyOn(Intl, "DateTimeFormat")
+      .mockImplementation(((...args: unknown[]) =>
+        args.length === 0
+          ? { resolvedOptions: () => ({ timeZone: "Not/AZone" }) }
+          : new (real as unknown as new (
+              ...a: unknown[]
+            ) => Intl.DateTimeFormat)(...args)) as never);
+    try {
+      expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("falls back to UTC on a SET but unrecognised timezone rather than throwing", () => {
     expect(() => todayForExpiry("Not/AZone", eveningInDenver)).not.toThrow();
     expect(todayForExpiry("Not/AZone", eveningInDenver)).toEqual(
       day("2026-06-16"),

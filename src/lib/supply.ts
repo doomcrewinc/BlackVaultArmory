@@ -170,6 +170,21 @@ function calendarPartsInTimeZone(
 }
 
 /**
+ * The host's IANA timezone, or null when the runtime cannot name one.
+ *
+ * `resolvedOptions().timeZone` is specified to return an IANA name, but it is
+ * an empty string on some older runtimes and the whole call can throw where
+ * Intl is a stub, so both are treated as "no answer" rather than propagating.
+ */
+function systemTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolves "today" for expiryStatus, in a given timezone, as a Date whose
  * UTC year/month/day equal that timezone's calendar day — the exact shape
  * calendarDayNumber (and so expiryStatus) requires.
@@ -185,10 +200,25 @@ function calendarPartsInTimeZone(
  * whenever the timezone's local day differs from it — that's the whole
  * point, see the "off-by-one" test in supply.test.ts for the worked example.
  *
+ * A NULL `timezone` — AppSettings.timezone out of the box, and on any install
+ * whose owner never opened Settings — falls back to the HOST's zone, not to
+ * UTC. Hardcoding UTC there re-opened the exact off-by-one this helper exists
+ * to close: a default install west of UTC read a supply expiring today as
+ * `expired` every evening. The host zone is right for a bare-metal or dev
+ * install and no worse than UTC anywhere else. In a container the host zone
+ * IS UTC, so this cannot rescue Docker — nothing silent can, which is why the
+ * dashboard shows a notice while the setting is unset.
+ *
  * `timezone` is looked up via Intl, which throws on anything it doesn't
- * recognise; that throw — like a missing/null timezone — falls back to UTC
- * rather than propagating, since a corrupt or absent setting must not take
- * down every expiry read in the app.
+ * recognise; that throw falls back to UTC rather than propagating, since a
+ * corrupt setting must not take down every expiry read in the app. Note the
+ * asymmetry: a null setting resolves to the host zone, whereas a SET but
+ * unrecognised one resolves to UTC — a stored value the user chose is not
+ * silently replaced with a different real zone, it is discarded. The host zone
+ * being itself unrecognised lands in the same catch, so UTC stays the floor.
+ *
+ * This is the ONE place a timezone is resolved. Callers pass
+ * `settings?.timezone ?? null` and nothing else decides a default.
  *
  * Takes `now` as an argument for the same reason expiryStatus takes `today`:
  * nothing in this module reads the clock itself.
@@ -196,7 +226,7 @@ function calendarPartsInTimeZone(
 export function todayForExpiry(timezone: string | null, now: Date): Date {
   let parts: { year: number; month: number; day: number };
   try {
-    parts = calendarPartsInTimeZone(timezone ?? "UTC", now);
+    parts = calendarPartsInTimeZone(timezone ?? systemTimeZone() ?? "UTC", now);
   } catch {
     parts = calendarPartsInTimeZone("UTC", now);
   }

@@ -22,6 +22,7 @@ async function getDashboardData() {
     lowStockSupplies: stats.supplies.lowStockItems,
     expiredSupplyCount: stats.supplies.expiredCount,
     expiringSoonSupplyCount: stats.supplies.expiringSoonCount,
+    supplyTimezoneConfigured: stats.supplies.timezoneConfigured,
   };
 }
 
