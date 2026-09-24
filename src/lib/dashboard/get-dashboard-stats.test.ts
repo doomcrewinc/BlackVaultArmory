@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expiryStatus } from "@/lib/supply";
 
 const mocks = vi.hoisted(() => ({
   findAppSettings: vi.fn(),
@@ -22,6 +23,15 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { getDashboardStats } from "./get-dashboard-stats";
+
+/**
+ * 21:00 on June 15 in Denver is already 03:00 on June 16 in UTC, so `now`'s
+ * own UTC calendar day is the 16th while the user's day is still the 15th.
+ * A supply expiring on the 15th is `soon` for the user and `expired` for the
+ * raw instant — which is what makes the boundary tests below able to fail.
+ */
+const EVENING_IN_DENVER = new Date("2026-06-16T03:00:00.000Z");
+const EXPIRES_TODAY_IN_DENVER = new Date("2026-06-15T00:00:00.000Z");
 
 function supply(overrides: Record<string, unknown> = {}) {
   return {
@@ -104,5 +114,46 @@ describe("getDashboardStats — supply counts", () => {
     ]);
     expect(stats.supplies.expiredCount).toBe(1);
     expect(stats.supplies.expiringSoonCount).toBe(1);
+  });
+});
+
+describe("getDashboardStats — the expiry timezone boundary", () => {
+  it("resolves today from the SETTINGS timezone, not the raw instant", async () => {
+    // expiredCount and expiringSoonCount are the numbers the user reads
+    // first. A caller handing `new Date()` straight to expiryStatus — the
+    // regression this phase spent a fix round preventing — would report
+    // expired: 1, soon: 0 here. Nothing else in the suite covered this path.
+    vi.useFakeTimers();
+    vi.setSystemTime(EVENING_IN_DENVER);
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "America/Denver",
+      expiryWarningDays: 90,
+    });
+    mocks.findSupplies.mockResolvedValue([
+      supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.supplies.expiringSoonCount).toBe(1);
+    expect(stats.supplies.expiredCount).toBe(0);
+    // The negative control: the verdict a bypassed helper would produce.
+    expect(expiryStatus(EXPIRES_TODAY_IN_DENVER, EVENING_IN_DENVER, 90)).toBe(
+      "expired",
+    );
+  });
+
+  it("resolves today from the host timezone when no timezone is saved", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(EVENING_IN_DENVER);
+    mocks.findAppSettings.mockResolvedValue(null);
+    mocks.findSupplies.mockResolvedValue([
+      supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.supplies.expiringSoonCount).toBe(1);
+    expect(stats.supplies.expiredCount).toBe(0);
   });
 });
