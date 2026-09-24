@@ -7,6 +7,9 @@ import {
   type ExportFormat,
   type ExportPreset,
   parseExportOptionsFromSearchParams,
+  hasNfaPaperwork,
+  nfaClassLabel,
+  nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
@@ -17,7 +20,16 @@ function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
 }
 
-type FirearmExportRecord = {
+/** The paperwork group as it comes off a firearm or an accessory row. */
+type NfaPaperworkRecord = {
+  nfaTransferMethod: string | null;
+  nfaControlNumber: string | null;
+  nfaApprovalDate: Date | null;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string | null;
+};
+
+type FirearmExportRecord = NfaPaperworkRecord & {
   id: string;
   name: string;
   manufacturer: string | null;
@@ -25,6 +37,7 @@ type FirearmExportRecord = {
   caliber: string | null;
   serialNumber: string | null;
   type: string | null;
+  nfaClass: string | null;
   acquisitionDate: Date | null;
   purchasePrice: number | null;
   currentValue: number | null;
@@ -32,7 +45,7 @@ type FirearmExportRecord = {
   imageUrl: string | null;
 };
 
-type AccessoryExportRecord = {
+type AccessoryExportRecord = NfaPaperworkRecord & {
   id: string;
   name: string;
   manufacturer: string | null;
@@ -44,6 +57,60 @@ type AccessoryExportRecord = {
   notes: string | null;
   imageUrl: string | null;
 };
+
+/**
+ * How the firearm is regulated, as its own column beside the platform.
+ *
+ * An SBR is a RIFLE by platform and an SBR by law, and a claims reader needs
+ * both: the platform describes the item, the class describes the paperwork it
+ * must have. One column reporting "the class, falling back to the platform"
+ * answered neither question reliably — a machine gun's PDW-ness appeared in no
+ * renderer at all, and every Title I row and every accessory read as if its
+ * platform were an NFA class.
+ *
+ * Emitted as the stored token (SBR, MACHINE_GUN, NONE), matching the raw
+ * platform tokens the category column has always carried. The two human
+ * renderers turn it into a label; JSON and CSV keep the token.
+ */
+function firearmExportNfaClass(firearm: Pick<FirearmExportRecord, "nfaClass">): string {
+  return (firearm.nfaClass ?? "").trim().toUpperCase();
+}
+
+/**
+ * The five paperwork columns, shared by firearm and accessory rows.
+ *
+ * Two of them are withheld by the export's own options:
+ *
+ * nfaControlNumber unless serials are included — it identifies a registered
+ * item as precisely as a serial number does, and a user who excluded serials
+ * asked not to publish identifiers. It is blanked and keeps its key, which is
+ * exactly what the export does to serialNumber: the rationale for gating it
+ * was "as precisely as a serial", so the mechanism matches the rationale. That
+ * also keeps the CSV header stable between two exports of the same armory and
+ * spares every consumer an optional property to narrow.
+ *
+ * nfaTaxPaid unless values are included — it is a dollar amount, and an export
+ * that hides every purchase price and replacement value while printing a $200
+ * tax stamp is not honouring the toggle the user set. It is nulled rather than
+ * dropped, exactly like purchasePrice and replacementValue, which are the
+ * columns it belongs with.
+ *
+ * The remaining three are neither identifiers nor amounts and ride
+ * unconditionally.
+ */
+function nfaPaperworkColumns(
+  record: NfaPaperworkRecord,
+  includeControlNumber: boolean,
+  includeValue: boolean
+) {
+  return {
+    nfaTransferMethod: record.nfaTransferMethod ?? "",
+    nfaControlNumber: includeControlNumber ? (record.nfaControlNumber ?? "") : "",
+    nfaApprovalDate: toISODate(record.nfaApprovalDate),
+    nfaTaxPaid: includeValue ? (record.nfaTaxPaid ?? null) : null,
+    nfaRegisteredTo: record.nfaRegisteredTo ?? "",
+  };
+}
 
 type ExportDocumentRecord = {
   id: string;
@@ -302,10 +369,28 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   }
 
   payload.items.forEach((item, index) => {
+    // Type is the platform / accessory type; Class is the NFA class and is
+    // printed only where there is one, because "Class: N/A" on every Title I
+    // row and every accessory is what made the old single column read wrong
+    // (`Class: PISTOL`, `Class: OPTIC`). Labels rather than tokens here and in
+    // the NFA line below: this is the renderer an adjuster reads, and the app's
+    // own detail pages already show "Form 4 (transfer)".
+    const classLabel = nfaClassLabel(item.nfaClass);
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
+    // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
+    // line under every Title I item would double the page count to say nothing.
+    // Control reads N/A when serials are excluded, matching the Serial field
+    // above rather than inventing a third convention for a withheld value.
+    if (hasNfaPaperwork(item)) {
+      pushWrapped(
+        lines,
+        `NFA: ${nfaTransferMethodLabel(item.nfaTransferMethod) || "N/A"} | Control: ${item.nfaControlNumber || "N/A"} | Approved: ${item.nfaApprovalDate || "N/A"} | Tax: ${item.nfaTaxPaid ?? "N/A"} | Registered To: ${item.nfaRegisteredTo || "N/A"}`,
+        "   "
+      );
+    }
     if (item.imageUrl) pushWrapped(lines, `Image Ref: ${item.imageUrl}`, "   ");
   });
 
@@ -372,6 +457,12 @@ export async function GET(request: NextRequest) {
         caliber: true,
         serialNumber: true,
         type: true,
+        nfaClass: true,
+        nfaTransferMethod: true,
+        nfaControlNumber: true,
+        nfaApprovalDate: true,
+        nfaTaxPaid: true,
+        nfaRegisteredTo: true,
         acquisitionDate: true,
         purchasePrice: true,
         currentValue: true,
@@ -388,6 +479,11 @@ export async function GET(request: NextRequest) {
         model: true,
         type: true,
         caliber: true,
+        nfaTransferMethod: true,
+        nfaControlNumber: true,
+        nfaApprovalDate: true,
+        nfaTaxPaid: true,
+        nfaRegisteredTo: true,
         acquisitionDate: true,
         purchasePrice: true,
         notes: true,
@@ -446,6 +542,7 @@ export async function GET(request: NextRequest) {
           itemId: firearm.id,
           entityType: "FIREARM" as const,
           category: firearm.type || "",
+          nfaClass: firearmExportNfaClass(firearm),
           manufacturer: firearm.manufacturer || "",
           model: firearm.model || firearm.name,
           caliber: firearm.caliber || "",
@@ -465,6 +562,11 @@ export async function GET(request: NextRequest) {
             ? firearm.currentValue == null && firearm.purchasePrice == null
             : false,
           notes: firearm.notes ?? "",
+          ...nfaPaperworkColumns(
+            firearm,
+            exportOptions.includeSerialNumbers,
+            exportOptions.includeValue
+          ),
         };
       }),
       ...accessories.map((accessory) => {
@@ -476,6 +578,9 @@ export async function GET(request: NextRequest) {
           itemId: accessory.id,
           entityType: "ACCESSORY" as const,
           category: accessory.type || "",
+          // An accessory has no class column on its model. Blank, not NONE:
+          // "not applicable", as against a firearm's "Title I".
+          nfaClass: "",
           manufacturer: accessory.manufacturer || "",
           model: accessory.model || accessory.name,
           caliber: accessory.caliber || "",
@@ -493,6 +598,11 @@ export async function GET(request: NextRequest) {
           missingPhoto: exportOptions.includeImages ? !hasPhoto : false,
           missingValue: exportOptions.includeValue ? accessory.purchasePrice == null : false,
           notes: accessory.notes ?? "",
+          ...nfaPaperworkColumns(
+            accessory,
+            exportOptions.includeSerialNumbers,
+            exportOptions.includeValue
+          ),
         };
       }),
     ];

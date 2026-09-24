@@ -39,11 +39,20 @@ vi.mock("@/lib/prisma", () => ({
 import { GET } from "./route";
 
 // The generated PDF draws each line as an uncompressed `(text) Tj` operator, so
-// the text it actually puts on the page can be read straight back out.
+// the text it actually puts on the page can be read straight back out. The
+// backslash escapes the PDF syntax requires around parentheses are undone here,
+// so a label like "Form 4 (transfer)" reads as the page shows it.
 function extractPdfText(pdf: string): string {
   return Array.from(pdf.matchAll(/\((.*)\) Tj/g))
-    .map((match) => match[1])
+    .map((match) => match[1].replace(/\\([()\\])/g, "$1"))
     .join("\n");
+}
+
+// A paperwork line is long enough to wrap across two drawn lines, and the wrap
+// indents the continuation — so an assertion about a whole logical line reads
+// the text with line breaks and indentation collapsed to single spaces.
+function extractPdfFlatText(pdf: string): string {
+  return extractPdfText(pdf).replace(/\s+/g, " ");
 }
 
 describe("GET /api/exports/full-armory", () => {
@@ -507,5 +516,353 @@ describe("GET /api/exports/full-armory", () => {
     expect(csv.length).toBeGreaterThan(0);
     expect(csv).toContain("summary");
     expect(csv).toContain("generatedAt");
+  });
+
+  // ─── NFA class and paperwork ────────────────────────────────────────────
+  // An SBR is a rifle by platform and an SBR by law, and a claims export has
+  // to say both: `category` carries the platform, `nfaClass` carries the
+  // class. They were one column briefly, which erased a machine gun's
+  // platform and made every Title I row and every accessory read as though
+  // its platform were an NFA class.
+
+  const documentedSbr = {
+    id: "firearm-sbr",
+    name: "Short Carbine",
+    manufacturer: "Acme",
+    model: "M4 SBR",
+    caliber: "5.56",
+    serialNumber: "SBR-0001",
+    type: "RIFLE",
+    nfaClass: "SBR",
+    mgRegistry: null,
+    nfaTransferMethod: "FORM_1",
+    nfaControlNumber: "2024-12345",
+    nfaApprovalDate: new Date("2024-06-10T00:00:00.000Z"),
+    nfaTaxPaid: 200,
+    nfaRegisteredTo: "Jane Q Owner",
+    acquisitionDate: new Date("2025-01-15T00:00:00.000Z"),
+    purchasePrice: 1200,
+    currentValue: 1450,
+    notes: "Primary",
+    imageUrl: null,
+  };
+
+  const documentedSuppressor = {
+    id: "accessory-can",
+    name: "House Can",
+    manufacturer: "QuietCo",
+    model: "CAN-1",
+    type: "SUPPRESSOR",
+    caliber: "5.56",
+    nfaTransferMethod: "FORM_4",
+    nfaControlNumber: "SUP-98765",
+    nfaApprovalDate: new Date("2025-02-20T00:00:00.000Z"),
+    nfaTaxPaid: 200,
+    nfaRegisteredTo: "Jane Q Owner",
+    acquisitionDate: null,
+    purchasePrice: 900,
+    notes: null,
+    imageUrl: null,
+  };
+
+  it("reports an SBR's platform and its class in separate columns", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    // Both facts, each in its own column — neither standing in for the other.
+    expect(json.items[0].category).toBe("RIFLE");
+    expect(json.items[0].nfaClass).toBe("SBR");
+    expect(json.items[0].nfaClass).not.toBe("RIFLE");
+  });
+
+  it("keeps the platform for a machine gun, an AOW and a Title I pistol while reporting each class", async () => {
+    mocks.findFirearms.mockResolvedValue([
+      { ...documentedSbr, id: "firearm-mg", type: "PDW", nfaClass: "MACHINE_GUN", mgRegistry: "TRANSFERABLE" },
+      { ...documentedSbr, id: "firearm-aow", type: "SHOTGUN", nfaClass: "AOW" },
+      {
+        ...documentedSbr,
+        id: "firearm-title1",
+        type: "PISTOL",
+        nfaClass: "NONE",
+        nfaTransferMethod: null,
+        nfaControlNumber: null,
+        nfaApprovalDate: null,
+        nfaTaxPaid: null,
+        nfaRegisteredTo: null,
+      },
+    ]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.items.map((item: { category: string }) => item.category)).toEqual([
+      // The platform survives on every row — this is what the single column
+      // erased: a select-fire PDW appeared in no renderer as a PDW.
+      "PDW",
+      "SHOTGUN",
+      "PISTOL",
+      // the beforeEach accessory
+      "OPTIC",
+    ]);
+    expect(json.items.map((item: { nfaClass: string }) => item.nfaClass)).toEqual([
+      "MACHINE_GUN",
+      "AOW",
+      "NONE",
+      // An accessory has no class column on its model: blank, not NONE.
+      "",
+    ]);
+  });
+
+  // Prisma is mocked here, so a `select` that omits a column still returns it.
+  // Without this assertion every paperwork test below would pass against a
+  // query that never asks the database for the columns.
+  it("asks the database for the class and paperwork columns", async () => {
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    await GET(request);
+
+    expect(mocks.findFirearms.mock.calls[0][0].select).toMatchObject({
+      nfaClass: true,
+      nfaTransferMethod: true,
+      nfaControlNumber: true,
+      nfaApprovalDate: true,
+      nfaTaxPaid: true,
+      nfaRegisteredTo: true,
+    });
+    expect(mocks.findAccessories.mock.calls[0][0].select).toMatchObject({
+      nfaTransferMethod: true,
+      nfaControlNumber: true,
+      nfaApprovalDate: true,
+      nfaTaxPaid: true,
+      nfaRegisteredTo: true,
+    });
+  });
+
+  it("exports the five paperwork columns for a documented firearm", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.items[0]).toMatchObject({
+      category: "RIFLE",
+      nfaClass: "SBR",
+      nfaTransferMethod: "FORM_1",
+      nfaControlNumber: "2024-12345",
+      nfaApprovalDate: "2024-06-10",
+      nfaTaxPaid: 200,
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+  });
+
+  it("exports the five paperwork columns for a documented suppressor", async () => {
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.items[1]).toMatchObject({
+      entityType: "ACCESSORY",
+      category: "SUPPRESSOR",
+      nfaClass: "",
+      nfaTransferMethod: "FORM_4",
+      nfaControlNumber: "SUP-98765",
+      nfaApprovalDate: "2025-02-20",
+      nfaTaxPaid: 200,
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+  });
+
+  it("leaves the paperwork columns empty for an item with no paperwork", async () => {
+    const request = new NextRequest("http://localhost/api/exports/full-armory");
+    const json = await (await GET(request)).json();
+
+    expect(json.items[0]).toMatchObject({
+      nfaTransferMethod: "",
+      nfaControlNumber: "",
+      nfaApprovalDate: "",
+      nfaTaxPaid: null,
+      nfaRegisteredTo: "",
+    });
+  });
+
+  // The control number identifies a registered item as precisely as a serial
+  // does, so it is gated behind includeSerialNumbers. The other three fields
+  // are neither identifiers nor amounts and ride unconditionally.
+  it("blanks nfaControlNumber but keeps its key when serials are excluded, exactly as it treats a serial", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const withSerials = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?includeSerialNumbers=true"))
+    ).json();
+    expect(withSerials.items[0].nfaControlNumber).toBe("2024-12345");
+    expect(withSerials.items[1].nfaControlNumber).toBe("SUP-98765");
+
+    const withoutSerials = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?includeSerialNumbers=false"))
+    ).json();
+    // Blanked with the key present — the same withholding mechanism the serial
+    // uses, which is the rationale the gate was justified with. This pins the
+    // two against each other so the asymmetry cannot come back.
+    expect("nfaControlNumber" in withoutSerials.items[0]).toBe(true);
+    expect("nfaControlNumber" in withoutSerials.items[1]).toBe(true);
+    expect(withoutSerials.items[0].nfaControlNumber).toBe("");
+    expect(withoutSerials.items[1].nfaControlNumber).toBe("");
+    expect("serialNumber" in withoutSerials.items[0]).toBe(true);
+    expect(withoutSerials.items[0].serialNumber).toBe("");
+    expect(JSON.stringify(withoutSerials)).not.toContain("2024-12345");
+    expect(JSON.stringify(withoutSerials)).not.toContain("SUP-98765");
+    expect(JSON.stringify(withoutSerials)).not.toContain("SBR-0001");
+
+    // The other three survive the exclusion, plus the tax, which travels with
+    // includeValue instead.
+    expect(withoutSerials.items[0]).toMatchObject({
+      nfaTransferMethod: "FORM_1",
+      nfaApprovalDate: "2024-06-10",
+      nfaTaxPaid: 200,
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+    expect(withoutSerials.items[1]).toMatchObject({
+      nfaTransferMethod: "FORM_4",
+      nfaApprovalDate: "2025-02-20",
+      nfaTaxPaid: 200,
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+  });
+
+  // The tax stamp is a dollar amount, so it belongs to includeValue, not to
+  // includeSerialNumbers. An export that hid every purchase price and
+  // replacement value while printing a $200 stamp ignored the toggle the user
+  // set.
+  it("withholds nfaTaxPaid when values are excluded, in every renderer", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const json = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?includeValue=false"))
+    ).json();
+
+    // Nulled, not dropped — the same treatment as the two value columns it
+    // travels with.
+    expect(json.items[0].nfaTaxPaid).toBeNull();
+    expect(json.items[1].nfaTaxPaid).toBeNull();
+    expect(json.items[0].purchasePrice).toBeNull();
+    expect(json.items[0].replacementValue).toBeNull();
+    expect("nfaTaxPaid" in json.items[0]).toBe(true);
+
+    // The rest of the paperwork is not an amount and survives.
+    expect(json.items[0]).toMatchObject({
+      nfaTransferMethod: "FORM_1",
+      nfaControlNumber: "2024-12345",
+      nfaApprovalDate: "2024-06-10",
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+
+    const csv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv&includeValue=false"))
+    ).text();
+    const header = csv.split("\n")[0].split(",");
+    const taxIndex = header.indexOf("nfaTaxPaid");
+    expect(taxIndex).toBeGreaterThan(-1);
+    // No fixture value in this file contains a comma, so a naive split lines
+    // up with the header.
+    const inventoryRows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
+    expect(inventoryRows).toHaveLength(2);
+    for (const row of inventoryRows) {
+      expect(row.split(",")[taxIndex]).toBe("");
+    }
+
+    const pdf = extractPdfFlatText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeValue=false"))
+      ).text()
+    );
+    expect(pdf).toContain("Tax: N/A");
+    expect(pdf).not.toContain("Tax: 200");
+    // The line still prints, so the reader still learns the item is registered.
+    expect(pdf).toContain("NFA: Form 1 (make)");
+  });
+
+  it("carries the class and paperwork into the CSV, and the control number column only with serials", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const csv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))
+    ).text();
+    const header = csv.split("\n")[0].split(",");
+
+    expect(header).toContain("nfaClass");
+    expect(header).toContain("nfaTransferMethod");
+    expect(header).toContain("nfaControlNumber");
+    expect(header).toContain("nfaApprovalDate");
+    expect(header).toContain("nfaTaxPaid");
+    expect(header).toContain("nfaRegisteredTo");
+    // Raw tokens in the CSV: machine consumers parse these, not labels.
+    expect(csv).toContain("SBR");
+    expect(csv).toContain("FORM_1");
+    expect(csv).toContain("2024-12345");
+    expect(csv).toContain("SUP-98765");
+    expect(csv).toContain("Jane Q Owner");
+
+    const redactedCsv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv&includeSerialNumbers=false"))
+    ).text();
+
+    // The header keeps its shape between two exports of the same armory —
+    // serialNumber has always stayed and been blanked, and the control number
+    // now matches it rather than changing the CSV's columns.
+    const redactedHeader = redactedCsv.split("\n")[0].split(",");
+    expect(redactedHeader).toContain("nfaControlNumber");
+    expect(redactedHeader).toContain("serialNumber");
+    expect(redactedHeader).toEqual(header);
+    expect(redactedCsv).not.toContain("2024-12345");
+    expect(redactedCsv).not.toContain("SUP-98765");
+    expect(redactedCsv).toContain("FORM_1");
+    expect(redactedCsv).toContain("Jane Q Owner");
+  });
+
+  it("prints the class and paperwork in the PDF, and never the withheld control number", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const text = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+
+    // Platform and class both printed, and the class as the label the app's
+    // own detail pages show rather than the internal token.
+    expect(text).toContain("1. FIREARM Acme M4 SBR | Type: RIFLE | Class: SBR");
+    expect(text).toContain("NFA: Form 1 (make) | Control: 2024-12345 | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
+    // An accessory has no NFA class, so the PDF prints no Class at all rather
+    // than labelling its type one.
+    expect(text).toContain("2. ACCESSORY QuietCo CAN-1 | Type: SUPPRESSOR | Serial:");
+    expect(text).not.toContain("Class: SUPPRESSOR");
+    expect(text).toContain("NFA: Form 4 (transfer) | Control: SUP-98765 | Approved: 2025-02-20 | Tax: 200 | Registered To: Jane Q Owner");
+
+    const redacted = extractPdfFlatText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeSerialNumbers=false"))
+      ).text()
+    );
+
+    expect(redacted).not.toContain("2024-12345");
+    expect(redacted).not.toContain("SUP-98765");
+    // The line stays, so the reader still learns the item is registered.
+    expect(redacted).toContain("NFA: Form 1 (make) | Control: N/A | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
+  });
+
+  it("prints no NFA line in the PDF for an item with no paperwork", async () => {
+    const text = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+
+    // A Title I firearm: its platform, and no Class line at all — the old
+    // single column printed "Class: RIFLE" here, which is not an NFA class.
+    expect(text).toContain("1. FIREARM Acme M4 | Type: RIFLE | Serial:");
+    expect(text).not.toContain("Class:");
+    expect(text).not.toContain("NFA:");
   });
 });

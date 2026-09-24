@@ -35,6 +35,14 @@ model Firearm {
   // MgRegistry: TRANSFERABLE | PRE_SAMPLE | POST_SAMPLE
   // Only meaningful when nfaClass = MACHINE_GUN; cleared server-side otherwise.
   mgRegistry      String?
+  // NFA paperwork. All nullable, and cleared server-side when nfaClass is NONE
+  // or the transfer method is FORM_4473 (a 4473 transfer has no stamp).
+  // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
+  nfaTransferMethod String?
+  nfaControlNumber  String?
+  nfaApprovalDate   DateTime?
+  nfaTaxPaid        Float?
+  nfaRegisteredTo   String?
   acquisitionDate DateTime
   purchasePrice   Float?
   currentValue    Float?
@@ -143,6 +151,14 @@ model Accessory {
   replacementIntervalDays Int?
 
   batteryChangeLogs      BatteryChangeLog[]
+
+  // NFA paperwork. Applies when type = SUPPRESSOR; cleared server-side otherwise.
+  // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
+  nfaTransferMethod      String?
+  nfaControlNumber       String?
+  nfaApprovalDate        DateTime?
+  nfaTaxPaid             Float?
+  nfaRegisteredTo        String?
 
   createdAt              DateTime        @default(now())
   updatedAt              DateTime        @updatedAt

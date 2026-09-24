@@ -5,6 +5,13 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
 import ImagePicker from "@/components/shared/ImagePicker";
+import {
+  NfaFieldset,
+  EMPTY_NFA_FIELDSET_VALUE,
+  type NfaFieldsetValue,
+  type NfaFieldsetField,
+} from "@/components/shared/NfaFieldset";
+import { toISODate } from "@/lib/date";
 import { ArrowLeft, Save, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
@@ -30,6 +37,11 @@ interface Accessory {
   replacementIntervalDays: number | null;
   roundCount: number;
   quantity: number;
+  nfaTransferMethod: string | null;
+  nfaControlNumber: string | null;
+  nfaApprovalDate: string | null;
+  nfaTaxPaid: number | null;
+  nfaRegisteredTo: string | null;
 }
 
 function toDateInputValue(dateStr: string | null): string {
@@ -59,9 +71,17 @@ export default function EditAccessoryPage() {
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
+  const [type, setType] = useState("");
+  const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
+    EMPTY_NFA_FIELDSET_VALUE,
+  );
 
   const [priorRounds, setPriorRounds] = useState("");
   const [priorRoundsNote, setPriorRoundsNote] = useState("");
+
+  function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
+    setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
+  }
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
     c.toLowerCase().includes(caliberInput.toLowerCase()),
@@ -80,6 +100,14 @@ export default function EditAccessoryPage() {
           setCaliberInput(data.caliber ?? "");
           setImageUrl(data.imageUrl ?? "");
           setQuantity(String(data.quantity ?? 1));
+          setType(data.type ?? "");
+          setNfaPaperwork({
+            nfaTransferMethod: data.nfaTransferMethod ?? "",
+            nfaControlNumber: data.nfaControlNumber ?? "",
+            nfaApprovalDate: toISODate(data.nfaApprovalDate),
+            nfaTaxPaid: data.nfaTaxPaid != null ? String(data.nfaTaxPaid) : "",
+            nfaRegisteredTo: data.nfaRegisteredTo ?? "",
+          });
         }
         setDataLoading(false);
       })
@@ -106,6 +134,11 @@ export default function EditAccessoryPage() {
       type: data.get("type") as string,
       caliber: caliberInput || null,
       quantity: data.get("quantity") as string,
+      nfaTransferMethod: nfaPaperwork.nfaTransferMethod || null,
+      nfaControlNumber: nfaPaperwork.nfaControlNumber || null,
+      nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
+      nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
+      nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       purchasePrice: data.get("purchasePrice")
         ? Number(data.get("purchasePrice"))
@@ -311,6 +344,7 @@ export default function EditAccessoryPage() {
                   id="type"
                   name="type"
                   defaultValue={accessory.type}
+                  onChange={(event) => setType(event.target.value)}
                   className={INPUT_CLASS}
                 >
                   <option value="">Select slot type...</option>
@@ -380,6 +414,14 @@ export default function EditAccessoryPage() {
                 How many identical items this record stands for.
               </p>
             </div>
+
+            {type === "SUPPRESSOR" && (
+              <NfaFieldset
+                variant="suppressor"
+                value={nfaPaperwork}
+                onChange={handleNfaFieldChange}
+              />
+            )}
           </fieldset>
 
           {/* Acquisition */}

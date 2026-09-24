@@ -92,12 +92,98 @@ describe("POST /api/firearms", () => {
     );
   });
 
-  it("defaults nfaClass to NONE and mgRegistry to null when no class info is sent", async () => {
+  it("defaults nfaClass to NONE and nulls every paperwork/registry field when no NFA info is sent", async () => {
     await POST(postRequest({ name: "New Rifle" }));
 
     expect(mocks.create).toHaveBeenCalledTimes(1);
     const { data } = mocks.create.mock.calls[0][0];
     expect(data.nfaClass).toBe("NONE");
     expect(data.mgRegistry).toBeNull();
+    expect(data.nfaTransferMethod).toBeNull();
+    expect(data.nfaControlNumber).toBeNull();
+    expect(data.nfaApprovalDate).toBeNull();
+    expect(data.nfaTaxPaid).toBeNull();
+    expect(data.nfaRegisteredTo).toBeNull();
+  });
+
+  // The fallback for an unrecognised class is NONE, and NONE clears mgRegistry
+  // and all five paperwork columns — so a typo'd enum must not be accepted and
+  // quietly turned into a Title I firearm.
+  // The accessory side has had this test since the paperwork landed; the
+  // firearm side did not, and the behaviour is just as surprising: paperwork
+  // sent for a Title I firearm is accepted with a 201 and silently discarded.
+  it("discards paperwork sent for a Title I firearm rather than storing it", async () => {
+    await POST(
+      postRequest({
+        name: "Plain Rifle",
+        type: "RIFLE",
+        nfaTransferMethod: "FORM_4",
+        nfaControlNumber: "12345",
+        nfaApprovalDate: "2024-03-12",
+        nfaTaxPaid: 200,
+        nfaRegisteredTo: "Doe Family Trust",
+      }),
+    );
+
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.nfaClass).toBe("NONE");
+    expect(data.nfaTransferMethod).toBeNull();
+    expect(data.nfaControlNumber).toBeNull();
+    expect(data.nfaApprovalDate).toBeNull();
+    expect(data.nfaTaxPaid).toBeNull();
+    expect(data.nfaRegisteredTo).toBeNull();
+  });
+
+  it("upper-cases a lower-case platform so the Title I sections can match it", async () => {
+    await POST(postRequest({ name: "Plain Rifle", type: " rifle " }));
+
+    expect(mocks.create.mock.calls[0][0].data.type).toBe("RIFLE");
+  });
+
+  it("rejects an out-of-enum nfaClass with a 400 rather than defaulting it to NONE", async () => {
+    const response = await POST(
+      postRequest({
+        name: "Suppressed SBR",
+        nfaClass: "SHORT_BARRELED_RIFLE",
+        nfaTransferMethod: "FORM_4",
+        nfaControlNumber: "12345",
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("Invalid nfaClass");
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("still defaults an absent or explicitly null nfaClass to NONE", async () => {
+    await POST(postRequest({ name: "Plain Rifle", nfaClass: null }));
+
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(mocks.create.mock.calls[0][0].data.nfaClass).toBe("NONE");
+  });
+
+  it("stores every paperwork field for a full Form 4 SBR", async () => {
+    await POST(
+      postRequest({
+        name: "Suppressed SBR",
+        nfaClass: "SBR",
+        nfaTransferMethod: "FORM_4",
+        nfaControlNumber: "12345",
+        nfaApprovalDate: "2024-03-12",
+        nfaTaxPaid: 200,
+        nfaRegisteredTo: "Doe Family Trust",
+      }),
+    );
+
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.nfaClass).toBe("SBR");
+    expect(data.mgRegistry).toBeNull(); // only machine guns
+    expect(data.nfaTransferMethod).toBe("FORM_4");
+    expect(data.nfaControlNumber).toBe("12345");
+    expect(data.nfaTaxPaid).toBe(200);
+    expect(data.nfaRegisteredTo).toBe("Doe Family Trust");
+    expect(data.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
   });
 });

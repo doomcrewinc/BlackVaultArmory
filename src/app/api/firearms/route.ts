@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeFirearmClassFields } from "@/lib/nfa";
+import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
+import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
 function normalizeString(value: unknown) {
@@ -104,6 +105,11 @@ export async function POST(request: NextRequest) {
       initialRoundCount,
       nfaClass,
       mgRegistry,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
     } = body;
 
     const normalizedName = normalizeString(name);
@@ -114,7 +120,33 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const classFields = normalizeFirearmClassFields({ nfaClass, mgRegistry });
+    // A class that is present but not a known one is rejected rather than
+    // normalized: the fallback for an unrecognised class is NONE, and NONE
+    // clears mgRegistry and the whole paperwork group. Absent (or explicitly
+    // null) still means "no class supplied" and defaults to NONE, which loses
+    // nothing.
+    if (
+      nfaClass !== undefined &&
+      nfaClass !== null &&
+      !isKnownNfaClass(nfaClass)
+    ) {
+      return NextResponse.json(
+        {
+          error: `Invalid nfaClass. Supported values: ${NFA_CLASSES.join(", ")}`,
+        },
+        { status: 400 },
+      );
+    }
+
+    const nfaFields = normalizeFirearmNfaFields({
+      nfaClass,
+      mgRegistry,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
+    });
 
     const firearm = await prisma.firearm.create({
       data: {
@@ -130,8 +162,8 @@ export async function POST(request: NextRequest) {
               .join(",") || null
           : null,
         serialNumber: normalizeString(serialNumber) || fallbackSerialNumber(),
-        type: normalizeString(type) || "UNSPECIFIED",
-        ...classFields,
+        type: normalizeTypeToken(type) || "UNSPECIFIED",
+        ...nfaFields,
         // No date supplied: fall back to UTC's today. The server cannot know the
         // viewer's timezone (in Docker this container is UTC), so the client sends
         // the date whenever it has one.

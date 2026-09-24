@@ -7,6 +7,12 @@ import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
 import { parseOptionalNumber } from "@/lib/forms";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
+import {
+  NfaFieldset,
+  EMPTY_NFA_FIELDSET_VALUE,
+  type NfaFieldsetValue,
+  type NfaFieldsetField,
+} from "@/components/shared/NfaFieldset";
 import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
@@ -22,6 +28,14 @@ export default function NewAccessoryPage() {
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
+  const [type, setType] = useState("");
+  const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
+    EMPTY_NFA_FIELDSET_VALUE,
+  );
+
+  function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
+    setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
+  }
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
     c.toLowerCase().includes(caliberInput.toLowerCase()),
@@ -46,6 +60,11 @@ export default function NewAccessoryPage() {
       type: data.get("type") as string,
       caliber: caliberInput || null,
       quantity: data.get("quantity") as string,
+      nfaTransferMethod: nfaPaperwork.nfaTransferMethod || null,
+      nfaControlNumber: nfaPaperwork.nfaControlNumber || null,
+      nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
+      nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
+      nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       purchasePrice: parseOptionalNumber(data.get("purchasePrice")),
       notes: (data.get("notes") as string) || null,
@@ -187,7 +206,13 @@ export default function NewAccessoryPage() {
                 <label htmlFor="type" className={LABEL_CLASS}>
                   Type / Slot
                 </label>
-                <select id="type" name="type" className={INPUT_CLASS}>
+                <select
+                  id="type"
+                  name="type"
+                  value={type}
+                  onChange={(event) => setType(event.target.value)}
+                  className={INPUT_CLASS}
+                >
                   <option value="">Select slot type...</option>
                   {SLOT_TYPES.map((t) => (
                     <option key={t} value={t}>
@@ -258,6 +283,14 @@ export default function NewAccessoryPage() {
                 How many identical items this record stands for.
               </p>
             </div>
+
+            {type === "SUPPRESSOR" && (
+              <NfaFieldset
+                variant="suppressor"
+                value={nfaPaperwork}
+                onChange={handleNfaFieldChange}
+              />
+            )}
           </fieldset>
 
           {/* Acquisition */}

@@ -3,6 +3,12 @@
 import { useState, useRef, useEffect } from "react";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
+import {
+  NfaFieldset,
+  EMPTY_NFA_FIELDSET_VALUE,
+  type NfaFieldsetValue,
+  type NfaFieldsetField,
+} from "@/components/shared/NfaFieldset";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -36,7 +42,14 @@ export default function NewFirearmPage() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [nfaClass, setNfaClass] = useState("NONE");
   const [mgRegistry, setMgRegistry] = useState("");
+  const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
+    EMPTY_NFA_FIELDSET_VALUE,
+  );
   const caliberRef = useRef<HTMLDivElement>(null);
+
+  function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
+    setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
+  }
   const acquisitionDateRef = useRef<HTMLInputElement>(null);
 
   const filteredCalibers = COMMON_CALIBERS.filter((c) =>
@@ -89,6 +102,11 @@ export default function NewFirearmPage() {
       type: data.get("type") as string,
       nfaClass,
       mgRegistry: mgRegistry || null,
+      nfaTransferMethod: nfaPaperwork.nfaTransferMethod || null,
+      nfaControlNumber: nfaPaperwork.nfaControlNumber || null,
+      nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
+      nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
+      nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
       acquisitionDate: data.get("acquisitionDate") as string,
       purchasePrice: data.get("purchasePrice")
         ? Number(data.get("purchasePrice"))
@@ -344,6 +362,14 @@ export default function NewFirearmPage() {
                 </div>
               )}
             </div>
+
+            {nfaClass !== "NONE" && (
+              <NfaFieldset
+                variant="firearm"
+                value={nfaPaperwork}
+                onChange={handleNfaFieldChange}
+              />
+            )}
 
             {/* Compatible Calibers Tag Input */}
             <div>

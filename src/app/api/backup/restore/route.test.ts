@@ -120,7 +120,10 @@ describe("POST /api/backup/restore", () => {
     expect(json.success).toBe(true);
     expect(created("gear")).toBeUndefined();
     expect(json.counts.gear).toBe(0);
-    expect(created("firearm")).toEqual([{ id: "firearms-1" }]);
+    // toMatchObject, not toEqual: restore re-derives the NFA group on every
+    // firearm row, so the row it writes also carries nfaClass and the five
+    // paperwork columns (see the normalization test below).
+    expect(created("firearm")).toMatchObject([{ id: "firearms-1" }]);
     expect(created("document")).toEqual([{ id: "documents-1" }]);
     expect(created("maintenanceLog")).toEqual([{ id: "maintenanceLogs-1" }]);
   });
@@ -137,11 +140,163 @@ describe("POST /api/backup/restore", () => {
     const json = await response.json();
 
     expect(response.status).toBe(200);
-    expect(created("firearm")).toEqual([{ id: "firearms-1" }]);
+    expect(created("firearm")).toMatchObject([{ id: "firearms-1" }]);
     expect(created("maintenanceLog")).toBeUndefined();
     expect(json.counts.maintenanceLogs).toBe(0);
     expect(json.counts.batteryChangeLogs).toBe(0);
     expect(json.counts.dateNormalizationAudits).toBe(0);
+  });
+
+  // The clearing rules have to hold however a write arrives, and restore is a
+  // write path: it hands uploaded JSON to createMany with no validation beyond
+  // "is it an array". A hand-edited or foreign backup must not be able to
+  // reintroduce paperwork onto a Title I firearm.
+  it("clears paperwork carried by a Title I firearm in the payload", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        firearms: [
+          {
+            id: "firearms-1",
+            name: "Plain Rifle",
+            type: "RIFLE",
+            nfaClass: "NONE",
+            mgRegistry: "TRANSFERABLE",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "12345",
+            nfaApprovalDate: "2024-03-12T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("firearm") as Record<string, unknown>[];
+    expect(row.name).toBe("Plain Rifle");
+    expect(row.nfaClass).toBe("NONE");
+    expect(row.mgRegistry).toBeNull();
+    expect(row.nfaTransferMethod).toBeNull();
+    expect(row.nfaControlNumber).toBeNull();
+    expect(row.nfaApprovalDate).toBeNull();
+    expect(row.nfaTaxPaid).toBeNull();
+    expect(row.nfaRegisteredTo).toBeNull();
+  });
+
+  // The other side of that rule. An unknown class is not a hand-edited file:
+  // it is a backup from a later build that added an NFA class, which the
+  // category registry's catch-all section documents and accommodates.
+  // Coercing it to NONE would drop mgRegistry and all five paperwork columns
+  // on a data-recovery path — silently, and for input the write routes answer
+  // 400 for rather than perform.
+  it("leaves a firearm with an unknown nfaClass and its paperwork untouched", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        firearms: [
+          {
+            id: "firearms-1",
+            name: "Future Class Item",
+            type: "RIFLE",
+            nfaClass: "SHORT_BARRELED_SHOTGUN_MK2",
+            mgRegistry: "PRE_SAMPLE",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "12345",
+            nfaApprovalDate: "2024-03-12T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("firearm") as Record<string, unknown>[];
+    expect(row.nfaClass).toBe("SHORT_BARRELED_SHOTGUN_MK2");
+    expect(row.mgRegistry).toBe("PRE_SAMPLE");
+    expect(row.nfaTransferMethod).toBe("FORM_4");
+    expect(row.nfaControlNumber).toBe("12345");
+    expect(row.nfaTaxPaid).toBe(200);
+    expect(row.nfaRegisteredTo).toBe("Doe Family Trust");
+    // Verbatim, not re-derived: the date is still the string from the file.
+    expect(row.nfaApprovalDate).toBe("2024-03-12T00:00:00.000Z");
+  });
+
+  it("clears paperwork carried by a non-suppressor accessory in the payload", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        accessories: [
+          {
+            id: "accessories-1",
+            name: "Red Dot",
+            type: "OPTIC",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "SUP-1",
+            nfaApprovalDate: "2025-02-20T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("accessory") as Record<string, unknown>[];
+    expect(row.name).toBe("Red Dot");
+    expect(row.nfaTransferMethod).toBeNull();
+    expect(row.nfaControlNumber).toBeNull();
+    expect(row.nfaApprovalDate).toBeNull();
+    expect(row.nfaTaxPaid).toBeNull();
+    expect(row.nfaRegisteredTo).toBeNull();
+  });
+
+  it("restores a legitimate SBR and suppressor with their paperwork intact", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        firearms: [
+          {
+            id: "firearms-1",
+            name: "Short Carbine",
+            type: "RIFLE",
+            nfaClass: "SBR",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "12345",
+            nfaApprovalDate: "2024-03-12T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+        accessories: [
+          {
+            id: "accessories-1",
+            name: "House Can",
+            type: "SUPPRESSOR",
+            nfaTransferMethod: "FORM_4",
+            nfaControlNumber: "SUP-1",
+            nfaApprovalDate: "2025-02-20T00:00:00.000Z",
+            nfaTaxPaid: 200,
+            nfaRegisteredTo: "Doe Family Trust",
+          },
+        ],
+      }),
+    );
+
+    const [firearm] = created("firearm") as Record<string, unknown>[];
+    expect(firearm.nfaClass).toBe("SBR");
+    expect(firearm.nfaTransferMethod).toBe("FORM_4");
+    expect(firearm.nfaControlNumber).toBe("12345");
+    expect(firearm.nfaTaxPaid).toBe(200);
+    expect(firearm.nfaRegisteredTo).toBe("Doe Family Trust");
+    // A date-only column: the ISO string in the file comes back as the same
+    // UTC calendar day, not shifted.
+    expect((firearm.nfaApprovalDate as Date).toISOString().slice(0, 10)).toBe(
+      "2024-03-12",
+    );
+
+    const [accessory] = created("accessory") as Record<string, unknown>[];
+    expect(accessory.nfaTransferMethod).toBe("FORM_4");
+    expect(accessory.nfaControlNumber).toBe("SUP-1");
+    expect(accessory.nfaRegisteredTo).toBe("Doe Family Trust");
   });
 
   it("rejects a truncated payload with only firearms and deletes nothing", async () => {

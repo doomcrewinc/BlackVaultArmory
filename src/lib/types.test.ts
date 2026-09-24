@@ -7,6 +7,7 @@ import {
   NFA_CLASSES,
   NFA_CLASS_LABELS,
   UNSPECIFIED_FIREARM_TYPE,
+  normalizeTypeToken,
 } from "./types";
 
 describe("firearm enums", () => {
@@ -56,5 +57,33 @@ describe("nfa enums", () => {
       "PRE_SAMPLE",
       "POST_SAMPLE",
     ]);
+  });
+});
+
+// Eligibility for NFA paperwork is decided on an upper-cased type, while the
+// section filters match the stored token exactly — so the stored token has to
+// be upper-cased too, or the two disagree.
+describe("normalizeTypeToken", () => {
+  it("trims and upper-cases a supplied token", () => {
+    expect(normalizeTypeToken("  suppressor ")).toBe("SUPPRESSOR");
+    expect(normalizeTypeToken("rifle")).toBe("RIFLE");
+    expect(normalizeTypeToken("BOLT_ACTION")).toBe("BOLT_ACTION");
+  });
+
+  it("returns blank for anything that is not a usable string", () => {
+    expect(normalizeTypeToken("")).toBe("");
+    expect(normalizeTypeToken("   ")).toBe("");
+    expect(normalizeTypeToken(null)).toBe("");
+    expect(normalizeTypeToken(undefined)).toBe("");
+    expect(normalizeTypeToken(3)).toBe("");
+  });
+
+  it("leaves every known platform token unchanged", () => {
+    for (const token of FIREARM_TYPES) {
+      expect(normalizeTypeToken(token)).toBe(token);
+    }
+    expect(normalizeTypeToken(UNSPECIFIED_FIREARM_TYPE)).toBe(
+      UNSPECIFIED_FIREARM_TYPE,
+    );
   });
 });

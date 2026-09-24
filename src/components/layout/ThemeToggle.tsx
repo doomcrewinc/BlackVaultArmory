@@ -8,6 +8,7 @@ export function ThemeToggle() {
 
   return (
     <button
+      data-print-hide
       onClick={toggleTheme}
       aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
       className="fixed bottom-4 right-4 z-50 w-10 h-10 rounded-full

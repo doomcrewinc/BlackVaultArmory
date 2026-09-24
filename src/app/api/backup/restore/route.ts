@@ -3,6 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
+import {
+  isKnownNfaClass,
+  normalizeAccessoryNfaFields,
+  normalizeFirearmNfaFields,
+} from "@/lib/nfa";
 
 type WriteDelegate = {
   deleteMany: () => Promise<unknown>;
@@ -23,6 +28,57 @@ function isValidBackup(body: unknown): body is BackupBody {
   if (!b.meta || typeof (b.meta as Record<string, unknown>).version !== "string") return false;
   if (!REQUIRED_BACKUP_KEYS.every((key) => Array.isArray(b[key]))) return false;
   return BACKUP_MODELS.every(({ key }) => b[key] === undefined || Array.isArray(b[key]));
+}
+
+function isRowObject(row: unknown): row is Record<string, unknown> {
+  return typeof row === "object" && row !== null && !Array.isArray(row);
+}
+
+/**
+ * Re-derives the NFA group on the firearm and accessory rows of a backup.
+ *
+ * The spec requires the clearing rules to hold "however the write arrives",
+ * and restore is a write path: it hands uploaded JSON straight to createMany
+ * with no per-row validation beyond "is it an array". So a hand-edited or
+ * foreign backup carrying
+ * `{ nfaClass: "NONE", nfaTransferMethod: "FORM_4", nfaControlNumber: "12345" }`
+ * restored exactly that, and the row then showed a full NFA card on
+ * /vault/[id] and exported paperwork under a Title I platform.
+ *
+ * Running the same normalizers the write routes use makes the rules hold by
+ * construction rather than by trusting the file. Only the NFA group is
+ * touched; every other column is copied verbatim, because a restore is meant
+ * to be faithful and the rows it replaces came from a database these routes
+ * kept consistent.
+ *
+ * The SQLite→Postgres migrator deliberately does NOT do this: a faithful
+ * whole-row copy is its entire job, and it verifies the rows it wrote.
+ *
+ * A firearm whose stored class is not one THIS BUILD KNOWS is passed through
+ * untouched, class and paperwork alike. Normalizing it would coerce the class
+ * to NONE and take mgRegistry and all five paperwork columns with it —
+ * silently, on a data-recovery path, which is exactly the outcome the write
+ * routes now answer 400 for rather than perform. And it is not a
+ * hand-edited-file scenario: a backup written by a later build that added an
+ * NFA class is the case src/lib/categories.ts's catch-all section documents
+ * and deliberately accommodates ("a backup written by a later version that
+ * added a class this build lacks"). Phase 1 chose "visible in the wrong-ish
+ * place" over "silently altered"; restore now agrees with it. Backups whose
+ * classes this build understands are still normalized, which is the hole this
+ * function was written to close.
+ */
+function normalizeNfaGroups(rows: Record<string, unknown[]>): void {
+  rows.firearms = rows.firearms.map((row) => {
+    if (!isRowObject(row)) return row;
+    const classIsPresent = row.nfaClass !== undefined && row.nfaClass !== null;
+    if (classIsPresent && !isKnownNfaClass(row.nfaClass)) return row;
+    return { ...row, ...normalizeFirearmNfaFields(row) };
+  });
+  rows.accessories = rows.accessories.map((row) =>
+    isRowObject(row)
+      ? { ...row, ...normalizeAccessoryNfaFields(row.type, row) }
+      : row
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -46,6 +102,7 @@ export async function POST(request: NextRequest) {
   const rows: Record<string, unknown[]> = Object.fromEntries(
     BACKUP_MODELS.map(({ key }) => [key, (body[key] as unknown[] | undefined) ?? []])
   );
+  normalizeNfaGroups(rows);
 
   try {
     await prisma.$transaction(

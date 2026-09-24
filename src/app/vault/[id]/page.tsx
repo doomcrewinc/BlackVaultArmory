@@ -7,8 +7,10 @@ import { decryptField } from "@/lib/crypto";
 import {
   NFA_CLASS_LABELS,
   MG_REGISTRY_LABELS,
+  NFA_TRANSFER_METHOD_LABELS,
   type NfaClass,
   type MgRegistry,
+  type NfaTransferMethod,
 } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
@@ -29,6 +31,7 @@ import {
   Hash,
   FileText,
   TrendingUp,
+  Stamp,
 } from "lucide-react";
 
 const FIREARM_TYPE_LABELS: Record<string, string> = {
@@ -147,6 +150,13 @@ export default async function FirearmDetailPage({
   const imageFilename = firearm.imageUrl
     ? (firearm.imageUrl.split("/").pop() ?? "")
     : "";
+
+  const hasNfaPaperwork =
+    firearm.nfaTransferMethod != null ||
+    firearm.nfaControlNumber != null ||
+    firearm.nfaApprovalDate != null ||
+    firearm.nfaTaxPaid != null ||
+    firearm.nfaRegisteredTo != null;
 
   return (
     <div className="min-h-full">
@@ -310,6 +320,64 @@ export default async function FirearmDetailPage({
             </p>
           </div>
         </div>
+
+        {/* NFA Paperwork */}
+        {hasNfaPaperwork && (
+          <div className="bg-vault-surface border border-vault-border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Stamp className="w-4 h-4 text-vault-text-faint" />
+              <h3 className="text-xs font-semibold uppercase tracking-widest text-vault-text-muted">
+                NFA Paperwork
+              </h3>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Transfer Method
+                </p>
+                <p className="text-sm text-vault-text">
+                  {firearm.nfaTransferMethod
+                    ? (NFA_TRANSFER_METHOD_LABELS[
+                        firearm.nfaTransferMethod as NfaTransferMethod
+                      ] ?? firearm.nfaTransferMethod)
+                    : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Control Number
+                </p>
+                <p className="text-sm font-mono text-vault-text">
+                  {firearm.nfaControlNumber ?? "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Approval Date
+                </p>
+                <p className="text-sm text-vault-text">
+                  {formatDateOnly(firearm.nfaApprovalDate)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Tax Paid
+                </p>
+                <p className="text-sm font-mono text-vault-text">
+                  {formatCurrency(firearm.nfaTaxPaid)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+                  Registered To
+                </p>
+                <p className="text-sm text-vault-text">
+                  {firearm.nfaRegisteredTo ?? "—"}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Notes */}
         {firearm.notes && (
