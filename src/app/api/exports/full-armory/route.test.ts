@@ -723,6 +723,59 @@ describe("GET /api/exports/full-armory", () => {
     });
   });
 
+  // The tax stamp is a dollar amount, so it belongs to includeValue, not to
+  // includeSerialNumbers. An export that hid every purchase price and
+  // replacement value while printing a $200 stamp ignored the toggle the user
+  // set.
+  it("withholds nfaTaxPaid when values are excluded, in every renderer", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
+
+    const json = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?includeValue=false"))
+    ).json();
+
+    // Nulled, not dropped — the same treatment as the two value columns it
+    // travels with.
+    expect(json.items[0].nfaTaxPaid).toBeNull();
+    expect(json.items[1].nfaTaxPaid).toBeNull();
+    expect(json.items[0].purchasePrice).toBeNull();
+    expect(json.items[0].replacementValue).toBeNull();
+    expect("nfaTaxPaid" in json.items[0]).toBe(true);
+
+    // The rest of the paperwork is not an amount and survives.
+    expect(json.items[0]).toMatchObject({
+      nfaTransferMethod: "FORM_1",
+      nfaControlNumber: "2024-12345",
+      nfaApprovalDate: "2024-06-10",
+      nfaRegisteredTo: "Jane Q Owner",
+    });
+
+    const csv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv&includeValue=false"))
+    ).text();
+    const header = csv.split("\n")[0].split(",");
+    const taxIndex = header.indexOf("nfaTaxPaid");
+    expect(taxIndex).toBeGreaterThan(-1);
+    // No fixture value in this file contains a comma, so a naive split lines
+    // up with the header.
+    const inventoryRows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
+    expect(inventoryRows).toHaveLength(2);
+    for (const row of inventoryRows) {
+      expect(row.split(",")[taxIndex]).toBe("");
+    }
+
+    const pdf = extractPdfFlatText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeValue=false"))
+      ).text()
+    );
+    expect(pdf).toContain("Tax: N/A");
+    expect(pdf).not.toContain("Tax: 200");
+    // The line still prints, so the reader still learns the item is registered.
+    expect(pdf).toContain("NFA: Form 1 (make)");
+  });
+
   it("carries the class and paperwork into the CSV, and the control number column only with serials", async () => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
     mocks.findAccessories.mockResolvedValue([documentedSuppressor]);

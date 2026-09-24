@@ -55,6 +55,10 @@ export interface FullArmoryItemRow {
    * precisely as a serial number does: it is gated behind
    * includeSerialNumbers, and the key is omitted rather than blanked so the
    * CSV never grows a column the export does not answer.
+   *
+   * nfaTaxPaid is gated behind includeValue, like purchasePrice and
+   * replacementValue: it is a dollar amount, and it is nulled rather than
+   * dropped so the column keeps its shape.
    */
   nfaTransferMethod: string;
   nfaControlNumber?: string;

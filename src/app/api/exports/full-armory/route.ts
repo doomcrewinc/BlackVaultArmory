@@ -78,19 +78,32 @@ function firearmExportNfaClass(firearm: Pick<FirearmExportRecord, "nfaClass">): 
 /**
  * The five paperwork columns, shared by firearm and accessory rows.
  *
- * nfaControlNumber is withheld unless serials are included: it identifies a
- * registered item as precisely as a serial number does, and a user who
- * excluded serials asked not to publish identifiers. The key is dropped
- * rather than blanked, so the CSV header never advertises a column this
- * export declines to answer. The other four are not identifiers and ride
+ * Two of them are withheld by the export's own options:
+ *
+ * nfaControlNumber unless serials are included — it identifies a registered
+ * item as precisely as a serial number does, and a user who excluded serials
+ * asked not to publish identifiers. The key is dropped rather than blanked, so
+ * the CSV header never advertises a column this export declines to answer.
+ *
+ * nfaTaxPaid unless values are included — it is a dollar amount, and an export
+ * that hides every purchase price and replacement value while printing a $200
+ * tax stamp is not honouring the toggle the user set. It is nulled rather than
+ * dropped, exactly like purchasePrice and replacementValue, which are the
+ * columns it belongs with.
+ *
+ * The remaining three are neither identifiers nor amounts and ride
  * unconditionally.
  */
-function nfaPaperworkColumns(record: NfaPaperworkRecord, includeControlNumber: boolean) {
+function nfaPaperworkColumns(
+  record: NfaPaperworkRecord,
+  includeControlNumber: boolean,
+  includeValue: boolean
+) {
   return {
     nfaTransferMethod: record.nfaTransferMethod ?? "",
     ...(includeControlNumber ? { nfaControlNumber: record.nfaControlNumber ?? "" } : {}),
     nfaApprovalDate: toISODate(record.nfaApprovalDate),
-    nfaTaxPaid: record.nfaTaxPaid ?? null,
+    nfaTaxPaid: includeValue ? (record.nfaTaxPaid ?? null) : null,
     nfaRegisteredTo: record.nfaRegisteredTo ?? "",
   };
 }
@@ -556,7 +569,11 @@ export async function GET(request: NextRequest) {
             ? firearm.currentValue == null && firearm.purchasePrice == null
             : false,
           notes: firearm.notes ?? "",
-          ...nfaPaperworkColumns(firearm, exportOptions.includeSerialNumbers),
+          ...nfaPaperworkColumns(
+            firearm,
+            exportOptions.includeSerialNumbers,
+            exportOptions.includeValue
+          ),
         };
       }),
       ...accessories.map((accessory) => {
@@ -588,7 +605,11 @@ export async function GET(request: NextRequest) {
           missingPhoto: exportOptions.includeImages ? !hasPhoto : false,
           missingValue: exportOptions.includeValue ? accessory.purchasePrice == null : false,
           notes: accessory.notes ?? "",
-          ...nfaPaperworkColumns(accessory, exportOptions.includeSerialNumbers),
+          ...nfaPaperworkColumns(
+            accessory,
+            exportOptions.includeSerialNumbers,
+            exportOptions.includeValue
+          ),
         };
       }),
     ];
