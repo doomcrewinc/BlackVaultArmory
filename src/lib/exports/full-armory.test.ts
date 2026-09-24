@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  nfaClassLabel,
+  nfaTransferMethodLabel,
   selectVisualEvidence,
   type FullArmoryExportOptions,
   type FullArmoryGearRow,
@@ -43,6 +45,7 @@ function itemRow(
     nfaApprovalDate: "",
     nfaTaxPaid: null,
     nfaRegisteredTo: "",
+    nfaClass: "NONE",
     ...overrides,
   };
 }
@@ -125,5 +128,38 @@ describe("selectVisualEvidence", () => {
     );
 
     expect(images.map((image) => image.id)).toEqual(["item:firearm-1"]);
+  });
+});
+
+// The two human-facing renderers (the print preview and the PDF an adjuster
+// reads) show these labels; JSON and CSV keep the raw tokens.
+describe("nfaClassLabel", () => {
+  it("labels a real class the way the detail pages do", () => {
+    expect(nfaClassLabel("SBR")).toBe("SBR");
+    expect(nfaClassLabel("MACHINE_GUN")).toBe("Machine Gun");
+    expect(nfaClassLabel("DESTRUCTIVE_DEVICE")).toBe("Destructive Device");
+  });
+
+  it("treats NONE and blank alike as nothing to report", () => {
+    expect(nfaClassLabel("NONE")).toBe("");
+    expect(nfaClassLabel("")).toBe("");
+    expect(nfaClassLabel("  ")).toBe("");
+  });
+
+  it("falls back to the raw token rather than hiding an unknown class", () => {
+    expect(nfaClassLabel("MYSTERY_CLASS")).toBe("MYSTERY_CLASS");
+  });
+});
+
+describe("nfaTransferMethodLabel", () => {
+  it("labels each transfer method", () => {
+    expect(nfaTransferMethodLabel("FORM_1")).toBe("Form 1 (make)");
+    expect(nfaTransferMethodLabel("FORM_4")).toBe("Form 4 (transfer)");
+    expect(nfaTransferMethodLabel("FORM_4473")).toBe("4473 (no stamp)");
+  });
+
+  it("returns blank for no method and the raw token for an unknown one", () => {
+    expect(nfaTransferMethodLabel("")).toBe("");
+    expect(nfaTransferMethodLabel("FORM_9")).toBe("FORM_9");
   });
 });

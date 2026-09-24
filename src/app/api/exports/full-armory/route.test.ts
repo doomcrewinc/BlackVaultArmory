@@ -39,11 +39,20 @@ vi.mock("@/lib/prisma", () => ({
 import { GET } from "./route";
 
 // The generated PDF draws each line as an uncompressed `(text) Tj` operator, so
-// the text it actually puts on the page can be read straight back out.
+// the text it actually puts on the page can be read straight back out. The
+// backslash escapes the PDF syntax requires around parentheses are undone here,
+// so a label like "Form 4 (transfer)" reads as the page shows it.
 function extractPdfText(pdf: string): string {
   return Array.from(pdf.matchAll(/\((.*)\) Tj/g))
-    .map((match) => match[1])
+    .map((match) => match[1].replace(/\\([()\\])/g, "$1"))
     .join("\n");
+}
+
+// A paperwork line is long enough to wrap across two drawn lines, and the wrap
+// indents the continuation — so an assertion about a whole logical line reads
+// the text with line breaks and indentation collapsed to single spaces.
+function extractPdfFlatText(pdf: string): string {
+  return extractPdfText(pdf).replace(/\s+/g, " ");
 }
 
 describe("GET /api/exports/full-armory", () => {
@@ -510,9 +519,11 @@ describe("GET /api/exports/full-armory", () => {
   });
 
   // ─── NFA class and paperwork ────────────────────────────────────────────
-  // An SBR is a rifle by platform and an SBR by law. An insurance or claims
-  // export that calls it a RIFLE misstates the one fact that matters most
-  // about it, so `category` reports the class wherever a record has one.
+  // An SBR is a rifle by platform and an SBR by law, and a claims export has
+  // to say both: `category` carries the platform, `nfaClass` carries the
+  // class. They were one column briefly, which erased a machine gun's
+  // platform and made every Title I row and every accessory read as though
+  // its platform were an NFA class.
 
   const documentedSbr = {
     id: "firearm-sbr",
@@ -554,17 +565,19 @@ describe("GET /api/exports/full-armory", () => {
     imageUrl: null,
   };
 
-  it("reports an SBR's class as its exported category, not its platform", async () => {
+  it("reports an SBR's platform and its class in separate columns", async () => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
 
     const request = new NextRequest("http://localhost/api/exports/full-armory");
     const json = await (await GET(request)).json();
 
-    expect(json.items[0].category).toBe("SBR");
-    expect(json.items[0].category).not.toBe("RIFLE");
+    // Both facts, each in its own column — neither standing in for the other.
+    expect(json.items[0].category).toBe("RIFLE");
+    expect(json.items[0].nfaClass).toBe("SBR");
+    expect(json.items[0].nfaClass).not.toBe("RIFLE");
   });
 
-  it("reports a machine gun and an AOW by class, and a Title I pistol by platform", async () => {
+  it("keeps the platform for a machine gun, an AOW and a Title I pistol while reporting each class", async () => {
     mocks.findFirearms.mockResolvedValue([
       { ...documentedSbr, id: "firearm-mg", type: "PDW", nfaClass: "MACHINE_GUN", mgRegistry: "TRANSFERABLE" },
       { ...documentedSbr, id: "firearm-aow", type: "SHOTGUN", nfaClass: "AOW" },
@@ -585,11 +598,20 @@ describe("GET /api/exports/full-armory", () => {
     const json = await (await GET(request)).json();
 
     expect(json.items.map((item: { category: string }) => item.category)).toEqual([
-      "MACHINE_GUN",
-      "AOW",
+      // The platform survives on every row — this is what the single column
+      // erased: a select-fire PDW appeared in no renderer as a PDW.
+      "PDW",
+      "SHOTGUN",
       "PISTOL",
       // the beforeEach accessory
       "OPTIC",
+    ]);
+    expect(json.items.map((item: { nfaClass: string }) => item.nfaClass)).toEqual([
+      "MACHINE_GUN",
+      "AOW",
+      "NONE",
+      // An accessory has no class column on its model: blank, not NONE.
+      "",
     ]);
   });
 
@@ -624,7 +646,8 @@ describe("GET /api/exports/full-armory", () => {
     const json = await (await GET(request)).json();
 
     expect(json.items[0]).toMatchObject({
-      category: "SBR",
+      category: "RIFLE",
+      nfaClass: "SBR",
       nfaTransferMethod: "FORM_1",
       nfaControlNumber: "2024-12345",
       nfaApprovalDate: "2024-06-10",
@@ -642,6 +665,7 @@ describe("GET /api/exports/full-armory", () => {
     expect(json.items[1]).toMatchObject({
       entityType: "ACCESSORY",
       category: "SUPPRESSOR",
+      nfaClass: "",
       nfaTransferMethod: "FORM_4",
       nfaControlNumber: "SUP-98765",
       nfaApprovalDate: "2025-02-20",
@@ -708,12 +732,15 @@ describe("GET /api/exports/full-armory", () => {
     ).text();
     const header = csv.split("\n")[0].split(",");
 
+    expect(header).toContain("nfaClass");
     expect(header).toContain("nfaTransferMethod");
     expect(header).toContain("nfaControlNumber");
     expect(header).toContain("nfaApprovalDate");
     expect(header).toContain("nfaTaxPaid");
     expect(header).toContain("nfaRegisteredTo");
+    // Raw tokens in the CSV: machine consumers parse these, not labels.
     expect(csv).toContain("SBR");
+    expect(csv).toContain("FORM_1");
     expect(csv).toContain("2024-12345");
     expect(csv).toContain("SUP-98765");
     expect(csv).toContain("Jane Q Owner");
@@ -735,16 +762,21 @@ describe("GET /api/exports/full-armory", () => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
     mocks.findAccessories.mockResolvedValue([documentedSuppressor]);
 
-    const text = extractPdfText(
+    const text = extractPdfFlatText(
       await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
     );
 
-    expect(text).toContain("1. FIREARM Acme M4 SBR | Class: SBR");
-    expect(text).toContain("NFA: FORM_1 | Control: 2024-12345 | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
-    expect(text).toContain("2. ACCESSORY QuietCo CAN-1 | Class: SUPPRESSOR");
-    expect(text).toContain("NFA: FORM_4 | Control: SUP-98765 | Approved: 2025-02-20 | Tax: 200 | Registered To: Jane Q Owner");
+    // Platform and class both printed, and the class as the label the app's
+    // own detail pages show rather than the internal token.
+    expect(text).toContain("1. FIREARM Acme M4 SBR | Type: RIFLE | Class: SBR");
+    expect(text).toContain("NFA: Form 1 (make) | Control: 2024-12345 | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
+    // An accessory has no NFA class, so the PDF prints no Class at all rather
+    // than labelling its type one.
+    expect(text).toContain("2. ACCESSORY QuietCo CAN-1 | Type: SUPPRESSOR | Serial:");
+    expect(text).not.toContain("Class: SUPPRESSOR");
+    expect(text).toContain("NFA: Form 4 (transfer) | Control: SUP-98765 | Approved: 2025-02-20 | Tax: 200 | Registered To: Jane Q Owner");
 
-    const redacted = extractPdfText(
+    const redacted = extractPdfFlatText(
       await (
         await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeSerialNumbers=false"))
       ).text()
@@ -753,15 +785,18 @@ describe("GET /api/exports/full-armory", () => {
     expect(redacted).not.toContain("2024-12345");
     expect(redacted).not.toContain("SUP-98765");
     // The line stays, so the reader still learns the item is registered.
-    expect(redacted).toContain("NFA: FORM_1 | Control: N/A | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
+    expect(redacted).toContain("NFA: Form 1 (make) | Control: N/A | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
   });
 
   it("prints no NFA line in the PDF for an item with no paperwork", async () => {
-    const text = extractPdfText(
+    const text = extractPdfFlatText(
       await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
     );
 
-    expect(text).toContain("1. FIREARM Acme M4 | Class: RIFLE");
+    // A Title I firearm: its platform, and no Class line at all — the old
+    // single column printed "Class: RIFLE" here, which is not an NFA class.
+    expect(text).toContain("1. FIREARM Acme M4 | Type: RIFLE | Serial:");
+    expect(text).not.toContain("Class:");
     expect(text).not.toContain("NFA:");
   });
 });

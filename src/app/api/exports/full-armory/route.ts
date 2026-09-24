@@ -7,6 +7,8 @@ import {
   type ExportFormat,
   type ExportPreset,
   parseExportOptionsFromSearchParams,
+  nfaClassLabel,
+  nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
@@ -56,19 +58,21 @@ type AccessoryExportRecord = NfaPaperworkRecord & {
 };
 
 /**
- * What the item legally is, which is the one thing a claims or insurance
- * reader cannot be told wrong. An SBR is a RIFLE by platform and an SBR by
- * law, and a select-fire PDW is a MACHINE_GUN; reporting the platform there
- * misstates the record. So the class wins wherever a firearm has one, and the
- * platform answers for a Title I firearm, which has no class to report.
+ * How the firearm is regulated, as its own column beside the platform.
  *
- * Emitted as the stored token (SBR, MACHINE_GUN, AOW), matching the raw
- * platform tokens this column has always carried.
+ * An SBR is a RIFLE by platform and an SBR by law, and a claims reader needs
+ * both: the platform describes the item, the class describes the paperwork it
+ * must have. One column reporting "the class, falling back to the platform"
+ * answered neither question reliably — a machine gun's PDW-ness appeared in no
+ * renderer at all, and every Title I row and every accessory read as if its
+ * platform were an NFA class.
+ *
+ * Emitted as the stored token (SBR, MACHINE_GUN, NONE), matching the raw
+ * platform tokens the category column has always carried. The two human
+ * renderers turn it into a label; JSON and CSV keep the token.
  */
-function firearmExportCategory(firearm: Pick<FirearmExportRecord, "nfaClass" | "type">): string {
-  const nfaClass = (firearm.nfaClass ?? "").trim().toUpperCase();
-  if (nfaClass && nfaClass !== "NONE") return nfaClass;
-  return firearm.type || "";
+function firearmExportNfaClass(firearm: Pick<FirearmExportRecord, "nfaClass">): string {
+  return (firearm.nfaClass ?? "").trim().toUpperCase();
 }
 
 /**
@@ -359,9 +363,16 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   }
 
   payload.items.forEach((item, index) => {
+    // Type is the platform / accessory type; Class is the NFA class and is
+    // printed only where there is one, because "Class: N/A" on every Title I
+    // row and every accessory is what made the old single column read wrong
+    // (`Class: PISTOL`, `Class: OPTIC`). Labels rather than tokens here and in
+    // the NFA line below: this is the renderer an adjuster reads, and the app's
+    // own detail pages already show "Form 4 (transfer)".
+    const classLabel = nfaClassLabel(item.nfaClass);
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Class: ${item.category || "N/A"} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
     // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
     // line under every Title I item would double the page count to say nothing.
@@ -370,7 +381,7 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     if (hasNfaPaperwork(item)) {
       pushWrapped(
         lines,
-        `NFA: ${item.nfaTransferMethod || "N/A"} | Control: ${item.nfaControlNumber || "N/A"} | Approved: ${item.nfaApprovalDate || "N/A"} | Tax: ${item.nfaTaxPaid ?? "N/A"} | Registered To: ${item.nfaRegisteredTo || "N/A"}`,
+        `NFA: ${nfaTransferMethodLabel(item.nfaTransferMethod) || "N/A"} | Control: ${item.nfaControlNumber || "N/A"} | Approved: ${item.nfaApprovalDate || "N/A"} | Tax: ${item.nfaTaxPaid ?? "N/A"} | Registered To: ${item.nfaRegisteredTo || "N/A"}`,
         "   "
       );
     }
@@ -524,7 +535,8 @@ export async function GET(request: NextRequest) {
         return {
           itemId: firearm.id,
           entityType: "FIREARM" as const,
-          category: firearmExportCategory(firearm),
+          category: firearm.type || "",
+          nfaClass: firearmExportNfaClass(firearm),
           manufacturer: firearm.manufacturer || "",
           model: firearm.model || firearm.name,
           caliber: firearm.caliber || "",
@@ -556,6 +568,9 @@ export async function GET(request: NextRequest) {
           itemId: accessory.id,
           entityType: "ACCESSORY" as const,
           category: accessory.type || "",
+          // An accessory has no class column on its model. Blank, not NONE:
+          // "not applicable", as against a firearm's "Title I".
+          nfaClass: "",
           manufacturer: accessory.manufacturer || "",
           model: accessory.model || accessory.name,
           caliber: accessory.caliber || "",

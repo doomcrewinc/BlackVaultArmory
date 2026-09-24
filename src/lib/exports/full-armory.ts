@@ -1,3 +1,10 @@
+import {
+  NFA_CLASS_LABELS,
+  NFA_TRANSFER_METHOD_LABELS,
+  type NfaClass,
+  type NfaTransferMethod,
+} from "@/lib/types";
+
 export type ExportPreset = "CLAIMS" | "BACKUP";
 export type ExportFormat = "csv" | "pdf";
 
@@ -13,6 +20,15 @@ export interface FullArmoryExportOptions {
 export interface FullArmoryItemRow {
   itemId: string;
   entityType: "FIREARM" | "ACCESSORY";
+  /**
+   * The platform for a firearm (RIFLE, PISTOL) or the type for an accessory
+   * (OPTIC, SUPPRESSOR). What the item IS, physically.
+   *
+   * It is deliberately NOT the NFA class: an SBR is a RIFLE by platform and an
+   * SBR by law, and a column that answered both questions erased one of them —
+   * a select-fire PDW's platform appeared in no renderer at all. The class has
+   * its own column below.
+   */
   category: string;
   manufacturer: string;
   model: string;
@@ -45,6 +61,13 @@ export interface FullArmoryItemRow {
   nfaApprovalDate: string;
   nfaTaxPaid: number | null;
   nfaRegisteredTo: string;
+  /**
+   * How the item is regulated, independent of `category`. The stored token
+   * (SBR, MACHINE_GUN, NONE) for a firearm; blank for an accessory, which has
+   * no class column on its model at all — blank means "not applicable" here,
+   * while a firearm says NONE for Title I.
+   */
+  nfaClass: string;
 }
 
 export interface FullArmoryAttachmentRow {
@@ -131,6 +154,30 @@ export interface VisualEvidenceImage {
   linkedItemId: string;
   linkedItemName: string;
   uploadedAt?: string;
+}
+
+/**
+ * The human labels for the two NFA enum columns, for the two human-facing
+ * renderers (the PDF an adjuster reads and the print preview). JSON and CSV
+ * keep the raw tokens their machine consumers parse.
+ *
+ * Both take the exported string rather than a narrowed union, because an
+ * export row carries whatever the column holds; anything unrecognised falls
+ * back to the raw token rather than being hidden.
+ */
+export function nfaClassLabel(token: string): string {
+  const key = token.trim().toUpperCase();
+  // NONE and blank both render as "no class to report": a Title I firearm and
+  // an accessory (which has no class column) are equally not NFA-classified,
+  // and the caller decides what a blank looks like ("—", or an omitted line).
+  if (!key || key === "NONE") return "";
+  return NFA_CLASS_LABELS[key as NfaClass] ?? token;
+}
+
+export function nfaTransferMethodLabel(token: string): string {
+  const key = token.trim().toUpperCase();
+  if (!key) return "";
+  return NFA_TRANSFER_METHOD_LABELS[key as NfaTransferMethod] ?? token;
 }
 
 const TRUE_VALUES = new Set(["1", "true", "yes", "on"]);

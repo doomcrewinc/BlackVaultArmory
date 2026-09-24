@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Printer, RefreshCw } from "lucide-react";
 import {
   buildExportQueryString,
+  nfaClassLabel,
+  nfaTransferMethodLabel,
   parseExportOptionsFromSearchParams,
   selectVisualEvidence,
   type FullArmoryExportResponse,
@@ -165,7 +167,8 @@ export default function FullArmoryPreviewPage() {
               <thead>
                 <tr className="border-b border-vault-border text-vault-text-faint">
                   <th className="py-2 pr-4 text-left">Type</th>
-                  <th className="py-2 pr-4 text-left">Class</th>
+                  <th className="py-2 pr-4 text-left">Platform</th>
+                  <th className="py-2 pr-4 text-left">NFA Class</th>
                   <th className="py-2 pr-4 text-left">Manufacturer</th>
                   <th className="py-2 pr-4 text-left">Model</th>
                   <th className="py-2 pr-4 text-left">Serial</th>
@@ -182,7 +185,7 @@ export default function FullArmoryPreviewPage() {
               <tbody>
                 {data.items.length === 0 ? (
                   <tr>
-                    <td className="py-3 text-vault-text-faint" colSpan={13}>
+                    <td className="py-3 text-vault-text-faint" colSpan={14}>
                       No inventory items included for this export.
                     </td>
                   </tr>
@@ -190,15 +193,18 @@ export default function FullArmoryPreviewPage() {
                   data.items.map((item) => (
                     <tr key={item.itemId} className="border-b border-vault-border/60">
                       <td className="py-2 pr-4">{item.entityType}</td>
-                      {/* The NFA class where the item has one, the platform otherwise —
-                          an SBR must not read as a plain RIFLE on a claims sheet. */}
+                      {/* Platform and class are separate columns: an SBR is a RIFLE by
+                          platform and an SBR by law, and a claims sheet needs both. The
+                          class cell shows the label the detail pages show, and a dash
+                          for a Title I firearm or an accessory, which has no class. */}
                       <td className="py-2 pr-4">{item.category || "—"}</td>
+                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || "—"}</td>
                       <td className="py-2 pr-4">{item.manufacturer || "—"}</td>
                       <td className="py-2 pr-4">{item.model || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.serialNumber || "—"}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.replacementValue)}</td>
-                      <td className="py-2 pr-4">{item.nfaTransferMethod || "—"}</td>
+                      <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
                       {/* Withheld with serials, so the payload has no key to read — the
                           dash is the same thing the Serial cell shows when hidden. */}
                       <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
