@@ -85,7 +85,7 @@ describe("getSupplySectionItems", () => {
       supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
     ]);
 
-    const items = await getSupplySectionItems({});
+    const { items } = await getSupplySectionItems({});
 
     expect(items[0].expiry).toBe("soon");
     // The negative control: the verdict a bypassed helper would produce.
@@ -104,7 +104,7 @@ describe("getSupplySectionItems", () => {
       supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
     ]);
 
-    const items = await getSupplySectionItems({});
+    const { items } = await getSupplySectionItems({});
 
     expect(items[0].expiry).toBe("soon");
   });
@@ -121,7 +121,7 @@ describe("getSupplySectionItems", () => {
       supply({ expirationDate: new Date("2026-07-15T00:00:00.000Z") }),
     ]);
 
-    const items = await getSupplySectionItems({});
+    const { items } = await getSupplySectionItems({});
 
     expect(items[0].expiry).toBe("fine");
   });
@@ -132,7 +132,7 @@ describe("getSupplySectionItems", () => {
       supply({ id: "ok", quantity: 9, lowStockAlert: 5 }),
     ]);
 
-    const items = await getSupplySectionItems({});
+    const { items } = await getSupplySectionItems({});
 
     expect(items.map((item) => [item.id, item.isLow])).toEqual([
       ["low", true],
@@ -141,5 +141,49 @@ describe("getSupplySectionItems", () => {
     // The list page badges this; a BATTERY row in the Food & Water catch-all
     // is only honest if the category survives the mapping.
     expect(items[0].category).toBe("BATTERY");
+  });
+
+  it("reports the timezone as unconfigured when AppSettings has none", async () => {
+    // What the list page's expiry-timezone notice is driven by: the verdicts
+    // above were resolved in the host's zone, and the page has to say so.
+    mocks.findAppSettings.mockResolvedValue(null);
+    mocks.findSupplies.mockResolvedValue([supply()]);
+
+    const result = await getSupplySectionItems({});
+
+    expect(result.timezoneConfigured).toBe(false);
+  });
+
+  it("reports the timezone as unconfigured when it is stored blank", async () => {
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "",
+      expiryWarningDays: null,
+    });
+
+    const result = await getSupplySectionItems({});
+
+    expect(result.timezoneConfigured).toBe(false);
+  });
+
+  it("reports the timezone as configured once one is saved", async () => {
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "America/Denver",
+      expiryWarningDays: null,
+    });
+
+    const result = await getSupplySectionItems({});
+
+    expect(result.timezoneConfigured).toBe(true);
+  });
+
+  it("reports the flag from the SAME AppSettings read that resolved the verdicts", async () => {
+    // The flag and the verdicts it describes cannot drift, because the page
+    // does not re-read AppSettings for it — one query serves both.
+    mocks.findAppSettings.mockResolvedValue(null);
+    mocks.findSupplies.mockResolvedValue([supply()]);
+
+    await getSupplySectionItems({});
+
+    expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
   });
 });

@@ -19,6 +19,18 @@ export interface SupplySectionItem {
   expiry: ExpiryStatus;
 }
 
+export interface SupplySectionResult {
+  items: SupplySectionItem[];
+  /**
+   * False while AppSettings.timezone is unset — the same read that resolved
+   * the expiry verdicts above, handed on so the list page can say the
+   * verdicts came from the server's timezone. Returned from here rather than
+   * re-read by the page: one AppSettings query per request, and the flag
+   * cannot drift from the verdicts it describes.
+   */
+  timezoneConfigured: boolean;
+}
+
 /**
  * Loads every Supply matching `where` for a section page, with `isLowStock`
  * and `expiryStatus` already resolved server-side.
@@ -33,7 +45,7 @@ export interface SupplySectionItem {
  */
 export async function getSupplySectionItems(
   where: object,
-): Promise<SupplySectionItem[]> {
+): Promise<SupplySectionResult> {
   const settings = await prisma.appSettings.findUnique({
     where: { id: "singleton" },
   });
@@ -47,15 +59,18 @@ export async function getSupplySectionItems(
     orderBy: { name: "asc" },
   });
 
-  return supplies.map((supply) => ({
-    id: supply.id,
-    name: supply.name,
-    brand: supply.brand,
-    category: supply.category,
-    quantity: supply.quantity,
-    unit: supply.unit,
-    storageLocation: supply.storageLocation,
-    isLow: isLowStock(supply),
-    expiry: expiryStatus(supply.expirationDate, today, warningDays),
-  }));
+  return {
+    items: supplies.map((supply) => ({
+      id: supply.id,
+      name: supply.name,
+      brand: supply.brand,
+      category: supply.category,
+      quantity: supply.quantity,
+      unit: supply.unit,
+      storageLocation: supply.storageLocation,
+      isLow: isLowStock(supply),
+      expiry: expiryStatus(supply.expirationDate, today, warningDays),
+    })),
+    timezoneConfigured: Boolean(settings?.timezone),
+  };
 }

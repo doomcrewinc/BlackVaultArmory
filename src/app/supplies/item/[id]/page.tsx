@@ -16,6 +16,7 @@ import {
 import { supplySectionForItem } from "@/lib/categories";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { DeleteSupplyButton } from "./DeleteSupplyButton";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
@@ -37,6 +38,9 @@ async function getSupplyWithExpiry(id: string) {
     supply,
     isLow: isLowStock(supply),
     expiry: expiryStatus(supply.expirationDate, today, warningDays),
+    // Same read, handed on: this page renders Expired / Expiring Soon badges
+    // too, so it carries the same notice as the list pages and the dashboard.
+    timezoneConfigured: Boolean(settings?.timezone),
   };
 }
 
@@ -76,7 +80,7 @@ export default async function SupplyDetailPage({
     notFound();
   }
 
-  const { supply, isLow, expiry } = result;
+  const { supply, isLow, expiry, timezoneConfigured } = result;
   const section = supplySectionForItem({ category: supply.category });
   const backHref = section
     ? `/${section.group === "prep" ? "prep" : "gear"}/${section.slug}`
@@ -107,6 +111,8 @@ export default async function SupplyDetailPage({
       </div>
 
       <div className="p-4 sm:p-6 space-y-6">
+        <SupplyTimezoneNotice timezoneConfigured={timezoneConfigured} />
+
         {/* Title block */}
         <div>
           <div className="flex flex-wrap items-center gap-2 mb-1">

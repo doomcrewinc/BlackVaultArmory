@@ -22,9 +22,9 @@ export default async function PrepSectionPage({
   const supplyWhere = supplyWhereForSection(section);
   if (!supplyWhere) notFound();
 
-  let items: Awaited<ReturnType<typeof getSupplySectionItems>>;
+  let result: Awaited<ReturnType<typeof getSupplySectionItems>>;
   try {
-    items = await getSupplySectionItems(supplyWhere);
+    result = await getSupplySectionItems(supplyWhere);
   } catch {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
@@ -43,7 +43,8 @@ export default async function PrepSectionPage({
 
   return (
     <SupplyClientPage
-      items={items}
+      items={result.items}
+      timezoneConfigured={result.timezoneConfigured}
       heading={section.label}
       subheading={section.description}
     />

@@ -21,6 +21,7 @@ import { StatCard } from "@/components/shared/StatCard";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SUPPLY_UNIT_LABELS, type SupplyUnit } from "@/lib/supply";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import {
   Shield,
   Crosshair,
@@ -32,7 +33,6 @@ import {
   GripVertical,
   Settings2,
   Settings,
-  Info,
   X,
   Package,
   Boxes,
@@ -69,7 +69,6 @@ const DEFAULT_ORDER = [
   "ammo-summary",
 ];
 const STORAGE_KEY = "vault-dashboard-layout";
-const TIMEZONE_NOTICE_KEY = "bv-supply-timezone-notice-dismissed";
 
 interface AmmoStockItem {
   id: string;
@@ -567,56 +566,26 @@ function SupplyAlertsWidget({
   items,
   expiredCount,
   expiringSoonCount,
-  showTimezoneNotice,
-  onDismissTimezoneNotice,
+  timezoneConfigured,
 }: {
   items: SupplyAlertItem[];
   expiredCount: number;
   expiringSoonCount: number;
   /**
-   * True only while AppSettings.timezone is unset, the notice is undismissed
-   * AND the client has mounted. The mount gate is what keeps this
-   * hydration-safe: it is false on the server and on the first client render,
-   * so the two agree (the same reason LegacySmgNotice renders null until its
-   * count resolves).
+   * From the server. The notice owns its own mount gate and its own
+   * localStorage dismissal — shared with the section and detail pages, so one
+   * dismissal covers every surface that shows an expiry badge.
    */
-  showTimezoneNotice: boolean;
-  onDismissTimezoneNotice: () => void;
+  timezoneConfigured: boolean;
 }) {
   const totalAlerts = items.length + expiredCount + expiringSoonCount;
 
   return (
     <section>
-      {showTimezoneNotice && (
-        // Expiry verdicts are resolved server-side. With no timezone saved,
-        // todayForExpiry falls back to the host's zone — which inside a
-        // container is UTC, so a user west of UTC can see a supply flip to
-        // EXPIRED an evening early. Nothing silent can fix that case; the
-        // user has to set the zone, so the app says so instead of hiding it.
-        <div className="mb-3 flex items-start gap-3 rounded-md border border-[#F5A623]/40 bg-[#F5A623]/10 px-4 py-3">
-          <Info
-            className="mt-0.5 h-4 w-4 shrink-0 text-[#F5A623]"
-            aria-hidden="true"
-          />
-          <div className="min-w-0 flex-1 text-sm text-vault-text">
-            <p>
-              Expiry dates use the server&apos;s timezone until you set your
-              own, so they can read a day early or late.
-            </p>
-            <Link href="/settings" className="text-[#00C2FF] hover:underline">
-              Set your timezone
-            </Link>
-          </div>
-          <button
-            type="button"
-            onClick={onDismissTimezoneNotice}
-            aria-label="Dismiss timezone notice"
-            className="shrink-0 text-vault-text-muted hover:text-vault-text"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
+      <SupplyTimezoneNotice
+        timezoneConfigured={timezoneConfigured}
+        className="mb-3"
+      />
       <div className="flex items-center gap-2 mb-3">
         <AlertTriangle className="w-4 h-4 text-[#F5A623]" />
         <h2 className="text-sm font-semibold tracking-widest uppercase text-[#F5A623]">
@@ -877,7 +846,6 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   const [mounted, setMounted] = useState(false);
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const [settingsHintDismissed, setSettingsHintDismissed] = useState(false);
-  const [timezoneNoticeDismissed, setTimezoneNoticeDismissed] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
@@ -913,9 +881,6 @@ export function DashboardClient({ data }: { data: DashboardData }) {
     setMounted(true);
     setWelcomeDismissed(localStorage.getItem("bv-welcome-dismissed") === "1");
     setSettingsHintDismissed(localStorage.getItem("bv-settings-hint-shown") === "1");
-    setTimezoneNoticeDismissed(
-      localStorage.getItem(TIMEZONE_NOTICE_KEY) === "1"
-    );
     // Restore saved widget order now that we're safely on the client
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -984,19 +949,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
             items={liveData.lowStockSupplies}
             expiredCount={liveData.expiredSupplyCount}
             expiringSoonCount={liveData.expiringSoonSupplyCount}
-            showTimezoneNotice={
-              mounted &&
-              !liveData.supplyTimezoneConfigured &&
-              !timezoneNoticeDismissed
-            }
-            onDismissTimezoneNotice={() => {
-              setTimezoneNoticeDismissed(true);
-              try {
-                localStorage.setItem(TIMEZONE_NOTICE_KEY, "1");
-              } catch {
-                // A browser refusing storage still gets it for this view.
-              }
-            }}
+            timezoneConfigured={liveData.supplyTimezoneConfigured}
           />
         );
       case "recent":

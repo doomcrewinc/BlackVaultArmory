@@ -11,10 +11,17 @@ import {
   type SupplyCategory,
   type SupplyUnit,
 } from "@/lib/supply";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import type { SupplySectionItem } from "./getSupplySectionItems";
 
 interface Props {
   items: SupplySectionItem[];
+  /**
+   * From the server. Drives the expiry-timezone notice below; defaults to
+   * true so a caller that does not know renders no notice rather than a
+   * misleading one.
+   */
+  timezoneConfigured?: boolean;
   heading?: string;
   subheading?: string;
 }
@@ -88,6 +95,7 @@ function hasBadges(expiry: ExpiryStatus, isLow: boolean): boolean {
 
 export function SupplyClientPage({
   items,
+  timezoneConfigured = true,
   heading = "SUPPLIES",
   subheading,
 }: Props) {
@@ -110,6 +118,15 @@ export function SupplyClientPage({
       />
 
       <div className="p-4 sm:p-6">
+        {/* Only where the badges it explains actually appear: the empty state
+            below renders no LOW/SOON/EXPIRED badge, so there is nothing for
+            the notice to qualify. */}
+        {items.length > 0 && (
+          <SupplyTimezoneNotice
+            timezoneConfigured={timezoneConfigured}
+            className="mb-4"
+          />
+        )}
         {items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
