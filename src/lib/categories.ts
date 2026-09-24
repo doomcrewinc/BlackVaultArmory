@@ -1,6 +1,15 @@
 import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
-export type SectionGroup = "vault" | "gear" | "prep";
+/**
+ * Every nav group, in sidebar order. A `readonly` tuple rather than a bare
+ * union so tests (and anything else) can WALK the groups instead of
+ * re-listing them — the reachability test in categories.test.ts derives the
+ * routes it checks from this and CATEGORY_SECTIONS, so a group or section
+ * added here is checked without anyone remembering to update a list.
+ */
+export const SECTION_GROUPS = ["vault", "gear", "prep"] as const;
+
+export type SectionGroup = (typeof SECTION_GROUPS)[number];
 export type SectionSource = "firearm" | "accessory" | "gear" | "supply";
 
 export type FirearmRow = { type: string; nfaClass: string };
@@ -376,6 +385,28 @@ export function sectionBySlug(slug: string): CategorySection | undefined {
 
 export function sectionsForGroup(group: SectionGroup): CategorySection[] {
   return CATEGORY_SECTIONS.filter((section) => section.group === group);
+}
+
+/**
+ * The landing page for a nav group. Defined here, beside the registry, rather
+ * than typed into the sidebar: adding a group means adding a route, and the
+ * reachability test in categories.test.ts can only check that if it can
+ * derive the URL. `/vault` predates the registry and keeps its own path.
+ */
+export function groupHref(group: SectionGroup): string {
+  return `/${group}`;
+}
+
+/**
+ * The page listing one section's items. The vault's sections sit under
+ * /vault/category/<slug> for historical reasons; gear and prep sections sit
+ * directly under their group. Single source of truth for the sidebar, the
+ * section index pages and the reachability test.
+ */
+export function sectionHref(section: CategorySection): string {
+  return section.group === "vault"
+    ? `/vault/category/${section.slug}`
+    : `/${section.group}/${section.slug}`;
 }
 
 export function firearmWhereForSection(

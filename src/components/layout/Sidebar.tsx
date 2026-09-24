@@ -24,7 +24,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
-import { sectionsForGroup } from "@/lib/categories";
+import {
+  groupHref,
+  sectionHref,
+  sectionsForGroup,
+  type SectionGroup,
+} from "@/lib/categories";
 import { fetchCategoryCounts } from "@/lib/category-counts";
 
 const PRIMARY_NAV_ITEMS = [
@@ -84,7 +89,6 @@ const BOTTOM_NAV_ITEMS = [
 function NavGroup({
   label,
   description,
-  href,
   icon: Icon,
   group,
   pathname,
@@ -94,14 +98,19 @@ function NavGroup({
 }: {
   label: string;
   description: string;
-  href: string;
   icon: LucideIcon;
-  group: "vault" | "gear" | "prep";
+  group: SectionGroup;
   pathname: string;
   collapsed: boolean;
   counts: Record<string, number>;
   onNavigate?: () => void;
 }) {
+  // Derived from the registry, never passed in: the group's own <Link> is the
+  // ONLY Preparedness/Gear affordance in the collapsed rail, so an href that
+  // does not match a real route is a 404 on every page. Keeping it beside the
+  // section hrefs is what lets one test check both. (/prep was exactly that
+  // 404 until this landed.)
+  const href = groupHref(group);
   const isActive = pathname.startsWith(href);
   const [open, setOpen] = useState(isActive);
   const sectionOpen = isActive || open;
@@ -163,20 +172,15 @@ function NavGroup({
       {!collapsed && sectionOpen && (
         <div className="mt-1 ml-4 space-y-0.5 border-l border-vault-border pl-2">
           {sections.map((section) => {
-            const sectionHref =
-              group === "vault"
-                ? `/vault/category/${section.slug}`
-                : group === "gear"
-                  ? `/gear/${section.slug}`
-                  : `/prep/${section.slug}`;
+            const slugHref = sectionHref(section);
             return (
               <Link
                 key={section.slug}
-                href={sectionHref}
+                href={slugHref}
                 onClick={() => onNavigate?.()}
                 className={cn(
                   "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors",
-                  pathname === sectionHref
+                  pathname === slugHref
                     ? "text-[#00C2FF]"
                     : "text-vault-text-muted hover:text-vault-text hover:bg-vault-border",
                 )}
@@ -329,7 +333,6 @@ export function Sidebar({
         <NavGroup
           label="Vault"
           description="Firearms inventory"
-          href="/vault"
           icon={Shield}
           group="vault"
           pathname={pathname}
@@ -340,7 +343,6 @@ export function Sidebar({
         <NavGroup
           label="Gear"
           description="Optics, parts & more"
-          href="/gear"
           icon={Crosshair}
           group="gear"
           pathname={pathname}
@@ -351,7 +353,6 @@ export function Sidebar({
         <NavGroup
           label="Preparedness"
           description="Medical & food supplies"
-          href="/prep"
           icon={Backpack}
           group="prep"
           pathname={pathname}

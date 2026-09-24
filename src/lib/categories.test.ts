@@ -1,11 +1,16 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CATEGORY_SECTIONS,
+  SECTION_GROUPS,
   accessoryWhereForSection,
   firearmWhereForSection,
   gearSectionForAccessory,
   gearWhereForSection,
+  groupHref,
   sectionBySlug,
+  sectionHref,
   sectionsForGroup,
   supplySectionForItem,
   supplyWhereForSection,
@@ -531,5 +536,80 @@ describe("supply-backed sections", () => {
         },
       ],
     });
+  });
+});
+
+// ── reachability ─────────────────────────────────────────────
+//
+// Everything above this line is about MATCHING: which rows a section claims.
+// None of it says a section can be OPENED. `/prep` shipped as a 404 that the
+// sidebar linked to from every page — and in the collapsed rail it was the
+// only Preparedness affordance — while all 500-odd tests stayed green,
+// because no test ever asked whether a href resolves to a route.
+//
+// The paths below are DERIVED from the registry (SECTION_GROUPS plus
+// CATEGORY_SECTIONS, through the same groupHref/sectionHref the sidebar
+// uses) and checked against the filesystem. Nothing here is hand-listed: a
+// group or section added to the registry is checked the moment it exists,
+// which is the point — a hardcoded list of expected routes would be the same
+// maintenance liability that let /prep through.
+
+const APP_DIR = path.join(__dirname, "..", "app");
+
+/**
+ * Resolves a URL path the way the App Router does: a literal directory wins,
+ * otherwise a dynamic segment (`[slug]`, `[...slug]`) at that level takes it.
+ * Returns the `page.tsx` that would serve the path, or null if nothing does.
+ */
+function resolveRouteFile(href: string): string | null {
+  let dir = APP_DIR;
+  for (const segment of href.split("/").filter(Boolean)) {
+    const literal = path.join(dir, segment);
+    if (fs.existsSync(literal) && fs.statSync(literal).isDirectory()) {
+      dir = literal;
+      continue;
+    }
+    const dynamic = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\[.+\]$/.test(entry.name))
+      .map((entry) => entry.name);
+    if (dynamic.length === 0) return null;
+    dir = path.join(dir, dynamic[0]);
+  }
+  const page = path.join(dir, "page.tsx");
+  return fs.existsSync(page) ? page : null;
+}
+
+describe("route reachability", () => {
+  it("can see the app directory it is asserting against", () => {
+    // Guards the guard: a wrong APP_DIR would make every assertion below
+    // fail loudly, but a resolver that silently found nothing anywhere would
+    // be indistinguishable from a repo with no routes at all.
+    expect(fs.existsSync(path.join(APP_DIR, "page.tsx"))).toBe(true);
+    expect(resolveRouteFile("/definitely-not-a-route")).toBeNull();
+  });
+
+  it.each([...SECTION_GROUPS])(
+    "serves the %s group's own landing page",
+    (group) => {
+      const href = groupHref(group);
+      expect(resolveRouteFile(href), `${href} has no page.tsx`).not.toBeNull();
+    },
+  );
+
+  it.each(CATEGORY_SECTIONS.map((section) => [section.slug, section] as const))(
+    "serves the %s section",
+    (_slug, section) => {
+      const href = sectionHref(section);
+      expect(resolveRouteFile(href), `${href} has no page.tsx`).not.toBeNull();
+    },
+  );
+
+  it("covers every group and every section, so the checks above cannot silently empty out", () => {
+    expect(SECTION_GROUPS.length).toBeGreaterThan(0);
+    expect(CATEGORY_SECTIONS.length).toBeGreaterThan(0);
+    for (const section of CATEGORY_SECTIONS) {
+      expect(SECTION_GROUPS).toContain(section.group);
+    }
   });
 });
