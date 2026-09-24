@@ -82,6 +82,28 @@ CREATE TABLE "Accessory" (
 );
 
 -- CreateTable
+CREATE TABLE "Gear" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "manufacturer" TEXT,
+    "model" TEXT,
+    "serialNumber" TEXT,
+    "category" TEXT NOT NULL,
+    "quantity" INTEGER NOT NULL DEFAULT 1,
+    "purchasePrice" DOUBLE PRECISION,
+    "currentValue" DOUBLE PRECISION,
+    "acquisitionDate" TIMESTAMP(3),
+    "storageLocation" TEXT,
+    "notes" TEXT,
+    "imageUrl" TEXT,
+    "imageSource" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Gear_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "Document" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -92,6 +114,7 @@ CREATE TABLE "Document" (
     "notes" TEXT,
     "firearmId" TEXT,
     "accessoryId" TEXT,
+    "gearId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -304,10 +327,16 @@ CREATE INDEX "Accessory_type_idx" ON "Accessory"("type");
 CREATE INDEX "Accessory_roundCount_idx" ON "Accessory"("roundCount");
 
 -- CreateIndex
+CREATE INDEX "Gear_category_idx" ON "Gear"("category");
+
+-- CreateIndex
 CREATE INDEX "Document_firearmId_idx" ON "Document"("firearmId");
 
 -- CreateIndex
 CREATE INDEX "Document_accessoryId_idx" ON "Document"("accessoryId");
+
+-- CreateIndex
+CREATE INDEX "Document_gearId_idx" ON "Document"("gearId");
 
 -- CreateIndex
 CREATE INDEX "Document_type_idx" ON "Document"("type");
@@ -383,6 +412,9 @@ ALTER TABLE "Document" ADD CONSTRAINT "Document_firearmId_fkey" FOREIGN KEY ("fi
 
 -- AddForeignKey
 ALTER TABLE "Document" ADD CONSTRAINT "Document_accessoryId_fkey" FOREIGN KEY ("accessoryId") REFERENCES "Accessory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Document" ADD CONSTRAINT "Document_gearId_fkey" FOREIGN KEY ("gearId") REFERENCES "Gear"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "RoundCountLog" ADD CONSTRAINT "RoundCountLog_accessoryId_fkey" FOREIGN KEY ("accessoryId") REFERENCES "Accessory"("id") ON DELETE CASCADE ON UPDATE CASCADE;

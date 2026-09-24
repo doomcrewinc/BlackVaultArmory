@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { BACKUP_MODELS } from "@/lib/backup/models";
+import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 
-type Call = { op: "deleteMany" | "createMany"; delegate: string; data?: unknown[] };
+type Call = {
+  op: "deleteMany" | "createMany";
+  delegate: string;
+  data?: unknown[];
+};
 
 const mocks = vi.hoisted(() => ({
   calls: [] as Call[],
   transaction: vi.fn(),
   runConfiguredDateMigration: vi.fn(),
-  appSettings: { deleteMany: vi.fn(), createMany: vi.fn(), upsert: vi.fn(), update: vi.fn() },
+  appSettings: {
+    deleteMany: vi.fn(),
+    createMany: vi.fn(),
+    upsert: vi.fn(),
+    update: vi.fn(),
+  },
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -47,25 +56,40 @@ function restoreRequest(body: unknown) {
 }
 
 const V1_0_KEYS = [
-  "firearms", "builds", "buildSlots", "accessories", "documents", "roundCountLogs",
-  "ammoStocks", "ammoTransactions", "rangeSessions", "rangeSessionAmmoLinks", "sessionDrills", "imageCache",
+  "firearms",
+  "builds",
+  "buildSlots",
+  "accessories",
+  "documents",
+  "roundCountLogs",
+  "ammoStocks",
+  "ammoTransactions",
+  "rangeSessions",
+  "rangeSessionAmmoLinks",
+  "sessionDrills",
+  "imageCache",
 ];
 
 function v11Payload() {
   return {
     meta: { version: "1.1" },
-    ...Object.fromEntries(BACKUP_MODELS.map(({ key }) => [key, [{ id: `${key}-1` }]])),
+    ...Object.fromEntries(
+      BACKUP_MODELS.map(({ key }) => [key, [{ id: `${key}-1` }]]),
+    ),
   };
 }
 
 const created = (delegate: string) =>
-  mocks.calls.find((c) => c.op === "createMany" && c.delegate === delegate)?.data;
+  mocks.calls.find((c) => c.op === "createMany" && c.delegate === delegate)
+    ?.data;
 
 describe("POST /api/backup/restore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.calls.length = 0;
-    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTx()));
+    mocks.transaction.mockImplementation(
+      async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTx()),
+    );
     mocks.runConfiguredDateMigration.mockResolvedValue(undefined);
   });
 
@@ -76,15 +100,37 @@ describe("POST /api/backup/restore", () => {
     expect(response.status).toBe(200);
     expect(json.success).toBe(true);
     expect(created("maintenanceLog")).toEqual([{ id: "maintenanceLogs-1" }]);
-    expect(created("batteryChangeLog")).toEqual([{ id: "batteryChangeLogs-1" }]);
-    expect(created("dateNormalizationAudit")).toEqual([{ id: "dateNormalizationAudits-1" }]);
+    expect(created("batteryChangeLog")).toEqual([
+      { id: "batteryChangeLogs-1" },
+    ]);
+    expect(created("dateNormalizationAudit")).toEqual([
+      { id: "dateNormalizationAudits-1" },
+    ]);
     for (const { key } of BACKUP_MODELS) expect(json.counts[key], key).toBe(1);
+  });
+
+  it("restores a v1.1 payload that omits gear, leaving other tables intact", async () => {
+    const { gear: _gear, ...payload } = v11Payload() as Record<string, unknown>;
+    void _gear;
+
+    const response = await POST(restoreRequest(payload));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(created("gear")).toBeUndefined();
+    expect(json.counts.gear).toBe(0);
+    expect(created("firearm")).toEqual([{ id: "firearms-1" }]);
+    expect(created("document")).toEqual([{ id: "documents-1" }]);
+    expect(created("maintenanceLog")).toEqual([{ id: "maintenanceLogs-1" }]);
   });
 
   it("accepts a v1.0 payload that lacks the new keys, treating them as empty", async () => {
     const payload = {
       meta: { version: "1.0" },
-      ...Object.fromEntries(V1_0_KEYS.map((key) => [key, [{ id: `${key}-1` }]])),
+      ...Object.fromEntries(
+        V1_0_KEYS.map((key) => [key, [{ id: `${key}-1` }]]),
+      ),
     };
 
     const response = await POST(restoreRequest(payload));
@@ -100,7 +146,10 @@ describe("POST /api/backup/restore", () => {
 
   it("rejects a truncated payload with only firearms and deletes nothing", async () => {
     const response = await POST(
-      restoreRequest({ meta: { version: "1.1" }, firearms: [{ id: "firearms-1" }] }),
+      restoreRequest({
+        meta: { version: "1.1" },
+        firearms: [{ id: "firearms-1" }],
+      }),
     );
 
     expect(response.status).toBe(400);
@@ -108,29 +157,47 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.calls.filter((c) => c.op === "deleteMany")).toEqual([]);
   });
 
-  it.each(V1_0_KEYS)("rejects a payload missing the v1.0 key %s and deletes nothing", async (key) => {
-    const { [key]: _dropped, ...partial } = v11Payload() as Record<string, unknown>;
-    void _dropped;
+  it.each(V1_0_KEYS)(
+    "rejects a payload missing the v1.0 key %s and deletes nothing",
+    async (key) => {
+      const { [key]: _dropped, ...partial } = v11Payload() as Record<
+        string,
+        unknown
+      >;
+      void _dropped;
 
-    const response = await POST(restoreRequest(partial));
+      const response = await POST(restoreRequest(partial));
 
-    expect(response.status).toBe(400);
-    expect(mocks.transaction).not.toHaveBeenCalled();
-    expect(mocks.calls).toEqual([]);
-  });
+      expect(response.status).toBe(400);
+      expect(mocks.transaction).not.toHaveBeenCalled();
+      expect(mocks.calls).toEqual([]);
+    },
+  );
 
   it("rejects a payload where a v1.0 key is null", async () => {
-    const response = await POST(restoreRequest({ ...v11Payload(), sessionDrills: null }));
+    const response = await POST(
+      restoreRequest({ ...v11Payload(), sessionDrills: null }),
+    );
 
     expect(response.status).toBe(400);
     expect(mocks.transaction).not.toHaveBeenCalled();
   });
 
-  it("requires exactly the first 12 registry keys; only the v1.1 keys are optional", () => {
-    expect(BACKUP_MODELS.slice(0, 12).map((m) => m.key).sort()).toEqual([...V1_0_KEYS].sort());
-    expect(BACKUP_MODELS.slice(12).map((m) => m.key)).toEqual([
-      "maintenanceLogs", "batteryChangeLogs", "dateNormalizationAudits",
-    ]);
+  it("requires exactly the v1.0 keys; only post-v1.0 keys are optional", () => {
+    // Not a positional slice: Gear sits ahead of Document in BACKUP_MODELS
+    // (restore-order, FK-safe) but must not become a required key for that reason.
+    expect([...REQUIRED_BACKUP_KEYS].sort()).toEqual([...V1_0_KEYS].sort());
+    const optionalKeys = BACKUP_MODELS.map((m) => m.key).filter(
+      (key) => !REQUIRED_BACKUP_KEYS.includes(key),
+    );
+    expect(optionalKeys.sort()).toEqual(
+      [
+        "gear",
+        "maintenanceLogs",
+        "batteryChangeLogs",
+        "dateNormalizationAudits",
+      ].sort(),
+    );
   });
 
   it("rejects a payload with no meta.version", async () => {
@@ -144,7 +211,9 @@ describe("POST /api/backup/restore", () => {
   });
 
   it("rejects a payload where a known key is not an array", async () => {
-    const response = await POST(restoreRequest({ ...v11Payload(), maintenanceLogs: "nope" }));
+    const response = await POST(
+      restoreRequest({ ...v11Payload(), maintenanceLogs: "nope" }),
+    );
 
     expect(response.status).toBe(400);
     expect(mocks.transaction).not.toHaveBeenCalled();
@@ -153,21 +222,34 @@ describe("POST /api/backup/restore", () => {
   it("deletes children before parents, then inserts parents before children", async () => {
     await POST(restoreRequest(v11Payload()));
 
-    const deletes = mocks.calls.filter((c) => c.op === "deleteMany").map((c) => c.delegate);
-    const inserts = mocks.calls.filter((c) => c.op === "createMany").map((c) => c.delegate);
+    const deletes = mocks.calls
+      .filter((c) => c.op === "deleteMany")
+      .map((c) => c.delegate);
+    const inserts = mocks.calls
+      .filter((c) => c.op === "createMany")
+      .map((c) => c.delegate);
     const order = BACKUP_MODELS.map((m) => m.delegate);
 
     expect(deletes).toEqual([...order].reverse());
     expect(inserts).toEqual(order);
-    expect(mocks.calls.findIndex((c) => c.op === "createMany")).toBe(order.length);
-    expect(deletes.indexOf("maintenanceLog")).toBeLessThan(deletes.indexOf("firearm"));
-    expect(deletes.indexOf("batteryChangeLog")).toBeLessThan(deletes.indexOf("accessory"));
+    expect(mocks.calls.findIndex((c) => c.op === "createMany")).toBe(
+      order.length,
+    );
+    expect(deletes.indexOf("maintenanceLog")).toBeLessThan(
+      deletes.indexOf("firearm"),
+    );
+    expect(deletes.indexOf("batteryChangeLog")).toBeLessThan(
+      deletes.indexOf("accessory"),
+    );
   });
 
   it("never touches AppSettings", async () => {
-    await POST(restoreRequest({ ...v11Payload(), appSettings: [{ id: "singleton" }] }));
+    await POST(
+      restoreRequest({ ...v11Payload(), appSettings: [{ id: "singleton" }] }),
+    );
 
-    for (const fn of Object.values(mocks.appSettings)) expect(fn).not.toHaveBeenCalled();
+    for (const fn of Object.values(mocks.appSettings))
+      expect(fn).not.toHaveBeenCalled();
   });
 
   it("runs the post-restore date migration after a successful restore", async () => {
@@ -178,7 +260,9 @@ describe("POST /api/backup/restore", () => {
   });
 
   it("still reports success when the post-restore migration throws", async () => {
-    mocks.runConfiguredDateMigration.mockRejectedValue(new Error("migration boom"));
+    mocks.runConfiguredDateMigration.mockRejectedValue(
+      new Error("migration boom"),
+    );
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await POST(restoreRequest(v11Payload()));

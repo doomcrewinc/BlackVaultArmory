@@ -38,7 +38,7 @@ export interface FullArmoryAttachmentRow {
   type: string;
   name: string;
   linkedItemId: string;
-  linkedItemType: "FIREARM" | "ACCESSORY" | "UNATTACHED";
+  linkedItemType: "FIREARM" | "ACCESSORY" | "GEAR" | "UNATTACHED";
   linkedItemName: string;
   mimeType: string;
   fileSize: number | string;
@@ -56,6 +56,29 @@ export interface FullArmoryAmmoRow {
   notes: string;
 }
 
+export interface FullArmoryGearRow {
+  gearId: string;
+  name: string;
+  category: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  quantity: number;
+  purchasePrice: number | null;
+  currentValue: number | null;
+  acquisitionDate: string;
+  storageLocation: string;
+  receiptCount: number;
+  documentCount: number;
+  hasPhoto: boolean;
+  imageUrl: string;
+  missingSerial: boolean;
+  missingReceipt: boolean;
+  missingPhoto: boolean;
+  missingValue: boolean;
+  notes: string;
+}
+
 export interface FullArmoryExportResponse {
   meta: {
     generatedAt: string;
@@ -67,6 +90,7 @@ export interface FullArmoryExportResponse {
     totalItems: number;
     totalFirearms: number;
     totalAccessories: number;
+    totalGear: number;
     totalDocuments: number;
     totalReceipts: number;
     totalAmmoStocks: number;
@@ -82,6 +106,7 @@ export interface FullArmoryExportResponse {
   items: FullArmoryItemRow[];
   attachments: FullArmoryAttachmentRow[];
   ammo: FullArmoryAmmoRow[];
+  gear: FullArmoryGearRow[];
 }
 
 export interface VisualEvidenceImage {
@@ -146,7 +171,8 @@ function isImageAttachment(row: FullArmoryAttachmentRow): boolean {
 }
 
 export function selectVisualEvidence(
-  payload: Pick<FullArmoryExportResponse, "items" | "attachments">,
+  payload: Pick<FullArmoryExportResponse, "items" | "attachments"> &
+    Partial<Pick<FullArmoryExportResponse, "gear">>,
   options: FullArmoryExportOptions
 ): VisualEvidenceImage[] {
   const images: VisualEvidenceImage[] = [];
@@ -161,6 +187,23 @@ export function selectVisualEvidence(
         imageUrl: item.imageUrl,
         linkedItemId: item.itemId,
         linkedItemName: item.model || item.manufacturer || item.itemId,
+      });
+    }
+
+    // Gear counts toward totalItems and the value totals, so its photos are
+    // part of the same evidence set. Keyed `item:` like the rows above: gear
+    // ids and firearm/accessory ids are all cuids from separate tables, so a
+    // separate prefix would only make the two look like different kinds of
+    // evidence in the renderers.
+    for (const item of payload.gear ?? []) {
+      if (!item.imageUrl) continue;
+      images.push({
+        id: `item:${item.gearId}`,
+        source: "ITEM_PHOTO",
+        title: `GEAR: ${item.manufacturer} ${item.name}`.trim(),
+        imageUrl: item.imageUrl,
+        linkedItemId: item.gearId,
+        linkedItemName: item.name || item.manufacturer || item.gearId,
       });
     }
   }

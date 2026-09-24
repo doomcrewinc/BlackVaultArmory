@@ -4,10 +4,12 @@ import {
   accessoryWhereForSection,
   firearmWhereForSection,
   gearSectionForAccessory,
+  gearWhereForSection,
   sectionBySlug,
   sectionsForGroup,
   vaultSectionForFirearm,
 } from "./categories";
+import { GEAR_CATEGORIES } from "./gear";
 import {
   CUSTOM_SLOT_PREFIX,
   FIREARM_TYPES,
@@ -61,6 +63,8 @@ describe("registry shape", () => {
       "lowers",
       "magazines",
       "parts",
+      "knives",
+      "cases",
     ]);
   });
 });
@@ -298,6 +302,100 @@ describe("where fragments agree with holds", () => {
           byHolds,
         );
       }
+    }
+  });
+
+  it("selects the same gear as holds, for every gear category — including cases' OR fragment", () => {
+    const categories = [
+      ...GEAR_CATEGORIES,
+      "ZZ_JUNK",
+      "",
+      "knife", // wrong case
+      "ARMOR",
+    ];
+    for (const section of sectionsForGroup("gear")) {
+      const where = gearWhereForSection(section) as Where | null;
+      if (!where) continue;
+      for (const category of categories) {
+        const row = { category };
+        const byHolds = section.sources.some(
+          (source) => source.source === "gear" && source.holds(row),
+        );
+        expect(whereMatches(where, row), `${section.slug} / ${category}`).toBe(
+          byHolds,
+        );
+      }
+    }
+  });
+});
+
+describe("gear-backed sections", () => {
+  it("adds knives and cases to the gear group, after the accessory sections", () => {
+    expect(sectionsForGroup("gear").map((s) => s.slug)).toEqual([
+      "optics",
+      "suppressors",
+      "barrels",
+      "lowers",
+      "magazines",
+      "parts",
+      "knives",
+      "cases",
+    ]);
+  });
+
+  it("places every gear category in exactly one section", () => {
+    for (const category of GEAR_CATEGORIES) {
+      const matches = sectionsForGroup("gear").filter((section) =>
+        section.sources.some(
+          (source) => source.source === "gear" && source.holds({ category }),
+        ),
+      );
+      expect(
+        matches.map((m) => m.slug),
+        `category ${category}`,
+      ).toHaveLength(1);
+    }
+  });
+
+  it("never loses gear with an unrecognised category", () => {
+    for (const category of ["ZZ_JUNK", "", "knife", "ARMOR"]) {
+      const matches = sectionsForGroup("gear").filter((section) =>
+        section.sources.some(
+          (source) => source.source === "gear" && source.holds({ category }),
+        ),
+      );
+      expect(
+        matches.map((m) => m.slug),
+        `category ${category}`,
+      ).toHaveLength(1);
+    }
+  });
+
+  it("keeps accessory sections free of gear rows and vice versa", () => {
+    const knives = sectionBySlug("knives")!;
+    expect(accessoryWhereForSection(knives)).toBeNull();
+    expect(gearWhereForSection(knives)).toEqual({
+      category: { in: ["KNIFE"] },
+    });
+
+    const optics = sectionBySlug("optics")!;
+    expect(gearWhereForSection(optics)).toBeNull();
+  });
+
+  it("combines cases' two matchers into a literal OR, not flattened or reordered", () => {
+    const cases = sectionBySlug("cases")!;
+    expect(gearWhereForSection(cases)).toEqual({
+      OR: [
+        { category: { in: ["CASE"] } },
+        { category: { notIn: ["KNIFE", "CASE"] } },
+      ],
+    });
+  });
+
+  it("no section uses a slug that would collide with a gear route segment", () => {
+    const reserved = ["new", "item"];
+    for (const section of CATEGORY_SECTIONS) {
+      expect(reserved).not.toContain(section.slug);
     }
   });
 });

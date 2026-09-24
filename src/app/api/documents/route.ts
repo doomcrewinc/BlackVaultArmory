@@ -10,17 +10,20 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const firearmId = searchParams.get("firearmId");
     const accessoryId = searchParams.get("accessoryId");
+    const gearId = searchParams.get("gearId");
     const type = searchParams.get("type");
 
     const docs = await prisma.document.findMany({
       where: {
         ...(firearmId ? { firearmId } : {}),
         ...(accessoryId ? { accessoryId } : {}),
+        ...(gearId ? { gearId } : {}),
         ...(type ? { type } : {}),
       },
       include: {
         firearm: { select: { id: true, name: true } },
         accessory: { select: { id: true, name: true } },
+        gear: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -28,7 +31,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(docs);
   } catch (error) {
     console.error("GET /api/documents error:", error);
-    return NextResponse.json({ error: "Failed to fetch documents" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to fetch documents" },
+      { status: 500 },
+    );
   }
 }
 
@@ -38,10 +44,23 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { name, type, fileUrl, fileSize, mimeType, notes, firearmId, accessoryId } = body;
+    const {
+      name,
+      type,
+      fileUrl,
+      fileSize,
+      mimeType,
+      notes,
+      firearmId,
+      accessoryId,
+      gearId,
+    } = body;
 
     if (!name || !fileUrl) {
-      return NextResponse.json({ error: "name and fileUrl are required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "name and fileUrl are required" },
+        { status: 400 },
+      );
     }
 
     const doc = await prisma.document.create({
@@ -54,16 +73,21 @@ export async function POST(req: NextRequest) {
         notes: notes || null,
         firearmId: firearmId || null,
         accessoryId: accessoryId || null,
+        gearId: gearId || null,
       },
       include: {
         firearm: { select: { id: true, name: true } },
         accessory: { select: { id: true, name: true } },
+        gear: { select: { id: true, name: true } },
       },
     });
 
     return NextResponse.json(doc, { status: 201 });
   } catch (error) {
     console.error("POST /api/documents error:", error);
-    return NextResponse.json({ error: "Failed to create document" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to create document" },
+      { status: 500 },
+    );
   }
 }

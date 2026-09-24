@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const firearmCount = vi.fn();
 const accessoryCount = vi.fn();
+const gearCount = vi.fn();
 
 // Every count goes through here so the test can watch how many are in flight.
 let inFlight = 0;
@@ -22,6 +23,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     firearm: { count: (args: unknown) => tracked(firearmCount(args)) },
     accessory: { count: (args: unknown) => tracked(accessoryCount(args)) },
+    gear: { count: (args: unknown) => tracked(gearCount(args)) },
   },
 }));
 
@@ -31,6 +33,23 @@ describe("GET /api/categories/counts", () => {
   beforeEach(() => {
     firearmCount.mockReset().mockResolvedValue(3);
     accessoryCount.mockReset().mockResolvedValue(5);
+    // Where-aware: a mock that answers the same number to every query can't
+    // tell a right query from a wrong one. `knives`' where is a bare
+    // `{ category: { in: [...] } }`; `cases`' where is the `{ OR: [...] }`
+    // combination — distinguish them so a regression that sends the wrong
+    // fragment to the wrong section shows up as a wrong count, not a match.
+    gearCount.mockReset().mockImplementation(
+      (args: {
+        where?: {
+          category?: { in?: string[]; notIn?: string[] };
+          OR?: unknown[];
+        };
+      }) => {
+        if (args?.where?.OR) return Promise.resolve(11);
+        if (args?.where?.category?.in) return Promise.resolve(7);
+        return Promise.resolve(0);
+      },
+    );
     inFlight = 0;
     maxInFlight = 0;
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -48,6 +67,23 @@ describe("GET /api/categories/counts", () => {
     const body = await (await GET()).json();
     expect(body.counts.handguns).toBe(3);
     expect(body.counts.optics).toBe(5);
+  });
+
+  it("counts gear for gear-backed sections (knives, cases), each from its own where", async () => {
+    const body = await (await GET()).json();
+    expect(body.counts.knives).toBe(7);
+    expect(body.counts.cases).toBe(11);
+    expect(gearCount).toHaveBeenCalledWith({
+      where: { category: { in: ["KNIFE"] } },
+    });
+    expect(gearCount).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { category: { in: ["CASE"] } },
+          { category: { notIn: ["KNIFE", "CASE"] } },
+        ],
+      },
+    });
   });
 
   it("reports the legacy SMG count separately, unclassified rows only", async () => {

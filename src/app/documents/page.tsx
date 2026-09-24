@@ -4,16 +4,22 @@ import { useState, useEffect } from "react";
 import { FileText, Upload, ExternalLink, X, Filter } from "lucide-react";
 import Link from "next/link";
 import { PageHeader } from "@/components/shared/PageHeader";
-import { DocumentUploader, type UploadedDocument } from "@/components/shared/DocumentUploader";
+import {
+  DocumentUploader,
+  type UploadedDocument,
+} from "@/components/shared/DocumentUploader";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { SectionCard } from "@/components/shared/SectionCard";
-import { StandardButton, buttonClassName } from "@/components/shared/StandardButton";
+import {
+  StandardButton,
+  buttonClassName,
+} from "@/components/shared/StandardButton";
 import { StatusMessage } from "@/components/shared/StatusMessage";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 
 type DocTypeFilter = "ALL" | "RECEIPT" | "PHOTO" | "NFA_TAX_STAMP" | "OTHER";
-type EntityFilter = "ALL" | "FIREARM" | "ACCESSORY" | "UNATTACHED";
+type EntityFilter = "ALL" | "FIREARM" | "ACCESSORY" | "GEAR" | "UNATTACHED";
 
 function formatBytes(bytes: number | null) {
   if (!bytes) return "";
@@ -32,7 +38,10 @@ export default function DocumentLibraryPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
-  const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [actionMessage, setActionMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     fetch("/api/documents", { credentials: "include", cache: "no-store" })
@@ -42,7 +51,10 @@ export default function DocumentLibraryPage() {
           setDocuments(data);
           setLoadError(null);
         } else {
-          setLoadError((data as { error?: string } | null)?.error ?? "Failed to load documents.");
+          setLoadError(
+            (data as { error?: string } | null)?.error ??
+              "Failed to load documents.",
+          );
         }
         setLoading(false);
       })
@@ -64,7 +76,12 @@ export default function DocumentLibraryPage() {
     if (typeFilter !== "ALL" && doc.type !== typeFilter) return false;
     if (entityFilter === "FIREARM" && !doc.firearmId) return false;
     if (entityFilter === "ACCESSORY" && !doc.accessoryId) return false;
-    if (entityFilter === "UNATTACHED" && (doc.firearmId || doc.accessoryId)) return false;
+    if (entityFilter === "GEAR" && !doc.gearId) return false;
+    if (
+      entityFilter === "UNATTACHED" &&
+      (doc.firearmId || doc.accessoryId || doc.gearId)
+    )
+      return false;
     return true;
   });
 
@@ -117,11 +134,21 @@ export default function DocumentLibraryPage() {
 
       <div className="mx-auto max-w-5xl space-y-4 p-4 sm:space-y-6 sm:p-6">
         {loadError && <StatusMessage tone="error" message={loadError} />}
-        {actionMessage && <StatusMessage tone={actionMessage.type} message={actionMessage.text} />}
-        {uploadSuccess && <StatusMessage tone="success" message={uploadSuccess} />}
+        {actionMessage && (
+          <StatusMessage
+            tone={actionMessage.type}
+            message={actionMessage.text}
+          />
+        )}
+        {uploadSuccess && (
+          <StatusMessage tone="success" message={uploadSuccess} />
+        )}
 
         {showUploader && (
-          <SectionCard title="Upload document" description="Attach receipts, photos, or tax records.">
+          <SectionCard
+            title="Upload document"
+            description="Attach receipts, photos, or tax records."
+          >
             <DocumentUploader
               entityType={null}
               entityId={null}
@@ -137,14 +164,28 @@ export default function DocumentLibraryPage() {
           </SectionCard>
         )}
 
-        <SectionCard title="Filters" description="Refine by document type or linked item.">
+        <SectionCard
+          title="Filters"
+          description="Refine by document type or linked item."
+        >
           <div className="flex flex-wrap items-center gap-2">
             <Filter className="h-4 w-4 text-vault-text-faint" />
-            {(["ALL", "RECEIPT", "PHOTO", "NFA_TAX_STAMP", "OTHER"] as DocTypeFilter[]).map((t) => (
+            {(
+              [
+                "ALL",
+                "RECEIPT",
+                "PHOTO",
+                "NFA_TAX_STAMP",
+                "OTHER",
+              ] as DocTypeFilter[]
+            ).map((t) => (
               <button
                 key={t}
                 onClick={() => setTypeFilter(t)}
-                className={buttonClassName(typeFilter === t ? "primary" : "ghost", "min-h-8 px-2.5 py-1 text-xs")}
+                className={buttonClassName(
+                  typeFilter === t ? "primary" : "ghost",
+                  "min-h-8 px-2.5 py-1 text-xs",
+                )}
               >
                 {t === "ALL"
                   ? "All Types"
@@ -158,11 +199,22 @@ export default function DocumentLibraryPage() {
               </button>
             ))}
             <div className="hidden h-5 w-px bg-vault-border sm:block" />
-            {(["ALL", "FIREARM", "ACCESSORY", "UNATTACHED"] as EntityFilter[]).map((e) => (
+            {(
+              [
+                "ALL",
+                "FIREARM",
+                "ACCESSORY",
+                "GEAR",
+                "UNATTACHED",
+              ] as EntityFilter[]
+            ).map((e) => (
               <button
                 key={e}
                 onClick={() => setEntityFilter(e)}
-                className={buttonClassName(entityFilter === e ? "primary" : "ghost", "min-h-8 px-2.5 py-1 text-xs")}
+                className={buttonClassName(
+                  entityFilter === e ? "primary" : "ghost",
+                  "min-h-8 px-2.5 py-1 text-xs",
+                )}
               >
                 {e === "ALL"
                   ? "All Items"
@@ -170,7 +222,9 @@ export default function DocumentLibraryPage() {
                     ? "Firearms"
                     : e === "ACCESSORY"
                       ? "Accessories"
-                      : "Unattached"}
+                      : e === "GEAR"
+                        ? "Gear"
+                        : "Unattached"}
               </button>
             ))}
             <span className="ml-auto text-xs text-vault-text-faint">
@@ -184,7 +238,11 @@ export default function DocumentLibraryPage() {
         ) : filtered.length === 0 ? (
           <EmptyState
             icon={FileText}
-            title={safeDocuments.length === 0 ? "No documents yet" : "No documents match current filters"}
+            title={
+              safeDocuments.length === 0
+                ? "No documents yet"
+                : "No documents match current filters"
+            }
             description={
               safeDocuments.length === 0
                 ? "Upload your first receipt or photo to keep evidence attached to your records."
@@ -192,38 +250,69 @@ export default function DocumentLibraryPage() {
             }
           />
         ) : (
-          <SectionCard title="Documents" description="Newest uploads are shown first." contentClassName="p-0">
+          <SectionCard
+            title="Documents"
+            description="Newest uploads are shown first."
+            contentClassName="p-0"
+          >
             <div className="divide-y divide-vault-border">
               {filtered.map((doc) => (
-                <div key={doc.id} className="flex flex-wrap items-center gap-3 px-4 py-3 sm:flex-nowrap sm:gap-4">
+                <div
+                  key={doc.id}
+                  className="flex flex-wrap items-center gap-3 px-4 py-3 sm:flex-nowrap sm:gap-4"
+                >
                   <div
                     className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md border ${
-                      isPdf(doc) ? "border-[#F5A623]/20 bg-[#F5A623]/5" : "border-[#00C2FF]/20 bg-[#00C2FF]/5"
+                      isPdf(doc)
+                        ? "border-[#F5A623]/20 bg-[#F5A623]/5"
+                        : "border-[#00C2FF]/20 bg-[#00C2FF]/5"
                     }`}
                   >
-                    <FileText className={`h-5 w-5 ${isPdf(doc) ? "text-[#F5A623]" : "text-[#00C2FF]"}`} />
+                    <FileText
+                      className={`h-5 w-5 ${isPdf(doc) ? "text-[#F5A623]" : "text-[#00C2FF]"}`}
+                    />
                   </div>
 
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate break-all text-sm font-medium text-vault-text">{doc.name}</p>
+                      <p className="truncate break-all text-sm font-medium text-vault-text">
+                        {doc.name}
+                      </p>
                       <span className="rounded border border-vault-border px-1.5 py-0.5 text-[10px] text-vault-text-muted">
                         {(doc.type || "OTHER").replaceAll("_", " ")}
                       </span>
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-vault-text-faint">
                       {doc.firearm && (
-                        <Link href={`/vault/${doc.firearm.id}`} className="text-[#00C2FF] hover:underline">
+                        <Link
+                          href={`/vault/${doc.firearm.id}`}
+                          className="text-[#00C2FF] hover:underline"
+                        >
                           {doc.firearm.name}
                         </Link>
                       )}
                       {doc.accessory && (
-                        <Link href={`/accessories/${doc.accessory.id}`} className="text-[#00C2FF] hover:underline">
+                        <Link
+                          href={`/accessories/${doc.accessory.id}`}
+                          className="text-[#00C2FF] hover:underline"
+                        >
                           {doc.accessory.name}
                         </Link>
                       )}
-                      {!doc.firearm && !doc.accessory && <span>Unattached</span>}
-                      <span>{new Date(doc.createdAt || 0).toLocaleDateString()}</span>
+                      {doc.gear && (
+                        <Link
+                          href={`/gear/item/${doc.gear.id}`}
+                          className="text-[#00C2FF] hover:underline"
+                        >
+                          {doc.gear.name}
+                        </Link>
+                      )}
+                      {!doc.firearm && !doc.accessory && !doc.gear && (
+                        <span>Unattached</span>
+                      )}
+                      <span>
+                        {new Date(doc.createdAt || 0).toLocaleDateString()}
+                      </span>
                       {doc.fileSize && <span>{formatBytes(doc.fileSize)}</span>}
                     </div>
                   </div>
@@ -233,7 +322,10 @@ export default function DocumentLibraryPage() {
                       href={doc.fileUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className={buttonClassName("secondary", "min-h-8 px-2.5 py-1 text-xs")}
+                      className={buttonClassName(
+                        "secondary",
+                        "min-h-8 px-2.5 py-1 text-xs",
+                      )}
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
                       Open
@@ -241,7 +333,10 @@ export default function DocumentLibraryPage() {
                     <a
                       href={doc.fileUrl}
                       download={doc.name}
-                      className={buttonClassName("ghost", "min-h-8 px-2.5 py-1 text-xs")}
+                      className={buttonClassName(
+                        "ghost",
+                        "min-h-8 px-2.5 py-1 text-xs",
+                      )}
                     >
                       Download
                     </a>
@@ -265,7 +360,9 @@ export default function DocumentLibraryPage() {
 
       <ConfirmDialog
         open={confirmDeleteId !== null}
-        onOpenChange={(open) => { if (!open) setConfirmDeleteId(null); }}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDeleteId(null);
+        }}
         title="Delete document?"
         description="This document will be permanently deleted. This cannot be undone."
         confirmLabel="Delete"

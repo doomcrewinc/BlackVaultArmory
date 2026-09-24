@@ -13,13 +13,15 @@ export interface UploadedDocument {
   notes: string | null;
   firearmId: string | null;
   accessoryId: string | null;
+  gearId: string | null;
   createdAt: string;
   firearm?: { id: string; name: string } | null;
   accessory?: { id: string; name: string } | null;
+  gear?: { id: string; name: string } | null;
 }
 
 interface DocumentUploaderProps {
-  entityType?: "firearm" | "accessory" | null;
+  entityType?: "firearm" | "accessory" | "gear" | null;
   entityId?: string | null;
   defaultDocType?: "RECEIPT" | "PHOTO" | "NFA_TAX_STAMP" | "OTHER";
   onUploadComplete: (doc: UploadedDocument) => void;
@@ -33,7 +35,13 @@ const DOC_TYPES = [
   { value: "OTHER", label: "Other" },
 ] as const;
 
-const ALLOWED_TYPES = ["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"];
+const ALLOWED_TYPES = [
+  "application/pdf",
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+];
 const MAX_SIZE = 20 * 1024 * 1024;
 
 function formatBytes(bytes: number) {
@@ -52,7 +60,9 @@ export function DocumentUploader({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [docName, setDocName] = useState("");
-  const [docType, setDocType] = useState<"RECEIPT" | "PHOTO" | "NFA_TAX_STAMP" | "OTHER">(defaultDocType);
+  const [docType, setDocType] = useState<
+    "RECEIPT" | "PHOTO" | "NFA_TAX_STAMP" | "OTHER"
+  >(defaultDocType);
   const [notes, setNotes] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +104,13 @@ export function DocumentUploader({
       formData.append("name", docName.trim());
       formData.append("type", docType);
       if (entityType && entityId) {
-        formData.append(entityType === "firearm" ? "firearmId" : "accessoryId", entityId);
+        const fieldName =
+          entityType === "firearm"
+            ? "firearmId"
+            : entityType === "accessory"
+              ? "accessoryId"
+              : "gearId";
+        formData.append(fieldName, entityId);
       }
       if (notes.trim()) formData.append("notes", notes.trim());
 
@@ -105,7 +121,7 @@ export function DocumentUploader({
       });
 
       if (!res.ok) {
-        const json = await res.json().catch(() => ({} as { error?: string }));
+        const json = await res.json().catch(() => ({}) as { error?: string });
         throw new Error(json.error ?? "Upload failed");
       }
 
@@ -126,7 +142,10 @@ export function DocumentUploader({
       {!file ? (
         <div
           onDrop={handleDrop}
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
           onDragLeave={() => setDragOver(false)}
           onClick={() => fileInputRef.current?.click()}
           className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
@@ -140,11 +159,17 @@ export function DocumentUploader({
             type="file"
             accept=".pdf,.jpg,.jpeg,.png,.webp"
             className="sr-only"
-            onChange={(e) => { if (e.target.files?.[0]) handleFileSelect(e.target.files[0]); }}
+            onChange={(e) => {
+              if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+            }}
           />
           <Upload className="w-8 h-8 text-vault-text-faint mx-auto mb-2" />
-          <p className="text-sm text-vault-text-muted">Drop file here or click to browse</p>
-          <p className="text-xs text-vault-text-faint mt-1">PDF, JPG, PNG, WebP — max 20MB</p>
+          <p className="text-sm text-vault-text-muted">
+            Drop file here or click to browse
+          </p>
+          <p className="text-xs text-vault-text-faint mt-1">
+            PDF, JPG, PNG, WebP — max 20MB
+          </p>
         </div>
       ) : (
         <div className="flex items-center gap-3 p-3 rounded-lg border border-vault-border bg-vault-bg">
@@ -154,12 +179,19 @@ export function DocumentUploader({
             <FileIcon className="w-8 h-8 text-[#00C2FF] shrink-0" />
           )}
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-vault-text truncate">{file.name}</p>
-            <p className="text-xs text-vault-text-faint">{formatBytes(file.size)}</p>
+            <p className="text-sm font-medium text-vault-text truncate">
+              {file.name}
+            </p>
+            <p className="text-xs text-vault-text-faint">
+              {formatBytes(file.size)}
+            </p>
           </div>
           <button
             type="button"
-            onClick={() => { setFile(null); setError(null); }}
+            onClick={() => {
+              setFile(null);
+              setError(null);
+            }}
             className="text-vault-text-faint hover:text-red-400 transition-colors"
           >
             <X className="w-4 h-4" />

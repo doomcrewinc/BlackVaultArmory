@@ -7,9 +7,15 @@ import {
   type ExportFormat,
   type ExportPreset,
   parseExportOptionsFromSearchParams,
+  type FullArmoryAttachmentRow,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
 import { requireAuth } from "@/lib/server/auth";
+import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+
+function gearCategoryLabel(category: string): string {
+  return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
 
 type FirearmExportRecord = {
   id: string;
@@ -45,8 +51,10 @@ type ExportDocumentRecord = {
   name: string;
   firearmId: string | null;
   accessoryId: string | null;
+  gearId: string | null;
   firearm: { id: string; name: string } | null;
   accessory: { id: string; name: string } | null;
+  gear: { id: string; name: string } | null;
   mimeType: string | null;
   fileSize: number | null;
   fileUrl: string;
@@ -63,6 +71,22 @@ type ExportAmmoRecord = {
   notes: string | null;
 };
 
+type GearExportRecord = {
+  id: string;
+  name: string;
+  manufacturer: string | null;
+  model: string | null;
+  serialNumber: string | null;
+  category: string;
+  quantity: number;
+  purchasePrice: number | null;
+  currentValue: number | null;
+  acquisitionDate: Date | null;
+  storageLocation: string | null;
+  notes: string | null;
+  imageUrl: string | null;
+};
+
 type PrismaWithOptionalDocument = typeof prisma & {
   document?: {
     findMany: (args: {
@@ -70,6 +94,7 @@ type PrismaWithOptionalDocument = typeof prisma & {
       include: {
         firearm: { select: { id: true; name: true } };
         accessory: { select: { id: true; name: true } };
+        gear: { select: { id: true; name: true } };
       };
     }) => Promise<ExportDocumentRecord[]>;
   };
@@ -83,6 +108,7 @@ async function findDocumentsForExport(): Promise<ExportDocumentRecord[]> {
     include: {
       firearm: { select: { id: true, name: true } },
       accessory: { select: { id: true, name: true } },
+      gear: { select: { id: true, name: true } },
     },
   });
 }
@@ -138,6 +164,7 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     { section: "summary", key: "totalItems", value: payload.summary.totalItems },
     { section: "summary", key: "totalFirearms", value: payload.summary.totalFirearms },
     { section: "summary", key: "totalAccessories", value: payload.summary.totalAccessories },
+    { section: "summary", key: "totalGear", value: payload.summary.totalGear },
     { section: "summary", key: "totalAmmoStocks", value: payload.summary.totalAmmoStocks },
     { section: "summary", key: "totalDocuments", value: payload.summary.totalDocuments },
     { section: "summary", key: "totalReceipts", value: payload.summary.totalReceipts },
@@ -157,8 +184,12 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     section: "attachments",
     ...flattenRecord(row as unknown as Record<string, unknown>),
   }));
+  const gearRows = payload.gear.map((row) => ({
+    section: "gear",
+    ...flattenRecord(row as unknown as Record<string, unknown>),
+  }));
 
-  return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows]);
+  return rowsToCsv([...metaRows, ...itemRows, ...ammoRows, ...attachmentRows, ...gearRows]);
 }
 
 function pdfEscape(value: string): string {
@@ -297,6 +328,19 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     });
   }
 
+  lines.push("", "Gear");
+  if (payload.gear.length === 0) {
+    lines.push("No gear records included");
+  } else {
+    payload.gear.forEach((row, index) => {
+      pushWrapped(
+        lines,
+        `${index + 1}. ${row.category} ${row.name} | Serial: ${row.serialNumber || "N/A"} | Qty: ${row.quantity} | Purchase: ${row.purchasePrice ?? "N/A"} | Value: ${row.currentValue ?? "N/A"}`
+      );
+      if (row.imageUrl) pushWrapped(lines, `Image Ref: ${row.imageUrl}`, "   ");
+    });
+  }
+
   return lines;
 }
 
@@ -368,6 +412,24 @@ export async function GET(request: NextRequest) {
           orderBy: [{ caliber: "asc" }, { brand: "asc" }],
         })
       : []) as ExportAmmoRecord[];
+    const gearItems = (await prisma.gear.findMany({
+      select: {
+        id: true,
+        name: true,
+        manufacturer: true,
+        model: true,
+        serialNumber: true,
+        category: true,
+        quantity: true,
+        purchasePrice: true,
+        currentValue: true,
+        acquisitionDate: true,
+        storageLocation: true,
+        notes: true,
+        imageUrl: true,
+      },
+      orderBy: [{ manufacturer: "asc" }, { name: "asc" }],
+    })) as GearExportRecord[];
 
     const receiptDocuments = documents.filter((doc) => doc.type === "RECEIPT");
 
@@ -437,19 +499,21 @@ export async function GET(request: NextRequest) {
 
     const attachmentsRows: FullArmoryExportResponse["attachments"] = exportOptions.includeDocuments
       ? documents.map((doc) => {
-          const linkedItemType: "FIREARM" | "ACCESSORY" | "UNATTACHED" = doc.firearmId
+          const linkedItemType: FullArmoryAttachmentRow["linkedItemType"] = doc.firearmId
             ? "FIREARM"
             : doc.accessoryId
               ? "ACCESSORY"
-              : "UNATTACHED";
+              : doc.gearId
+                ? "GEAR"
+                : "UNATTACHED";
 
           return {
             documentId: doc.id,
             type: doc.type,
             name: doc.name,
-            linkedItemId: doc.firearmId || doc.accessoryId || "",
+            linkedItemId: doc.firearmId || doc.accessoryId || doc.gearId || "",
             linkedItemType,
-            linkedItemName: doc.firearm?.name || doc.accessory?.name || "",
+            linkedItemName: doc.firearm?.name || doc.accessory?.name || doc.gear?.name || "",
             mimeType: doc.mimeType ?? "",
             fileSize: doc.fileSize ?? "",
             fileUrl: doc.fileUrl,
@@ -470,12 +534,53 @@ export async function GET(request: NextRequest) {
         }))
       : [];
 
+    // Gear carries a serial, a value, documents and a photo, so every
+    // missing-evidence counter applies to it exactly as it does to a firearm.
+    // totalItems counts gear (below), so the counters must too — otherwise the
+    // preview can say "13 items, 0 missing values" while a gear item has none.
+    const gearRows = gearItems.map((item) => {
+      const itemDocs = documents.filter((doc) => doc.gearId === item.id);
+      const receiptCount = itemDocs.filter((doc) => doc.type === "RECEIPT").length;
+      const hasPhoto = exportOptions.includeImages && !!item.imageUrl;
+
+      return {
+        gearId: item.id,
+        name: item.name,
+        category: gearCategoryLabel(item.category),
+        manufacturer: item.manufacturer || "",
+        model: item.model || "",
+        serialNumber: exportOptions.includeSerialNumbers ? item.serialNumber || "" : "",
+        quantity: item.quantity ?? 0,
+        purchasePrice: exportOptions.includeValue ? (item.purchasePrice ?? null) : null,
+        currentValue: exportOptions.includeValue ? (item.currentValue ?? null) : null,
+        acquisitionDate: toISODate(item.acquisitionDate),
+        storageLocation: item.storageLocation || "",
+        receiptCount: exportOptions.includeDocuments ? receiptCount : 0,
+        documentCount: exportOptions.includeDocuments ? itemDocs.length : 0,
+        hasPhoto,
+        imageUrl: hasPhoto ? item.imageUrl ?? "" : "",
+        missingSerial: exportOptions.includeSerialNumbers ? !item.serialNumber : false,
+        missingReceipt: exportOptions.includeDocuments ? receiptCount === 0 : false,
+        missingPhoto: exportOptions.includeImages ? !hasPhoto : false,
+        missingValue: exportOptions.includeValue
+          ? item.currentValue == null && item.purchasePrice == null
+          : false,
+        notes: item.notes ?? "",
+      };
+    });
+
+    // Accessories participate in totalItems and totalPurchaseValue but never carry a
+    // replacementValue (their record has no currentValue field, so that row's
+    // contribution is always 0). Gear does track currentValue, so it feeds all three
+    // the same way firearms do.
     const totalPurchaseValue = exportOptions.includeValue
-      ? itemRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
+      ? itemRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0) +
+        gearRows.reduce((sum, item) => sum + (typeof item.purchasePrice === "number" ? item.purchasePrice : 0), 0)
       : 0;
 
     const totalReplacementValue = exportOptions.includeValue
-      ? itemRows.reduce((sum, item) => sum + (typeof item.replacementValue === "number" ? item.replacementValue : 0), 0)
+      ? itemRows.reduce((sum, item) => sum + (typeof item.replacementValue === "number" ? item.replacementValue : 0), 0) +
+        gearRows.reduce((sum, item) => sum + (typeof item.currentValue === "number" ? item.currentValue : 0), 0)
       : 0;
 
     const payload: FullArmoryExportResponse = {
@@ -486,24 +591,30 @@ export async function GET(request: NextRequest) {
         exportOptions,
       },
       summary: {
-        totalItems: itemRows.length,
+        totalItems: itemRows.length + gearRows.length,
         totalFirearms: firearms.length,
         totalAccessories: accessories.length,
+        totalGear: gearRows.length,
         totalDocuments: attachmentsRows.length,
         totalReceipts: receiptDocuments.length,
         totalAmmoStocks: ammoRows.length,
         totalPurchaseValue,
         totalReplacementValue,
         missingEvidence: {
-          missingReceipts: itemRows.filter((i) => i.missingReceipt).length,
-          missingPhotos: itemRows.filter((i) => i.missingPhoto).length,
-          missingValues: itemRows.filter((i) => i.missingValue).length,
-          missingSerials: itemRows.filter((i) => i.missingSerial).length,
+          missingReceipts:
+            itemRows.filter((i) => i.missingReceipt).length + gearRows.filter((g) => g.missingReceipt).length,
+          missingPhotos:
+            itemRows.filter((i) => i.missingPhoto).length + gearRows.filter((g) => g.missingPhoto).length,
+          missingValues:
+            itemRows.filter((i) => i.missingValue).length + gearRows.filter((g) => g.missingValue).length,
+          missingSerials:
+            itemRows.filter((i) => i.missingSerial).length + gearRows.filter((g) => g.missingSerial).length,
         },
       },
       items: itemRows,
       attachments: attachmentsRows,
       ammo: ammoRows,
+      gear: gearRows,
     };
 
     if (format === "csv") {

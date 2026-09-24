@@ -3,11 +3,12 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
 
 type ExportFormat = "csv" | "pdf";
-type UploadReferenceKind = "firearmImage" | "accessoryImage" | "document";
+type UploadReferenceKind = "firearmImage" | "accessoryImage" | "gearImage" | "document";
 
 type SectionFlags = {
   firearms: boolean;
   accessories: boolean;
+  gear: boolean;
   builds: boolean;
   ammo: boolean;
   rangeSessions: boolean;
@@ -30,6 +31,7 @@ function parseFlags(searchParams: URLSearchParams): SectionFlags {
   return {
     firearms: parseBool(searchParams.get("firearms"), true),
     accessories: parseBool(searchParams.get("accessories"), true),
+    gear: parseBool(searchParams.get("gear"), true),
     builds: parseBool(searchParams.get("builds"), true),
     ammo: parseBool(searchParams.get("ammo"), true),
     rangeSessions: parseBool(searchParams.get("rangeSessions"), true),
@@ -46,6 +48,15 @@ function parseFormat(searchParams: URLSearchParams): ExportFormat {
 
 function normalizeIncludeUploadReferences(value: unknown): boolean {
   return typeof value === "boolean" ? value : true;
+}
+
+// Firearm, Accessory and Gear are the only models this route emits that carry a
+// serialNumber. None of them may keep it when includeSerialNumbers is off —
+// including the Accessory rows nested inside a build's slots.
+function withoutSerialNumber(row: object): Record<string, unknown> {
+  const rest = { ...row } as Record<string, unknown>;
+  delete rest.serialNumber;
+  return rest;
 }
 
 function isLocalUploadUrl(url: string): boolean {
@@ -227,6 +238,7 @@ function buildPdfLines(
   const sections: { title: string; enabled: boolean; rows: unknown[] }[] = [
     { title: "Firearms", enabled: flags.firearms, rows: asRows(payload.firearms) },
     { title: "Accessories", enabled: flags.accessories, rows: asRows(payload.accessories) },
+    { title: "Gear", enabled: flags.gear, rows: asRows(payload.gear) },
     { title: "Builds", enabled: flags.builds, rows: asRows(payload.builds) },
     { title: "Ammo Stocks", enabled: flags.ammo, rows: asRows(payload.ammoStocks) },
     { title: "Range Sessions", enabled: flags.rangeSessions, rows: asRows(payload.rangeSessions) },
@@ -359,21 +371,24 @@ export async function GET(request: NextRequest) {
     // Sequential queries — SQLite connection_limit=1 cannot handle concurrent reads
     if (flags.firearms) {
       const rows = await prisma.firearm.findMany({ orderBy: [{ manufacturer: "asc" }, { model: "asc" }, { name: "asc" }] });
-      payload.firearms = includeSerialNumbers
-        ? rows
-        : rows.map((row) => {
-            const rest = { ...row } as Record<string, unknown>;
-            delete rest.serialNumber;
-            return rest;
-          });
+      payload.firearms = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
     }
 
     if (flags.accessories) {
-      payload.accessories = await prisma.accessory.findMany({ orderBy: [{ manufacturer: "asc" }, { name: "asc" }] });
+      const rows = await prisma.accessory.findMany({ orderBy: [{ manufacturer: "asc" }, { name: "asc" }] });
+      payload.accessories = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
+    }
+
+    // Gear carries a serialNumber, so it honours includeSerialNumbers the same
+    // way firearms do — otherwise a knife's serial would ride along in an export
+    // the user asked to strip serials from.
+    if (flags.gear) {
+      const rows = await prisma.gear.findMany({ orderBy: [{ category: "asc" }, { manufacturer: "asc" }, { name: "asc" }] });
+      payload.gear = includeSerialNumbers ? rows : rows.map(withoutSerialNumber);
     }
 
     if (flags.builds) {
-      payload.builds = await prisma.build.findMany({
+      const rows = await prisma.build.findMany({
         include: {
           slots: {
             include: { accessory: true },
@@ -382,6 +397,17 @@ export async function GET(request: NextRequest) {
         },
         orderBy: [{ firearmId: "asc" }, { name: "asc" }],
       });
+      // A build slot embeds the whole Accessory row, so the same strip has to
+      // reach one level down — otherwise an accessory mounted on a build keeps
+      // the serial the top-level accessories section just dropped.
+      payload.builds = includeSerialNumbers
+        ? rows
+        : rows.map((row) => ({
+            ...row,
+            slots: row.slots.map((slot) =>
+              slot.accessory ? { ...slot, accessory: withoutSerialNumber(slot.accessory) } : slot
+            ),
+          }));
     }
 
     if (flags.ammo) {
@@ -410,6 +436,7 @@ export async function GET(request: NextRequest) {
         include: {
           firearm: { select: { id: true, name: true } },
           accessory: { select: { id: true, name: true } },
+          gear: { select: { id: true, name: true } },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -469,6 +496,14 @@ export async function GET(request: NextRequest) {
         });
       }
 
+      if (flags.gear) {
+        (payload.gear as Array<Record<string, unknown>> | undefined)?.forEach((row) => {
+          const id = String(row.id ?? "");
+          const imageUrl = typeof row.imageUrl === "string" ? row.imageUrl : "";
+          addReference("gearImage", id, imageUrl);
+        });
+      }
+
       if (flags.documents) {
         (payload.documents as Array<Record<string, unknown>> | undefined)?.forEach((row) => {
           const id = String(row.id ?? "");
@@ -516,6 +551,7 @@ export async function GET(request: NextRequest) {
 
       if (flags.firearms) csvSections.push({ section: "firearms", rows: payload.firearms ?? [] });
       if (flags.accessories) csvSections.push({ section: "accessories", rows: payload.accessories ?? [] });
+      if (flags.gear) csvSections.push({ section: "gear", rows: payload.gear ?? [] });
       if (flags.builds) csvSections.push({ section: "builds", rows: payload.builds ?? [] });
       if (flags.ammo) csvSections.push({ section: "ammoStocks", rows: payload.ammoStocks ?? [] });
       if (flags.rangeSessions) csvSections.push({ section: "rangeSessions", rows: payload.rangeSessions ?? [] });

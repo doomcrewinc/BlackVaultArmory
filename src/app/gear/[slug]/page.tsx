@@ -4,7 +4,16 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { AccessoriesClientPage } from "@/app/accessories/AccessoriesClientPage";
-import { accessoryWhereForSection, sectionBySlug } from "@/lib/categories";
+import { GearClientPage } from "@/app/gear/GearClientPage";
+import {
+  accessoryWhereForSection,
+  gearWhereForSection,
+  sectionBySlug,
+} from "@/lib/categories";
+
+async function getSectionGear(where: object) {
+  return prisma.gear.findMany({ where, orderBy: { name: "asc" } });
+}
 
 async function getSectionAccessories(where: object | undefined) {
   const accessories = await prisma.accessory.findMany({
@@ -51,11 +60,50 @@ export default async function GearSectionPage({
   const section = sectionBySlug(slug);
   if (!section || section.group !== "gear") notFound();
 
+  // A section could in principle carry both a gear source and an accessory
+  // source. Phase 2 has none like that, so the gear branch returns early and
+  // a mixed section would silently show only its gear — not a case that
+  // exists today.
+  const gearWhere = gearWhereForSection(section);
+  if (gearWhere) {
+    let items: Awaited<ReturnType<typeof getSectionGear>>;
+    try {
+      items = await getSectionGear(gearWhere);
+    } catch {
+      return (
+        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
+          <p className="text-sm text-vault-text-muted">
+            Failed to load {section.label}.
+          </p>
+          <Link
+            href={`/gear/${section.slug}`}
+            className="text-sm text-[#00C2FF] hover:underline"
+          >
+            Tap to retry
+          </Link>
+        </div>
+      );
+    }
+    return (
+      <GearClientPage
+        items={items}
+        heading={section.label}
+        subheading={section.description}
+      />
+    );
+  }
+
+  // A gear-group section must carry a gear matcher (handled above) or an
+  // accessory matcher — `?? undefined` here would otherwise turn "no
+  // matcher for this source" into "no filter", pulling in every accessory.
+  // Every section in the registry today has one or the other, so reaching
+  // neither is a registry defect, not a legitimate empty state.
+  const accessoryWhere = accessoryWhereForSection(section);
+  if (!accessoryWhere) notFound();
+
   let accessories: Awaited<ReturnType<typeof getSectionAccessories>>;
   try {
-    accessories = await getSectionAccessories(
-      accessoryWhereForSection(section) ?? undefined,
-    );
+    accessories = await getSectionAccessories(accessoryWhere);
   } catch {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
