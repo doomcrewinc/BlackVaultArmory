@@ -17,15 +17,24 @@ interface SearchResults {
   ammo: SearchResult[];
   builds: SearchResult[];
   gear: SearchResult[];
+  supplies: SearchResult[];
 }
 
-const EMPTY: SearchResults = { firearms: [], accessories: [], ammo: [], builds: [], gear: [] };
+const EMPTY: SearchResults = {
+  firearms: [],
+  accessories: [],
+  ammo: [],
+  builds: [],
+  gear: [],
+  supplies: [],
+};
 const CATEGORIES: { key: keyof SearchResults; label: string }[] = [
   { key: "firearms", label: "FIREARMS" },
   { key: "accessories", label: "ACCESSORIES" },
   { key: "ammo", label: "AMMO" },
   { key: "builds", label: "BUILDS" },
   { key: "gear", label: "GEAR" },
+  { key: "supplies", label: "SUPPLIES" },
 ];
 
 export function GlobalSearch() {
@@ -110,7 +119,7 @@ export function GlobalSearch() {
           ref={inputRef}
           value={q}
           onChange={handleChange}
-          placeholder="Search firearms, accessories, ammo, gear…"
+          placeholder="Search firearms, accessories, ammo, gear, supplies…"
           className="flex-1 bg-transparent text-vault-text text-sm placeholder-vault-text-faint outline-none"
         />
         {q && (

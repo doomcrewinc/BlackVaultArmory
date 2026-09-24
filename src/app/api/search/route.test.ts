@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   findAmmoStocks: vi.fn(),
   findBuilds: vi.fn(),
   findGear: vi.fn(),
+  findSupplies: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -16,6 +17,7 @@ vi.mock("@/lib/prisma", () => ({
     ammoStock: { findMany: mocks.findAmmoStocks },
     build: { findMany: mocks.findBuilds },
     gear: { findMany: mocks.findGear },
+    supply: { findMany: mocks.findSupplies },
   },
 }));
 
@@ -50,6 +52,14 @@ describe("GET /api/search", () => {
         manufacturer: "Benchmade",
         model: "535",
         category: "KNIFE",
+      },
+    ]);
+    mocks.findSupplies.mockResolvedValue([
+      {
+        id: "supply-1",
+        name: "Bug Out Bandages",
+        brand: "MedCo",
+        category: "MEDICAL",
       },
     ]);
   });
@@ -100,7 +110,48 @@ describe("GET /api/search", () => {
       ammo: [],
       builds: [],
       gear: [],
+      supplies: [],
     });
     expect(mocks.findGear).not.toHaveBeenCalled();
+  });
+
+  it("returns a supplies key alongside the existing sections", async () => {
+    const response = await GET(request("bug"));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json).toHaveProperty("supplies");
+    expect(json.supplies).toEqual([
+      {
+        id: "supply-1",
+        name: "Bug Out Bandages",
+        subtitle: "MedCo · Medical",
+        url: "/supplies/item/supply-1",
+      },
+    ]);
+  });
+
+  it("searches supply name, brand and category through containsInsensitive", async () => {
+    await GET(request("bug"));
+
+    expect(mocks.findSupplies).toHaveBeenCalledTimes(1);
+    const where = mocks.findSupplies.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("bug") },
+      { brand: containsInsensitive("bug") },
+      { category: containsInsensitive("bug") },
+    ]);
+
+    // Every field in the supply OR clause was produced by the spied helper, not a
+    // bare `{ contains: "bug" }` literal that would bypass Postgres's insensitive mode.
+    const supplyCallArgs = vi
+      .mocked(containsInsensitive)
+      .mock.calls.filter(([value]) => value === "bug");
+    expect(supplyCallArgs.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("does not query supplies for a short query", async () => {
+    await GET(request("a"));
+    expect(mocks.findSupplies).not.toHaveBeenCalled();
   });
 });

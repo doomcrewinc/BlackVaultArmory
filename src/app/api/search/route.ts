@@ -2,9 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { containsInsensitive } from "@/lib/db/text-search";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import { SUPPLY_CATEGORY_LABELS, type SupplyCategory } from "@/lib/supply";
 
 function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
+}
+
+function supplyCategoryLabel(category: string): string {
+  return SUPPLY_CATEGORY_LABELS[category as SupplyCategory] ?? category;
 }
 
 export async function GET(request: NextRequest) {
@@ -12,7 +17,7 @@ export async function GET(request: NextRequest) {
   // Not lowercased: containsInsensitive handles case on both providers.
   const q = rawQ.trim();
 
-  const empty = { firearms: [], accessories: [], ammo: [], builds: [], gear: [] };
+  const empty = { firearms: [], accessories: [], ammo: [], builds: [], gear: [], supplies: [] };
 
   if (q.length < 2) {
     return NextResponse.json(empty);
@@ -76,6 +81,18 @@ export async function GET(request: NextRequest) {
     select: { id: true, name: true, manufacturer: true, model: true, category: true },
   });
 
+  const supplies = await prisma.supply.findMany({
+    where: {
+      OR: [
+        { name: containsInsensitive(q) },
+        { brand: containsInsensitive(q) },
+        { category: containsInsensitive(q) },
+      ],
+    },
+    take: 5,
+    select: { id: true, name: true, brand: true, category: true },
+  });
+
   return NextResponse.json({
     firearms: firearms.map((f) => ({
       id: f.id,
@@ -108,6 +125,14 @@ export async function GET(request: NextRequest) {
         ? `${g.manufacturer} · ${gearCategoryLabel(g.category)}`
         : gearCategoryLabel(g.category),
       url: `/gear/item/${g.id}`,
+    })),
+    supplies: supplies.map((s) => ({
+      id: s.id,
+      name: s.name,
+      subtitle: s.brand
+        ? `${s.brand} · ${supplyCategoryLabel(s.category)}`
+        : supplyCategoryLabel(s.category),
+      url: `/supplies/item/${s.id}`,
     })),
   });
 }

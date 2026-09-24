@@ -365,6 +365,57 @@ export default function FullArmoryPreviewPage() {
           </div>
         </section>
 
+        <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Supplies</h2>
+          <div className="armory-print-scroll mt-3 overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-vault-border text-vault-text-faint">
+                  <th className="py-2 pr-4 text-left">Category</th>
+                  <th className="py-2 pr-4 text-left">Name</th>
+                  <th className="py-2 pr-4 text-left">Brand</th>
+                  <th className="py-2 pr-4 text-right">Qty</th>
+                  <th className="py-2 pr-4 text-left">Unit</th>
+                  <th className="py-2 pr-4 text-right">Threshold</th>
+                  <th className="py-2 pr-4 text-left">Expiry</th>
+                  <th className="py-2 pr-4 text-right">Price</th>
+                  <th className="py-2 pr-4 text-left">Purchased</th>
+                  <th className="py-2 pr-4 text-left">Storage</th>
+                  <th className="py-2 text-left">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.supplies.length === 0 ? (
+                  <tr>
+                    <td className="py-3 text-vault-text-faint" colSpan={11}>
+                      No supply records included for this export.
+                    </td>
+                  </tr>
+                ) : (
+                  data.supplies.map((item) => (
+                    <tr key={item.supplyId} className="border-b border-vault-border/60">
+                      <td className="py-2 pr-4">{item.category}</td>
+                      <td className="py-2 pr-4">{item.name}</td>
+                      <td className="py-2 pr-4">{item.brand || "—"}</td>
+                      <td className="py-2 pr-4 text-right">{item.quantity}</td>
+                      <td className="py-2 pr-4">{item.unit}</td>
+                      <td className="py-2 pr-4 text-right">{item.lowStockAlert ?? "—"}</td>
+                      <td className="py-2 pr-4">
+                        {formatDateOnly(item.expirationDate)}
+                        {item.expiryStatus !== "none" ? ` (${item.expiryStatus})` : ""}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
+                      <td className="py-2 pr-4">{formatDateOnly(item.purchaseDate)}</td>
+                      <td className="py-2 pr-4">{item.storageLocation || "—"}</td>
+                      <td className="py-2">{item.notes || "—"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         {options.includeDocuments && (
           <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Document Index</h2>
