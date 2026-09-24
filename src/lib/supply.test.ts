@@ -12,6 +12,7 @@ import {
   normalizeAmount,
   normalizeSupplyCategory,
   normalizeSupplyUnit,
+  todayForExpiry,
 } from "./supply";
 
 const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
@@ -65,6 +66,14 @@ describe("normalizeAmount", () => {
     expect(normalizeAmount("abc")).toBeNull();
     expect(normalizeAmount(Number.NaN)).toBeNull();
     expect(normalizeAmount(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("rejects non-numeric, non-string types rather than coercing them", () => {
+    // Number(true) is 1 — a boolean must not silently become a quantity.
+    expect(normalizeAmount(true)).toBeNull();
+    expect(normalizeAmount(false)).toBeNull();
+    expect(normalizeAmount([])).toBeNull();
+    expect(normalizeAmount({})).toBeNull();
   });
 
   it("honours a fallback, for an update that must preserve the stored value", () => {
@@ -135,5 +144,77 @@ describe("expiryStatus", () => {
     const b = expiryStatus(day("2026-06-20"), today, 90);
     expect(a).toBe(b);
     expect(a).toBe("soon");
+  });
+
+  it("treats an invalid expirationDate as no usable date, not as fine", () => {
+    expect(expiryStatus(new Date("not-a-date"), today, 90)).toBe("none");
+  });
+
+  it("treats an invalid 'today' as unresolvable, not as fine", () => {
+    expect(expiryStatus(day("2026-06-20"), new Date("not-a-date"), 90)).toBe(
+      "none",
+    );
+  });
+});
+
+describe("todayForExpiry", () => {
+  // 8pm Mountain Time on June 15 is already 03:00 UTC on June 16 — a raw
+  // `new Date()` reads the wrong calendar day in this (or any
+  // negative-UTC-offset) timezone. This is the precondition expiryStatus's
+  // `today` argument depends on, and the reason this helper exists.
+  const eveningInDenver = new Date("2026-06-15T20:00:00-07:00");
+
+  it("resolves the caller's timezone's calendar day, not the instant's UTC day", () => {
+    expect(todayForExpiry("America/Denver", eveningInDenver)).toEqual(
+      day("2026-06-15"),
+    );
+  });
+
+  it("documents the bug it fixes: a naive Date passed straight to expiryStatus gives a different, wrong verdict", () => {
+    const resolvedToday = todayForExpiry("America/Denver", eveningInDenver);
+    const somethingExpiringToday = day("2026-06-15");
+
+    // The mistake this helper exists to prevent: passing `now` straight
+    // into expiryStatus reads its UTC day (the 16th) and marks something
+    // expiring TODAY as already expired, hours before local midnight.
+    const naiveVerdict = expiryStatus(
+      somethingExpiringToday,
+      eveningInDenver,
+      90,
+    );
+    // Resolving "today" through the caller's timezone first gives the
+    // correct verdict: expiring today is "soon", not "expired".
+    const correctVerdict = expiryStatus(
+      somethingExpiringToday,
+      resolvedToday,
+      90,
+    );
+
+    expect(naiveVerdict).not.toBe(correctVerdict);
+    expect(naiveVerdict).toBe("expired");
+    expect(correctVerdict).toBe("soon");
+  });
+
+  it("falls back to UTC when timezone is null", () => {
+    // UTC day here is the 16th — distinct from Denver's 15th above, so this
+    // proves null falls back to UTC rather than silently defaulting to some
+    // other zone.
+    expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
+  });
+
+  it("falls back to UTC on an unrecognised timezone rather than throwing", () => {
+    expect(() => todayForExpiry("Not/AZone", eveningInDenver)).not.toThrow();
+    expect(todayForExpiry("Not/AZone", eveningInDenver)).toEqual(
+      day("2026-06-16"),
+    );
+  });
+
+  it("resolves a timezone ahead of UTC, where the local day can lead the UTC day", () => {
+    // 20:00 UTC on the 15th is already 05:00 the next morning in Tokyo
+    // (UTC+9) — the local day is ahead of, not behind, the UTC day.
+    const lateUtcAfternoon = new Date("2026-06-15T20:00:00Z");
+    expect(todayForExpiry("Asia/Tokyo", lateUtcAfternoon)).toEqual(
+      day("2026-06-16"),
+    );
   });
 });

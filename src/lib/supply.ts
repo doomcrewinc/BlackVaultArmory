@@ -102,7 +102,11 @@ export function normalizeAmount(
   value: unknown,
   fallback: number | null = null,
 ): number | null {
-  if (value === undefined || value === null) return fallback;
+  // Only a number or a string is a legitimate amount. Anything else — most
+  // notably a boolean — must fall back rather than coerce: `Number(true)` is
+  // `1`, which would silently turn a checkbox or truthy flag into a stocked
+  // quantity.
+  if (typeof value !== "number" && typeof value !== "string") return fallback;
   if (typeof value === "string" && value.trim() === "") return fallback;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
@@ -145,6 +149,61 @@ function calendarDayNumber(date: Date): number {
 }
 
 /**
+ * The year/month/day a given instant reads as in a given IANA timezone, via
+ * Intl rather than arithmetic on a fixed UTC offset — the offset itself
+ * varies by date (DST), so a fixed-offset calculation is exactly the kind of
+ * bug this module exists to avoid.
+ */
+function calendarPartsInTimeZone(
+  timeZone: string,
+  now: Date,
+): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type: string) =>
+    Number(parts.find((part) => part.type === type)?.value);
+  return { year: get("year"), month: get("month"), day: get("day") };
+}
+
+/**
+ * Resolves "today" for expiryStatus, in a given timezone, as a Date whose
+ * UTC year/month/day equal that timezone's calendar day — the exact shape
+ * calendarDayNumber (and so expiryStatus) requires.
+ *
+ * This exists because a raw `new Date()` is NOT that shape: in any
+ * negative-UTC-offset timezone (this project's own dev/test timezone,
+ * America/Denver at UTC-6/-7, included), the wall clock is still on
+ * yesterday's calendar day for several hours after UTC has already rolled
+ * over to today. Pass that straight into expiryStatus and something
+ * expiring "today" reads as already expired every evening, hours before
+ * local midnight. Passing it through here first fixes that: the UTC day
+ * this function returns is deliberately not the same as `now`'s UTC day
+ * whenever the timezone's local day differs from it — that's the whole
+ * point, see the "off-by-one" test in supply.test.ts for the worked example.
+ *
+ * `timezone` is looked up via Intl, which throws on anything it doesn't
+ * recognise; that throw — like a missing/null timezone — falls back to UTC
+ * rather than propagating, since a corrupt or absent setting must not take
+ * down every expiry read in the app.
+ *
+ * Takes `now` as an argument for the same reason expiryStatus takes `today`:
+ * nothing in this module reads the clock itself.
+ */
+export function todayForExpiry(timezone: string | null, now: Date): Date {
+  let parts: { year: number; month: number; day: number };
+  try {
+    parts = calendarPartsInTimeZone(timezone ?? "UTC", now);
+  } catch {
+    parts = calendarPartsInTimeZone("UTC", now);
+  }
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+}
+
+/**
  * Expiry status of a supply. "none" with no date, "expired" strictly before
  * today, "soon" on the day itself or within warningDays after, else "fine".
  * Expiring today is "soon", not "expired" — you can still use it today.
@@ -157,13 +216,32 @@ function calendarDayNumber(date: Date): number {
  * called `new Date()` itself would make server and client disagree
  * unpredictably, and would not be testable without mocking the clock. Do not
  * add a `new Date()` fallback here, ever.
+ *
+ * PRECONDITION on `today` (and `expirationDate`, which is already
+ * date-only by column type): its UTC year/month/day must already equal the
+ * intended calendar day. A raw wall-clock `new Date()` does NOT satisfy
+ * this in a negative-UTC-offset timezone — it is still yesterday locally for
+ * hours after UTC has rolled over — so passing it straight in shifts
+ * expired/soon/fine boundaries a day early every evening. Callers must
+ * resolve `today` through `todayForExpiry(timezone, now)` first; do not
+ * construct it any other way.
  */
 export function expiryStatus(
   expirationDate: Date | null,
   today: Date,
   warningDays: number,
 ): ExpiryStatus {
-  if (!expirationDate) return "none";
+  if (!expirationDate || Number.isNaN(expirationDate.getTime())) {
+    // A corrupt/unparseable expirationDate is unusable, not reassuring — it
+    // must not silently fall through the NaN comparisons below into "fine".
+    // Treated the same as no date at all: "none".
+    return "none";
+  }
+  if (Number.isNaN(today.getTime())) {
+    // Same reasoning for an invalid `today`: no verdict can be computed, so
+    // don't emit one that happens to fall out of a NaN comparison.
+    return "none";
+  }
 
   const window =
     Number.isFinite(warningDays) && warningDays >= 0
