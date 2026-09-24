@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeQuantity } from "@/lib/quantity";
+import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -105,6 +106,11 @@ export async function PUT(
       lastBatteryChangeDate,
       replacementIntervalDays,
       quantity,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
     } = body;
 
     const existing = await prisma.accessory.findUnique({ where: { id } });
@@ -114,6 +120,29 @@ export async function PUT(
         { status: 404 },
       );
     }
+
+    // Unlike the firearm route, the eligibility gate here (`type`) is an
+    // ordinary editable field, not a dedicated class column — so a write that
+    // only changes `type` (no paperwork field mentioned at all, e.g.
+    // `{ type: "OPTIC" }`) must still re-derive the group: moving a
+    // suppressor's type away must clear its paperwork even though the body
+    // never names a paperwork column. So the gate fires on `type` OR any
+    // paperwork field being present, and — critically — the normalizer is
+    // handed the RESOLVED type (the body's type if this write sets one,
+    // otherwise the type already stored), never the raw possibly-absent body
+    // field, since normalizeAccessoryNfaFields trusts whatever string it is
+    // given and cannot itself detect a stale or wrong one.
+    const touchesNfaGroup =
+      type !== undefined ||
+      nfaTransferMethod !== undefined ||
+      nfaControlNumber !== undefined ||
+      nfaApprovalDate !== undefined ||
+      nfaTaxPaid !== undefined ||
+      nfaRegisteredTo !== undefined;
+    const resolvedType =
+      type !== undefined
+        ? normalizeString(type) || "UNSPECIFIED"
+        : existing.type;
 
     const updated = await prisma.accessory.update({
       where: { id },
@@ -128,9 +157,32 @@ export async function PUT(
         ...(serialNumber !== undefined && {
           serialNumber: normalizeString(serialNumber) || null,
         }),
-        ...(type !== undefined && {
-          type: normalizeString(type) || "UNSPECIFIED",
-        }),
+        ...(type !== undefined && { type: resolvedType }),
+        ...(touchesNfaGroup
+          ? normalizeAccessoryNfaFields(resolvedType, {
+              // Absence is checked with !== undefined (not ??) so an explicit
+              // null still clears a nullable paperwork column, matching the
+              // firearm route's convention.
+              nfaTransferMethod:
+                nfaTransferMethod !== undefined
+                  ? nfaTransferMethod
+                  : existing.nfaTransferMethod,
+              nfaControlNumber:
+                nfaControlNumber !== undefined
+                  ? nfaControlNumber
+                  : existing.nfaControlNumber,
+              nfaApprovalDate:
+                nfaApprovalDate !== undefined
+                  ? nfaApprovalDate
+                  : existing.nfaApprovalDate,
+              nfaTaxPaid:
+                nfaTaxPaid !== undefined ? nfaTaxPaid : existing.nfaTaxPaid,
+              nfaRegisteredTo:
+                nfaRegisteredTo !== undefined
+                  ? nfaRegisteredTo
+                  : existing.nfaRegisteredTo,
+            })
+          : {}),
         ...(caliber !== undefined && { caliber }),
         ...(purchasePrice !== undefined && { purchasePrice }),
         ...(acquisitionDate !== undefined && {

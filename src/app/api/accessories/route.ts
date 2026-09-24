@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeQuantity } from "@/lib/quantity";
+import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -91,6 +92,11 @@ export async function POST(request: NextRequest) {
       replacementIntervalDays,
       initialRoundCount,
       quantity,
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
     } = body;
 
     const normalizedName = normalizeString(name);
@@ -101,13 +107,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // A new record has no stored type to fall back to, so the type written
+    // below IS the resolved type — the only type this record has ever had.
+    // normalizeAccessoryNfaFields is handed that exact value (not the raw,
+    // un-normalized `type` from the body) so eligibility is decided from what
+    // actually gets persisted, not from whatever the caller happened to send.
+    const resolvedType = normalizeString(type) || "UNSPECIFIED";
+    const nfaFields = normalizeAccessoryNfaFields(resolvedType, {
+      nfaTransferMethod,
+      nfaControlNumber,
+      nfaApprovalDate,
+      nfaTaxPaid,
+      nfaRegisteredTo,
+    });
+
     const accessory = await prisma.accessory.create({
       data: {
         name: normalizedName,
         manufacturer: normalizeString(manufacturer) || "Unknown",
         model: normalizeString(model) || null,
         serialNumber: normalizeString(serialNumber) || null,
-        type: normalizeString(type) || "UNSPECIFIED",
+        type: resolvedType,
+        ...nfaFields,
         caliber: caliber ?? null,
         purchasePrice: purchasePrice ?? null,
         acquisitionDate: acquisitionDate
