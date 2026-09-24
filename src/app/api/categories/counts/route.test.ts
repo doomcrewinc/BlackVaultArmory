@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const firearmCount = vi.fn();
 const accessoryCount = vi.fn();
 const gearCount = vi.fn();
+const supplyCount = vi.fn();
 
 // Every count goes through here so the test can watch how many are in flight.
 let inFlight = 0;
@@ -24,6 +25,7 @@ vi.mock("@/lib/prisma", () => ({
     firearm: { count: (args: unknown) => tracked(firearmCount(args)) },
     accessory: { count: (args: unknown) => tracked(accessoryCount(args)) },
     gear: { count: (args: unknown) => tracked(gearCount(args)) },
+    supply: { count: (args: unknown) => tracked(supplyCount(args)) },
   },
 }));
 
@@ -47,6 +49,21 @@ describe("GET /api/categories/counts", () => {
       }) => {
         if (args?.where?.OR) return Promise.resolve(11);
         if (args?.where?.category?.in) return Promise.resolve(7);
+        return Promise.resolve(0);
+      },
+    );
+    // Same where-aware shape as gearCount: cleaning's where is a bare
+    // `{ category: { in: [...] } }`, food-water's is the `{ OR: [...] }`
+    // combination — distinguish them the same way.
+    supplyCount.mockReset().mockImplementation(
+      (args: {
+        where?: {
+          category?: { in?: string[]; notIn?: string[] };
+          OR?: unknown[];
+        };
+      }) => {
+        if (args?.where?.OR) return Promise.resolve(13);
+        if (args?.where?.category?.in) return Promise.resolve(9);
         return Promise.resolve(0);
       },
     );
@@ -81,6 +98,31 @@ describe("GET /api/categories/counts", () => {
         OR: [
           { category: { in: ["CASE"] } },
           { category: { notIn: ["KNIFE", "CASE"] } },
+        ],
+      },
+    });
+  });
+
+  it("counts supplies for supply-backed sections (cleaning, medical, food-water), each from its own where", async () => {
+    const body = await (await GET()).json();
+    expect(body.counts.cleaning).toBe(9);
+    expect(body.counts.medical).toBe(9);
+    expect(body.counts["food-water"]).toBe(13);
+    expect(supplyCount).toHaveBeenCalledWith({
+      where: { category: { in: ["CLEANING"] } },
+    });
+    expect(supplyCount).toHaveBeenCalledWith({
+      where: { category: { in: ["MEDICAL"] } },
+    });
+    expect(supplyCount).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { category: { in: ["FOOD", "WATER", "FILTER"] } },
+          {
+            category: {
+              notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+            },
+          },
         ],
       },
     });

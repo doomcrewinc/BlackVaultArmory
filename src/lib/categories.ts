@@ -1,11 +1,12 @@
 import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 export type SectionGroup = "vault" | "gear" | "prep";
-export type SectionSource = "firearm" | "accessory" | "gear";
+export type SectionSource = "firearm" | "accessory" | "gear" | "supply";
 
 export type FirearmRow = { type: string; nfaClass: string };
 export type AccessoryRow = { type: string };
 export type GearRow = { category: string };
+export type SupplyRow = { category: string };
 
 export type SectionMatcher =
   | { source: "firearm"; where: object; holds: (row: FirearmRow) => boolean }
@@ -18,6 +19,11 @@ export type SectionMatcher =
       source: "gear";
       where: object;
       holds: (row: GearRow) => boolean;
+    }
+  | {
+      source: "supply";
+      where: object;
+      holds: (row: SupplyRow) => boolean;
     };
 
 export type CategorySection = {
@@ -154,6 +160,50 @@ function otherGearSection(): SectionMatcher {
     source: "gear",
     where: { category: { notIn: GROUPED_GEAR } },
     holds: (row) => !GROUPED_GEAR.includes(row.category),
+  };
+}
+
+const CLEANING_CATEGORIES = ["CLEANING"];
+const MEDICAL_CATEGORIES = ["MEDICAL"];
+const FOOD_WATER_CATEGORIES = ["FOOD", "WATER", "FILTER"];
+// Every SupplyCategory an explicit section claims. Used by otherSupplySection
+// below to build the negation — not just food-water's own explicit branch —
+// so CLEANING and MEDICAL rows can never double-match into food-water too.
+const GROUPED_SUPPLIES = [
+  ...CLEANING_CATEGORIES,
+  ...MEDICAL_CATEGORIES,
+  ...FOOD_WATER_CATEGORIES,
+];
+
+function supplySection(categories: string[]): SectionMatcher {
+  return {
+    source: "supply",
+    where: { category: { in: categories } },
+    holds: (row) => categories.includes(row.category),
+  };
+}
+
+/**
+ * Everything no supply section claims yet: BATTERY, FUEL, SANITATION,
+ * CBRN_FILTER, SIGNAL, OTHER, and any category this build does not
+ * recognise. Phase 4 only builds Cleaning, Medical and Food & Water —
+ * Power & Comms, Shelter & Clothing, Tools & Fire and Other Prep are phase
+ * 5's job — so the six categories above are deliberately, temporarily
+ * homeless. They ride on Food & Water for now, the same way `cases` rides
+ * otherGearSection() for gear categories phase 2 hadn't built sections for
+ * yet. Phase 5 restructures this into their own sections.
+ *
+ * Mutually exclusive with `supplySection(FOOD_WATER_CATEGORIES)` on the same
+ * section (one demands membership in GROUPED_SUPPLIES, the other demands
+ * exclusion from it), so the two matchers never both fire — and excluding
+ * CLEANING/MEDICAL here (not just FOOD/WATER/FILTER) keeps rows claimed by
+ * the cleaning and medical sections from also matching food-water's OR.
+ */
+function otherSupplySection(): SectionMatcher {
+  return {
+    source: "supply",
+    where: { category: { notIn: GROUPED_SUPPLIES } },
+    holds: (row) => !GROUPED_SUPPLIES.includes(row.category),
   };
 }
 
@@ -294,6 +344,30 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     icon: "Layers",
     sources: [gearSection(CASE_CATEGORIES), otherGearSection()],
   },
+  {
+    slug: "cleaning",
+    label: "Cleaning",
+    description: "Solvents, oils & cleaning supplies",
+    group: "gear",
+    icon: "SprayCan",
+    sources: [supplySection(CLEANING_CATEGORIES)],
+  },
+  {
+    slug: "medical",
+    label: "Medical",
+    description: "First aid & medical supplies",
+    group: "prep",
+    icon: "Cross",
+    sources: [supplySection(MEDICAL_CATEGORIES)],
+  },
+  {
+    slug: "food-water",
+    label: "Food & Water",
+    description: "Food, water & filtration",
+    group: "prep",
+    icon: "Droplets",
+    sources: [supplySection(FOOD_WATER_CATEGORIES), otherSupplySection()],
+  },
 ];
 
 export function sectionBySlug(slug: string): CategorySection | undefined {
@@ -352,6 +426,31 @@ export function gearSectionForItem(row: GearRow): CategorySection | undefined {
   return sectionsForGroup("gear").find((section) =>
     section.sources.some(
       (source) => source.source === "gear" && source.holds(row),
+    ),
+  );
+}
+
+export function supplyWhereForSection(section: CategorySection): object | null {
+  const matchers = section.sources.filter(
+    (source) => source.source === "supply",
+  );
+  if (matchers.length === 0) return null;
+  if (matchers.length === 1) return matchers[0].where;
+  return { OR: matchers.map((matcher) => matcher.where) };
+}
+
+/**
+ * Unlike vaultSectionForFirearm/gearSectionForAccessory, this searches every
+ * section rather than one group's — cleaning's supply source lives in the
+ * "gear" group while medical's and food-water's live in "prep", so a
+ * group-scoped search would miss cleaning.
+ */
+export function supplySectionForItem(
+  row: SupplyRow,
+): CategorySection | undefined {
+  return CATEGORY_SECTIONS.find((section) =>
+    section.sources.some(
+      (source) => source.source === "supply" && source.holds(row),
     ),
   );
 }

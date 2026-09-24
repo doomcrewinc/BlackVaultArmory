@@ -59,8 +59,22 @@ describe("GET /api/supplies", () => {
     await GET(
       request("http://localhost/api/supplies?section=food-water") as never,
     );
+    // Shape change from Task 3's collapsed `notIn`: the registry now models
+    // food-water as two matchers (an explicit `in` for FOOD/WATER/FILTER
+    // plus a catch-all `notIn` for everything else), the same way `cases`
+    // is modelled — so supplyWhereForSection wraps them in `{ OR: [...] }`.
+    // Semantically identical to the old single fragment (every category not
+    // CLEANING or MEDICAL still matches), just expressed as two branches
+    // instead of one collapsed negation.
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({
-      category: { notIn: ["CLEANING", "MEDICAL"] },
+      OR: [
+        { category: { in: ["FOOD", "WATER", "FILTER"] } },
+        {
+          category: {
+            notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+          },
+        },
+      ],
     });
   });
 

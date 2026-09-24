@@ -19,6 +19,7 @@ import {
   Calculator,
   Library,
   Search,
+  Backpack,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -95,7 +96,7 @@ function NavGroup({
   description: string;
   href: string;
   icon: LucideIcon;
-  group: "vault" | "gear";
+  group: "vault" | "gear" | "prep";
   pathname: string;
   collapsed: boolean;
   counts: Record<string, number>;
@@ -165,7 +166,9 @@ function NavGroup({
             const sectionHref =
               group === "vault"
                 ? `/vault/category/${section.slug}`
-                : `/gear/${section.slug}`;
+                : group === "gear"
+                  ? `/gear/${section.slug}`
+                  : `/prep/${section.slug}`;
             return (
               <Link
                 key={section.slug}
@@ -340,6 +343,17 @@ export function Sidebar({
           href="/gear"
           icon={Crosshair}
           group="gear"
+          pathname={pathname}
+          collapsed={collapsed}
+          counts={counts}
+          onNavigate={onMobileClose}
+        />
+        <NavGroup
+          label="Preparedness"
+          description="Medical & food supplies"
+          href="/prep"
+          icon={Backpack}
+          group="prep"
           pathname={pathname}
           collapsed={collapsed}
           counts={counts}
