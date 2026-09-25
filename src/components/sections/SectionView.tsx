@@ -40,6 +40,7 @@ function PayloadList({
       return (
         <GearClientPage
           items={payload.items}
+          timezoneConfigured={payload.timezoneConfigured}
           heading={heading}
           subheading={subheading}
           embedded={embedded}
@@ -84,9 +85,16 @@ function PayloadList({
  * separate and say which is which.
  *
  * The timezone notice renders EXACTLY ONCE per page. With one payload the
- * list component still owns it (unchanged behaviour); with several, this
- * component renders it and passes `embedded` so the blocks do not each add
- * their own copy.
+ * list component owns it; with several, this component renders it and passes
+ * `embedded` so the blocks do not each add their own copy.
+ *
+ * Both gear and supply lists carry it, because both render expiry verdicts.
+ * `AppSettings.timezone` ships NULL and no client path sets it, so the host
+ * timezone IS the shipped default — a page that says EXPIRED without saying
+ * which timezone decided it re-opens exactly what the notice was added to
+ * close. This is why `timezoneConfigured` is a REQUIRED prop on both list
+ * components rather than an optional one defaulting to `true`: a default
+ * would fail open on the next surface that forgets to pass it.
  */
 export function SectionView({
   section,

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Plus, Package, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import type { ExpiryStatus } from "@/lib/supply";
@@ -29,6 +30,14 @@ interface GearItem {
 
 interface Props {
   items: GearItem[];
+  /**
+   * From the server, via loadSectionItems. REQUIRED, with no default, exactly
+   * as on SupplyClientPage: an optional prop defaulting to `true` is
+   * fail-open, so a new surface that renders expiry badges and forgets to
+   * pass it would lose the notice silently — a guard that looks present and
+   * does nothing. tsc cannot catch that through a default.
+   */
+  timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
   /**
@@ -69,6 +78,7 @@ function ExpiryBadge({ expiry }: { expiry: ExpiryStatus }) {
 
 export function GearClientPage({
   items,
+  timezoneConfigured,
   heading = "GEAR",
   subheading,
   embedded = false,
@@ -98,6 +108,20 @@ export function GearClientPage({
       )}
 
       <div className="p-4 sm:p-6">
+        {/* Only where the badges it explains actually appear: the empty state
+            below renders no SOON/EXPIRED badge, so there is nothing for the
+            notice to qualify. Skipped entirely when embedded — SectionView
+            renders the one notice for the whole page in that case, and two
+            copies on one page is the failure this guard exists to prevent.
+            Mirrors SupplyClientPage exactly: gear carries expiry dates too,
+            and a page showing an EXPIRED verdict must disclose which timezone
+            decided it. */}
+        {!embedded && items.length > 0 && (
+          <SupplyTimezoneNotice
+            timezoneConfigured={timezoneConfigured}
+            className="mb-4"
+          />
+        )}
         {items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
