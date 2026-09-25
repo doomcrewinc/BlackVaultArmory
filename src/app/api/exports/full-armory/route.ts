@@ -8,6 +8,7 @@ import {
   type ExportPreset,
   parseExportOptionsFromSearchParams,
   hasNfaPaperwork,
+  formatExpiryFootnote,
   nfaClassLabel,
   nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
@@ -18,9 +19,8 @@ import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import {
   SUPPLY_CATEGORY_LABELS,
   SUPPLY_UNIT_LABELS,
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
-  todayForExpiry,
+  resolveExpiryContext,
   type SupplyCategory,
   type SupplyUnit,
 } from "@/lib/supply";
@@ -166,6 +166,9 @@ type GearExportRecord = {
   purchasePrice: number | null;
   currentValue: number | null;
   acquisitionDate: Date | null;
+  expirationDate: Date | null;
+  protectionLevel: string | null;
+  armorSize: string | null;
   storageLocation: string | null;
   notes: string | null;
   imageUrl: string | null;
@@ -259,6 +262,11 @@ function rowsToCsv(rows: Record<string, unknown>[]): string {
 function buildExportCsv(payload: FullArmoryExportResponse): string {
   const metaRows = [
     { section: "summary", key: "generatedAt", value: payload.meta.generatedAt },
+    // Beside generatedAt, the only other line that says when and where this
+    // sheet's verdicts came from. Every gear and supply row carries an
+    // expiryStatus column; without this the reader cannot tell whose calendar
+    // day decided them.
+    { section: "summary", key: "expiryFootnote", value: formatExpiryFootnote(payload.meta) },
     { section: "summary", key: "preset", value: payload.meta.preset },
     { section: "summary", key: "totalItems", value: payload.summary.totalItems },
     { section: "summary", key: "totalFirearms", value: payload.summary.totalFirearms },
@@ -397,10 +405,33 @@ function pushWrapped(lines: string[], line: string, indent = ""): void {
   wrapped.forEach((part, index) => lines.push(index === 0 ? `${indent}${part}` : `${indent}  ${part}`));
 }
 
+/**
+ * The `Expires: <date> (<status>)` segment for a PDF row, or null when the row
+ * has no date to report.
+ *
+ * Shared by the gear and the supply renderers because they had drifted into two
+ * OPPOSITE conventions inside one rendered document: gear omitted the segment
+ * while supplies printed `Expiry: N/A (none)` on every dateless row, so a
+ * reader comparing a plate to a water jug on the same sheet had to know which
+ * block followed which rule. One function and one label, so they cannot
+ * diverge again.
+ *
+ * The convention is the gear one, which is also the rule the NFA line follows:
+ * print nothing where there is nothing to say. `(status)` is likewise dropped
+ * when the status is "none", which is the only status a dateless row can have
+ * — so it never appears in practice, and the guard is there because
+ * expiryStatus also returns "none" for a date it could not parse.
+ */
+function expirySegment(expirationDate: string, expiryStatus: string): string | null {
+  if (!expirationDate) return null;
+  return `Expires: ${expirationDate}${expiryStatus !== "none" ? ` (${expiryStatus})` : ""}`;
+}
+
 function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   const lines: string[] = [
     "Project BlackVault - Full Armory Export",
     `Generated: ${payload.meta.generatedAt}`,
+    formatExpiryFootnote(payload.meta),
     `Preset: ${payload.meta.preset}`,
     `Items: ${payload.summary.totalItems} | Ammo Lots: ${payload.summary.totalAmmoStocks} | Documents: ${payload.summary.totalDocuments}`,
     `Purchase Total: ${payload.summary.totalPurchaseValue.toFixed(2)} | Replacement Total: ${payload.summary.totalReplacementValue.toFixed(2)}`,
@@ -462,9 +493,20 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     lines.push("No gear records included");
   } else {
     payload.gear.forEach((row, index) => {
+      // Each value gets its own labelled segment — the rating is never folded
+      // into the category, which is the phase-3 "Class: PISTOL" mistake.
+      // Printed only where there is something to print, the same rule the NFA
+      // line below follows: "Protection: N/A" on every knife and case would
+      // double the page count to say nothing, and a plate's rating would be
+      // harder to find for it.
+      const extras: string[] = [];
+      const expiry = expirySegment(row.expirationDate, row.expiryStatus);
+      if (expiry) extras.push(expiry);
+      if (row.protectionLevel) extras.push(`Protection: ${row.protectionLevel}`);
+      if (row.armorSize) extras.push(`Size/Cut: ${row.armorSize}`);
       pushWrapped(
         lines,
-        `${index + 1}. ${row.category} ${row.name} | Serial: ${row.serialNumber || "N/A"} | Qty: ${row.quantity} | Purchase: ${row.purchasePrice ?? "N/A"} | Value: ${row.currentValue ?? "N/A"}`
+        `${index + 1}. ${row.category} ${row.name} | Serial: ${row.serialNumber || "N/A"} | Qty: ${row.quantity} | Purchase: ${row.purchasePrice ?? "N/A"} | Value: ${row.currentValue ?? "N/A"}${extras.length > 0 ? ` | ${extras.join(" | ")}` : ""}`
       );
       if (row.imageUrl) pushWrapped(lines, `Image Ref: ${row.imageUrl}`, "   ");
     });
@@ -475,9 +517,13 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     lines.push("No supply records included");
   } else {
     payload.supplies.forEach((row, index) => {
+      // Same segment helper the gear rows above use: a dateless supply now says
+      // nothing rather than "Expiry: N/A (none)", so both blocks of this one
+      // document follow one convention.
+      const expiry = expirySegment(row.expirationDate, row.expiryStatus);
       pushWrapped(
         lines,
-        `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"} | Expiry: ${row.expirationDate || "N/A"} (${row.expiryStatus}) | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
+        `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"}${expiry ? ` | ${expiry}` : ""} | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
       );
     });
   }
@@ -576,6 +622,9 @@ export async function GET(request: NextRequest) {
         purchasePrice: true,
         currentValue: true,
         acquisitionDate: true,
+        expirationDate: true,
+        protectionLevel: true,
+        armorSize: true,
         storageLocation: true,
         notes: true,
         imageUrl: true,
@@ -585,9 +634,15 @@ export async function GET(request: NextRequest) {
 
     // Resolved once, not per row: expiryStatus must never read the clock
     // itself, matching getSupplySectionItems.ts's own resolution of "today".
+    //
+    // The whole context, not just `today`, because meta's footnote has to name
+    // the timezone and the day that THESE rows were judged against. A second
+    // `new Date()` or a second AppSettings read for the footnote is exactly how
+    // a disclosure line ends up contradicting the rows it annotates.
     const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
-    const today = todayForExpiry(settings?.timezone ?? null, new Date());
-    const expiryWarningDays = settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+    const expiry = resolveExpiryContext(settings, new Date());
+    const today = expiry.today;
+    const expiryWarningDays = expiry.warningDays;
 
     const supplies = (await prisma.supply.findMany({
       select: {
@@ -744,6 +799,20 @@ export async function GET(request: NextRequest) {
         purchasePrice: exportOptions.includeValue ? (item.purchasePrice ?? null) : null,
         currentValue: exportOptions.includeValue ? (item.currentValue ?? null) : null,
         acquisitionDate: toISODate(item.acquisitionDate),
+        expirationDate: toISODate(item.expirationDate),
+        // The same `today` and window the supply rows below use, so one sheet
+        // cannot carry two verdicts about the same calendar day — and the same
+        // pair meta's footnote names.
+        expiryStatus: expiryStatus(item.expirationDate, today, expiryWarningDays),
+        // Three separate cells, not one. `category` says "Armor"; these say
+        // what rating and what cut. Empty — not "—", not "null" — on every row
+        // that has no rating, which is every non-armor row because the write
+        // path clears both fields when a category stops being ARMOR. Not gated
+        // on the category HERE, because a category this build does not
+        // recognise keeps what it stored (normalizeGearArmorFields) and an
+        // export is the last place that should quietly drop it.
+        protectionLevel: item.protectionLevel || "",
+        armorSize: item.armorSize || "",
         storageLocation: item.storageLocation || "",
         receiptCount: exportOptions.includeDocuments ? receiptCount : 0,
         documentCount: exportOptions.includeDocuments ? itemDocs.length : 0,
@@ -807,6 +876,11 @@ export async function GET(request: NextRequest) {
         preset,
         includesAllUploadedReceipts: exportOptions.includeDocuments,
         exportOptions,
+        // Straight off the one resolved context the gear and supply rows were
+        // mapped with — never re-resolved here.
+        expiryTimezone: expiry.timezone,
+        expiryTimezoneFromSetting: expiry.timezoneFromSetting,
+        expiryEvaluatedOn: toISODate(today),
       },
       summary: {
         totalItems: itemRows.length + gearRows.length + supplyRows.length,

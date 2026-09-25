@@ -7,15 +7,20 @@ import {
   accessoryWhereForSection,
   firearmWhereForSection,
   gearSectionForAccessory,
+  gearSectionForItem,
   gearWhereForSection,
   groupHref,
   sectionBySlug,
   sectionHref,
+  sectionIsRenderable,
+  sectionSources,
   sectionsForGroup,
   supplySectionForItem,
   supplyWhereForSection,
   vaultSectionForFirearm,
+  type CategorySection,
 } from "./categories";
+import { RENDERABLE_SOURCES_BY_GROUP } from "./sections/renderableSources";
 import { GEAR_CATEGORIES } from "./gear";
 import { SUPPLY_CATEGORIES } from "./supply";
 import {
@@ -76,8 +81,13 @@ describe("registry shape", () => {
       "cleaning",
     ]);
     expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
+      "armor",
       "medical",
       "food-water",
+      "power-comms",
+      "shelter-clothing",
+      "tools-fire",
+      "other-prep",
     ]);
   });
 });
@@ -318,15 +328,17 @@ describe("where fragments agree with holds", () => {
     }
   });
 
-  it("selects the same gear as holds, for every gear category — including cases' OR fragment", () => {
+  it("selects the same gear as holds, for every gear category — including other-prep's OR fragment", () => {
     const categories = [
       ...GEAR_CATEGORIES,
       "ZZ_JUNK",
       "",
       "knife", // wrong case
-      "ARMOR",
+      "EXOSUIT",
     ];
-    for (const section of sectionsForGroup("gear")) {
+    // Gear-backed sections span the "gear" and "prep" groups now, the same
+    // reason the supplies check below spans every group.
+    for (const section of CATEGORY_SECTIONS) {
       const where = gearWhereForSection(section) as Where | null;
       if (!where) continue;
       for (const category of categories) {
@@ -341,7 +353,7 @@ describe("where fragments agree with holds", () => {
     }
   });
 
-  it("selects the same supplies as holds, for every supply category — including food-water's OR fragment", () => {
+  it("selects the same supplies as holds, for every supply category — including other-prep's OR fragment", () => {
     const categories = [
       ...SUPPLY_CATEGORIES,
       "ZZ_JUNK",
@@ -349,8 +361,9 @@ describe("where fragments agree with holds", () => {
       "cleaning", // wrong case
       "ARMOR",
     ];
-    // Supply-backed sections span two groups (cleaning is "gear", medical and
-    // food-water are "prep"), so check every section, not one group's.
+    // Supply-backed sections span two groups (cleaning is "gear", the rest
+    // of the supply-backed sections are "prep"), so check every section, not
+    // one group's.
     for (const section of CATEGORY_SECTIONS) {
       const where = supplyWhereForSection(section) as Where | null;
       if (!where) continue;
@@ -383,8 +396,12 @@ describe("gear-backed sections", () => {
   });
 
   it("places every gear category in exactly one section", () => {
+    // Gear-backed sections now span the "gear" and "prep" groups (armor,
+    // medical, etc. moved to prep), so search every section, the same reason
+    // supplySectionsMatching below searches CATEGORY_SECTIONS rather than
+    // one group's.
     for (const category of GEAR_CATEGORIES) {
-      const matches = sectionsForGroup("gear").filter((section) =>
+      const matches = CATEGORY_SECTIONS.filter((section) =>
         section.sources.some(
           (source) => source.source === "gear" && source.holds({ category }),
         ),
@@ -397,8 +414,8 @@ describe("gear-backed sections", () => {
   });
 
   it("never loses gear with an unrecognised category", () => {
-    for (const category of ["ZZ_JUNK", "", "knife", "ARMOR"]) {
-      const matches = sectionsForGroup("gear").filter((section) =>
+    for (const category of ["ZZ_JUNK", "", "knife", "EXOSUIT"]) {
+      const matches = CATEGORY_SECTIONS.filter((section) =>
         section.sources.some(
           (source) => source.source === "gear" && source.holds({ category }),
         ),
@@ -421,12 +438,51 @@ describe("gear-backed sections", () => {
     expect(gearWhereForSection(optics)).toBeNull();
   });
 
-  it("combines cases' two matchers into a literal OR, not flattened or reordered", () => {
-    const cases = sectionBySlug("cases")!;
-    expect(gearWhereForSection(cases)).toEqual({
+  it("combines other-prep's two gear matchers into a literal OR, not flattened or reordered", () => {
+    // Phase 4's version of this test named `cases`, which carried the gear
+    // catch-all back then. The catch-all rides on other-prep now.
+    const otherPrep = sectionBySlug("other-prep")!;
+    expect(gearWhereForSection(otherPrep)).toEqual({
       OR: [
-        { category: { in: ["CASE"] } },
-        { category: { notIn: ["KNIFE", "CASE"] } },
+        {
+          category: {
+            in: [
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
+        {
+          category: {
+            notIn: [
+              "KNIFE",
+              "CASE",
+              "ARMOR",
+              "MEDICAL_KIT",
+              "WATER_TREATMENT",
+              "POWER",
+              "COMMS",
+              "SHELTER",
+              "CLOTHING",
+              "TOOL",
+              "FIRE",
+              "LIGHT",
+              "SIGNALING",
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
       ],
     });
   });
@@ -474,33 +530,10 @@ describe("supply-backed sections", () => {
     }
   });
 
-  it("groups the supply categories the way the spec says", () => {
-    expect(supplySectionForItem({ category: "CLEANING" })?.slug).toBe(
-      "cleaning",
-    );
-    expect(supplySectionForItem({ category: "MEDICAL" })?.slug).toBe("medical");
-    expect(supplySectionForItem({ category: "FOOD" })?.slug).toBe("food-water");
-    expect(supplySectionForItem({ category: "WATER" })?.slug).toBe(
-      "food-water",
-    );
-    expect(supplySectionForItem({ category: "FILTER" })?.slug).toBe(
-      "food-water",
-    );
-    // The catch-all: categories with no section of their own yet, deliberately
-    // and temporarily homed under food-water until phase 5.
-    for (const category of [
-      "BATTERY",
-      "FUEL",
-      "SANITATION",
-      "CBRN_FILTER",
-      "SIGNAL",
-      "OTHER",
-    ]) {
-      expect(supplySectionForItem({ category })?.slug, category).toBe(
-        "food-water",
-      );
-    }
-  });
+  // "groups the supply categories the way the spec says" moved to the
+  // "preparedness sections" describe below, where it covers every supply
+  // category rather than repeating the food-water-only slice phase 4 left
+  // behind.
 
   it("keeps supply sections free of gear/accessory/firearm rows and vice versa", () => {
     const cleaning = sectionBySlug("cleaning")!;
@@ -524,17 +557,129 @@ describe("supply-backed sections", () => {
     });
   });
 
-  it("combines food-water's two matchers into a literal OR, not flattened or reordered", () => {
-    const foodWater = sectionBySlug("food-water")!;
-    expect(supplyWhereForSection(foodWater)).toEqual({
+  it("combines other-prep's two supply matchers into a literal OR, not flattened or reordered", () => {
+    // Phase 4's version of this test named `food-water`, which carried the
+    // supply catch-all back then. The catch-all rides on other-prep now.
+    const otherPrep = sectionBySlug("other-prep")!;
+    expect(supplyWhereForSection(otherPrep)).toEqual({
       OR: [
-        { category: { in: ["FOOD", "WATER", "FILTER"] } },
+        { category: { in: ["SANITATION", "CBRN_FILTER", "OTHER"] } },
         {
           category: {
-            notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+            notIn: [
+              "CLEANING",
+              "MEDICAL",
+              "FOOD",
+              "WATER",
+              "FILTER",
+              "BATTERY",
+              "FUEL",
+              "SIGNAL",
+              "SANITATION",
+              "CBRN_FILTER",
+              "OTHER",
+            ],
           },
         },
       ],
+    });
+  });
+});
+
+describe("preparedness sections", () => {
+  it("declares the seven sections the spec names, in order", () => {
+    expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
+      "armor",
+      "medical",
+      "food-water",
+      "power-comms",
+      "shelter-clothing",
+      "tools-fire",
+      "other-prep",
+    ]);
+  });
+
+  it("groups the gear categories the way the spec says", () => {
+    const expected: Record<string, string> = {
+      KNIFE: "knives",
+      CASE: "cases",
+      ARMOR: "armor",
+      MEDICAL_KIT: "medical",
+      WATER_TREATMENT: "food-water",
+      POWER: "power-comms",
+      COMMS: "power-comms",
+      LIGHT: "tools-fire",
+      FIRE: "tools-fire",
+      SHELTER: "shelter-clothing",
+      CLOTHING: "shelter-clothing",
+      TOOL: "tools-fire",
+      SANITATION: "other-prep",
+      CBRN: "other-prep",
+      NAVIGATION: "other-prep",
+      SIGNALING: "tools-fire",
+      DOCUMENTS: "other-prep",
+      SAFETY: "other-prep",
+      BUGOUT: "other-prep",
+      OTHER: "other-prep",
+    };
+    for (const category of GEAR_CATEGORIES) {
+      expect(
+        gearSectionForItem({ category })?.slug,
+        `${category} landed in the wrong section`,
+      ).toBe(expected[category]);
+    }
+  });
+
+  it("groups the supply categories the way the spec says", () => {
+    const expected: Record<string, string> = {
+      CLEANING: "cleaning",
+      MEDICAL: "medical",
+      FOOD: "food-water",
+      WATER: "food-water",
+      FILTER: "food-water",
+      BATTERY: "power-comms",
+      FUEL: "tools-fire",
+      SANITATION: "other-prep",
+      CBRN_FILTER: "other-prep",
+      SIGNAL: "tools-fire",
+      OTHER: "other-prep",
+    };
+    for (const category of SUPPLY_CATEGORIES) {
+      expect(
+        supplySectionForItem({ category })?.slug,
+        `${category} landed in the wrong section`,
+      ).toBe(expected[category]);
+    }
+  });
+
+  it("sends an unrecognised gear category to other-prep, not to cases", () => {
+    // Phase 4 parked the gear catch-all on `cases` because prep had no home
+    // for it. It has one now, and a bugout-bag category must not surface
+    // under Gear > Cases.
+    expect(gearSectionForItem({ category: "EXOSUIT" })?.slug).toBe("other-prep");
+  });
+
+  it("sends an unrecognised supply category to other-prep, not to food-water", () => {
+    expect(supplySectionForItem({ category: "PLUTONIUM" })?.slug).toBe("other-prep");
+  });
+
+  it("finds a gear item whose section lives outside the gear group", () => {
+    // gearSectionForItem searched only sectionsForGroup("gear"), which was
+    // correct while every gear category was a Gear section. Armor is a prep
+    // section, so a group-scoped search returns undefined and the detail
+    // page's back link falls back to "/" for fourteen of twenty categories.
+    const section = gearSectionForItem({ category: "ARMOR" });
+    expect(section?.slug).toBe("armor");
+    expect(section?.group).toBe("prep");
+  });
+
+  it("keeps mixed sections' two sources independent", () => {
+    const medical = sectionBySlug("medical")!;
+    expect(gearWhereForSection(medical)).toEqual({
+      category: { in: ["MEDICAL_KIT"] },
+    });
+    expect(supplyWhereForSection(medical)).toEqual({
+      category: { in: ["MEDICAL"] },
     });
   });
 });
@@ -611,5 +756,110 @@ describe("route reachability", () => {
     for (const section of CATEGORY_SECTIONS) {
       expect(SECTION_GROUPS).toContain(section.group);
     }
+  });
+});
+
+// ── renderability ─────────────────────────────────────────────
+//
+// The suite above asserts a section's href resolves to a page.tsx. It cannot
+// see that the page's own body refuses to render: `/prep/armor` resolved
+// through `/prep/[slug]` and 404'd anyway, because that page's supply-matcher
+// guard called notFound() for a gear-only section. "The route resolves" and
+// "the page renders" are different claims, and only the first was tested.
+//
+// `sectionIsRenderable` is the second claim, and it has two halves — the
+// LOADER can fetch every source the section declares (a non-null where), and
+// the group's VIEW can render every one of them. The second half is the one
+// that bites: a prep section given a firearm source clears the first half
+// completely and then throws inside SectionView at render time, which is an
+// HTTP 500 with no retry link. Both [slug] pages gate on this function, so
+// these tests are what make that gate's notFound() unreachable.
+
+describe("section renderability", () => {
+  it("gives every registered section at least one source to render", () => {
+    for (const section of CATEGORY_SECTIONS) {
+      expect(
+        sectionSources(section).length,
+        `${section.slug} declares no source, so its page would render nothing`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("builds a non-null where clause for every source a section declares", () => {
+    // A section can declare a source kind whose where-builder returns null —
+    // the loader skips it, and a section whose ONLY source did that would
+    // render an empty page forever while every matching test stayed green.
+    const builders = {
+      firearm: firearmWhereForSection,
+      accessory: accessoryWhereForSection,
+      gear: gearWhereForSection,
+      supply: supplyWhereForSection,
+    } as const;
+    for (const section of CATEGORY_SECTIONS) {
+      for (const kind of sectionSources(section)) {
+        expect(
+          builders[kind](section),
+          `${section.slug} declares a ${kind} source with no where clause`,
+        ).not.toBeNull();
+      }
+    }
+  });
+
+  it("declares only source kinds its group's view can render", () => {
+    // The half a where clause cannot speak to. RENDERABLE_SOURCES_BY_GROUP is
+    // the same definition SectionView is compile-pinned to, so this reads the
+    // view's real capability rather than a list copied beside it.
+    for (const section of CATEGORY_SECTIONS) {
+      for (const kind of sectionSources(section)) {
+        expect(
+          RENDERABLE_SOURCES_BY_GROUP[section.group],
+          `${section.slug} declares a ${kind} source that no ${section.group} view renders`,
+        ).toContain(kind);
+      }
+    }
+  });
+
+  it("agrees with sectionIsRenderable, which the pages gate on", () => {
+    for (const section of CATEGORY_SECTIONS) {
+      expect(sectionIsRenderable(section), `${section.slug}`).toBe(true);
+    }
+  });
+
+  it("fails a section with no sources, so the check above is not vacuous", () => {
+    expect(
+      sectionIsRenderable({
+        slug: "hollow",
+        label: "Hollow",
+        description: "",
+        group: "prep",
+        icon: "Package",
+        sources: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("fails a prep section whose source no prep view renders", () => {
+    // The half-function case. This section's where clause is real and the
+    // loader would happily query with it — what fails is the VIEW: SectionView
+    // has no firearm branch, so this renders as a 500, not as a page. A gate
+    // that only checked where clauses would wave it through.
+    const firearmBackedPrep: CategorySection = {
+      ...sectionBySlug("handguns")!,
+      slug: "prep-with-firearms",
+      group: "prep",
+    };
+    expect(firearmWhereForSection(firearmBackedPrep)).not.toBeNull();
+    expect(sectionIsRenderable(firearmBackedPrep)).toBe(false);
+  });
+
+  it("accepts that same source in the vault group, which does render it", () => {
+    // Proves the check above is about the group's view, not a blanket ban on
+    // firearm sources — /vault/category/[slug] renders them through
+    // VaultClientPage, so the vault's nine sections must stay renderable.
+    const vaultBacked: CategorySection = {
+      ...sectionBySlug("handguns")!,
+      group: "vault",
+    };
+    expect(sectionIsRenderable(vaultBacked)).toBe(true);
   });
 });

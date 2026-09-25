@@ -21,13 +21,18 @@ function gearCategoryLabel(category: string): string {
  * supplies below, and for the same reason: the column stores the token while
  * every surface displays the label.
  *
- * Today's two labels ("Knife", "Case") differ from their tokens only by case,
- * which containsInsensitive already handles — so this changes no result yet.
- * It is here because the moment phase 5 adds a multi-word category the
- * gear.ts header already promises (armor, medical, shelter...), `FIRST_AID`
- * would be unfindable as "first aid", which is exactly the bug supplies had.
- * The test is derived from GEAR_CATEGORIES, so it starts covering that
- * category the day it is added.
+ * This now changes results. It was written while the enum held only KNIFE and
+ * CASE, whose labels differ from their tokens by case alone — something
+ * containsInsensitive already handled — against the multi-word categories
+ * gear.ts promised were coming. Phase 5 added eighteen, and exactly three of
+ * the twenty labels now differ from their token by more than case:
+ * MEDICAL_KIT is "Medical Kit", WATER_TREATMENT is "Water Treatment" and
+ * CBRN is "CBRN Protection". Without this, a search for "medical kit" or
+ * "water treatment" — what every surface in the app displays — matched no
+ * gear at all, which is exactly the bug supplies had.
+ *
+ * The filter is derived from GEAR_CATEGORIES, so a category added later is
+ * covered the day it lands, and so is the test.
  */
 function gearCategoriesMatchingLabel(q: string): GearCategory[] {
   const needle = q.toLowerCase();

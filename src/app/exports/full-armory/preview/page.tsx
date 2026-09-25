@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Printer, RefreshCw } from "lucide-react";
 import {
   buildExportQueryString,
+  formatExpiryFootnote,
   hasNfaPaperwork,
   nfaClassLabel,
   nfaTransferMethodLabel,
@@ -68,6 +69,18 @@ export default function FullArmoryPreviewPage() {
     return data.items.filter(hasNfaPaperwork);
   }, [data]);
 
+  // The gear rows whose four screen-only columns have anything in them, for the
+  // Gear Detail section — the same shape as nfaItems above, and for the same
+  // reason: those columns do not fit on a letter page beside the other nine, and
+  // a section repeating four dashes for every knife would be longer than the
+  // Gear table and say nothing.
+  const gearDetailItems = useMemo(() => {
+    if (!data) return [];
+    return data.gear.filter(
+      (item) => item.protectionLevel || item.armorSize || item.storageLocation || item.notes
+    );
+  }, [data]);
+
   if (loading) {
     return (
       <main className="min-h-screen bg-vault-bg text-vault-text px-4 py-10">
@@ -120,6 +133,11 @@ export default function FullArmoryPreviewPage() {
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h1 className="text-lg font-semibold text-vault-text">Full Armory Export</h1>
           <p className="text-xs text-vault-text-faint mt-1">Generated {new Date(data.meta.generatedAt).toLocaleString()}</p>
+          {/* The gear and supply tables below both carry an expiry verdict.
+              This says whose calendar day decided them — the same sentence the
+              CSV and the PDF print, from the same meta the rows came with, so
+              the printout an adjuster reads cannot disagree with either. */}
+          <p className="text-xs text-vault-text-faint mt-0.5">{formatExpiryFootnote(data.meta)}</p>
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
             <div className="rounded-md border border-vault-border bg-vault-bg p-3">
               <p className="text-vault-text-faint">Preset</p>
@@ -333,14 +351,31 @@ export default function FullArmoryPreviewPage() {
                   <th className="py-2 pr-4 text-right">Qty</th>
                   <th className="py-2 pr-4 text-right">Purchase</th>
                   <th className="py-2 pr-4 text-right">Value</th>
-                  <th className="py-2 pr-4 text-left">Storage</th>
-                  <th className="py-2 text-left">Notes</th>
+                  {/* Three separate columns, never folded together or into
+                      Category. Phase 3 folded a firearm's platform into its NFA
+                      class and printed "Class: PISTOL" for an SBR; a plate is
+                      an Armor item rated NIJ III+ in a Medium SAPI cut, and a
+                      claims sheet needs all three read separately. */}
+                  <th className="py-2 pr-4 text-left">Expires</th>
+                  {/* Screen-only, and NOT because they matter less: thirteen
+                      columns measure 838px against the 654px a letter page
+                      leaves for a table here, so on paper the last three ran
+                      off the right edge and were cut — the phase-3 failure
+                      exactly. They print in Gear Detail below instead, the
+                      same split Master Inventory and NFA Paperwork use.
+                      `Expires` stays in this table because every category can
+                      carry a date and the nine remaining columns measure
+                      591px, inside the page with room to spare. */}
+                  <th className="print:hidden py-2 pr-4 text-left">Protection Level</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Size / Cut</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Storage</th>
+                  <th className="print:hidden py-2 text-left">Notes</th>
                 </tr>
               </thead>
               <tbody>
                 {data.gear.length === 0 ? (
                   <tr>
-                    <td className="py-3 text-vault-text-faint" colSpan={10}>
+                    <td className="py-3 text-vault-text-faint" colSpan={13}>
                       No gear records included for this export.
                     </td>
                   </tr>
@@ -355,8 +390,20 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4 text-right">{item.quantity}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.currentValue)}</td>
-                      <td className="py-2 pr-4">{item.storageLocation || "—"}</td>
-                      <td className="py-2">{item.notes || "—"}</td>
+                      {/* A knife has no rated life and no plate cut, so these
+                          three cells are EMPTY on its row — not a dash, which
+                          here means "on file but withheld or unknown", and
+                          never the string "null". The expiry cell keeps the
+                          dash convention the Supplies table uses, because a
+                          missing date there is a gap in the record. */}
+                      <td className="py-2 pr-4">
+                        {item.expirationDate ? formatDateOnly(item.expirationDate) : "—"}
+                        {item.expiryStatus !== "none" ? ` (${item.expiryStatus})` : ""}
+                      </td>
+                      <td className="print:hidden py-2 pr-4">{item.protectionLevel}</td>
+                      <td className="print:hidden py-2 pr-4">{item.armorSize}</td>
+                      <td className="print:hidden py-2 pr-4">{item.storageLocation || "—"}</td>
+                      <td className="print:hidden py-2">{item.notes || "—"}</td>
                     </tr>
                   ))
                 )}
@@ -364,6 +411,45 @@ export default function FullArmoryPreviewPage() {
             </table>
           </div>
         </section>
+
+        {gearDetailItems.length > 0 && (
+          <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Gear Detail</h2>
+            <p className="text-xs text-vault-text-faint mt-1">
+              {gearDetailItems.length} {gearDetailItems.length === 1 ? "item" : "items"} with a rating, a cut, a
+              location or a note. These columns also appear in Gear on screen; on paper they live here, where they
+              fit.
+            </p>
+            <div className="armory-print-scroll mt-3 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-vault-border text-vault-text-faint">
+                    <th className="py-2 pr-4 text-left">Item</th>
+                    <th className="py-2 pr-4 text-left">Category</th>
+                    <th className="py-2 pr-4 text-left">Protection Level</th>
+                    <th className="py-2 pr-4 text-left">Size / Cut</th>
+                    <th className="py-2 pr-4 text-left">Storage</th>
+                    <th className="py-2 text-left">Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gearDetailItems.map((item) => (
+                    <tr key={item.gearId} className="border-b border-vault-border/60 break-inside-avoid">
+                      <td className="py-2 pr-4">{item.name}</td>
+                      <td className="py-2 pr-4">{item.category}</td>
+                      {/* Still empty rather than dashed on a non-armor row: the
+                          rule does not change because the table did. */}
+                      <td className="py-2 pr-4">{item.protectionLevel}</td>
+                      <td className="py-2 pr-4">{item.armorSize}</td>
+                      <td className="py-2 pr-4">{item.storageLocation || "—"}</td>
+                      <td className="py-2">{item.notes || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
 
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Supplies</h2>

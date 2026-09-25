@@ -170,13 +170,23 @@ model Gear {
   manufacturer    String?
   model           String?
   serialNumber    String?
-  // GearCategory: KNIFE | CASE
+  // GearCategory: KNIFE | CASE | ARMOR | MEDICAL_KIT | WATER_TREATMENT | POWER |
+  //               COMMS | LIGHT | FIRE | SHELTER | CLOTHING | TOOL | SANITATION |
+  //               CBRN | NAVIGATION | SIGNALING | DOCUMENTS | SAFETY | BUGOUT | OTHER
   category        String
   // One record can stand for several identical items.
   quantity        Int        @default(1)
   purchasePrice   Float?
   currentValue    Float?
   acquisitionDate DateTime?
+  // Armor plates have a rated life; a knife does not. Optional everywhere and
+  // simply absent from the form where it does not apply.
+  expirationDate  DateTime?
+  // Armor only, shown when category = ARMOR. Free text rather than enums: NIJ
+  // ratings and plate cuts vary by maker, and a wrong enum would block a real
+  // plate from being recorded.
+  protectionLevel String?
+  armorSize       String?
   storageLocation String?
   notes           String?
   imageUrl        String?
@@ -188,6 +198,7 @@ model Gear {
   updatedAt       DateTime   @updatedAt
 
   @@index([category])
+  @@index([expirationDate])
 }
 
 // Consumable stores: cleaning, medical, food, water, batteries. One model

@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import {
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
   isLowStock,
-  todayForExpiry,
+  resolveExpiryContext,
   type ExpiryStatus,
 } from "@/lib/supply";
 
@@ -17,6 +16,45 @@ export interface SupplySectionItem {
   storageLocation: string | null;
   isLow: boolean;
   expiry: ExpiryStatus;
+}
+
+/**
+ * One Supply row as a section list renders it.
+ *
+ * Derived from the Prisma delegate rather than hand-written, so a schema
+ * change updates it automatically — hand-written row interfaces are the shape
+ * that fell behind the schema in DATE_ONLY_FIELDS.
+ */
+type SupplyRow = Awaited<ReturnType<typeof prisma.supply.findMany>>[number];
+
+/**
+ * The row shape every supply list renders, with `isLow` and `expiry` already
+ * resolved.
+ *
+ * Exported and shared by `getSupplySectionItems` and the section loader's
+ * supply branch rather than copied into each, so the supply row shape cannot
+ * drift between `/supplies/item/[id]` and the section pages.
+ *
+ * `today` is an argument, never read from the clock here: the caller resolves
+ * it once per request through `todayForExpiry(settings?.timezone ?? null, …)`,
+ * so every list on one page agrees about what "today" is.
+ */
+export function mapSupplyRow(
+  supply: SupplyRow,
+  today: Date,
+  warningDays: number,
+): SupplySectionItem {
+  return {
+    id: supply.id,
+    name: supply.name,
+    brand: supply.brand,
+    category: supply.category,
+    quantity: supply.quantity,
+    unit: supply.unit,
+    storageLocation: supply.storageLocation,
+    isLow: isLowStock(supply),
+    expiry: expiryStatus(supply.expirationDate, today, warningDays),
+  };
 }
 
 export interface SupplySectionResult {
@@ -50,9 +88,14 @@ export async function getSupplySectionItems(
     where: { id: "singleton" },
   });
 
-  const today = todayForExpiry(settings?.timezone ?? null, new Date());
-  const warningDays =
-    settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+  // One resolution for both the verdicts and the disclosure. A separate
+  // Boolean(settings.timezone) disagrees with it for a zone that is SET BUT
+  // UNRECOGNISED — resolveExpiryTimeZone discards such a zone and computes in
+  // UTC, so the notice must appear, and the hand-rolled predicate hid it.
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   const supplies = await prisma.supply.findMany({
     where,
@@ -60,17 +103,7 @@ export async function getSupplySectionItems(
   });
 
   return {
-    items: supplies.map((supply) => ({
-      id: supply.id,
-      name: supply.name,
-      brand: supply.brand,
-      category: supply.category,
-      quantity: supply.quantity,
-      unit: supply.unit,
-      storageLocation: supply.storageLocation,
-      isLow: isLowStock(supply),
-      expiry: expiryStatus(supply.expirationDate, today, warningDays),
-    })),
-    timezoneConfigured: Boolean(settings?.timezone),
+    items: supplies.map((supply) => mapSupplyRow(supply, today, warningDays)),
+    timezoneConfigured: timezoneFromSetting,
   };
 }

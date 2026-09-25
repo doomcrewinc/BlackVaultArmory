@@ -1,10 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import {
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
   isLowStock,
-  todayForExpiry,
+  resolveExpiryContext,
+  type ExpiryStatus,
 } from "@/lib/supply";
+import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 
 export interface DashboardStatsResponse {
   totals: {
@@ -66,6 +67,33 @@ export interface DashboardStatsResponse {
      * quietly reporting a day-shifted verdict. See todayForExpiry.
      */
     timezoneConfigured: boolean;
+  };
+  /**
+   * Expiring GEAR, alongside the expiring supplies above. Armor plates have a
+   * rated life and filters have a shelf life, and a dashboard that counted
+   * only half the expiring inventory is worse than one that counted none — the
+   * user reads "0 expired" and believes it.
+   *
+   * Only the rows that need attention: `expired` or `soon`. A `fine` or
+   * date-less item is not an alert and is not carried here.
+   */
+  gear: {
+    expiringItems: Array<{
+      id: string;
+      name: string;
+      /** The human label ("Armor"), as every other surface shows it. */
+      category: string;
+      expirationDate: Date | null;
+      /**
+       * Resolved SERVER-SIDE from the same `today` the supply counts used.
+       * The widget is a client component and must never recompute this: it has
+       * no access to AppSettings.timezone, so it would silently judge against
+       * the browser's day and disagree with the counts beside it.
+       */
+      expiry: Extract<ExpiryStatus, "expired" | "soon">;
+    }>;
+    expiredCount: number;
+    expiringSoonCount: number;
   };
   recent: {
     firearms: Array<{
@@ -181,6 +209,20 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       expirationDate: true,
     },
   });
+  // Sequential, after the supply read — SQLite here runs connection_limit=1,
+  // so never Promise.all. Narrowed in SQL to the rows that can possibly be an
+  // alert: an install with a thousand knives should not ship a thousand null
+  // dates to the Node process to filter them out again.
+  const datedGear = await prisma.gear.findMany({
+    where: { expirationDate: { not: null } },
+    select: {
+      id: true,
+      name: true,
+      category: true,
+      expirationDate: true,
+    },
+    orderBy: { expirationDate: "asc" },
+  });
 
   const ammoByCaliber: Record<
     string,
@@ -230,8 +272,14 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       s.quantity <= s.lowStockAlert
   );
 
-  const today = todayForExpiry(settings?.timezone ?? null, new Date());
-  const warningDays = settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+  // ONE resolution of "today" for this whole request, shared by the supply
+  // counts and the gear alerts below. Two resolutions could land on different
+  // calendar days either side of local midnight and put a "0 expired" tile
+  // next to an expired row.
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   const lowStockSupplies = supplies.filter((s) => isLowStock(s));
   let expiredSupplyCount = 0;
@@ -240,6 +288,24 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
     const status = expiryStatus(supply.expirationDate, today, warningDays);
     if (status === "expired") expiredSupplyCount += 1;
     if (status === "soon") expiringSoonSupplyCount += 1;
+  }
+
+  const expiringGear: DashboardStatsResponse["gear"]["expiringItems"] = [];
+  let expiredGearCount = 0;
+  let expiringSoonGearCount = 0;
+  for (const item of datedGear) {
+    const status = expiryStatus(item.expirationDate, today, warningDays);
+    if (status !== "expired" && status !== "soon") continue;
+    if (status === "expired") expiredGearCount += 1;
+    else expiringSoonGearCount += 1;
+    expiringGear.push({
+      id: item.id,
+      name: item.name,
+      category:
+        GEAR_CATEGORY_LABELS[item.category as GearCategory] ?? item.category,
+      expirationDate: item.expirationDate,
+      expiry: status,
+    });
   }
 
   return {
@@ -290,7 +356,16 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       lowStockCount: lowStockSupplies.length,
       expiredCount: expiredSupplyCount,
       expiringSoonCount: expiringSoonSupplyCount,
-      timezoneConfigured: Boolean(settings?.timezone),
+      // Off the same resolution as the counts above, not a second
+      // Boolean(settings.timezone): a set-but-unrecognised zone is discarded
+      // in favour of UTC, so the notice has to appear even though a timezone
+      // is stored.
+      timezoneConfigured: timezoneFromSetting,
+    },
+    gear: {
+      expiringItems: expiringGear,
+      expiredCount: expiredGearCount,
+      expiringSoonCount: expiringSoonGearCount,
     },
     recent: {
       firearms: recentFirearms,

@@ -8,6 +8,7 @@ import {
   normalizeAccessoryNfaFields,
   normalizeFirearmNfaFields,
 } from "@/lib/nfa";
+import { normalizeGearArmorFields } from "@/lib/gear";
 
 type WriteDelegate = {
   deleteMany: () => Promise<unknown>;
@@ -81,6 +82,46 @@ function normalizeNfaGroups(rows: Record<string, unknown[]>): void {
   );
 }
 
+/**
+ * Re-derives the armor group (`protectionLevel`, `armorSize`) on the gear rows
+ * of a backup, for the same reason and by the same rule as normalizeNfaGroups
+ * above: restore is an unvalidated write path, and the clearing rules have to
+ * hold however the write arrives. Without this, a hand-edited backup restores
+ * `{ category: "KNIFE", protectionLevel: "IV" }` — invisible on the detail
+ * page, which gates the cells on the category, and PRINTED by the full-armory
+ * export, which deliberately does not.
+ *
+ * `body: {}` means "change nothing, just re-decide": the merged category is
+ * the row's own stored category, so this only ever clears, never writes a
+ * rating the file did not carry.
+ *
+ * WHO decides "this build does not understand this category" is
+ * normalizeGearArmorFields, not this function. Its gate already passes an
+ * unrecognised category through untouched, and that single judgement is the
+ * one the write routes use, so restore cannot drift into a second, stricter
+ * copy of the rule — the mistake an earlier phase of this epic made with the
+ * NFA class, silently declassifying firearms whose class came from a later
+ * build. A non-string category is likewise handed back unchanged: it is not
+ * something this build can judge either.
+ */
+function normalizeGearArmorGroups(rows: Record<string, unknown[]>): void {
+  rows.gear = rows.gear.map((row) => {
+    if (!isRowObject(row) || typeof row.category !== "string") return row;
+    return {
+      ...row,
+      ...normalizeGearArmorFields({
+        existing: {
+          category: row.category,
+          protectionLevel:
+            typeof row.protectionLevel === "string" ? row.protectionLevel : null,
+          armorSize: typeof row.armorSize === "string" ? row.armorSize : null,
+        },
+        body: {},
+      }),
+    };
+  });
+}
+
 export async function POST(request: NextRequest) {
   const auth = await requireAuth();
   if (auth) return auth;
@@ -103,6 +144,7 @@ export async function POST(request: NextRequest) {
     BACKUP_MODELS.map(({ key }) => [key, (body[key] as unknown[] | undefined) ?? []])
   );
   normalizeNfaGroups(rows);
+  normalizeGearArmorGroups(rows);
 
   try {
     await prisma.$transaction(

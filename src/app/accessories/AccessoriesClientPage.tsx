@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { Plus, Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
@@ -73,12 +74,19 @@ interface Props {
   accessories: AccessoryWithBuild[];
   heading?: string;
   subheading?: string;
+  /**
+   * True when this list is one block of a multi-source section page (see
+   * SectionView). The page owns the `h1`, so the block gets the lighter
+   * SectionBlockHeader instead of a second PageHeader.
+   */
+  embedded?: boolean;
 }
 
 export function AccessoriesClientPage({
   accessories,
   heading = "ACCESSORIES",
   subheading,
+  embedded = false,
 }: Props) {
   const [selectedType, setSelectedType] = useState<string | null>(null);
 
@@ -96,24 +104,30 @@ export function AccessoriesClientPage({
 
   const totalRounds = accessories.reduce((sum, a) => sum + a.roundCount, 0);
 
+  const addAction = (
+    <Link
+      href="/accessories/new"
+      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+    >
+      <Plus className="w-4 h-4" />
+      Add Accessory
+    </Link>
+  );
+
   return (
-    <div className="min-h-full">
-      <PageHeader
-        title={heading}
-        subtitle={
-          subheading ??
-          `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
-        }
-        actions={
-          <Link
-            href="/accessories/new"
-            className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add Accessory
-          </Link>
-        }
-      />
+    <div className={embedded ? undefined : "min-h-full"}>
+      {embedded ? (
+        <SectionBlockHeader title={heading} action={addAction} />
+      ) : (
+        <PageHeader
+          title={heading}
+          subtitle={
+            subheading ??
+            `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
+          }
+          actions={addAction}
+        />
+      )}
 
       <div className="p-4 sm:p-6">
         {/* Summary bar */}

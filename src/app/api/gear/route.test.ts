@@ -44,12 +44,61 @@ describe("GET /api/gear", () => {
     });
   });
 
-  it("filters by the literal OR shape for a multi-matcher section", async () => {
+  it("filters by the cases section's categories", async () => {
     await GET(request("http://localhost/api/gear?section=cases") as never);
+    // Phase 5 gave cases a plain explicit list and moved the gear catch-all
+    // to other-prep, so this is a bare `in` fragment again rather than the
+    // `{ OR: [...] }` it carried while it doubled as the catch-all's home.
+    expect(mocks.findMany.mock.calls[0][0].where).toEqual({
+      category: { in: ["CASE"] },
+    });
+  });
+
+  it("filters by the literal OR shape for a multi-matcher section", async () => {
+    await GET(
+      request("http://localhost/api/gear?section=other-prep") as never,
+    );
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({
       OR: [
-        { category: { in: ["CASE"] } },
-        { category: { notIn: ["KNIFE", "CASE"] } },
+        {
+          category: {
+            in: [
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
+        {
+          category: {
+            notIn: [
+              "KNIFE",
+              "CASE",
+              "ARMOR",
+              "MEDICAL_KIT",
+              "WATER_TREATMENT",
+              "POWER",
+              "COMMS",
+              "SHELTER",
+              "CLOTHING",
+              "TOOL",
+              "FIRE",
+              "LIGHT",
+              "SIGNALING",
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
       ],
     });
   });
@@ -105,5 +154,98 @@ describe("POST /api/gear", () => {
     const data = mocks.create.mock.calls[0][0].data;
     expect(data.category).toBe("KNIFE");
     expect(data.quantity).toBe(1);
+  });
+
+  it("stores the armor fields when the sent category is armor", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Plate Carrier",
+        category: "ARMOR",
+        protectionLevel: "III",
+        armorSize: "L",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBe("III");
+    expect(data.armorSize).toBe("L");
+  });
+
+  it("drops the armor fields when the sent category is not armor, even though there is no stored row to gate against", async () => {
+    // POST has no `existing` row, so the gate is seeded with the category the
+    // row is about to be stored with. Here that is TOOL, so the fields must
+    // not survive.
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Hammer",
+        category: "TOOL",
+        protectionLevel: "III",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  // The three cases where the request does NOT hand the gate a usable
+  // category. The row is still stored with normalizeGearCategory's answer, so
+  // the gate has to be seeded with that same answer — otherwise create and
+  // update disagree and the export prints "Protection: IV" under a Knife.
+  it("drops the armor fields when the request sends no category at all", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "No Category",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("drops the armor fields when the request sends a blank category", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Blank Category",
+        category: "   ",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("drops the armor fields for a category this build does not recognise, because the row is stored as the fallback", async () => {
+    // Forward compatibility belongs to the STORED category, and a create
+    // never stores an unknown one — normalizeGearCategory has already made it
+    // KNIFE. Preserving here would attach plate ratings to a knife.
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Exosuit",
+        category: "EXOSUIT",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("stores a whitespace-only purchase price as null, not 0", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Bugout Bag",
+        category: "BUGOUT",
+        purchasePrice: "   ",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.purchasePrice).toBeNull();
   });
 });

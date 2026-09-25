@@ -32,6 +32,7 @@ vi.mock("@/lib/db/text-search", async (importOriginal) => {
 import { GET } from "./route";
 import { containsInsensitive } from "@/lib/db/text-search";
 import { GEAR_CATEGORIES, GEAR_CATEGORY_LABELS } from "@/lib/gear";
+import { gearSectionForItem, sectionHref } from "@/lib/categories";
 
 function request(query: string): NextRequest {
   return new NextRequest(
@@ -86,11 +87,25 @@ describe("GET /api/search", () => {
 
     expect(mocks.findGear).toHaveBeenCalledTimes(1);
     const where = mocks.findGear.mock.calls[0][0].where;
+    // Pin the derivation before asserting with it. Both sides of the
+    // expectation below are computed the same way, so if no label ever matched
+    // "bug" they would collapse to `{ in: [] }` together and the test would
+    // pass while asserting nothing.
+    const bugCategories = GEAR_CATEGORIES.filter((c) =>
+      GEAR_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
+    );
+    expect(bugCategories).toEqual(["BUGOUT"]);
     expect(where.OR).toEqual([
       { name: containsInsensitive("bug") },
       { manufacturer: containsInsensitive("bug") },
       { model: containsInsensitive("bug") },
       { category: containsInsensitive("bug") },
+      // "bug" matches the BUGOUT label, so the label clause fires too. Derived
+      // from GEAR_CATEGORY_LABELS rather than hardcoded: the phase-4 comment on
+      // gearCategoriesMatchingLabel predicted this would start firing "the day"
+      // a matching category was added, and phase 5 added it — but this
+      // expectation was a literal, so it broke instead of covering the case.
+      { category: { in: bugCategories } },
     ]);
 
     // Every field in the gear OR clause was produced by the spied helper, not a
@@ -238,5 +253,131 @@ describe("GET /api/search", () => {
       { model: containsInsensitive("zzzz") },
       { category: containsInsensitive("zzzz") },
     ]);
+  });
+  // ─── Phase 5's eighteen new categories ───────────────────────────────────
+  // The derivation was PREDICTED to cover them (see the comment on
+  // gearCategoriesMatchingLabel). These verify it rather than trusting it.
+
+  it("finds an ARMOR gear item when searching for armor", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        manufacturer: "PlateCo",
+        model: "III+",
+        category: "ARMOR",
+      },
+    ]);
+
+    const response = await GET(request("armor"));
+    const json = await response.json();
+
+    // The query reached the label clause...
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ category: { in: ["ARMOR"] } });
+    // ...and the row comes back rendered, not just matched.
+    expect(json.gear).toEqual([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        subtitle: "PlateCo · Armor",
+        url: "/gear/item/gear-plate",
+      },
+    ]);
+  });
+
+  it("serves 'medical kit' on the label path, and the token spelling on the column path", async () => {
+    // The exact shape the supplies bug had: the column stores MEDICAL_KIT and
+    // every surface shows "Medical Kit", so a substring match on the column
+    // alone finds nothing for what the user typed.
+    //
+    // The negative control is a SECOND CALL THROUGH THE ROUTE rather than a
+    // statement about strings: an earlier version of this test asserted
+    // `"MEDICAL_KIT".toLowerCase().includes("medical kit") === false`, which is
+    // literal-on-literal and could not fail whatever the route did. Driving the
+    // route with the token spelling instead shows the two paths are genuinely
+    // distinct — and fails if the route ever started label-matching tokens, or
+    // if the label clause leaked into every query.
+    await GET(request("medical kit"));
+    await GET(request("medical_kit"));
+
+    const inClauseOf = (where: { OR: Record<string, unknown>[] }) =>
+      where.OR.find(
+        (clause) =>
+          typeof clause.category === "object" &&
+          clause.category !== null &&
+          "in" in (clause.category as object),
+      );
+
+    const labelWhere = mocks.findGear.mock.calls[0][0].where;
+    const tokenWhere = mocks.findGear.mock.calls[1][0].where;
+
+    // The label spelling reaches the label clause...
+    expect(inClauseOf(labelWhere)).toEqual({ category: { in: ["MEDICAL_KIT"] } });
+    // ...alongside the column clause, which is kept for a category a restore
+    // stored outside the enum and which therefore has no label.
+    expect(labelWhere.OR).toContainEqual({
+      category: containsInsensitive("medical kit"),
+    });
+
+    // The token spelling reaches ONLY the column clause: no label contains
+    // "medical_kit", so the route emits no `in` clause at all for it. That is
+    // what makes the assertion above specifically about the label path.
+    expect(inClauseOf(tokenWhere)).toBeUndefined();
+    expect(tokenWhere.OR).toContainEqual({
+      category: containsInsensitive("medical_kit"),
+    });
+  });
+
+  it("keeps the gear item URL at /gear/item/<id> for a category whose section moved under /prep", async () => {
+    // ARMOR's SECTION now lives under /prep, but the item route is not
+    // section-scoped, so the search result must not follow the section there.
+    // Asserted against the registry rather than a literal, so a later
+    // re-grouping of ARMOR keeps this test honest.
+    const section = gearSectionForItem({ category: "ARMOR" });
+    expect(section).toBeDefined();
+    expect(sectionHref(section!)).toMatch(/^\/prep\//);
+
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        manufacturer: null,
+        model: null,
+        category: "ARMOR",
+      },
+    ]);
+
+    const json = await (await GET(request("armor"))).json();
+
+    expect(json.gear[0].url).toBe("/gear/item/gear-plate");
+  });
+
+  it("points every gear category at the same unscoped item route", async () => {
+    // Fourteen of the twenty categories now sit in a /prep section and six do
+    // not. One route serves all of them; this fails the moment a url starts
+    // being derived from the section.
+    //
+    // The id is the SAME literal for every category, and the expectation is
+    // that literal spelled out. An earlier version built the id from the
+    // category and asserted `/gear/item/gear-${category}`, so both sides moved
+    // together and only the prefix was really being checked.
+    for (const category of GEAR_CATEGORIES) {
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "fixed-gear-id",
+          name: `A ${category}`,
+          manufacturer: null,
+          model: null,
+          category,
+        },
+      ]);
+
+      const json = await (
+        await GET(request(GEAR_CATEGORY_LABELS[category]))
+      ).json();
+
+      expect(json.gear[0].url).toBe("/gear/item/fixed-gear-id");
+    }
   });
 });

@@ -34,6 +34,15 @@ const stored = {
   category: "KNIFE",
   quantity: 12,
   notes: "old",
+  protectionLevel: null,
+  armorSize: null,
+};
+
+const storedArmor = {
+  ...stored,
+  category: "ARMOR",
+  protectionLevel: "IIIA",
+  armorSize: "M SAPI",
 };
 
 describe("PUT /api/gear/[id]", () => {
@@ -71,6 +80,33 @@ describe("PUT /api/gear/[id]", () => {
     );
     expect(response.status).toBe(404);
     expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("clears the armor fields when only category moves off armor, even though the body never mentions them", async () => {
+    mocks.findUnique.mockResolvedValue(storedArmor);
+    await PUT(putRequest({ category: "TOOL" }) as never, { params } as never);
+    const data = mocks.update.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("clears expirationDate when sent blank", async () => {
+    await PUT(putRequest({ expirationDate: "" }) as never, { params } as never);
+    expect(mocks.update.mock.calls[0][0].data.expirationDate).toBeNull();
+  });
+
+  it("400s on a malformed expirationDate instead of 500ing", async () => {
+    const response = await PUT(
+      putRequest({ expirationDate: "not-a-date" }) as never,
+      { params } as never,
+    );
+    expect(response.status).toBe(400);
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("stores a whitespace-only purchase price as null, not 0", async () => {
+    await PUT(putRequest({ purchasePrice: "   " }) as never, { params } as never);
+    expect(mocks.update.mock.calls[0][0].data.purchasePrice).toBeNull();
   });
 });
 

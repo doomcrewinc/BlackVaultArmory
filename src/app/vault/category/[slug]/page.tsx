@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { VaultClientPage } from "../../VaultClientPage";
 import { LegacySmgNotice } from "@/components/vault/LegacySmgNotice";
-import { sectionBySlug } from "@/lib/categories";
+import { sectionBySlug, sectionIsRenderable } from "@/lib/categories";
 
 export default async function VaultSectionPage({
   params,
@@ -11,6 +11,14 @@ export default async function VaultSectionPage({
   const { slug } = await params;
   const section = sectionBySlug(slug);
   if (!section || section.group !== "vault") notFound();
+
+  // The same gate the /gear and /prep [slug] pages carry. This page's view
+  // is VaultClientPage, which fetches /api/firearms by slug, so a vault
+  // section declaring a gear or supply source would render firearms only
+  // and drop the rest silently. sectionIsRenderable is group-aware and the
+  // registry test asserts it holds for all nine vault sections, so this
+  // 404 is unreachable unless the registry itself is broken.
+  if (!sectionIsRenderable(section)) notFound();
 
   return (
     <>

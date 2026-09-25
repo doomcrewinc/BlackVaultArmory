@@ -23,6 +23,13 @@ async function getDashboardData() {
     expiredSupplyCount: stats.supplies.expiredCount,
     expiringSoonSupplyCount: stats.supplies.expiringSoonCount,
     supplyTimezoneConfigured: stats.supplies.timezoneConfigured,
+    // Expiry statuses arrive already RESOLVED. DashboardClient is a client
+    // component with no access to AppSettings.timezone, so anything it decided
+    // itself would be judged against the browser's day and could contradict
+    // the counts beside it.
+    expiringGear: stats.gear.expiringItems,
+    expiredGearCount: stats.gear.expiredCount,
+    expiringSoonGearCount: stats.gear.expiringSoonCount,
   };
 }
 

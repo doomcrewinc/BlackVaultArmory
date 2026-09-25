@@ -1,11 +1,24 @@
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
-import { getSupplySectionItems } from "@/app/supplies/getSupplySectionItems";
-import { sectionBySlug, supplyWhereForSection } from "@/lib/categories";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
+import { SectionView } from "@/components/sections/SectionView";
+import { sectionBySlug, sectionIsRenderable } from "@/lib/categories";
+import {
+  loadSectionItems,
+  type SectionPayload,
+} from "@/lib/sections/loadSectionItems";
 
+/**
+ * Resolve the slug, check the group, load, render.
+ *
+ * The supply-source `notFound()` this page used to carry is gone: it was
+ * exactly what made a gear-backed prep section (armor, shelter & clothing)
+ * 404 the moment phase 5 registered it. `loadSectionItems` walks every source
+ * a section declares, so "no supply matcher" is now "this section draws from
+ * somewhere else", not "this page cannot render". Every query it issues still
+ * carries a where clause — the guard that `notFound()` was standing in for.
+ */
 export default async function PrepSectionPage({
   params,
 }: {
@@ -15,38 +28,25 @@ export default async function PrepSectionPage({
   const section = sectionBySlug(slug);
   if (!section || section.group !== "prep") notFound();
 
-  // Every prep-group section today carries a supply matcher. A slug that
-  // resolves to a real section but has none must still 404 rather than fall
-  // through to an unfiltered query — `?? undefined` here would silently pull
-  // in every supply instead of none.
-  const supplyWhere = supplyWhereForSection(section);
-  if (!supplyWhere) notFound();
+  // The only notFound() about sources this page may contain. Safe
+  // precisely because the registry test asserts sectionIsRenderable is
+  // true for every registered section: a 404 here means the registry is
+  // broken — a section with no source, a source with no where clause, or
+  // one this group's view cannot render — and the suite says so before a
+  // user does.
+  if (!sectionIsRenderable(section)) notFound();
 
-  let result: Awaited<ReturnType<typeof getSupplySectionItems>>;
+  let payloads: SectionPayload[];
   try {
-    result = await getSupplySectionItems(supplyWhere);
+    payloads = await loadSectionItems(section);
   } catch {
     return (
-      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
-        <p className="text-sm text-vault-text-muted">
-          Failed to load {section.label}.
-        </p>
-        <Link
-          href={`/prep/${section.slug}`}
-          className="text-sm text-[#00C2FF] hover:underline"
-        >
-          Tap to retry
-        </Link>
-      </div>
+      <SectionLoadError
+        label={section.label}
+        href={`/prep/${section.slug}`}
+      />
     );
   }
 
-  return (
-    <SupplyClientPage
-      items={result.items}
-      timezoneConfigured={result.timezoneConfigured}
-      heading={section.label}
-      subheading={section.description}
-    />
-  );
+  return <SectionView section={section} payloads={payloads} />;
 }

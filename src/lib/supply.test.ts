@@ -12,6 +12,8 @@ import {
   normalizeAmount,
   normalizeSupplyCategory,
   normalizeSupplyUnit,
+  resolveExpiryContext,
+  resolveExpiryTimeZone,
   todayForExpiry,
 } from "./supply";
 
@@ -269,5 +271,95 @@ describe("todayForExpiry", () => {
     expect(todayForExpiry("Asia/Tokyo", lateUtcAfternoon)).toEqual(
       day("2026-06-16"),
     );
+  });
+});
+
+describe("resolveExpiryTimeZone", () => {
+  // The vitest config pins TZ=America/Denver, so the host zone is knowable.
+  it("reports a saved zone as the deciding one, and says it came from the setting", () => {
+    expect(resolveExpiryTimeZone("Asia/Tokyo")).toEqual({
+      timeZone: "Asia/Tokyo",
+      fromSetting: true,
+    });
+  });
+
+  it("names the HOST zone, not UTC, when nothing is saved", () => {
+    // Hardcoding UTC here is the off-by-one todayForExpiry exists to close, so
+    // a disclosure line that claimed UTC would be doubly wrong: wrong zone AND
+    // inconsistent with the verdicts.
+    expect(resolveExpiryTimeZone(null)).toEqual({
+      timeZone: "America/Denver",
+      fromSetting: false,
+    });
+  });
+
+  it("discards a saved zone Intl does not recognise, and stops claiming it came from the setting", () => {
+    // A stored value the user chose is not silently replaced with a different
+    // REAL zone — it is discarded to UTC. Reporting fromSetting: true here
+    // would make a footnote name UTC as if the owner had picked it.
+    expect(resolveExpiryTimeZone("Mars/Olympus_Mons")).toEqual({
+      timeZone: "UTC",
+      fromSetting: false,
+    });
+    expect(resolveExpiryTimeZone("")).toEqual({
+      timeZone: "UTC",
+      fromSetting: false,
+    });
+  });
+
+  it("agrees with the zone todayForExpiry actually resolved the day in", () => {
+    // The whole point of the extraction: one resolution, so a disclosure
+    // cannot name a zone other than the one that decided. 21:00 on June 15 in
+    // Denver is already the 16th in UTC.
+    const eveningInDenver = new Date("2026-06-16T03:00:00.000Z");
+    const { timeZone } = resolveExpiryTimeZone(null);
+    expect(timeZone).toBe("America/Denver");
+    expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-15"));
+  });
+});
+
+describe("resolveExpiryContext", () => {
+  const eveningInDenver = new Date("2026-06-16T03:00:00.000Z");
+
+  it("resolves today, the window and the disclosed zone from one settings read", () => {
+    expect(
+      resolveExpiryContext(
+        { timezone: "America/Denver", expiryWarningDays: 30 },
+        eveningInDenver,
+      ),
+    ).toEqual({
+      today: day("2026-06-15"),
+      warningDays: 30,
+      timezone: "America/Denver",
+      timezoneFromSetting: true,
+    });
+  });
+
+  it("falls back to the host zone and the default window with no settings row", () => {
+    expect(resolveExpiryContext(null, eveningInDenver)).toEqual({
+      today: day("2026-06-15"),
+      warningDays: DEFAULT_EXPIRY_WARNING_DAYS,
+      timezone: "America/Denver",
+      timezoneFromSetting: false,
+    });
+  });
+
+  it("resolves the same `today` todayForExpiry would, for every zone shape", () => {
+    // The invariant the footnote depends on. If these ever diverge, a renderer
+    // annotating rows mapped with todayForExpiry would name the wrong day.
+    for (const timezone of [null, "UTC", "Asia/Tokyo", "America/Denver", "Not/AZone"]) {
+      expect(resolveExpiryContext({ timezone }, eveningInDenver).today).toEqual(
+        todayForExpiry(timezone, eveningInDenver),
+      );
+    }
+  });
+
+  it("keeps a zero warning window rather than defaulting it away", () => {
+    // 0 is a real window — "warn only on the day itself" — not "unset", the
+    // same distinction isLowStock draws for a zero threshold.
+    expect(
+      resolveExpiryContext({ timezone: "UTC", expiryWarningDays: 0 }, eveningInDenver)
+        .warningDays,
+    ).toBe(0);
   });
 });

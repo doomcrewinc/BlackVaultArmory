@@ -1,3 +1,4 @@
+import { isRenderableSource } from "./sections/renderableSources";
 import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 /**
@@ -145,7 +146,36 @@ function partsSection(): SectionMatcher {
 
 const KNIFE_CATEGORIES = ["KNIFE"];
 const CASE_CATEGORIES = ["CASE"];
-const GROUPED_GEAR = [...KNIFE_CATEGORIES, ...CASE_CATEGORIES];
+const ARMOR_CATEGORIES = ["ARMOR"];
+const MEDICAL_GEAR_CATEGORIES = ["MEDICAL_KIT"];
+const FOOD_WATER_GEAR_CATEGORIES = ["WATER_TREATMENT"];
+const POWER_COMMS_GEAR_CATEGORIES = ["POWER", "COMMS"];
+const SHELTER_GEAR_CATEGORIES = ["SHELTER", "CLOTHING"];
+const TOOLS_FIRE_GEAR_CATEGORIES = ["TOOL", "FIRE", "LIGHT", "SIGNALING"];
+const OTHER_PREP_GEAR_CATEGORIES = [
+  "SANITATION",
+  "CBRN",
+  "NAVIGATION",
+  "DOCUMENTS",
+  "SAFETY",
+  "BUGOUT",
+  "OTHER",
+];
+
+// Every GearCategory an explicit section claims. The catch-all below is the
+// negation of this list, so a category added to the schema without a section
+// still lands somewhere visible instead of matching zero sections.
+const GROUPED_GEAR = [
+  ...KNIFE_CATEGORIES,
+  ...CASE_CATEGORIES,
+  ...ARMOR_CATEGORIES,
+  ...MEDICAL_GEAR_CATEGORIES,
+  ...FOOD_WATER_GEAR_CATEGORIES,
+  ...POWER_COMMS_GEAR_CATEGORIES,
+  ...SHELTER_GEAR_CATEGORIES,
+  ...TOOLS_FIRE_GEAR_CATEGORIES,
+  ...OTHER_PREP_GEAR_CATEGORIES,
+];
 
 function gearSection(categories: string[]): SectionMatcher {
   return {
@@ -156,13 +186,12 @@ function gearSection(categories: string[]): SectionMatcher {
 }
 
 /**
- * Anything no gear section claimed — a category added to the schema before
- * its section exists (Phase 5 adds many more) must still be reachable, not
- * invisible. Rides on `cases` rather than a standalone "Other Gear" section
- * so the registry stays exactly-one today without inventing a section Phase 5
- * will restructure anyway. Mutually exclusive with `gearSection(CASE_CATEGORIES)`
- * on the same section (one demands membership in GROUPED_GEAR, the other demands
- * exclusion from it), so the two matchers never both fire.
+ * Anything no gear section claimed — a category added to the schema without
+ * a section still has to be reachable, not invisible. Rides on `other-prep`:
+ * Other Prep is where an unclassifiable durable good belongs. Mutually
+ * exclusive with every other `gearSection(...)` matcher on this section (one
+ * demands membership in GROUPED_GEAR, this one demands exclusion from it),
+ * so the two never both fire.
  */
 function otherGearSection(): SectionMatcher {
   return {
@@ -173,15 +202,22 @@ function otherGearSection(): SectionMatcher {
 }
 
 const CLEANING_CATEGORIES = ["CLEANING"];
-const MEDICAL_CATEGORIES = ["MEDICAL"];
-const FOOD_WATER_CATEGORIES = ["FOOD", "WATER", "FILTER"];
+const MEDICAL_SUPPLY_CATEGORIES = ["MEDICAL"];
+const FOOD_WATER_SUPPLY_CATEGORIES = ["FOOD", "WATER", "FILTER"];
+const POWER_COMMS_SUPPLY_CATEGORIES = ["BATTERY"];
+const TOOLS_FIRE_SUPPLY_CATEGORIES = ["FUEL", "SIGNAL"];
+const OTHER_PREP_SUPPLY_CATEGORIES = ["SANITATION", "CBRN_FILTER", "OTHER"];
+
 // Every SupplyCategory an explicit section claims. Used by otherSupplySection
-// below to build the negation — not just food-water's own explicit branch —
-// so CLEANING and MEDICAL rows can never double-match into food-water too.
+// below to build the negation — not just one section's own explicit branch —
+// so no grouped category can ever double-match into another section's OR.
 const GROUPED_SUPPLIES = [
   ...CLEANING_CATEGORIES,
-  ...MEDICAL_CATEGORIES,
-  ...FOOD_WATER_CATEGORIES,
+  ...MEDICAL_SUPPLY_CATEGORIES,
+  ...FOOD_WATER_SUPPLY_CATEGORIES,
+  ...POWER_COMMS_SUPPLY_CATEGORIES,
+  ...TOOLS_FIRE_SUPPLY_CATEGORIES,
+  ...OTHER_PREP_SUPPLY_CATEGORIES,
 ];
 
 function supplySection(categories: string[]): SectionMatcher {
@@ -193,20 +229,12 @@ function supplySection(categories: string[]): SectionMatcher {
 }
 
 /**
- * Everything no supply section claims yet: BATTERY, FUEL, SANITATION,
- * CBRN_FILTER, SIGNAL, OTHER, and any category this build does not
- * recognise. Phase 4 only builds Cleaning, Medical and Food & Water —
- * Power & Comms, Shelter & Clothing, Tools & Fire and Other Prep are phase
- * 5's job — so the six categories above are deliberately, temporarily
- * homeless. They ride on Food & Water for now, the same way `cases` rides
- * otherGearSection() for gear categories phase 2 hadn't built sections for
- * yet. Phase 5 restructures this into their own sections.
- *
- * Mutually exclusive with `supplySection(FOOD_WATER_CATEGORIES)` on the same
- * section (one demands membership in GROUPED_SUPPLIES, the other demands
- * exclusion from it), so the two matchers never both fire — and excluding
- * CLEANING/MEDICAL here (not just FOOD/WATER/FILTER) keeps rows claimed by
- * the cleaning and medical sections from also matching food-water's OR.
+ * Everything no supply section claims: any category this build does not
+ * recognise. Rides on `other-prep`, the same way `otherGearSection()` does
+ * for gear categories. Mutually exclusive with every other
+ * `supplySection(...)` matcher on this section (one demands membership in
+ * GROUPED_SUPPLIES, this one demands exclusion from it), so the two never
+ * both fire.
  */
 function otherSupplySection(): SectionMatcher {
   return {
@@ -351,7 +379,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Cases & storage",
     group: "gear",
     icon: "Layers",
-    sources: [gearSection(CASE_CATEGORIES), otherGearSection()],
+    sources: [gearSection(CASE_CATEGORIES)],
   },
   {
     slug: "cleaning",
@@ -362,20 +390,77 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     sources: [supplySection(CLEANING_CATEGORIES)],
   },
   {
+    slug: "armor",
+    label: "Armor",
+    description: "Plates, carriers & soft armor",
+    group: "prep",
+    icon: "ShieldCheck",
+    sources: [gearSection(ARMOR_CATEGORIES)],
+  },
+  {
     slug: "medical",
     label: "Medical",
-    description: "First aid & medical supplies",
+    description: "Kits, first aid & medical supplies",
     group: "prep",
     icon: "Cross",
-    sources: [supplySection(MEDICAL_CATEGORIES)],
+    sources: [
+      gearSection(MEDICAL_GEAR_CATEGORIES),
+      supplySection(MEDICAL_SUPPLY_CATEGORIES),
+    ],
   },
   {
     slug: "food-water",
     label: "Food & Water",
-    description: "Food, water & filtration",
+    description: "Food, water, filters & treatment",
     group: "prep",
     icon: "Droplets",
-    sources: [supplySection(FOOD_WATER_CATEGORIES), otherSupplySection()],
+    sources: [
+      gearSection(FOOD_WATER_GEAR_CATEGORIES),
+      supplySection(FOOD_WATER_SUPPLY_CATEGORIES),
+    ],
+  },
+  {
+    slug: "power-comms",
+    label: "Power & Comms",
+    description: "Batteries, power & radios",
+    group: "prep",
+    icon: "BatteryCharging",
+    sources: [
+      gearSection(POWER_COMMS_GEAR_CATEGORIES),
+      supplySection(POWER_COMMS_SUPPLY_CATEGORIES),
+    ],
+  },
+  {
+    slug: "shelter-clothing",
+    label: "Shelter & Clothing",
+    description: "Shelter, sleep & clothing",
+    group: "prep",
+    icon: "Tent",
+    sources: [gearSection(SHELTER_GEAR_CATEGORIES)],
+  },
+  {
+    slug: "tools-fire",
+    label: "Tools & Fire",
+    description: "Tools, light, fire & signaling",
+    group: "prep",
+    icon: "Flame",
+    sources: [
+      gearSection(TOOLS_FIRE_GEAR_CATEGORIES),
+      supplySection(TOOLS_FIRE_SUPPLY_CATEGORIES),
+    ],
+  },
+  {
+    slug: "other-prep",
+    label: "Other Prep",
+    description: "Sanitation, CBRN, navigation & everything else",
+    group: "prep",
+    icon: "Package",
+    sources: [
+      gearSection(OTHER_PREP_GEAR_CATEGORIES),
+      otherGearSection(),
+      supplySection(OTHER_PREP_SUPPLY_CATEGORIES),
+      otherSupplySection(),
+    ],
   },
 ];
 
@@ -453,8 +538,28 @@ export function gearWhereForSection(section: CategorySection): object | null {
   return { OR: matchers.map((matcher) => matcher.where) };
 }
 
+/**
+ * Searches every section rather than one group's, like supplySectionForItem
+ * and unlike vaultSectionForFirearm. Gear categories are spread across both
+ * the "gear" group (knives, cases) and the "prep" group (armor, medical kits,
+ * shelter and the rest), so a group-scoped search would return undefined for
+ * EIGHTEEN of the twenty categories — everything but KNIFE and CASE.
+ *
+ * Its caller is the gear detail page's back link
+ * (src/app/gear/item/[id]/page.tsx), which resolves the item's own section
+ * instead of the "/gear" it used to hardcode: /gear is a section index over
+ * the gear group alone, so an ARMOR item's "Back to Gear" landed on a page
+ * that did not contain it. That page treats undefined as "no section" and
+ * falls back to "/" with the label "Home", matching what the supply detail
+ * page does with supplySectionForItem.
+ *
+ * Measured, not predicted: undefined is unreachable for all twenty current
+ * categories — other-prep's catch-all matcher is the negation of the full
+ * grouped list, so it holds anything the named sections do not. The fallback
+ * is there for a category a later build adds while this registry lags.
+ */
 export function gearSectionForItem(row: GearRow): CategorySection | undefined {
-  return sectionsForGroup("gear").find((section) =>
+  return CATEGORY_SECTIONS.find((section) =>
     section.sources.some(
       (source) => source.source === "gear" && source.holds(row),
     ),
@@ -484,4 +589,63 @@ export function supplySectionForItem(
       (source) => source.source === "supply" && source.holds(row),
     ),
   );
+}
+
+/**
+ * The distinct source kinds a section draws from, in declaration order. The
+ * section renderer walks this rather than probing each where-builder for null,
+ * so "this section has no data source at all" is a case the caller can see
+ * instead of one that quietly renders an empty page.
+ */
+export function sectionSources(section: CategorySection): SectionSource[] {
+  const seen: SectionSource[] = [];
+  for (const source of section.sources) {
+    if (!seen.includes(source.source)) seen.push(source.source);
+  }
+  return seen;
+}
+
+/**
+ * Whether a section's page can actually SHOW something: at least one declared
+ * source, a real where clause for every source it declares, and a view in its
+ * group that can render every one of them.
+ *
+ * Exists because "the route resolves" and "the page renders" are different
+ * claims, and the suite only ever checked the first. `/prep` shipped as a 404
+ * the sidebar linked from every page; `/prep/armor` would have shipped the
+ * same way — the route file existed, but the page's own supply-matcher guard
+ * called notFound() for a gear-only section. Both [slug] pages now gate on
+ * this function and the test asserts it holds for every registered section,
+ * so the page and the test can no longer disagree.
+ *
+ * BOTH halves are required, and the second is the one that is easy to miss.
+ * A where clause only says the LOADER can fetch the rows. Give a prep section
+ * a `firearm` source and it clears that half — `firearmWhereForSection`
+ * returns a good fragment — then `PayloadList` throws during render, because
+ * SectionView has no firearm branch: an HTTP 500 with no retry link, verified
+ * empirically. The renderable set per group is NOT restated here; it comes
+ * from `sections/renderableSources.ts`, the one definition the view itself is
+ * compile-pinned to.
+ */
+export function sectionIsRenderable(section: CategorySection): boolean {
+  const kinds = sectionSources(section);
+  if (kinds.length === 0) return false;
+  return kinds.every((kind) => {
+    // Half 2: the group's view has a renderer for this kind.
+    if (!isRenderableSource(section.group, kind)) return false;
+    // Half 1: the loader has something to query with. The switch is
+    // exhaustive over SectionSource with no `default`, so a source kind added
+    // to the registry is a tsc error here rather than a kind this gate waves
+    // through unchecked.
+    switch (kind) {
+      case "firearm":
+        return firearmWhereForSection(section) !== null;
+      case "accessory":
+        return accessoryWhereForSection(section) !== null;
+      case "gear":
+        return gearWhereForSection(section) !== null;
+      case "supply":
+        return supplyWhereForSection(section) !== null;
+    }
+  });
 }

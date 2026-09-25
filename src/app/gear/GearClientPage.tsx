@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { Plus, Package, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import type { ExpiryStatus } from "@/lib/supply";
 
 interface GearItem {
   id: string;
@@ -16,38 +19,109 @@ interface GearItem {
   quantity: number;
   purchasePrice: number | null;
   imageUrl: string | null;
+  /**
+   * Resolved server-side via todayForExpiry + expiryStatus — this is a
+   * client component and must not compute "today" itself (server and
+   * browser timezones can disagree, and a client-computed value would not
+   * match the badge the detail page shows for the same item).
+   */
+  expiry: ExpiryStatus;
 }
 
 interface Props {
   items: GearItem[];
+  /**
+   * From the server, via loadSectionItems. REQUIRED, with no default, exactly
+   * as on SupplyClientPage: an optional prop defaulting to `true` is
+   * fail-open, so a new surface that renders expiry badges and forgets to
+   * pass it would lose the notice silently — a guard that looks present and
+   * does nothing. tsc cannot catch that through a default.
+   */
+  timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
+  /**
+   * True when this list is one block of a multi-source section page (see
+   * SectionView). The page owns the `h1`, so the block gets the lighter
+   * SectionBlockHeader instead of a second PageHeader.
+   */
+  embedded?: boolean;
 }
 
 function categoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
 }
 
-export function GearClientPage({ items, heading = "GEAR", subheading }: Props) {
+/**
+ * `shrink-0`, and a SIBLING of the truncating name element rather than a
+ * descendant: `truncate` plus `flex` on one element hides its siblings — a
+ * `×N` quantity badge vanishing for a long name shipped once already (see
+ * SupplyClientPage's StatusBadges). This badge must follow the same rule.
+ */
+function ExpiryBadge({ expiry }: { expiry: ExpiryStatus }) {
+  if (expiry === "expired") {
+    return (
+      <span className="shrink-0 text-[10px] font-mono text-[#E53935] bg-[#E53935]/10 border border-[#E53935]/20 px-1.5 py-0.5 rounded">
+        EXPIRED
+      </span>
+    );
+  }
+  if (expiry === "soon") {
+    return (
+      <span className="shrink-0 text-[10px] font-mono text-[#F5A623] bg-[#F5A623]/10 border border-[#F5A623]/20 px-1.5 py-0.5 rounded">
+        SOON
+      </span>
+    );
+  }
+  return null;
+}
+
+export function GearClientPage({
+  items,
+  timezoneConfigured,
+  heading = "GEAR",
+  subheading,
+  embedded = false,
+}: Props) {
+  const addAction = (
+    <Link
+      href="/gear/new"
+      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+    >
+      <Plus className="w-4 h-4" />
+      Add Gear
+    </Link>
+  );
+
   return (
-    <div className="min-h-full">
-      <PageHeader
-        title={heading}
-        subtitle={
-          subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
-        }
-        actions={
-          <Link
-            href="/gear/new"
-            className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add Gear
-          </Link>
-        }
-      />
+    <div className={embedded ? undefined : "min-h-full"}>
+      {embedded ? (
+        <SectionBlockHeader title={heading} action={addAction} />
+      ) : (
+        <PageHeader
+          title={heading}
+          subtitle={
+            subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
+          }
+          actions={addAction}
+        />
+      )}
 
       <div className="p-4 sm:p-6">
+        {/* Only where the badges it explains actually appear: the empty state
+            below renders no SOON/EXPIRED badge, so there is nothing for the
+            notice to qualify. Skipped entirely when embedded — SectionView
+            renders the one notice for the whole page in that case, and two
+            copies on one page is the failure this guard exists to prevent.
+            Mirrors SupplyClientPage exactly: gear carries expiry dates too,
+            and a page showing an EXPIRED verdict must disclose which timezone
+            decided it. */}
+        {!embedded && items.length > 0 && (
+          <SupplyTimezoneNotice
+            timezoneConfigured={timezoneConfigured}
+            className="mb-4"
+          />
+        )}
         {items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
@@ -94,13 +168,14 @@ export function GearClientPage({ items, heading = "GEAR", subheading }: Props) {
                     </Link>
                     <div className="min-w-0 flex-1">
                       <Link href={`/gear/item/${item.id}`} className="min-w-0">
-                        <p className="font-semibold text-vault-text flex items-center">
+                        <p className="font-semibold text-vault-text flex items-center gap-2">
                           <span className="truncate min-w-0">{item.name}</span>
                           {item.quantity > 1 && (
-                            <span className="ml-2 shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
+                            <span className="shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
                               ×{item.quantity}
                             </span>
                           )}
+                          <ExpiryBadge expiry={item.expiry} />
                         </p>
                       </Link>
                       <p className="text-xs text-vault-text-faint truncate">
@@ -184,10 +259,11 @@ export function GearClientPage({ items, heading = "GEAR", subheading }: Props) {
                                 {item.name}
                               </span>
                               {item.quantity > 1 && (
-                                <span className="ml-1 shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
+                                <span className="shrink-0 rounded border border-vault-border px-1.5 py-0.5 text-[11px] text-vault-text-muted">
                                   ×{item.quantity}
                                 </span>
                               )}
+                              <ExpiryBadge expiry={item.expiry} />
                               <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
                             </p>
                             {item.model && (

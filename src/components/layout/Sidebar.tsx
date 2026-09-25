@@ -352,7 +352,7 @@ export function Sidebar({
         />
         <NavGroup
           label="Preparedness"
-          description="Medical & food supplies"
+          description="Armor, medical & more"
           icon={Backpack}
           group="prep"
           pathname={pathname}

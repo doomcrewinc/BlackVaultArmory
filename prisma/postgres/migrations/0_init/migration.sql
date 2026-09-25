@@ -103,6 +103,9 @@ CREATE TABLE "Gear" (
     "purchasePrice" DOUBLE PRECISION,
     "currentValue" DOUBLE PRECISION,
     "acquisitionDate" TIMESTAMP(3),
+    "expirationDate" TIMESTAMP(3),
+    "protectionLevel" TEXT,
+    "armorSize" TEXT,
     "storageLocation" TEXT,
     "notes" TEXT,
     "imageUrl" TEXT,
@@ -359,6 +362,9 @@ CREATE INDEX "Accessory_roundCount_idx" ON "Accessory"("roundCount");
 
 -- CreateIndex
 CREATE INDEX "Gear_category_idx" ON "Gear"("category");
+
+-- CreateIndex
+CREATE INDEX "Gear_expirationDate_idx" ON "Gear"("expirationDate");
 
 -- CreateIndex
 CREATE INDEX "Supply_category_idx" ON "Supply"("category");

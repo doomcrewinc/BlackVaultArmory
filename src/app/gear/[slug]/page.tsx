@@ -1,59 +1,24 @@
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { prisma } from "@/lib/prisma";
-import { AccessoriesClientPage } from "@/app/accessories/AccessoriesClientPage";
-import { GearClientPage } from "@/app/gear/GearClientPage";
-import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
-import { getSupplySectionItems } from "@/app/supplies/getSupplySectionItems";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
+import { SectionView } from "@/components/sections/SectionView";
+import { sectionBySlug, sectionIsRenderable } from "@/lib/categories";
 import {
-  accessoryWhereForSection,
-  gearWhereForSection,
-  sectionBySlug,
-  supplyWhereForSection,
-} from "@/lib/categories";
+  loadSectionItems,
+  type SectionPayload,
+} from "@/lib/sections/loadSectionItems";
 
-async function getSectionGear(where: object) {
-  return prisma.gear.findMany({ where, orderBy: { name: "asc" } });
-}
-
-async function getSectionAccessories(where: object | undefined) {
-  const accessories = await prisma.accessory.findMany({
-    where,
-    include: {
-      buildSlots: {
-        include: {
-          build: {
-            select: {
-              id: true,
-              name: true,
-              isActive: true,
-              firearm: { select: { id: true, name: true } },
-            },
-          },
-        },
-      },
-    },
-    orderBy: { roundCount: "desc" },
-  });
-
-  return accessories.map((accessory) => {
-    const activeSlot = accessory.buildSlots.find((slot) => slot.build.isActive);
-    return {
-      ...accessory,
-      currentBuild: activeSlot
-        ? {
-            id: activeSlot.build.id,
-            name: activeSlot.build.name,
-            slotType: activeSlot.slotType,
-            firearm: activeSlot.build.firearm,
-          }
-        : null,
-    };
-  });
-}
-
+/**
+ * Resolve the slug, check the group, load, render.
+ *
+ * The per-source early returns this page used to carry are gone: each
+ * returned after the FIRST source it matched, so a section declaring both a
+ * gear and a supply source would silently have rendered one of its two lists.
+ * `loadSectionItems` walks every source in declaration order, and its
+ * exhaustive switch makes a new source kind a compile error rather than a
+ * quietly missing list.
+ */
 export default async function GearSectionPage({
   params,
 }: {
@@ -63,104 +28,25 @@ export default async function GearSectionPage({
   const section = sectionBySlug(slug);
   if (!section || section.group !== "gear") notFound();
 
-  // A section could in principle carry a gear source, a supply source and an
-  // accessory source all at once. No gear-group section does today, so each
-  // branch below returns early and a mixed section would silently show only
-  // the first source it matches — not a case that exists today.
-  const gearWhere = gearWhereForSection(section);
-  if (gearWhere) {
-    let items: Awaited<ReturnType<typeof getSectionGear>>;
-    try {
-      items = await getSectionGear(gearWhere);
-    } catch {
-      return (
-        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
-          <p className="text-sm text-vault-text-muted">
-            Failed to load {section.label}.
-          </p>
-          <Link
-            href={`/gear/${section.slug}`}
-            className="text-sm text-[#00C2FF] hover:underline"
-          >
-            Tap to retry
-          </Link>
-        </div>
-      );
-    }
-    return (
-      <GearClientPage
-        items={items}
-        heading={section.label}
-        subheading={section.description}
-      />
-    );
-  }
+  // The only notFound() about sources this page may contain. Safe
+  // precisely because the registry test asserts sectionIsRenderable is
+  // true for every registered section: a 404 here means the registry is
+  // broken — a section with no source, a source with no where clause, or
+  // one this group's view cannot render — and the suite says so before a
+  // user does.
+  if (!sectionIsRenderable(section)) notFound();
 
-  // Cleaning is the one gear-group section backed by a supply source instead
-  // of a gear or accessory one.
-  const supplyWhere = supplyWhereForSection(section);
-  if (supplyWhere) {
-    let result: Awaited<ReturnType<typeof getSupplySectionItems>>;
-    try {
-      result = await getSupplySectionItems(supplyWhere);
-    } catch {
-      return (
-        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
-          <p className="text-sm text-vault-text-muted">
-            Failed to load {section.label}.
-          </p>
-          <Link
-            href={`/gear/${section.slug}`}
-            className="text-sm text-[#00C2FF] hover:underline"
-          >
-            Tap to retry
-          </Link>
-        </div>
-      );
-    }
-    return (
-      <SupplyClientPage
-        items={result.items}
-        timezoneConfigured={result.timezoneConfigured}
-        heading={section.label}
-        subheading={section.description}
-      />
-    );
-  }
-
-  // A gear-group section must carry a gear matcher, a supply matcher (both
-  // handled above) or an accessory matcher — `?? undefined` here would
-  // otherwise turn "no matcher for this source" into "no filter", pulling in
-  // every accessory. Every section in the registry today has one of the
-  // three, so reaching none of them is a registry defect, not a legitimate
-  // empty state.
-  const accessoryWhere = accessoryWhereForSection(section);
-  if (!accessoryWhere) notFound();
-
-  let accessories: Awaited<ReturnType<typeof getSectionAccessories>>;
+  let payloads: SectionPayload[];
   try {
-    accessories = await getSectionAccessories(accessoryWhere);
+    payloads = await loadSectionItems(section);
   } catch {
     return (
-      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
-        <p className="text-sm text-vault-text-muted">
-          Failed to load {section.label}.
-        </p>
-        <Link
-          href={`/gear/${section.slug}`}
-          className="text-sm text-[#00C2FF] hover:underline"
-        >
-          Tap to retry
-        </Link>
-      </div>
+      <SectionLoadError
+        label={section.label}
+        href={`/gear/${section.slug}`}
+      />
     );
   }
 
-  return (
-    <AccessoriesClientPage
-      accessories={accessories}
-      heading={section.label}
-      subheading={section.description}
-    />
-  );
+  return <SectionView section={section} payloads={payloads} />;
 }

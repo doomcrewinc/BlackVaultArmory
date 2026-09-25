@@ -64,15 +64,6 @@ interface Firearm {
   rangeSessionCount: number;
 }
 
-function toDateInputValue(dateStr: string | null): string {
-  if (!dateStr) return "";
-  try {
-    return new Date(dateStr).toISOString().split("T")[0];
-  } catch {
-    return "";
-  }
-}
-
 export default function EditFirearmPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -672,7 +663,7 @@ export default function EditFirearmPage() {
                 id="acquisitionDate"
                 name="acquisitionDate"
                 type="date"
-                defaultValue={toDateInputValue(firearm.acquisitionDate)}
+                defaultValue={toISODate(firearm.acquisitionDate)}
                 className={INPUT_CLASS}
               />
             </div>
@@ -736,7 +727,7 @@ export default function EditFirearmPage() {
                   id="lastMaintenanceDate"
                   name="lastMaintenanceDate"
                   type="date"
-                  defaultValue={toDateInputValue(firearm.lastMaintenanceDate)}
+                  defaultValue={toISODate(firearm.lastMaintenanceDate)}
                   className={INPUT_CLASS}
                 />
               </div>
