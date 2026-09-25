@@ -52,7 +52,7 @@ function ExpiryBadge({ expiry }: { expiry: ExpiryStatus }) {
   }
   if (expiry === "soon") {
     return (
-      <span className="shrink-0 text-[10px] font-mono text-[#FFB300] bg-[#FFB300]/10 border border-[#FFB300]/20 px-1.5 py-0.5 rounded">
+      <span className="shrink-0 text-[10px] font-mono text-[#F5A623] bg-[#F5A623]/10 border border-[#F5A623]/20 px-1.5 py-0.5 rounded">
         SOON
       </span>
     );

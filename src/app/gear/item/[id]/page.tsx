@@ -123,7 +123,7 @@ export default async function GearDetailPage({
               </span>
             )}
             {expiry === "soon" && (
-              <span className="text-xs px-2 py-0.5 rounded border border-[#FFB300]/30 bg-[#FFB300]/10 text-[#FFB300] font-mono uppercase">
+              <span className="text-xs px-2 py-0.5 rounded border border-[#F5A623]/30 bg-[#F5A623]/10 text-[#F5A623] font-mono uppercase">
                 Expiring Soon
               </span>
             )}

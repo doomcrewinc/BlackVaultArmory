@@ -21,7 +21,7 @@
 - **Schema changes go through `npm run gen:schemas`.** Never hand-edit `prisma/postgres/schema.prisma` or `prisma/sqlite/schema.prisma`.
 - **`Number("")` and `Number(" ")` are both `0`.** Any numeric normalizer trims first and treats empty as absent.
 - **A `NOT NULL DEFAULT` column treats explicit `null` as absent, not as "clear".** A nullable column treats explicit `null` as "clear".
-- Path alias `@/` = `src/`. Prisma client from `@/lib/prisma`. Accent `#00C2FF`, error `#E53935`, success `#00C853`, amber `#FFB300`. Dark theme classes: `text-vault-text`, `text-vault-text-muted`, `bg-vault-surface`, `border-vault-border`.
+- Path alias `@/` = `src/`. Prisma client from `@/lib/prisma`. Accent `#00C2FF`, error `#E53935`, success `#00C853`, amber `#F5A623`. Dark theme classes: `text-vault-text`, `text-vault-text-muted`, `bg-vault-surface`, `border-vault-border`.
 
 ---
 
@@ -660,7 +660,7 @@ For the badge, resolve `today` once on the server from `AppSettings.timezone` ex
 
 Badge styling, matching the supply pages:
 - expired → `#E53935` text on a transparent red tint
-- soon → `#FFB300`
+- soon → `#F5A623`
 - otherwise no badge
 
 - [ ] **Step 7: Show the expiry badge in the gear list**
