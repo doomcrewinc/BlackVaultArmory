@@ -600,11 +600,18 @@ function LowAmmoWidget({ items, totalStocks }: { items: AmmoStockItem[]; totalSt
  * was out of date — worse than showing nothing. Supply rows and gear rows
  * carry their own badge so the two are never mistaken for each other.
  *
- * Name and file unchanged on purpose: this component is a byte-copy of
- * LowAmmoWidget, which is noted and not fixed here — deduplicating the three
- * dashboard widgets is its own change, not a rider on this one. The widget id
- * ("supply-alerts") is likewise untouched: it is a key in every user's saved
- * layout in localStorage.
+ * Name and file unchanged on purpose. This widget duplicates LowAmmoWidget's
+ * whole shell — the heading row, the alert-count badge, the empty state, the
+ * low-stock bar and its critical/warning colour rule — and that duplication is
+ * noted, not fixed here; deduplicating the three dashboard widgets is its own
+ * change, not a rider on this one. It is NOT a byte-for-byte copy, though this
+ * comment used to say so: the rows already carried a badge, a name and a unit
+ * label that LowAmmoWidget has no equivalent for, and the gear list below adds
+ * more. Whoever does the dedup should expect a shared shell plus three
+ * genuinely different row renderers, not three identical components.
+ *
+ * The widget id ("supply-alerts") is untouched: it is a key in every user's
+ * saved layout in localStorage.
  *
  * Every status it renders was resolved server-side. It calls expiryStatus
  * nowhere, and must not: see GearAlertItem.

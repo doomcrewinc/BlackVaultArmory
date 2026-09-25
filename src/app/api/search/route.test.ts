@@ -286,19 +286,47 @@ describe("GET /api/search", () => {
     ]);
   });
 
-  it("matches MEDICAL_KIT by its two-word human label", async () => {
+  it("serves 'medical kit' on the label path, and the token spelling on the column path", async () => {
     // The exact shape the supplies bug had: the column stores MEDICAL_KIT and
     // every surface shows "Medical Kit", so a substring match on the column
     // alone finds nothing for what the user typed.
+    //
+    // The negative control is a SECOND CALL THROUGH THE ROUTE rather than a
+    // statement about strings: an earlier version of this test asserted
+    // `"MEDICAL_KIT".toLowerCase().includes("medical kit") === false`, which is
+    // literal-on-literal and could not fail whatever the route did. Driving the
+    // route with the token spelling instead shows the two paths are genuinely
+    // distinct — and fails if the route ever started label-matching tokens, or
+    // if the label clause leaked into every query.
     await GET(request("medical kit"));
+    await GET(request("medical_kit"));
 
-    const where = mocks.findGear.mock.calls[0][0].where;
-    expect(where.OR).toContainEqual({ category: { in: ["MEDICAL_KIT"] } });
-    expect(where.OR).toContainEqual({
+    const inClauseOf = (where: { OR: Record<string, unknown>[] }) =>
+      where.OR.find(
+        (clause) =>
+          typeof clause.category === "object" &&
+          clause.category !== null &&
+          "in" in (clause.category as object),
+      );
+
+    const labelWhere = mocks.findGear.mock.calls[0][0].where;
+    const tokenWhere = mocks.findGear.mock.calls[1][0].where;
+
+    // The label spelling reaches the label clause...
+    expect(inClauseOf(labelWhere)).toEqual({ category: { in: ["MEDICAL_KIT"] } });
+    // ...alongside the column clause, which is kept for a category a restore
+    // stored outside the enum and which therefore has no label.
+    expect(labelWhere.OR).toContainEqual({
       category: containsInsensitive("medical kit"),
     });
-    // The negative control: the token-only clause could not have found it.
-    expect("MEDICAL_KIT".toLowerCase().includes("medical kit")).toBe(false);
+
+    // The token spelling reaches ONLY the column clause: no label contains
+    // "medical_kit", so the route emits no `in` clause at all for it. That is
+    // what makes the assertion above specifically about the label path.
+    expect(inClauseOf(tokenWhere)).toBeUndefined();
+    expect(tokenWhere.OR).toContainEqual({
+      category: containsInsensitive("medical_kit"),
+    });
   });
 
   it("keeps the gear item URL at /gear/item/<id> for a category whose section moved under /prep", async () => {
@@ -329,10 +357,15 @@ describe("GET /api/search", () => {
     // Fourteen of the twenty categories now sit in a /prep section and six do
     // not. One route serves all of them; this fails the moment a url starts
     // being derived from the section.
+    //
+    // The id is the SAME literal for every category, and the expectation is
+    // that literal spelled out. An earlier version built the id from the
+    // category and asserted `/gear/item/gear-${category}`, so both sides moved
+    // together and only the prefix was really being checked.
     for (const category of GEAR_CATEGORIES) {
       mocks.findGear.mockResolvedValue([
         {
-          id: `gear-${category}`,
+          id: "fixed-gear-id",
           name: `A ${category}`,
           manufacturer: null,
           model: null,
@@ -344,7 +377,7 @@ describe("GET /api/search", () => {
         await GET(request(GEAR_CATEGORY_LABELS[category]))
       ).json();
 
-      expect(json.gear[0].url).toBe(`/gear/item/gear-${category}`);
+      expect(json.gear[0].url).toBe("/gear/item/fixed-gear-id");
     }
   });
 });

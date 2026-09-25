@@ -405,6 +405,28 @@ function pushWrapped(lines: string[], line: string, indent = ""): void {
   wrapped.forEach((part, index) => lines.push(index === 0 ? `${indent}${part}` : `${indent}  ${part}`));
 }
 
+/**
+ * The `Expires: <date> (<status>)` segment for a PDF row, or null when the row
+ * has no date to report.
+ *
+ * Shared by the gear and the supply renderers because they had drifted into two
+ * OPPOSITE conventions inside one rendered document: gear omitted the segment
+ * while supplies printed `Expiry: N/A (none)` on every dateless row, so a
+ * reader comparing a plate to a water jug on the same sheet had to know which
+ * block followed which rule. One function and one label, so they cannot
+ * diverge again.
+ *
+ * The convention is the gear one, which is also the rule the NFA line follows:
+ * print nothing where there is nothing to say. `(status)` is likewise dropped
+ * when the status is "none", which is the only status a dateless row can have
+ * — so it never appears in practice, and the guard is there because
+ * expiryStatus also returns "none" for a date it could not parse.
+ */
+function expirySegment(expirationDate: string, expiryStatus: string): string | null {
+  if (!expirationDate) return null;
+  return `Expires: ${expirationDate}${expiryStatus !== "none" ? ` (${expiryStatus})` : ""}`;
+}
+
 function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
   const lines: string[] = [
     "Project BlackVault - Full Armory Export",
@@ -478,11 +500,8 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
       // double the page count to say nothing, and a plate's rating would be
       // harder to find for it.
       const extras: string[] = [];
-      if (row.expirationDate) {
-        extras.push(
-          `Expires: ${row.expirationDate}${row.expiryStatus !== "none" ? ` (${row.expiryStatus})` : ""}`
-        );
-      }
+      const expiry = expirySegment(row.expirationDate, row.expiryStatus);
+      if (expiry) extras.push(expiry);
       if (row.protectionLevel) extras.push(`Protection: ${row.protectionLevel}`);
       if (row.armorSize) extras.push(`Size/Cut: ${row.armorSize}`);
       pushWrapped(
@@ -498,9 +517,13 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     lines.push("No supply records included");
   } else {
     payload.supplies.forEach((row, index) => {
+      // Same segment helper the gear rows above use: a dateless supply now says
+      // nothing rather than "Expiry: N/A (none)", so both blocks of this one
+      // document follow one convention.
+      const expiry = expirySegment(row.expirationDate, row.expiryStatus);
       pushWrapped(
         lines,
-        `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"} | Expiry: ${row.expirationDate || "N/A"} (${row.expiryStatus}) | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
+        `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"}${expiry ? ` | ${expiry}` : ""} | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
       );
     });
   }

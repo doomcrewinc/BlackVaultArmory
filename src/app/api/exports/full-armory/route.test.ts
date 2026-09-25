@@ -64,6 +64,72 @@ function extractPdfFlatText(pdf: string): string {
   return extractPdfText(pdf).replace(/\s+/g, " ");
 }
 
+/**
+ * A CSV document parsed into rows of cells, honouring RFC-4180 quoting.
+ *
+ * A naive `line.split(",")` lines up with the header only while no value
+ * contains a comma. The moment one does, every cell after it shifts by one and
+ * a column assertion silently starts checking its NEIGHBOUR instead of
+ * failing — it does not error, it just quietly asserts the wrong thing. A
+ * value containing a newline is worse: it breaks the split into lines before
+ * the cells are ever reached.
+ *
+ * Both are ordinary user input here — a gear name, a note typed into a
+ * textarea — and csvEscape quotes them correctly, so the export is right and
+ * only the assertion was fragile. The gear fixture in the empty-armor-cells
+ * test below deliberately contains a comma AND a newline so that class of
+ * false pass cannot return unnoticed.
+ */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inQuotes) {
+      if (char === '"') {
+        // A doubled quote inside a quoted field is one literal quote.
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === ",") {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[i + 1] === "\n") i += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+
+  row.push(cell);
+  // Guard against a trailing newline producing a phantom one-empty-cell row.
+  if (row.length > 1 || row[0] !== "") rows.push(row);
+  return rows;
+}
+
 describe("GET /api/exports/full-armory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -785,10 +851,15 @@ describe("GET /api/exports/full-armory", () => {
     // Asserted on the drawn text, not just the %PDF- prefix — removing the
     // Supplies block from buildExportPdfLines would still leave a valid PDF.
     expect(text).toContain("Supplies");
-    // The decimal quantity is not floored in the PDF line either.
+    // The decimal quantity is not floored in the PDF line either. The expiry
+    // segment is ABSENT rather than reading "Expiry: N/A (none)": this supply
+    // has no date, and the gear rows in the same document already said nothing
+    // in that case. See expirySegment.
     expect(text).toContain(
-      "1. Medical Iodine Tablets | Brand: PotableAid | Qty: 12.5 oz | Threshold: 2 | Expiry: N/A (none) | Price: 25 | Storage: Pantry"
+      "1. Medical Iodine Tablets | Brand: PotableAid | Qty: 12.5 oz | Threshold: 2 | Price: 25 | Storage: Pantry"
     );
+    expect(text).not.toContain("Expiry: N/A");
+    expect(text).not.toContain("(none)");
   });
 
   it("says so in the PDF when there are no supplies to report", async () => {
@@ -1064,8 +1135,11 @@ describe("GET /api/exports/full-armory", () => {
     const header = csv.split("\n")[0].split(",");
     const taxIndex = header.indexOf("nfaTaxPaid");
     expect(taxIndex).toBeGreaterThan(-1);
-    // No fixture value in this file contains a comma, so a naive split lines
-    // up with the header.
+    // No value on an INVENTORY row contains a comma or a newline, so a naive
+    // split lines up with the header for these rows. That is no longer true of
+    // the file as a whole — the gear fixture in the empty-armor-cells test
+    // carries both on purpose — so the claim is scoped to the rows read here.
+    // parseCsv is the safe option for anything wider.
     const inventoryRows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
     expect(inventoryRows).toHaveLength(2);
     for (const row of inventoryRows) {
@@ -1214,7 +1288,11 @@ describe("GET /api/exports/full-armory", () => {
     mocks.findGear.mockResolvedValue([
       {
         id: "gear-knife",
-        name: "Bugout",
+        // A comma in the name and a comma AND a newline in the notes, both of
+        // them ordinary user input. They are here to keep the CSV assertion
+        // below honest: with them, a naive `split(",")` reads a neighbouring
+        // cell instead of the one it names, and quietly passes. See parseCsv.
+        name: "Bugout, Mini",
         manufacturer: "Benchmade",
         model: "535",
         serialNumber: null,
@@ -1228,7 +1306,7 @@ describe("GET /api/exports/full-armory", () => {
         protectionLevel: null,
         armorSize: null,
         storageLocation: null,
-        notes: null,
+        notes: "EDC, daily\nsecond line",
         imageUrl: null,
       },
     ]);
@@ -1243,19 +1321,36 @@ describe("GET /api/exports/full-armory", () => {
     expect(json.gear[0].expiryStatus).toBe("none");
 
     // And in the CSV, where a "null" or "—" would be read as a value by every
-    // spreadsheet that opens it.
+    // spreadsheet that opens it. Parsed with quoting honoured, not split on
+    // commas — the fixture above contains a comma and a newline precisely so
+    // this cannot be indexing the wrong cell.
     const csv = await (
       await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))
     ).text();
-    const headers = csv.split("\n")[0].split(",");
-    const gearLine = csv.split("\n").find((line) => line.startsWith("gear,"));
-    expect(gearLine).toBeDefined();
-    const cells = (gearLine as string).split(",");
+    const rows = parseCsv(csv);
+    const headers = rows[0];
+    const gearRow = rows.find((row) => row[0] === "gear");
+    expect(gearRow).toBeDefined();
     for (const column of ["protectionLevel", "armorSize", "expirationDate"]) {
       const index = headers.indexOf(column);
       expect(index).toBeGreaterThan(-1);
-      expect(cells[index]).toBe("");
+      expect((gearRow as string[])[index]).toBe("");
     }
+
+    // The quoted values survived the round trip intact, which is what makes
+    // the cell indices above trustworthy rather than coincidentally right.
+    expect((gearRow as string[])[headers.indexOf("name")]).toBe("Bugout, Mini");
+    expect((gearRow as string[])[headers.indexOf("notes")]).toBe("EDC, daily\nsecond line");
+
+    // Not ceremony: on this row the naive approach really does go wrong. The
+    // newline inside `notes` truncates what `split("\n")` calls the gear
+    // "line", so the cell the old assertion indexed is not even present.
+    // Both sides of this come from the route's own output.
+    const naiveCells = (
+      csv.split("\n").find((line) => line.startsWith("gear,")) as string
+    ).split(",");
+    expect(naiveCells.length).toBeLessThan(headers.length);
+    expect(naiveCells[headers.indexOf("protectionLevel")]).toBeUndefined();
   });
 
   it("resolves gear expiry against the SAME today the supply rows used", async () => {
@@ -1445,5 +1540,65 @@ describe("GET /api/exports/full-armory", () => {
     expect(text).not.toContain("Protection:");
     expect(text).not.toContain("Size/Cut:");
     expect(text).not.toContain("Expires:");
+  });
+  it("prints ONE expiry convention across the gear and supply blocks of the same document", async () => {
+    // The two blocks had drifted into opposite conventions: gear omitted the
+    // segment where supplies printed "Expiry: N/A (none)". This asserts on both
+    // blocks of a single rendered document, because the inconsistency is only
+    // visible when you read them together — either block alone looked fine.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "gear-dateless", name: "Plain Knife", manufacturer: "Benchmade", model: "535",
+          serialNumber: null, category: "KNIFE", quantity: 1, purchasePrice: null,
+          currentValue: null, acquisitionDate: null, expirationDate: null,
+          protectionLevel: null, armorSize: null, storageLocation: null, notes: null, imageUrl: null,
+        },
+        {
+          id: "gear-dated", name: "Front Plate", manufacturer: "PlateCo", model: "III+",
+          serialNumber: null, category: "ARMOR", quantity: 1, purchasePrice: null,
+          currentValue: null, acquisitionDate: null,
+          expirationDate: new Date("2026-01-01T00:00:00.000Z"),
+          protectionLevel: null, armorSize: null, storageLocation: null, notes: null, imageUrl: null,
+        },
+      ]);
+      mocks.findSupplies.mockResolvedValue([
+        {
+          id: "supply-dateless", name: "Bandages", brand: null, category: "MEDICAL", quantity: 1,
+          unit: "KIT", lowStockAlert: null, expirationDate: null, purchasePrice: null,
+          purchaseDate: null, storageLocation: null, notes: null,
+        },
+        {
+          id: "supply-dated", name: "Canned Beans", brand: null, category: "FOOD", quantity: 1,
+          unit: "COUNT", lowStockAlert: null,
+          expirationDate: new Date("2026-01-01T00:00:00.000Z"),
+          purchasePrice: null, purchaseDate: null, storageLocation: null, notes: null,
+        },
+      ]);
+
+      const text = extractPdfFlatText(
+        await (
+          await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+        ).text(),
+      );
+
+      // Both dated rows print the segment, under the SAME label.
+      const expiresSegments = text.match(/Expires: 2026-01-01 \(expired\)/g) ?? [];
+      expect(expiresSegments).toHaveLength(2);
+      // Neither dateless row prints anything: no placeholder, no "(none)", and
+      // not the old supplies-only "Expiry:" label either.
+      expect(text).not.toContain("Expiry:");
+      expect(text).not.toContain("N/A (none)");
+      expect(text).not.toContain("(none)");
+      // The dateless rows are still on the page — only the segment is gone.
+      expect(text).toContain("Plain Knife");
+      expect(text).toContain("Bandages");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
