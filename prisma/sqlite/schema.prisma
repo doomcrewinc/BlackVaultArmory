@@ -59,6 +59,7 @@ model Firearm {
   rangeSessions    RangeSession[]
   documents        Document[]
   maintenanceLogs  MaintenanceLog[]
+  kitItems         KitItem[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -151,6 +152,7 @@ model Accessory {
   replacementIntervalDays Int?
 
   batteryChangeLogs      BatteryChangeLog[]
+  kitItems               KitItem[]
 
   // NFA paperwork. Applies when type = SUPPRESSOR; cleared server-side otherwise.
   // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
@@ -199,6 +201,7 @@ model Gear {
   imageSource     String?
 
   documents       Document[]
+  kitItems        KitItem[]
 
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
@@ -230,6 +233,7 @@ model Supply {
   purchaseDate    DateTime?
   storageLocation String?
   notes           String?
+  kitItems        KitItem[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -294,6 +298,7 @@ model AmmoStock {
 
   transactions    AmmoTransaction[]
   rangeSessionLinks RangeSessionAmmoLink[]
+  kitItems        KitItem[]
 
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
@@ -469,4 +474,52 @@ model AppSettings {
   timezone                String?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+}
+
+// ─── KITS ─────────────────────────────────────────────────────
+// A kit is a container, not a copy: a KitItem points at an inventory record
+// and says how much of it lives in this kit. See the item-categories spec,
+// "Kit and KitItem: what is packed where".
+
+model Kit {
+  id        String    @id @default(cuid())
+  name      String
+  // KitCategory: BUGOUT | MEDICAL | RANGE | VEHICLE | HOME | OTHER
+  category  String
+  location  String?
+  notes     String?
+  imageUrl  String?
+  items     KitItem[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([category])
+}
+
+model KitItem {
+  id             String      @id @default(cuid())
+  kitId          String
+  kit            Kit         @relation(fields: [kitId], references: [id], onDelete: Cascade)
+
+  // Exactly one source, or none plus a label. Enforced in the API and by test.
+  gearId         String?
+  supplyId       String?
+  accessoryId    String?
+  ammoStockId    String?
+  firearmId      String?
+  label          String?
+
+  gear           Gear?       @relation(fields: [gearId], references: [id], onDelete: Cascade)
+  supply         Supply?     @relation(fields: [supplyId], references: [id], onDelete: Cascade)
+  accessory      Accessory?  @relation(fields: [accessoryId], references: [id], onDelete: Cascade)
+  ammoStock      AmmoStock?  @relation(fields: [ammoStockId], references: [id], onDelete: Cascade)
+  firearm        Firearm?    @relation(fields: [firearmId], references: [id], onDelete: Cascade)
+
+  quantity       Float       @default(1)
+  targetQuantity Float?
+  notes          String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([kitId])
 }

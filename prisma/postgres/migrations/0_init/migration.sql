@@ -327,6 +327,39 @@ CREATE TABLE "AppSettings" (
     CONSTRAINT "AppSettings_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "Kit" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "location" TEXT,
+    "notes" TEXT,
+    "imageUrl" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Kit_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "KitItem" (
+    "id" TEXT NOT NULL,
+    "kitId" TEXT NOT NULL,
+    "gearId" TEXT,
+    "supplyId" TEXT,
+    "accessoryId" TEXT,
+    "ammoStockId" TEXT,
+    "firearmId" TEXT,
+    "label" TEXT,
+    "quantity" DOUBLE PRECISION NOT NULL DEFAULT 1,
+    "targetQuantity" DOUBLE PRECISION,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "KitItem_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "Firearm_serialNumber_key" ON "Firearm"("serialNumber");
 
@@ -441,6 +474,12 @@ CREATE INDEX "DateNormalizationAudit_model_field_idx" ON "DateNormalizationAudit
 -- CreateIndex
 CREATE UNIQUE INDEX "DateNormalizationAudit_model_field_recordId_key" ON "DateNormalizationAudit"("model", "field", "recordId");
 
+-- CreateIndex
+CREATE INDEX "Kit_category_idx" ON "Kit"("category");
+
+-- CreateIndex
+CREATE INDEX "KitItem_kitId_idx" ON "KitItem"("kitId");
+
 -- AddForeignKey
 ALTER TABLE "Build" ADD CONSTRAINT "Build_firearmId_fkey" FOREIGN KEY ("firearmId") REFERENCES "Firearm"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -485,4 +524,22 @@ ALTER TABLE "BatteryChangeLog" ADD CONSTRAINT "BatteryChangeLog_accessoryId_fkey
 
 -- AddForeignKey
 ALTER TABLE "MaintenanceLog" ADD CONSTRAINT "MaintenanceLog_firearmId_fkey" FOREIGN KEY ("firearmId") REFERENCES "Firearm"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_kitId_fkey" FOREIGN KEY ("kitId") REFERENCES "Kit"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_gearId_fkey" FOREIGN KEY ("gearId") REFERENCES "Gear"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_supplyId_fkey" FOREIGN KEY ("supplyId") REFERENCES "Supply"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_accessoryId_fkey" FOREIGN KEY ("accessoryId") REFERENCES "Accessory"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_ammoStockId_fkey" FOREIGN KEY ("ammoStockId") REFERENCES "AmmoStock"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "KitItem" ADD CONSTRAINT "KitItem_firearmId_fkey" FOREIGN KEY ("firearmId") REFERENCES "Firearm"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

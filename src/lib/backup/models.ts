@@ -57,6 +57,8 @@ export const BACKUP_MODELS: BackupModel[] = [
     delegate: "dateNormalizationAudit",
     key: "dateNormalizationAudits",
   },
+  { model: "Kit", delegate: "kit", key: "kits" },
+  { model: "KitItem", delegate: "kitItem", key: "kitItems" },
 ];
 
 /**

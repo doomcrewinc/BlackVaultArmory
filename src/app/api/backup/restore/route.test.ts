@@ -424,6 +424,8 @@ describe("POST /api/backup/restore", () => {
         "maintenanceLogs",
         "batteryChangeLogs",
         "dateNormalizationAudits",
+        "kits",
+        "kitItems",
       ].sort(),
     );
   });
