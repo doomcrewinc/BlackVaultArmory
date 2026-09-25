@@ -8,14 +8,11 @@ import {
   isArmorCategory,
   type GearCategory,
 } from "@/lib/gear";
-import {
-  DEFAULT_EXPIRY_WARNING_DAYS,
-  expiryStatus,
-  todayForExpiry,
-} from "@/lib/supply";
+import { expiryStatus, resolveExpiryContext } from "@/lib/supply";
 import { gearSectionForItem, sectionHref } from "@/lib/categories";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { DeleteGearButton } from "./DeleteGearButton";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
@@ -26,11 +23,11 @@ import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 // No `include: { documents }`: ItemDocumentPanel fetches its own list from
 // /api/documents?gearId=…, so an included set would be loaded and never read.
 //
-// `today` is resolved here from AppSettings.timezone via todayForExpiry, the
-// same boundary getSupplySectionItems and the supply detail page use — never
-// a raw `new Date()`, which reads an item expiring "today" as already
-// expired every evening in a negative-UTC-offset timezone. Two sequential
-// awaits, not Promise.all — SQLite here runs with connection_limit=1.
+// `today` is resolved here via resolveExpiryContext, the same boundary the
+// supply detail page and getSupplySectionItems use — never a raw
+// `new Date()`, which reads an item expiring "today" as already expired
+// every evening in a negative-UTC-offset timezone. Two sequential awaits,
+// not Promise.all — SQLite here runs with connection_limit=1.
 async function getGearWithExpiry(id: string) {
   const gear = await prisma.gear.findUnique({ where: { id } });
   if (!gear) return null;
@@ -38,9 +35,10 @@ async function getGearWithExpiry(id: string) {
   const settings = await prisma.appSettings.findUnique({
     where: { id: "singleton" },
   });
-  const today = todayForExpiry(settings?.timezone ?? null, new Date());
-  const warningDays =
-    settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   // ONE more sequential query, and only one: how much of this gear is packed
   // across kits. `owned` is gear.quantity from the record already in hand, so
@@ -52,6 +50,12 @@ async function getGearWithExpiry(id: string) {
     gear,
     expiry: expiryStatus(gear.expirationDate, today, warningDays),
     allocation,
+    // Same read AND the same resolution, handed on: this page renders
+    // Expired / Expiring Soon badges too, so it carries the same notice as
+    // the supply detail page. Taken off resolveExpiryContext rather than
+    // recomputed as Boolean(settings.timezone), which claims "configured" for
+    // a set-but-unrecognised zone that was actually evaluated in UTC.
+    timezoneConfigured: timezoneFromSetting,
   };
 }
 
@@ -81,7 +85,8 @@ export default async function GearDetailPage({
     notFound();
   }
 
-  const { gear, expiry, allocation } = result;
+  const { gear, expiry, allocation, timezoneConfigured } = result;
+  const hasExpiryBadge = expiry === "expired" || expiry === "soon";
   // Resolved from the item, not hardcoded. /gear is a section INDEX over the
   // gear group only, so "Back to Gear" stranded an ARMOR, MEDICAL_KIT or
   // SHELTER item on a page that does not contain it — eighteen of the twenty
@@ -116,6 +121,12 @@ export default async function GearDetailPage({
       </div>
 
       <div className="p-4 sm:p-6 space-y-6">
+        {/* Only where the badge it explains actually appears — see the
+            supply detail page and KitContents for the same rule. */}
+        {hasExpiryBadge && (
+          <SupplyTimezoneNotice timezoneConfigured={timezoneConfigured} />
+        )}
+
         {/* Title block */}
         <div>
           <div className="flex flex-wrap items-center gap-2 mb-1">

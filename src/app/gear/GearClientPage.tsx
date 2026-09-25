@@ -83,6 +83,14 @@ export function GearClientPage({
   subheading,
   embedded = false,
 }: Props) {
+  // The SAME rule KitSectionList/KitContents use: show the notice only where
+  // an expiry badge actually appears, not merely because the list is
+  // non-empty — a list of items carrying no expiration date at all has
+  // nothing for the notice to qualify.
+  const hasExpiryBadges = items.some(
+    (item) => item.expiry === "expired" || item.expiry === "soon",
+  );
+
   const addAction = (
     <Link
       href="/gear/new"
@@ -116,7 +124,7 @@ export function GearClientPage({
             Mirrors SupplyClientPage exactly: gear carries expiry dates too,
             and a page showing an EXPIRED verdict must disclose which timezone
             decided it. */}
-        {!embedded && items.length > 0 && (
+        {!embedded && hasExpiryBadges && (
           <SupplyTimezoneNotice
             timezoneConfigured={timezoneConfigured}
             className="mb-4"
