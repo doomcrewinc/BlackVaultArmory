@@ -10,12 +10,18 @@ import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/
 
 const ALLOWED_EXTENSIONS = new Set<string>(ALLOWED_IMAGE_EXTENSIONS);
 
+// Every entity whose table carries an `imageUrl` column AND has a form that
+// writes one. "kit" joined in phase 6 task 6: Kit.imageUrl shipped with the
+// model in task 1 and was a dead column until this allowlist, ImagePicker's
+// union and the kit edit form all knew about it. Directory and URL are derived
+// (`${entityType}s`), so nothing else here is per-entity.
 const ALLOWED_ENTITY_TYPES = new Set([
   "firearm",
   "accessory",
   "ammo",
   "build",
   "gear",
+  "kit",
 ]);
 const MAX_SIZE = 10 * 1024 * 1024;
 const SAFE_ENTITY_ID = /^[a-zA-Z0-9_-]{1,64}$/;

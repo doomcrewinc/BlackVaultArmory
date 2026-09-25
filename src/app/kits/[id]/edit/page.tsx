@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
+import { AlertCircle, ArrowLeft, Loader2, Save } from "lucide-react";
+import ImagePicker from "@/components/shared/ImagePicker";
 import {
   KIT_CATEGORIES,
   KIT_CATEGORY_LABELS,
@@ -15,44 +16,97 @@ const INPUT_CLASS =
 const LABEL_CLASS =
   "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
+interface Kit {
+  id: string;
+  name: string;
+  category: string;
+  location: string | null;
+  notes: string | null;
+  imageUrl: string | null;
+}
+
 /**
- * Create a kit — the container only. Its contents are added line by line on
- * the detail page, through `/api/kits/[id]/items`, because a KitItem needs a
- * source picker (task 6) that this form has no business embedding.
+ * Edit a kit — the container's own fields. `PUT /api/kits/[id]` has existed
+ * since task 3 with no caller, which meant a kit could be created and never
+ * renamed; this is that caller.
  *
- * The category `<option>`s come from KIT_CATEGORIES, so the dropdown cannot
- * offer a value `normalizeKitCategory` would silently rewrite.
+ * Follows `/gear/item/[id]/edit` deliberately: fetch on mount, controlled
+ * `select` and image state, uncontrolled `defaultValue` text fields read back
+ * through FormData, inline load/save/error states, and an 800ms success beat
+ * before returning to the detail page.
  *
- * No image field, still — but for a different reason than when this form was
- * written. "kit" is now in ImagePicker's `entityType` union and the upload
- * route's allowlist (task 6), so `Kit.imageUrl` is live; the photo is added on
- * the EDIT form, where the kit already has an id to name its upload after.
- * Uploading against a temp id from a create form is a separate decision from
- * making the column work, and this form does not need it to ship.
+ * NOT edited here: the kit's CONTENTS. A line's quantity, target and notes
+ * are edited in place on the detail page, where the line and its allocation
+ * warning are visible; adding one needs the inventory picker. This form owns
+ * the bag, not what is in it.
+ *
+ * CATEGORY comes from KIT_CATEGORIES, so the dropdown cannot offer a value
+ * `normalizeKitCategory` would silently rewrite to BUGOUT on save.
+ *
+ * The IMAGE control is real now: `entityType="kit"` is in ImagePicker's union
+ * and in the upload route's allowlist, the route stores `imageUrl`, and the
+ * detail page renders it. Before this task all three were missing, which is
+ * why `/kits/new` still deliberately has no image field — there is nothing
+ * wrong with adding one, but a create form has no id yet and the temp-id path
+ * is a separate decision from making the column live.
  */
-export default function NewKitPage() {
+export default function EditKitPage() {
   const router = useRouter();
+  const params = useParams<{ id: string }>();
+  const kitId = Array.isArray(params.id) ? params.id[0] : params.id;
+  const invalidRoute = !kitId;
+
+  const [kit, setKit] = useState<Kit | null>(null);
+  const [dataLoading, setDataLoading] = useState(!invalidRoute);
+  const [dataError, setDataError] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [category, setCategory] = useState<string>(DEFAULT_KIT_CATEGORY);
+  const [success, setSuccess] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  const [category, setCategory] = useState<string>(DEFAULT_KIT_CATEGORY);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!kitId) return;
+
+    fetch(`/api/kits/${kitId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) {
+          setDataError(data.error);
+        } else {
+          setKit(data);
+          setCategory(data.category ?? DEFAULT_KIT_CATEGORY);
+          setImageUrl(data.imageUrl ?? null);
+        }
+        setDataLoading(false);
+      })
+      .catch(() => {
+        setDataError("Failed to load kit");
+        setDataLoading(false);
+      });
+  }, [kitId]);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     setError(null);
+    setSuccess(false);
     setLoading(true);
 
-    const data = new FormData(e.currentTarget);
+    const data = new FormData(event.currentTarget);
 
     const payload = {
       name: data.get("name") as string,
       category: data.get("category") as string,
       location: (data.get("location") as string) || null,
       notes: (data.get("notes") as string) || null,
+      imageUrl: imageUrl || null,
     };
 
     try {
-      const res = await fetch("/api/kits", {
-        method: "POST",
+      const res = await fetch(`/api/kits/${kitId}`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -60,42 +114,77 @@ export default function NewKitPage() {
       const json = await res.json();
 
       if (!res.ok) {
-        setError(json.error ?? "Failed to create kit");
+        setError(json.error ?? "Failed to update kit");
         setLoading(false);
         return;
       }
 
-      router.push(`/kits/${json.id}`);
+      setSuccess(true);
+      setTimeout(() => {
+        router.push(`/kits/${kitId}`);
+      }, 800);
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);
     }
   }
 
+  if (dataLoading) {
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-[#00C2FF]" />
+      </div>
+    );
+  }
+
+  if (invalidRoute) {
+    return (
+      <div className="flex min-h-full flex-col items-center justify-center gap-4">
+        <AlertCircle className="h-10 w-10 text-[#E53935]" />
+        <p className="text-[#E53935]">Invalid kit route.</p>
+        <Link href="/kits" className="text-sm text-[#00C2FF] hover:underline">
+          Back to Kits
+        </Link>
+      </div>
+    );
+  }
+
+  if (dataError || !kit) {
+    return (
+      <div className="flex min-h-full flex-col items-center justify-center gap-4">
+        <AlertCircle className="h-10 w-10 text-[#E53935]" />
+        <p className="text-[#E53935]">{dataError ?? "Kit not found"}</p>
+        <Link href="/kits" className="text-sm text-[#00C2FF] hover:underline">
+          Back to Kits
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-full">
       <div className="flex flex-wrap items-center gap-2 border-b border-vault-border px-4 py-4 sm:gap-4 sm:px-6">
         <Link
-          href="/kits"
+          href={`/kits/${kitId}`}
           className="flex items-center gap-1.5 text-sm text-vault-text-muted transition-colors hover:text-vault-text"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to Kits
+          {/* The name truncates in an element of its own. */}
+          <span className="min-w-0 truncate">Back to {kit.name}</span>
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold uppercase tracking-wide text-vault-text">
-          Add Kit
+          Edit Kit
         </h1>
       </div>
 
       <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6 sm:py-8">
         <div className="mb-8">
-          <h2 className="mb-1 text-xl font-bold text-vault-text">
-            New Kit
+          <h2 className="mb-1 break-words text-xl font-bold text-vault-text">
+            Edit {kit.name}
           </h2>
           <p className="text-sm text-vault-text-muted">
-            A packing list — a bugout bag, a range bag, a vehicle kit. Add its
-            contents once it exists.
+            The bag itself. Its contents are edited on the kit page.
           </p>
         </div>
 
@@ -103,6 +192,13 @@ export default function NewKitPage() {
           <div className="mb-6 flex items-center gap-3 rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 px-4 py-3">
             <AlertCircle className="h-4 w-4 shrink-0 text-[#E53935]" />
             <p className="text-sm text-[#E53935]">{error}</p>
+          </div>
+        )}
+
+        {success && (
+          <div className="mb-6 flex items-center gap-3 rounded-lg border border-[#00C853]/30 bg-[#00C853]/10 px-4 py-3">
+            <Save className="h-4 w-4 shrink-0 text-[#00C853]" />
+            <p className="text-sm text-[#00C853]">Saved! Redirecting...</p>
           </div>
         )}
 
@@ -121,7 +217,7 @@ export default function NewKitPage() {
                 name="name"
                 type="text"
                 required
-                placeholder="e.g. Truck Bugout Bag"
+                defaultValue={kit.name}
                 className={INPUT_CLASS}
               />
             </div>
@@ -153,6 +249,7 @@ export default function NewKitPage() {
                 id="location"
                 name="location"
                 type="text"
+                defaultValue={kit.location ?? ""}
                 placeholder="e.g. Truck, behind the seat"
                 className={INPUT_CLASS}
               />
@@ -160,6 +257,18 @@ export default function NewKitPage() {
                 Where the bag itself lives.
               </p>
             </div>
+          </fieldset>
+
+          <fieldset className="space-y-4 rounded-lg border border-vault-border bg-vault-surface p-5">
+            <legend className="-ml-1 px-1 font-mono text-xs uppercase tracking-widest text-[#00C2FF]">
+              Image
+            </legend>
+            <ImagePicker
+              entityType="kit"
+              entityId={kit.id}
+              value={imageUrl}
+              onChange={setImageUrl}
+            />
           </fieldset>
 
           <fieldset className="space-y-4 rounded-lg border border-vault-border bg-vault-surface p-5">
@@ -174,6 +283,7 @@ export default function NewKitPage() {
                 id="notes"
                 name="notes"
                 rows={3}
+                defaultValue={kit.notes ?? ""}
                 placeholder="Anything worth remembering about this kit..."
                 className={`${INPUT_CLASS} resize-none`}
               />
@@ -182,22 +292,22 @@ export default function NewKitPage() {
 
           <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:items-center sm:justify-end">
             <Link
-              href="/kits"
+              href={`/kits/${kitId}`}
               className="w-full rounded-md border border-vault-border px-4 py-2 text-center text-sm text-vault-text-muted transition-colors hover:border-vault-text-muted/30 hover:text-vault-text sm:w-auto"
             >
               Cancel
             </Link>
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || success}
               className="flex w-full items-center justify-center gap-2 rounded-md border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-5 py-2 text-sm font-medium text-[#00C2FF] transition-colors hover:bg-[#00C2FF]/20 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
             >
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <Plus className="h-4 w-4" />
+                <Save className="h-4 w-4" />
               )}
-              {loading ? "Adding..." : "Add Kit"}
+              {loading ? "Saving..." : success ? "Saved!" : "Save Changes"}
             </button>
           </div>
         </form>

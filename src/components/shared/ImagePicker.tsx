@@ -9,7 +9,7 @@ import {
 import { Camera, Loader2, X, AlertCircle } from "lucide-react";
 
 interface ImagePickerProps {
-  entityType: "firearm" | "accessory" | "ammo" | "build" | "gear";
+  entityType: "firearm" | "accessory" | "ammo" | "build" | "gear" | "kit";
   entityId?: string; // undefined on new forms; a temp UUID will be used
   currentUrl?: string | null;
   value?: string | null;

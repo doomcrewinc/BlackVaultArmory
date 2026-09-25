@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ExternalLink, PackageOpen, TriangleAlert } from "lucide-react";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { formatDateOnly } from "@/lib/date";
+import { KitLineControls } from "./KitLineControls";
 import type { KitContentGroup, KitContentLine } from "./getKitDetail";
 
 /**
@@ -57,7 +58,13 @@ function LineBadges({ line }: { line: KitContentLine }) {
   );
 }
 
-function ContentLine({ line }: { line: KitContentLine }) {
+function ContentLine({
+  line,
+  kitId,
+}: {
+  line: KitContentLine;
+  kitId: string;
+}) {
   const name = (
     <span className="min-w-0 truncate font-medium text-vault-text">
       {line.name}
@@ -118,16 +125,30 @@ function ContentLine({ line }: { line: KitContentLine }) {
           {line.notes}
         </p>
       )}
+
+      {/* The only client component on this list: everything above it is a
+          server-rendered verdict, and these are the two writes. */}
+      <KitLineControls
+        kitId={kitId}
+        itemId={line.id}
+        name={line.name}
+        quantity={line.quantity}
+        targetQuantity={line.targetQuantity}
+        notes={line.notes}
+      />
     </li>
   );
 }
 
 export function KitContents({
   groups,
+  kitId,
   timezoneConfigured,
   hasExpiryBadges,
 }: {
   groups: KitContentGroup[];
+  /** Needed by every line's edit/remove controls to address its API route. */
+  kitId: string;
   /**
    * REQUIRED with no default, as on every other surface that renders an
    * expiry badge: an optional prop defaulting to `true` is fail-open and
@@ -140,8 +161,9 @@ export function KitContents({
   if (groups.length === 0) {
     // An empty kit is a real, common state — a kit is created before it is
     // packed — so it gets an empty state, never a blank region under a
-    // heading. Adding lines needs the source picker (task 6), so this says
-    // what a line is rather than offering a control that does not exist yet.
+    // heading. The picker now exists (task 6) and the page mounts it directly
+    // above this block, so the copy points at it rather than describing a
+    // control that has not been built.
     return (
       <div className="flex flex-col items-center justify-center rounded-lg border border-vault-border bg-vault-surface py-16 text-center">
         <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[#00C2FF]/20 bg-[#00C2FF]/10">
@@ -151,6 +173,7 @@ export function KitContents({
           Nothing packed yet
         </h3>
         <p className="max-w-sm px-4 text-sm text-vault-text-muted">
+          Use <span className="text-vault-text">Add a line</span> above.
           A kit&apos;s contents point at gear, supplies, accessories, ammo and
           firearms you already track — or carry a plain label for something you
           don&apos;t.
@@ -183,7 +206,7 @@ export function KitContents({
           </div>
           <ul className="divide-y divide-vault-border">
             {group.lines.map((line) => (
-              <ContentLine key={line.id} line={line} />
+              <ContentLine key={line.id} line={line} kitId={kitId} />
             ))}
           </ul>
         </div>

@@ -2,12 +2,13 @@ export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, MapPin, PackageOpen } from "lucide-react";
+import { ArrowLeft, Backpack, MapPin, PackageOpen, Pencil } from "lucide-react";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { formatDateOnly } from "@/lib/date";
 import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
 import { getKitDetail, type KitDetail } from "./getKitDetail";
 import { KitContents } from "./KitContents";
+import { AddKitItem } from "./AddKitItem";
 import { DeleteKitButton } from "./DeleteKitButton";
 
 /**
@@ -83,44 +84,71 @@ export default async function KitDetailPage({
           <ArrowLeft className="h-4 w-4" />
           Back to Kits
         </Link>
-        <DeleteKitButton id={kit.id} redirectTo={BACK_HREF} />
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/kits/${kit.id}/edit`}
+            className="flex items-center gap-1.5 rounded-md border border-vault-border bg-vault-surface px-3 py-1.5 text-sm text-vault-text-muted transition-colors hover:text-vault-text"
+          >
+            <Pencil className="h-4 w-4" />
+            Edit
+          </Link>
+          <DeleteKitButton id={kit.id} redirectTo={BACK_HREF} />
+        </div>
       </div>
 
       <div className="space-y-6 p-4 sm:p-6">
-        <div>
-          {/* Badges are siblings of the name, and the name is an `h1` of its
-              own below them — not a flex row with the name truncating inside
-              it, which is how a badge came to disappear for a long name
-              elsewhere in this repo. */}
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <span className="rounded border border-vault-border px-2 py-0.5 font-mono text-xs uppercase text-vault-text-muted">
-              {categoryLabel(kit.category)}
-            </span>
-            {expiry.expired > 0 && (
-              <span className="rounded border border-[#E53935]/30 bg-[#E53935]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#E53935]">
-                {expiry.expired} Expired
-              </span>
-            )}
-            {expiry.soon > 0 && (
-              <span className="rounded border border-[#F5A623]/30 bg-[#F5A623]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#F5A623]">
-                {expiry.soon} Soon
-              </span>
-            )}
-            {missing > 0 && (
-              <span className="rounded border border-[#F5A623]/30 bg-[#F5A623]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#F5A623]">
-                {missing} Missing
-              </span>
+        <div className="flex items-start gap-4">
+          {/* The kit's own photo, where one has been uploaded. `Kit.imageUrl`
+              is written by the edit form's ImagePicker; this is where it is
+              read back, so the column is not a write-only field. */}
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-vault-border bg-vault-surface">
+            {kit.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={kit.imageUrl}
+                alt={kit.name}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <Backpack className="h-6 w-6 text-vault-text-faint" />
             )}
           </div>
-          <h1 className="break-words text-xl font-bold text-vault-text">
-            {kit.name}
-          </h1>
-          {kit.location && (
-            <p className="flex items-center gap-1.5 text-sm text-vault-text-muted">
-              <MapPin className="h-3.5 w-3.5 shrink-0 text-vault-text-faint" />
-              <span className="min-w-0 break-words">{kit.location}</span>
-            </p>
-          )}
+
+          <div className="min-w-0 flex-1">
+            {/* Badges are siblings of the name, and the name is an `h1` of its
+                own below them — not a flex row with the name truncating inside
+                it, which is how a badge came to disappear for a long name
+                elsewhere in this repo. */}
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <span className="rounded border border-vault-border px-2 py-0.5 font-mono text-xs uppercase text-vault-text-muted">
+                {categoryLabel(kit.category)}
+              </span>
+              {expiry.expired > 0 && (
+                <span className="rounded border border-[#E53935]/30 bg-[#E53935]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#E53935]">
+                  {expiry.expired} Expired
+                </span>
+              )}
+              {expiry.soon > 0 && (
+                <span className="rounded border border-[#F5A623]/30 bg-[#F5A623]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#F5A623]">
+                  {expiry.soon} Soon
+                </span>
+              )}
+              {missing > 0 && (
+                <span className="rounded border border-[#F5A623]/30 bg-[#F5A623]/10 px-2 py-0.5 font-mono text-xs uppercase text-[#F5A623]">
+                  {missing} Missing
+                </span>
+              )}
+            </div>
+            <h1 className="break-words text-xl font-bold text-vault-text">
+              {kit.name}
+            </h1>
+            {kit.location && (
+              <p className="flex items-center gap-1.5 text-sm text-vault-text-muted">
+                <MapPin className="h-3.5 w-3.5 shrink-0 text-vault-text-faint" />
+                <span className="min-w-0 break-words">{kit.location}</span>
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -147,8 +175,15 @@ export default async function KitDetailPage({
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-vault-text-muted">
             Contents
           </h2>
+          {/* The picker, above the list it adds to, and mounted whether or not
+              the kit has lines yet — an empty kit is exactly when you need
+              it. */}
+          <div className="mb-4">
+            <AddKitItem kitId={kit.id} />
+          </div>
           <KitContents
             groups={groups}
+            kitId={kit.id}
             timezoneConfigured={detail.timezoneConfigured}
             hasExpiryBadges={detail.hasExpiryBadges}
           />

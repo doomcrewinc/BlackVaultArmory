@@ -40,6 +40,8 @@ interface KitItem {
   name: string;
   category: string;
   location: string | null;
+  /** The kit's own photo, uploaded on `/kits/[id]/edit`. */
+  imageUrl: string | null;
   itemCount: number;
   missing: number;
   expiry: KitExpiryRollup;
@@ -161,8 +163,20 @@ export function KitSectionList({
                 className="block rounded-lg border border-vault-border bg-vault-surface p-3 transition-colors hover:border-[#00C2FF]/40"
               >
                 <div className="flex items-start gap-3">
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded border border-vault-border bg-vault-bg">
-                    <Backpack className="h-4 w-4 text-vault-text-faint" />
+                  {/* The photo where there is one, the icon where there is
+                      not — the same 11×11 tile GearClientPage uses, so a kit
+                      card and a gear card line up in a mixed section page. */}
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded border border-vault-border bg-vault-bg">
+                    {kit.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={kit.imageUrl}
+                        alt={kit.name}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <Backpack className="h-4 w-4 text-vault-text-faint" />
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
                     {/* The name truncates alone; the badges are siblings. */}

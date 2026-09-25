@@ -36,6 +36,16 @@ describe("POST /api/images/upload", () => {
     expect(json.error).toContain("Invalid file type");
   });
 
+  // Kit.imageUrl shipped with the model and was a dead column until phase 6
+  // task 6 wired this allowlist, ImagePicker's union and the kit edit form.
+  it("accepts kit as an entity type", async () => {
+    const response = await POST(uploadRequest("kit"));
+    const json = await response.json();
+
+    expect(json.error).not.toContain("Invalid entityType");
+    expect(json.error).toContain("Invalid file type");
+  });
+
   it("still rejects an unknown entity type", async () => {
     const response = await POST(uploadRequest("supply"));
     const json = await response.json();

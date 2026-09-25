@@ -16,11 +16,15 @@ import {
   type KitExpiryRollup,
 } from "@/lib/kits/allocation";
 import {
+  AMMO_UNIT_LABEL,
+  FIREARM_OWNED_QUANTITY,
+  joinKitSourceDetail,
+  kitSupplyUnitLabel,
+} from "@/lib/kits/sourceDisplay";
+import {
   expiryStatus,
   resolveExpiryContext,
-  SUPPLY_UNIT_LABELS,
   type ExpiryStatus,
-  type SupplyUnit,
 } from "@/lib/supply";
 
 /**
@@ -73,6 +77,7 @@ export interface KitDetail {
     category: string;
     location: string | null;
     notes: string | null;
+    imageUrl: string | null;
   };
   groups: KitContentGroup[];
   itemCount: number;
@@ -150,15 +155,6 @@ type KitWithItems = NonNullable<
 >;
 type KitItemRow = KitWithItems["items"][number];
 
-function joinDetail(...parts: (string | null | undefined)[]): string | null {
-  const joined = parts.filter(Boolean).join(" · ");
-  return joined === "" ? null : joined;
-}
-
-function unitLabel(unit: string): string {
-  return SUPPLY_UNIT_LABELS[unit as SupplyUnit] ?? unit;
-}
-
 /**
  * What the line shows for whichever source it set: a name, a sub-line, a link
  * to the record, how many are owned and when it expires.
@@ -181,7 +177,7 @@ function describeSource(item: KitItemRow, field: KitItemSourceField | null) {
       if (!item.gear) break;
       return {
         name: item.gear.name,
-        detail: joinDetail(item.gear.manufacturer, item.gear.model),
+        detail: joinKitSourceDetail(item.gear.manufacturer, item.gear.model),
         href: `/gear/item/${item.gear.id}`,
         owned: item.gear.quantity as number | null,
         unit: null as string | null,
@@ -194,14 +190,14 @@ function describeSource(item: KitItemRow, field: KitItemSourceField | null) {
         detail: item.supply.brand,
         href: `/supplies/item/${item.supply.id}`,
         owned: item.supply.quantity as number | null,
-        unit: unitLabel(item.supply.unit),
+        unit: kitSupplyUnitLabel(item.supply.unit),
         expirationDate: item.supply.expirationDate,
       };
     case "accessoryId":
       if (!item.accessory) break;
       return {
         name: item.accessory.name,
-        detail: joinDetail(item.accessory.manufacturer, item.accessory.model),
+        detail: joinKitSourceDetail(item.accessory.manufacturer, item.accessory.model),
         href: `/accessories/${item.accessory.id}`,
         owned: item.accessory.quantity as number | null,
         unit: null,
@@ -215,18 +211,19 @@ function describeSource(item: KitItemRow, field: KitItemSourceField | null) {
         // No /ammo/[id] route exists, so no link rather than a dead one.
         href: null,
         owned: item.ammoStock.quantity as number | null,
-        unit: "rounds",
+        unit: AMMO_UNIT_LABEL,
         expirationDate: null,
       };
     case "firearmId":
       if (!item.firearm) break;
       return {
         name: item.firearm.name,
-        detail: joinDetail(item.firearm.manufacturer, item.firearm.model),
+        detail: joinKitSourceDetail(item.firearm.manufacturer, item.firearm.model),
         href: `/vault/${item.firearm.id}`,
         // See above: a Firearm row has no quantity column and stands for one
-        // physical object.
-        owned: 1,
+        // physical object. The constant is shared with the picker's search
+        // endpoint, so both surfaces answer "how many are owned" identically.
+        owned: FIREARM_OWNED_QUANTITY,
         unit: null,
         expirationDate: null,
       };
@@ -373,6 +370,7 @@ export async function getKitDetail(id: string): Promise<KitDetail | null> {
       category: kit.category,
       location: kit.location,
       notes: kit.notes,
+      imageUrl: kit.imageUrl,
     },
     groups,
     itemCount: kit.items.length,
