@@ -4,6 +4,7 @@ import {
   GEAR_CATEGORIES,
   GEAR_CATEGORY_LABELS,
   isArmorCategory,
+  normalizeGearArmorFields,
   normalizeGearCategory,
 } from "./gear";
 
@@ -85,5 +86,66 @@ describe("the full category set", () => {
     // normalize: an unrecognised value is not armor.
     expect(isArmorCategory("armor")).toBe(false);
     expect(isArmorCategory("PLATE")).toBe(false);
+  });
+});
+
+describe("normalizeGearArmorFields", () => {
+  const stored = {
+    category: "ARMOR",
+    protectionLevel: "IIIA",
+    armorSize: "M SAPI",
+  };
+
+  it("keeps the fields when the merged record is still armor", () => {
+    expect(normalizeGearArmorFields({ existing: stored, body: {} })).toEqual({
+      protectionLevel: "IIIA",
+      armorSize: "M SAPI",
+    });
+  });
+
+  it("clears the fields when the category moves off armor, even if the body never mentions them", () => {
+    // The gate that matters: a PUT sending only { category: "TOOL" } must not
+    // leave a plate rating attached to a hammer.
+    expect(
+      normalizeGearArmorFields({ existing: stored, body: { category: "TOOL" } }),
+    ).toEqual({ protectionLevel: null, armorSize: null });
+  });
+
+  it("accepts the fields when the category moves onto armor in the same request", () => {
+    expect(
+      normalizeGearArmorFields({
+        existing: { category: "TOOL", protectionLevel: null, armorSize: null },
+        body: { category: "ARMOR", protectionLevel: "IV", armorSize: "L" },
+      }),
+    ).toEqual({ protectionLevel: "IV", armorSize: "L" });
+  });
+
+  it("treats an explicit null as clearing one nullable field", () => {
+    expect(
+      normalizeGearArmorFields({
+        existing: stored,
+        body: { protectionLevel: null },
+      }),
+    ).toEqual({ protectionLevel: null, armorSize: "M SAPI" });
+  });
+
+  it("treats a blank string as clearing, and trims what it keeps", () => {
+    expect(
+      normalizeGearArmorFields({
+        existing: stored,
+        body: { protectionLevel: "   ", armorSize: "  III  " },
+      }),
+    ).toEqual({ protectionLevel: null, armorSize: "III" });
+  });
+
+  it("preserves the fields on a category this build does not recognise", () => {
+    // Forward compatibility, the rule restore already follows: a category a
+    // later version added is not a reason to erase data this one cannot judge.
+    expect(
+      normalizeGearArmorFields({
+        existing: { ...stored, category: "EXOSUIT" },
+        body: {},
+      }),
+    ).toEqual({ protectionLevel: "IIIA", armorSize: "M SAPI" });
   });
 });

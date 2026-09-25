@@ -106,4 +106,46 @@ describe("POST /api/gear", () => {
     expect(data.category).toBe("KNIFE");
     expect(data.quantity).toBe(1);
   });
+
+  it("stores the armor fields when the sent category is armor", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Plate Carrier",
+        category: "ARMOR",
+        protectionLevel: "III",
+        armorSize: "L",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBe("III");
+    expect(data.armorSize).toBe("L");
+  });
+
+  it("drops the armor fields when the sent category is not armor, even though there is no stored row to gate against", async () => {
+    // POST has no `existing` row, so the gate is seeded with category: "" —
+    // an unrecognised category, which falls through to "use what was sent".
+    // The merged body.category is TOOL, so the fields must not survive.
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Hammer",
+        category: "TOOL",
+        protectionLevel: "III",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("stores a whitespace-only purchase price as null, not 0", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Bugout Bag",
+        category: "BUGOUT",
+        purchasePrice: "   ",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.purchasePrice).toBeNull();
+  });
 });

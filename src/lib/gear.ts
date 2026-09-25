@@ -79,3 +79,55 @@ export function normalizeGearCategory(value: unknown): GearCategory {
     ? (candidate as GearCategory)
     : DEFAULT_GEAR_CATEGORY;
 }
+
+type ArmorFieldInput = {
+  existing: { category: string; protectionLevel: string | null; armorSize: string | null };
+  body: Record<string, unknown>;
+};
+
+function mergedText(
+  body: Record<string, unknown>,
+  key: string,
+  stored: string | null,
+): string | null {
+  if (!(key in body)) return stored;
+  const value = body[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") return stored;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Merge first, then decide. Whether the armor fields MOVE comes from what the
+ * client sent; what they move TO comes from re-running eligibility over the
+ * merged record — the same shape as normalizeFirearmNfaFields.
+ *
+ * Reading eligibility off `body.category` alone would miss the case that
+ * matters: a PUT that changes only the category, leaving a plate rating on a
+ * hammer. Reading it off `existing.category` alone would refuse the fields on
+ * the request that makes an item armor in the first place.
+ *
+ * A category this build does not recognise is left alone rather than cleared.
+ * The codebase already made the opposite mistake once, silently declassifying
+ * firearms whose class came from a later build; preserving what we cannot judge
+ * is the rule here too.
+ */
+export function normalizeGearArmorFields({ existing, body }: ArmorFieldInput): {
+  protectionLevel: string | null;
+  armorSize: string | null;
+} {
+  const category =
+    "category" in body && typeof body.category === "string" && body.category.trim() !== ""
+      ? normalizeGearCategory(body.category)
+      : existing.category;
+
+  const protectionLevel = mergedText(body, "protectionLevel", existing.protectionLevel);
+  const armorSize = mergedText(body, "armorSize", existing.armorSize);
+
+  const knownCategory = (GEAR_CATEGORIES as readonly string[]).includes(category);
+  if (knownCategory && !isArmorCategory(category)) {
+    return { protectionLevel: null, armorSize: null };
+  }
+  return { protectionLevel, armorSize };
+}

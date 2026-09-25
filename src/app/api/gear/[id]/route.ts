@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeGearCategory } from "@/lib/gear";
+import { normalizeGearArmorFields, normalizeGearCategory } from "@/lib/gear";
+import { normalizeMoney } from "@/lib/money";
 import { normalizeQuantity } from "@/lib/quantity";
 
 export const dynamic = "force-dynamic";
@@ -60,6 +61,7 @@ export async function PUT(
       purchasePrice,
       currentValue,
       acquisitionDate,
+      expirationDate,
       storageLocation,
       notes,
       imageUrl,
@@ -91,13 +93,21 @@ export async function PUT(
           category !== null && {
             category: normalizeGearCategory(category),
           }),
-        ...(purchasePrice !== undefined && { purchasePrice }),
-        ...(currentValue !== undefined && { currentValue }),
+        ...(purchasePrice !== undefined && {
+          purchasePrice: normalizeMoney(purchasePrice),
+        }),
+        ...(currentValue !== undefined && {
+          currentValue: normalizeMoney(currentValue),
+        }),
         ...(acquisitionDate !== undefined && {
           acquisitionDate: acquisitionDate
             ? toDateOnlyUTC(acquisitionDate)
             : null,
         }),
+        ...(expirationDate !== undefined && {
+          expirationDate: expirationDate ? toDateOnlyUTC(expirationDate) : null,
+        }),
+        ...normalizeGearArmorFields({ existing, body }),
         ...(storageLocation !== undefined && {
           storageLocation: normalizeString(storageLocation) || null,
         }),

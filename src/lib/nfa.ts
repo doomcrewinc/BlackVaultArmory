@@ -1,4 +1,5 @@
 import { InvalidDateError, toDateOnlyUTC } from "./date";
+import { normalizeMoney } from "./money";
 import {
   DEFAULT_NFA_CLASS,
   MG_REGISTRIES,
@@ -25,19 +26,6 @@ function normalizeText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
-}
-
-/**
- * A non-negative amount, or null. Blank is null, not 0 — `Number("")` is `0`,
- * and that exact bug has already shipped twice in this repo (the accessories
- * create form and the gear form).
- */
-function normalizeMoney(value: unknown): number | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "string" && value.trim() === "") return null;
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return null;
-  return parsed;
 }
 
 /**

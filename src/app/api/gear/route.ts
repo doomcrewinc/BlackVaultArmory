@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
-import { normalizeGearCategory } from "@/lib/gear";
+import { normalizeGearArmorFields, normalizeGearCategory } from "@/lib/gear";
+import { normalizeMoney } from "@/lib/money";
 import { normalizeQuantity } from "@/lib/quantity";
 import { gearWhereForSection, sectionBySlug } from "@/lib/categories";
 
@@ -62,6 +63,7 @@ export async function POST(request: NextRequest) {
       purchasePrice,
       currentValue,
       acquisitionDate,
+      expirationDate,
       storageLocation,
       notes,
       imageUrl,
@@ -84,11 +86,16 @@ export async function POST(request: NextRequest) {
         serialNumber: normalizeString(serialNumber) || null,
         category: normalizeGearCategory(category),
         quantity: normalizeQuantity(quantity),
-        purchasePrice: purchasePrice ?? null,
-        currentValue: currentValue ?? null,
+        purchasePrice: normalizeMoney(purchasePrice),
+        currentValue: normalizeMoney(currentValue),
         acquisitionDate: acquisitionDate
           ? toDateOnlyUTC(acquisitionDate)
           : null,
+        expirationDate: expirationDate ? toDateOnlyUTC(expirationDate) : null,
+        ...normalizeGearArmorFields({
+          existing: { category: "", protectionLevel: null, armorSize: null },
+          body,
+        }),
         storageLocation: normalizeString(storageLocation) || null,
         notes: notes ?? null,
         imageUrl: imageUrl ?? null,
