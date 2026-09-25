@@ -1,3 +1,4 @@
+import type { ReactElement } from "react";
 import { Package } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
@@ -6,6 +7,7 @@ import { GearClientPage } from "@/app/gear/GearClientPage";
 import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
 import type { CategorySection } from "@/lib/categories";
 import type { SectionPayload } from "@/lib/sections/loadSectionItems";
+import type { SectionViewSource } from "@/lib/sections/renderableSources";
 
 /** The sub-heading one list block carries on a multi-source section page. */
 const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
@@ -16,6 +18,16 @@ const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
 };
 
 /**
+ * The payloads this view can render, derived from `SECTION_VIEW_SOURCES` —
+ * the single definition `sectionIsRenderable` gates on. Writing it as an
+ * `Extract` rather than listing the kinds again is what keeps the gate honest:
+ * the switch below is exhaustive over THIS union, so the list and the view
+ * cannot disagree without a compile error in one direction or the other (see
+ * `src/lib/sections/renderableSources.ts` for which error fires when).
+ */
+type RenderablePayload = Extract<SectionPayload, { kind: SectionViewSource }>;
+
+/**
  * One payload's list, with the list component that already renders that kind
  * of row. Nothing is re-implemented here — the section pages and the
  * standalone /gear, /supplies and /accessories pages must not drift apart.
@@ -24,21 +36,22 @@ const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
  * empty state: empty sections appear in the nav with a zero count by spec
  * decision, so hiding the block would make the same information invisible one
  * level down.
+ *
+ * The explicit `ReactElement` return type is load-bearing: it is what turns a
+ * kind added to `SECTION_VIEW_SOURCES` with no branch here into TS2366 rather
+ * than an inferred `| undefined`.
  */
-function PayloadList({
+function RenderablePayloadList({
   payload,
-  sectionSlug,
   heading,
   subheading,
   embedded,
 }: {
-  payload: SectionPayload;
-  /** Only used to name the section in the `firearm` branch's throw. */
-  sectionSlug: string;
+  payload: RenderablePayload;
   heading: string;
   subheading?: string;
   embedded: boolean;
-}) {
+}): ReactElement {
   switch (payload.kind) {
     case "gear":
       return (
@@ -69,35 +82,74 @@ function PayloadList({
           embedded={embedded}
         />
       );
-    case "firearm":
-      // The case exists because the switch is exhaustive over SectionPayload
-      // with no `default` — a kind added to the payload union is a tsc error
-      // here rather than a list that quietly goes missing.
-      //
-      // It THROWS rather than returning null. No gear-group or prep-group
-      // section carries a firearm source today, and the vault's nine sections
-      // render through VaultClientPage at /vault/category/[slug], which
-      // fetches by slug rather than taking rows — so this is unreachable. But
-      // returning null would be the exact silent-omission shape this phase
-      // removed from the loader, just relocated into the view: the section
-      // would query the database and then render nothing, with no error and
-      // no empty state.
-      //
-      // Where the throw surfaces, verified by temporarily giving `armor` a
-      // firearm source: NOT SectionLoadError. The [slug] pages' try/catch
-      // wraps only `loadSectionItems`, and this runs later, during render of
-      // the JSX they return. It is caught by `src/app/error.tsx`, which
-      // probes /api/health, finds the database fine and renders "Something
-      // went wrong" with a working "Try again" button. Loud either way, and
-      // that boundary also tells a real outage apart from a code defect.
-      // Making it render SectionLoadError instead needs a load-phase gate,
-      // which is what task 6's `sectionIsRenderable` is for.
-      throw new Error(
-        `Section "${sectionSlug}" declares a firearm source, which no ` +
-          `section renderer handles; firearms render through VaultClientPage ` +
-          `at /vault/category/[slug].`,
-      );
   }
+}
+
+/**
+ * Dispatches one payload: everything the view can render goes to
+ * `RenderablePayloadList`, and the one kind it cannot is handled here.
+ *
+ * Splitting the two is what lets `RenderablePayloadList` be typed by
+ * `SECTION_VIEW_SOURCES`. It also keeps a future non-renderable payload kind
+ * from slipping through: a kind added to `SectionPayload` but to neither
+ * `SECTION_VIEW_SOURCES` nor this narrowing survives the `firearm` check and
+ * is not assignable to `RenderablePayload`, which is a tsc error on the call
+ * below.
+ */
+function PayloadList({
+  payload,
+  sectionSlug,
+  heading,
+  subheading,
+  embedded,
+}: {
+  payload: SectionPayload;
+  /** Only used to name the section in the `firearm` branch's throw. */
+  sectionSlug: string;
+  heading: string;
+  subheading?: string;
+  embedded: boolean;
+}) {
+  if (payload.kind === "firearm") {
+    // Defence in depth. `sectionIsRenderable` now makes this unreachable
+    // through a REGISTERED section — both [slug] pages 404 a section whose
+    // sources this view cannot render, and the registry test asserts that can
+    // never be true — but the gate lives in the registry, so anything that
+    // reaches this component another way still has to fail loudly.
+    //
+    // It THROWS rather than returning null. No gear-group or prep-group
+    // section carries a firearm source today, and the vault's nine sections
+    // render through VaultClientPage at /vault/category/[slug], which
+    // fetches by slug rather than taking rows — so this is unreachable. But
+    // returning null would be the exact silent-omission shape this phase
+    // removed from the loader, just relocated into the view: the section
+    // would query the database and then render nothing, with no error and
+    // no empty state.
+    //
+    // Where the throw surfaces, verified by temporarily giving `armor` a
+    // firearm source: NOT SectionLoadError. The [slug] pages' try/catch
+    // wraps only `loadSectionItems`, and this runs later, during render of
+    // the JSX they return. It is caught by `src/app/error.tsx`, which
+    // probes /api/health, finds the database fine and renders "Something
+    // went wrong" with a working "Try again" button. Loud either way, and
+    // that boundary also tells a real outage apart from a code defect. The
+    // load-phase gate that keeps a registered section from getting this far
+    // is `sectionIsRenderable`.
+    throw new Error(
+      `Section "${sectionSlug}" declares a firearm source, which no ` +
+        `section renderer handles; firearms render through VaultClientPage ` +
+        `at /vault/category/[slug].`,
+    );
+  }
+
+  return (
+    <RenderablePayloadList
+      payload={payload}
+      heading={heading}
+      subheading={subheading}
+      embedded={embedded}
+    />
+  );
 }
 
 /**

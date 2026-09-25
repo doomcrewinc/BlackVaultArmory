@@ -1,3 +1,4 @@
+import { isRenderableSource } from "./sections/renderableSources";
 import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 
 /**
@@ -590,4 +591,49 @@ export function sectionSources(section: CategorySection): SectionSource[] {
     if (!seen.includes(source.source)) seen.push(source.source);
   }
   return seen;
+}
+
+/**
+ * Whether a section's page can actually SHOW something: at least one declared
+ * source, a real where clause for every source it declares, and a view in its
+ * group that can render every one of them.
+ *
+ * Exists because "the route resolves" and "the page renders" are different
+ * claims, and the suite only ever checked the first. `/prep` shipped as a 404
+ * the sidebar linked from every page; `/prep/armor` would have shipped the
+ * same way — the route file existed, but the page's own supply-matcher guard
+ * called notFound() for a gear-only section. Both [slug] pages now gate on
+ * this function and the test asserts it holds for every registered section,
+ * so the page and the test can no longer disagree.
+ *
+ * BOTH halves are required, and the second is the one that is easy to miss.
+ * A where clause only says the LOADER can fetch the rows. Give a prep section
+ * a `firearm` source and it clears that half — `firearmWhereForSection`
+ * returns a good fragment — then `PayloadList` throws during render, because
+ * SectionView has no firearm branch: an HTTP 500 with no retry link, verified
+ * empirically. The renderable set per group is NOT restated here; it comes
+ * from `sections/renderableSources.ts`, the one definition the view itself is
+ * compile-pinned to.
+ */
+export function sectionIsRenderable(section: CategorySection): boolean {
+  const kinds = sectionSources(section);
+  if (kinds.length === 0) return false;
+  return kinds.every((kind) => {
+    // Half 2: the group's view has a renderer for this kind.
+    if (!isRenderableSource(section.group, kind)) return false;
+    // Half 1: the loader has something to query with. The switch is
+    // exhaustive over SectionSource with no `default`, so a source kind added
+    // to the registry is a tsc error here rather than a kind this gate waves
+    // through unchecked.
+    switch (kind) {
+      case "firearm":
+        return firearmWhereForSection(section) !== null;
+      case "accessory":
+        return accessoryWhereForSection(section) !== null;
+      case "gear":
+        return gearWhereForSection(section) !== null;
+      case "supply":
+        return supplyWhereForSection(section) !== null;
+    }
+  });
 }

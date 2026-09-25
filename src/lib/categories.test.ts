@@ -12,11 +12,15 @@ import {
   groupHref,
   sectionBySlug,
   sectionHref,
+  sectionIsRenderable,
+  sectionSources,
   sectionsForGroup,
   supplySectionForItem,
   supplyWhereForSection,
   vaultSectionForFirearm,
+  type CategorySection,
 } from "./categories";
+import { RENDERABLE_SOURCES_BY_GROUP } from "./sections/renderableSources";
 import { GEAR_CATEGORIES } from "./gear";
 import { SUPPLY_CATEGORIES } from "./supply";
 import {
@@ -752,5 +756,110 @@ describe("route reachability", () => {
     for (const section of CATEGORY_SECTIONS) {
       expect(SECTION_GROUPS).toContain(section.group);
     }
+  });
+});
+
+// ── renderability ─────────────────────────────────────────────
+//
+// The suite above asserts a section's href resolves to a page.tsx. It cannot
+// see that the page's own body refuses to render: `/prep/armor` resolved
+// through `/prep/[slug]` and 404'd anyway, because that page's supply-matcher
+// guard called notFound() for a gear-only section. "The route resolves" and
+// "the page renders" are different claims, and only the first was tested.
+//
+// `sectionIsRenderable` is the second claim, and it has two halves — the
+// LOADER can fetch every source the section declares (a non-null where), and
+// the group's VIEW can render every one of them. The second half is the one
+// that bites: a prep section given a firearm source clears the first half
+// completely and then throws inside SectionView at render time, which is an
+// HTTP 500 with no retry link. Both [slug] pages gate on this function, so
+// these tests are what make that gate's notFound() unreachable.
+
+describe("section renderability", () => {
+  it("gives every registered section at least one source to render", () => {
+    for (const section of CATEGORY_SECTIONS) {
+      expect(
+        sectionSources(section).length,
+        `${section.slug} declares no source, so its page would render nothing`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("builds a non-null where clause for every source a section declares", () => {
+    // A section can declare a source kind whose where-builder returns null —
+    // the loader skips it, and a section whose ONLY source did that would
+    // render an empty page forever while every matching test stayed green.
+    const builders = {
+      firearm: firearmWhereForSection,
+      accessory: accessoryWhereForSection,
+      gear: gearWhereForSection,
+      supply: supplyWhereForSection,
+    } as const;
+    for (const section of CATEGORY_SECTIONS) {
+      for (const kind of sectionSources(section)) {
+        expect(
+          builders[kind](section),
+          `${section.slug} declares a ${kind} source with no where clause`,
+        ).not.toBeNull();
+      }
+    }
+  });
+
+  it("declares only source kinds its group's view can render", () => {
+    // The half a where clause cannot speak to. RENDERABLE_SOURCES_BY_GROUP is
+    // the same definition SectionView is compile-pinned to, so this reads the
+    // view's real capability rather than a list copied beside it.
+    for (const section of CATEGORY_SECTIONS) {
+      for (const kind of sectionSources(section)) {
+        expect(
+          RENDERABLE_SOURCES_BY_GROUP[section.group],
+          `${section.slug} declares a ${kind} source that no ${section.group} view renders`,
+        ).toContain(kind);
+      }
+    }
+  });
+
+  it("agrees with sectionIsRenderable, which the pages gate on", () => {
+    for (const section of CATEGORY_SECTIONS) {
+      expect(sectionIsRenderable(section), `${section.slug}`).toBe(true);
+    }
+  });
+
+  it("fails a section with no sources, so the check above is not vacuous", () => {
+    expect(
+      sectionIsRenderable({
+        slug: "hollow",
+        label: "Hollow",
+        description: "",
+        group: "prep",
+        icon: "Package",
+        sources: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("fails a prep section whose source no prep view renders", () => {
+    // The half-function case. This section's where clause is real and the
+    // loader would happily query with it — what fails is the VIEW: SectionView
+    // has no firearm branch, so this renders as a 500, not as a page. A gate
+    // that only checked where clauses would wave it through.
+    const firearmBackedPrep: CategorySection = {
+      ...sectionBySlug("handguns")!,
+      slug: "prep-with-firearms",
+      group: "prep",
+    };
+    expect(firearmWhereForSection(firearmBackedPrep)).not.toBeNull();
+    expect(sectionIsRenderable(firearmBackedPrep)).toBe(false);
+  });
+
+  it("accepts that same source in the vault group, which does render it", () => {
+    // Proves the check above is about the group's view, not a blanket ban on
+    // firearm sources — /vault/category/[slug] renders them through
+    // VaultClientPage, so the vault's nine sections must stay renderable.
+    const vaultBacked: CategorySection = {
+      ...sectionBySlug("handguns")!,
+      group: "vault",
+    };
+    expect(sectionIsRenderable(vaultBacked)).toBe(true);
   });
 });

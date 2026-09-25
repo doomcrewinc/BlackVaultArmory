@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { notFound } from "next/navigation";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { SectionView } from "@/components/sections/SectionView";
-import { sectionBySlug } from "@/lib/categories";
+import { sectionBySlug, sectionIsRenderable } from "@/lib/categories";
 import {
   loadSectionItems,
   type SectionPayload,
@@ -27,6 +27,14 @@ export default async function GearSectionPage({
   const { slug } = await params;
   const section = sectionBySlug(slug);
   if (!section || section.group !== "gear") notFound();
+
+  // The only notFound() about sources this page may contain. Safe
+  // precisely because the registry test asserts sectionIsRenderable is
+  // true for every registered section: a 404 here means the registry is
+  // broken — a section with no source, a source with no where clause, or
+  // one this group's view cannot render — and the suite says so before a
+  // user does.
+  if (!sectionIsRenderable(section)) notFound();
 
   let payloads: SectionPayload[];
   try {
