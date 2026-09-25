@@ -86,6 +86,14 @@ describe("GET /api/search", () => {
 
     expect(mocks.findGear).toHaveBeenCalledTimes(1);
     const where = mocks.findGear.mock.calls[0][0].where;
+    // Pin the derivation before asserting with it. Both sides of the
+    // expectation below are computed the same way, so if no label ever matched
+    // "bug" they would collapse to `{ in: [] }` together and the test would
+    // pass while asserting nothing.
+    const bugCategories = GEAR_CATEGORIES.filter((c) =>
+      GEAR_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
+    );
+    expect(bugCategories).toEqual(["BUGOUT"]);
     expect(where.OR).toEqual([
       { name: containsInsensitive("bug") },
       { manufacturer: containsInsensitive("bug") },
@@ -96,13 +104,7 @@ describe("GET /api/search", () => {
       // gearCategoriesMatchingLabel predicted this would start firing "the day"
       // a matching category was added, and phase 5 added it — but this
       // expectation was a literal, so it broke instead of covering the case.
-      {
-        category: {
-          in: GEAR_CATEGORIES.filter((c) =>
-            GEAR_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
-          ),
-        },
-      },
+      { category: { in: bugCategories } },
     ]);
 
     // Every field in the gear OR clause was produced by the spied helper, not a
