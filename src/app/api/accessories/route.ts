@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 import { normalizeQuantity } from "@/lib/quantity";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 import { normalizeTypeToken } from "@/lib/types";
@@ -131,7 +132,7 @@ export async function POST(request: NextRequest) {
         type: resolvedType,
         ...nfaFields,
         caliber: caliber ?? null,
-        purchasePrice: purchasePrice ?? null,
+        purchasePrice: normalizeMoney(purchasePrice),
         acquisitionDate: acquisitionDate
           ? toDateOnlyUTC(acquisitionDate)
           : null,

@@ -111,6 +111,15 @@ export function SupplyClientPage({
   subheading,
   embedded = false,
 }: Props) {
+  // The SAME rule KitSectionList/KitContents use: show the notice only where
+  // an expiry badge actually appears, not merely because the list is
+  // non-empty — a list of items carrying no expiration date at all (or only
+  // LOW stock badges, which are not a timezone-dependent verdict) has
+  // nothing for the notice to qualify.
+  const hasExpiryBadges = items.some(
+    (item) => item.expiry === "expired" || item.expiry === "soon",
+  );
+
   const addAction = (
     <Link
       href="/supplies/new"
@@ -136,12 +145,13 @@ export function SupplyClientPage({
       )}
 
       <div className="p-4 sm:p-6">
-        {/* Only where the badges it explains actually appear: the empty state
-            below renders no LOW/SOON/EXPIRED badge, so there is nothing for
-            the notice to qualify. Skipped entirely when embedded — SectionView
-            renders the one notice for the whole page in that case, and two
-            copies on one page is the failure this guard exists to prevent. */}
-        {!embedded && items.length > 0 && (
+        {/* Only where an EXPIRY badge (not LOW stock, which carries no
+            timezone dependency) actually appears: the empty state below
+            renders none, so there is nothing for the notice to qualify.
+            Skipped entirely when embedded — SectionView renders the one
+            notice for the whole page in that case, and two copies on one
+            page is the failure this guard exists to prevent. */}
+        {!embedded && hasExpiryBadges && (
           <SupplyTimezoneNotice
             timezoneConfigured={timezoneConfigured}
             className="mb-4"

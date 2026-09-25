@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 import {
   normalizeAmount,
   normalizeSupplyCategory,
@@ -89,7 +90,7 @@ export async function POST(request: NextRequest) {
         unit: normalizeSupplyUnit(unit),
         lowStockAlert: normalizeAmount(lowStockAlert),
         expirationDate: expirationDate ? toDateOnlyUTC(expirationDate) : null,
-        purchasePrice: purchasePrice ?? null,
+        purchasePrice: normalizeMoney(purchasePrice),
         purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         storageLocation: normalizeString(storageLocation) || null,
         notes: notes ?? null,

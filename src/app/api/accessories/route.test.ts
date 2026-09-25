@@ -110,4 +110,30 @@ describe("POST /api/accessories", () => {
     expect(data.nfaTaxPaid).toBeNull();
     expect(data.nfaRegisteredTo).toBeNull();
   });
+
+  it("stores a blank purchasePrice as null, not 0", async () => {
+    await POST(
+      postRequest({
+        name: "PMAG",
+        type: "MAGAZINE",
+        purchasePrice: "",
+      }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.purchasePrice).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice as 0", async () => {
+    await POST(
+      postRequest({
+        name: "PMAG",
+        type: "MAGAZINE",
+        purchasePrice: 0,
+      }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.purchasePrice).toBe(0);
+  });
 });

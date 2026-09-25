@@ -136,6 +136,23 @@ describe("PUT /api/supplies/[id]", () => {
     await PUT(putRequest({ quantity: 1 }) as never, { params } as never);
     expect(mocks.revalidateDashboardData).toHaveBeenCalledTimes(1);
   });
+
+  it("stores a blank purchasePrice as null, not 0", async () => {
+    await PUT(putRequest({ purchasePrice: "" }) as never, { params } as never);
+    expect(mocks.update.mock.calls[0][0].data.purchasePrice).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice as 0", async () => {
+    await PUT(putRequest({ purchasePrice: 0 }) as never, { params } as never);
+    expect(mocks.update.mock.calls[0][0].data.purchasePrice).toBe(0);
+  });
+
+  it("leaves purchasePrice untouched when the body doesn't mention it", async () => {
+    await PUT(putRequest({ notes: "new" }) as never, { params } as never);
+    expect(mocks.update.mock.calls[0][0].data).not.toHaveProperty(
+      "purchasePrice",
+    );
+  });
 });
 
 describe("GET and DELETE /api/supplies/[id]", () => {

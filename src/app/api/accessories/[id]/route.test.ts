@@ -101,6 +101,39 @@ describe("PUT /api/accessories/[id]", () => {
     const { data } = mocks.update.mock.calls[0][0];
     expect(data).not.toHaveProperty("quantity");
   });
+
+  it("stores a blank purchasePrice as null, not 0", async () => {
+    mocks.findUnique.mockResolvedValue(existingAccessory());
+
+    await PUT(putRequest({ purchasePrice: "" }), {
+      params: Promise.resolve({ id: "accessory-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.purchasePrice).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice as 0", async () => {
+    mocks.findUnique.mockResolvedValue(existingAccessory());
+
+    await PUT(putRequest({ purchasePrice: 0 }), {
+      params: Promise.resolve({ id: "accessory-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.purchasePrice).toBe(0);
+  });
+
+  it("leaves purchasePrice untouched when the body doesn't mention it", async () => {
+    mocks.findUnique.mockResolvedValue(existingAccessory());
+
+    await PUT(putRequest({ name: "PMAG Gen3" }), {
+      params: Promise.resolve({ id: "accessory-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data).not.toHaveProperty("purchasePrice");
+  });
 });
 
 describe("PUT /api/accessories/[id] — NFA paperwork", () => {

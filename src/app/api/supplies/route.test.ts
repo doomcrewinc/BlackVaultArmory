@@ -192,4 +192,28 @@ describe("POST /api/supplies", () => {
     await POST(request("http://localhost/api/supplies", {}) as never);
     expect(mocks.revalidateDashboardData).not.toHaveBeenCalled();
   });
+
+  it("stores a blank purchasePrice as null, not 0", async () => {
+    await POST(
+      request("http://localhost/api/supplies", {
+        name: "Bandages",
+        category: "MEDICAL",
+        purchasePrice: "",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.purchasePrice).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice as 0", async () => {
+    await POST(
+      request("http://localhost/api/supplies", {
+        name: "Bandages",
+        category: "MEDICAL",
+        purchasePrice: 0,
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.purchasePrice).toBe(0);
+  });
 });

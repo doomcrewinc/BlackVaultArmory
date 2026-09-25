@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 
 // GET /api/ammo - List all AmmoStock grouped by caliber
 export async function GET() {
@@ -97,8 +98,8 @@ export async function POST(request: NextRequest) {
         grainWeight: grainWeight ?? null,
         bulletType: bulletType ?? null,
         quantity: quantity ?? 0,
-        purchasePrice: purchasePrice ?? null,
-        pricePerRound: pricePerRound ?? null,
+        purchasePrice: normalizeMoney(purchasePrice),
+        pricePerRound: normalizeMoney(pricePerRound),
         purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         storageLocation: storageLocation ?? null,
         lowStockAlert: resolvedLowStockAlert,

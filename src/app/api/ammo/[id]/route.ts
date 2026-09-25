@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 
 // GET /api/ammo/[id] - Get a single AmmoStock entry
 export async function GET(
@@ -76,8 +77,12 @@ export async function PUT(
         ...(grainWeight !== undefined && { grainWeight }),
         ...(bulletType !== undefined && { bulletType }),
         ...(quantity !== undefined && { quantity }),
-        ...(purchasePrice !== undefined && { purchasePrice }),
-        ...(pricePerRound !== undefined && { pricePerRound: pricePerRound ?? null }),
+        ...(purchasePrice !== undefined && {
+          purchasePrice: normalizeMoney(purchasePrice),
+        }),
+        ...(pricePerRound !== undefined && {
+          pricePerRound: normalizeMoney(pricePerRound),
+        }),
         ...(purchaseDate !== undefined && {
           purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         }),
