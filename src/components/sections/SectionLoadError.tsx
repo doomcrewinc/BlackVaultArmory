@@ -1,12 +1,18 @@
 import Link from "next/link";
 
 /**
- * The retry UI the section pages, the supply pages and the accessories and
- * builds pages each carried their own copy of.
+ * The retry UI for a page whose data load threw.
  *
- * One component rather than four copies of the same JSX: a section page that
- * fails to load is the same screen wherever it happens, and the copies had
- * already drifted apart on the wrapper classes.
+ * Now the only copy in the tree. There were six: the two `[slug]` section
+ * pages (three of them in `/gear/[slug]` alone, one per source branch),
+ * `/accessories`, `/builds` and `/supplies/item/[id]`. They had already
+ * drifted — the standalone three wrote `text-vault-text-muted text-sm` and
+ * `flex flex-col items-center` where the section pages wrote `text-sm
+ * text-vault-text-muted` and `flex min-h-[60vh] flex-col`. Same rendered
+ * result, three spellings, which is how the next divergence goes unnoticed.
+ *
+ * `href` is the page's own path, so "Tap to retry" re-requests the page the
+ * user is already on rather than navigating them somewhere else.
  */
 export function SectionLoadError({
   label,

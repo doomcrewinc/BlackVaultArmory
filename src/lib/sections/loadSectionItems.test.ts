@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { CATEGORY_SECTIONS, sectionBySlug } from "@/lib/categories";
+import {
+  CATEGORY_SECTIONS,
+  accessoryWhereForSection,
+  sectionBySlug,
+  sectionSources,
+  type CategorySection,
+} from "@/lib/categories";
 
 const mocks = vi.hoisted(() => ({
   findAppSettings: vi.fn(),
@@ -54,6 +60,10 @@ describe("loadSectionItems", () => {
     // `?? undefined` on a where-builder has caused two live bugs in this
     // epic: it turns "matches nothing here" into "match everything". Every
     // query this loader issues carries a filter.
+    //
+    // A bare `toBeTruthy()` would pass for `where: {}`, which IS an
+    // unfiltered query — the very thing being guarded against — so the key
+    // count is asserted too.
     for (const section of CATEGORY_SECTIONS) {
       vi.clearAllMocks();
       await loadSectionItems(section);
@@ -65,9 +75,43 @@ describe("loadSectionItems", () => {
       ]) {
         for (const call of (delegate.findMany as unknown as Mock).mock.calls) {
           expect(call[0]?.where).toBeTruthy();
+          expect(
+            Object.keys(call[0].where as object).length,
+            `${section.slug} issued a query with an empty where`,
+          ).toBeGreaterThan(0);
         }
       }
     }
+  });
+
+  it("skips a source whose where-builder returns null", async () => {
+    // The loop above cannot reach the `continue` branches: `sectionSources`
+    // derives the kinds it reports from the same `sources` array the
+    // where-builders search, so every registered section's builders return
+    // non-null and the guard is never exercised by real data.
+    //
+    // This forges the case directly. `accessoryWhereForSection` ends in
+    // `?? null`, so a matcher that declares the source but carries no `where`
+    // makes it return null while `sectionSources` still reports "accessory".
+    // The loader must issue NO accessory query at all. Were the `continue`
+    // written as `where ?? undefined`, Prisma would receive
+    // `{ where: undefined }` and return every accessory in the database.
+    const forged = {
+      slug: "forged-null-where",
+      label: "Forged",
+      description: "A section whose accessory matcher carries no where",
+      group: "gear",
+      icon: "Package",
+      sources: [{ source: "accessory", holds: () => true }],
+    } as unknown as CategorySection;
+
+    expect(sectionSources(forged)).toEqual(["accessory"]);
+    expect(accessoryWhereForSection(forged)).toBeNull();
+
+    const payloads = await loadSectionItems(forged);
+
+    expect(payloads).toEqual([]);
+    expect(prisma.accessory.findMany).not.toHaveBeenCalled();
   });
 
   it("issues at least one query for every registered section", async () => {

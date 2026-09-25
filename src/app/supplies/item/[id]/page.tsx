@@ -17,6 +17,7 @@ import { supplySectionForItem } from "@/lib/categories";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { DeleteSupplyButton } from "./DeleteSupplyButton";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
@@ -63,17 +64,7 @@ export default async function SupplyDetailPage({
   try {
     result = await getSupplyWithExpiry(id);
   } catch {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-vault-text-muted text-sm">Failed to load item.</p>
-        <Link
-          href={`/supplies/item/${id}`}
-          className="text-[#00C2FF] text-sm hover:underline"
-        >
-          Tap to retry
-        </Link>
-      </div>
-    );
+    return <SectionLoadError label="item" href={`/supplies/item/${id}`} />;
   }
 
   if (!result) {

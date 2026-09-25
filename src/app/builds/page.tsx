@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { Settings2, Layers, CheckCircle2, Circle } from "lucide-react";
 
 const FIREARM_TYPE_LABELS: Record<string, string> = {
@@ -54,12 +55,7 @@ export default async function BuildsPage() {
   try {
     firearms = await getAllBuilds();
   } catch {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-vault-text-muted text-sm">Failed to load builds.</p>
-        <Link href="/builds" className="text-[#00C2FF] text-sm hover:underline">Tap to retry</Link>
-      </div>
-    );
+    return <SectionLoadError label="builds" href="/builds" />;
   }
 
   const totalBuilds = firearms.reduce((sum, f) => sum + f.builds.length, 0);

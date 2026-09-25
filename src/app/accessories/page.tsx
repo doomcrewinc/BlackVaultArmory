@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { AccessoriesClientPage } from "./AccessoriesClientPage";
 
 async function getAccessories() {
@@ -44,12 +44,7 @@ export default async function AccessoriesPage() {
   try {
     accessories = await getAccessories();
   } catch {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-vault-text-muted text-sm">Failed to load accessories.</p>
-        <Link href="/accessories" className="text-[#00C2FF] text-sm hover:underline">Tap to retry</Link>
-      </div>
-    );
+    return <SectionLoadError label="accessories" href="/accessories" />;
   }
 
   return <AccessoriesClientPage accessories={accessories} />;
