@@ -1,4 +1,5 @@
-import { Backpack, PackageOpen } from "lucide-react";
+import Link from "next/link";
+import { Backpack, PackageOpen, Plus } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
@@ -10,11 +11,22 @@ import type { KitExpiryRollup } from "@/lib/kits/allocation";
  * The Kits block of the Preparedness group: one card per kit, showing what is
  * packed, what is missing and what is going off.
  *
- * A SERVER component, unlike GearClientPage and SupplyClientPage. Those are
- * `"use client"` because they own an "Add …" action and interactive rows; this
- * list has no interaction yet — kit CRUD pages are not built (only
- * `/api/kits` exists) — so there is nothing to hydrate and no link to a
- * detail route that would 404.
+ * MOUNTED BY BOTH KIT LIST ROUTES, which is the point of it existing as a
+ * component rather than as markup inside a page:
+ *
+ *   /prep/kits — the registry-derived section route (the nav entry and the
+ *                section count come from here), via SectionView's kit branch.
+ *   /kits      — the spec's routing-table path, which resolves the same
+ *                registry section and renders the same SectionView.
+ *
+ * Both must exist (dropping /prep/kits breaks the nav invariant and the
+ * counts; dropping /kits contradicts the routing table) and neither may own a
+ * card grid of its own, or the two drift.
+ *
+ * Still a SERVER component, unlike GearClientPage and SupplyClientPage: the
+ * card is a link and the "Add Kit" action is a link, so there is nothing to
+ * hydrate. Phase 6 task 5 added both — the note that once stood here saying
+ * a detail link "would 404" is obsolete now that /kits/[id] exists.
  *
  * Every number on the card is resolved SERVER-SIDE by `loadSectionItems`:
  * `expiry` comes from `kitExpiryRollup` against the one `today` that loader
@@ -84,16 +96,27 @@ export function KitSectionList({
   subheading,
   embedded = false,
 }: Props) {
+  const addAction = (
+    <Link
+      href="/kits/new"
+      className="flex items-center gap-2 rounded border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-3 py-1.5 text-sm font-medium text-[#00C2FF] transition-colors hover:bg-[#00C2FF]/20"
+    >
+      <Plus className="h-4 w-4" />
+      Add Kit
+    </Link>
+  );
+
   return (
     <div className={embedded ? undefined : "min-h-full"}>
       {embedded ? (
-        <SectionBlockHeader title={heading} />
+        <SectionBlockHeader title={heading} action={addAction} />
       ) : (
         <PageHeader
           title={heading}
           subtitle={
             subheading ?? `${items.length} kit${items.length !== 1 ? "s" : ""}`
           }
+          actions={addAction}
         />
       )}
 
@@ -117,17 +140,25 @@ export function KitSectionList({
             <h3 className="mb-2 text-lg font-semibold text-vault-text">
               No kits yet
             </h3>
-            <p className="max-w-sm text-sm text-vault-text-muted">
+            <p className="mb-6 max-w-sm text-sm text-vault-text-muted">
               A kit is a packing list — a bugout bag, a range bag, a vehicle kit
               — that points at gear and supplies you already track.
             </p>
+            <Link
+              href="/kits/new"
+              className="flex items-center gap-2 rounded border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-4 py-2 text-sm font-medium text-[#00C2FF] transition-colors hover:bg-[#00C2FF]/20"
+            >
+              <Plus className="h-4 w-4" />
+              Add First Kit
+            </Link>
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {items.map((kit) => (
-              <div
+              <Link
                 key={kit.id}
-                className="rounded-lg border border-vault-border bg-vault-surface p-3"
+                href={`/kits/${kit.id}`}
+                className="block rounded-lg border border-vault-border bg-vault-surface p-3 transition-colors hover:border-[#00C2FF]/40"
               >
                 <div className="flex items-start gap-3">
                   <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded border border-vault-border bg-vault-bg">
@@ -169,7 +200,7 @@ export function KitSectionList({
                     </div>
                   </div>
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}

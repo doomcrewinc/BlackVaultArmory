@@ -59,3 +59,28 @@ export const KIT_ITEM_SOURCES = [
 ] as const;
 
 export type KitItemSourceField = (typeof KIT_ITEM_SOURCES)[number];
+
+/**
+ * What a kit's contents are grouped under, one heading per source kind.
+ *
+ * A `Record<KitItemSourceField, string>`, so it is exhaustive BY TYPE: a
+ * sixth entry added to KIT_ITEM_SOURCES is a tsc error here rather than a
+ * group of lines that silently renders under no heading at all. Same
+ * guarantee the section loader's sourceless `switch` gives, expressed the
+ * only way a lookup table can express it.
+ */
+export const KIT_ITEM_SOURCE_LABELS: Record<KitItemSourceField, string> = {
+  gearId: "Gear",
+  supplyId: "Supplies",
+  accessoryId: "Accessories",
+  ammoStockId: "Ammo",
+  firearmId: "Firearms",
+};
+
+/**
+ * The heading for lines that set no source — the `label`-only rows the spec
+ * allows for something not tracked anywhere in inventory. Not a member of
+ * KIT_ITEM_SOURCES, because it is the absence of one; kept beside the labels
+ * so the six group headings are defined in one place.
+ */
+export const KIT_ITEM_UNTRACKED_LABEL = "Other";

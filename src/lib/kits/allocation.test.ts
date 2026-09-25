@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   allocationByItem,
+  allocationKey,
+  allocationSourceOf,
   isOverAllocated,
   kitExpiryRollup,
   missingQuantity,
 } from "./allocation";
+import { KIT_ITEM_SOURCES } from "@/lib/kit";
+import { resolveKitItemSource } from "./kitItemSource";
 
 describe("allocation across kits", () => {
   it("sums one item's quantity over every kit that holds it", () => {
@@ -50,6 +54,56 @@ describe("allocation across kits", () => {
     expect(missingQuantity({ quantity: 5, targetQuantity: 5 })).toBe(0);
     expect(missingQuantity({ quantity: 7, targetQuantity: 5 })).toBe(0);
     expect(missingQuantity({ quantity: 2, targetQuantity: null })).toBe(0);
+  });
+});
+
+describe("allocationSourceOf", () => {
+  it("resolves each of the five sources, and none for a label-only line", () => {
+    // Driven off KIT_ITEM_SOURCES rather than five hand-written cases, so a
+    // sixth source cannot be added with this test still claiming full cover.
+    for (const field of KIT_ITEM_SOURCES) {
+      expect(allocationSourceOf({ [field]: "id1", quantity: 1 })).toEqual({
+        field,
+        id: "id1",
+      });
+    }
+    expect(allocationSourceOf({ label: "cash", quantity: 1 })).toBeNull();
+  });
+
+  it("treats a blank or whitespace foreign key as unset", () => {
+    // Matches normalizeAmount's rule elsewhere: a cleared field is absent,
+    // not a value. Without this, a "" id would key allocations as
+    // "gearId:" and pool every blank line into one phantom item.
+    expect(allocationSourceOf({ gearId: "   ", quantity: 1 })).toBeNull();
+    expect(allocationSourceOf({ gearId: "", supplyId: "s1", quantity: 1 }))
+      .toEqual({ field: "supplyId", id: "s1" });
+  });
+
+  it("agrees with allocationByItem on a row with two sources set", () => {
+    // The regression this function exists to prevent. The API refuses such a
+    // row, but the database does not forbid it, and the detail page groups
+    // its lines by source while reading their totals out of
+    // allocationByItem's map. If the page resolved "which source" any
+    // differently, the line would render under one heading with the
+    // allocation of another item entirely.
+    const row = { gearId: "g1", supplyId: "s1", quantity: 3 };
+
+    const source = allocationSourceOf(row);
+    expect(source).toEqual({ field: "gearId", id: "g1" });
+
+    const totals = allocationByItem([row]);
+    expect(totals.size).toBe(1);
+    expect(totals.get(allocationKey(source!))).toBe(3);
+
+    // And the strict write-path rule still REFUSES it, rather than having
+    // been loosened to match the read path.
+    expect(resolveKitItemSource(row).ok).toBe(false);
+  });
+
+  it("builds the map key the sum was stored under", () => {
+    expect(allocationKey({ field: "accessoryId", id: "a1" })).toBe(
+      "accessoryId:a1",
+    );
   });
 });
 

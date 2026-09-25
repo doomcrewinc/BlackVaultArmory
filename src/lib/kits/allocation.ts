@@ -28,25 +28,65 @@ export interface AllocationRow {
   quantity: number;
 }
 
+/** A row's source, once resolved: which of the five keys it set, and to what. */
+export interface AllocationSource {
+  field: KitItemSourceField;
+  id: string;
+}
+
+/**
+ * Which source a row allocates against: the FIRST of KIT_ITEM_SOURCES it
+ * sets, or null for a label-only line.
+ *
+ * Exported and shared rather than inlined, because the kit detail page groups
+ * its lines by source and then looks each line's total up in the map
+ * `allocationByItem` returns. Two implementations of "which source is this
+ * row" would agree for every valid row and disagree for an invalid one — a
+ * row with two foreign keys set, which the API rejects but the database
+ * itself does not forbid. On such a row, first-match-wins here and a
+ * stricter rule there would put the line under one heading while counting its
+ * allocation under another, so the page would show a number for an item it
+ * was not displaying. One rule, used by both.
+ *
+ * `resolveKitItemSource` is the STRICT counterpart, for writes: it refuses a
+ * two-source row instead of picking one. A read path cannot refuse — the row
+ * is already stored and must render as something.
+ */
+export function allocationSourceOf(row: AllocationRow): AllocationSource | null {
+  for (const field of KIT_ITEM_SOURCES as readonly KitItemSourceField[]) {
+    const id = row[field];
+    if (typeof id === "string" && id.trim() !== "") {
+      return { field, id };
+    }
+  }
+  return null;
+}
+
+/**
+ * The map key for one source. SOURCE AND ID together (`"accessoryId:a1"`),
+ * never a bare id: two different tables could in principle share an id (cuids
+ * collide only astronomically rarely, but the point is the key shape, not the
+ * odds), and a bare-id key would make that collision silent.
+ *
+ * Exported alongside `allocationByItem` so a caller looks a total up with the
+ * function that wrote it rather than re-spelling the `${field}:${id}`
+ * template — the shape of mistake that a string key invites.
+ */
+export function allocationKey(source: AllocationSource): string {
+  return `${source.field}:${source.id}`;
+}
+
 /**
  * Sums `quantity` for one item across every kit that holds it, keyed by
- * SOURCE AND ID together (`"accessoryId:a1"`), never a bare id. Two
- * different tables could in principle share an id (cuids collide only
- * astronomically rarely, but the point is the key shape, not the odds); a
- * bare-id key would make that collision silent. A label-only row allocates
- * nothing and is skipped.
+ * `allocationKey`. A label-only row allocates nothing and is skipped.
  */
 export function allocationByItem(rows: AllocationRow[]): Map<string, number> {
   const totals = new Map<string, number>();
   for (const row of rows) {
-    for (const field of KIT_ITEM_SOURCES as readonly KitItemSourceField[]) {
-      const id = row[field];
-      if (typeof id === "string" && id.trim() !== "") {
-        const key = `${field}:${id}`;
-        totals.set(key, (totals.get(key) ?? 0) + row.quantity);
-        break; // a KitItem sets at most one source (see kitItemSource.ts)
-      }
-    }
+    const source = allocationSourceOf(row);
+    if (!source) continue;
+    const key = allocationKey(source);
+    totals.set(key, (totals.get(key) ?? 0) + row.quantity);
   }
   return totals;
 }
