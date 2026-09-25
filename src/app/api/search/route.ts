@@ -11,7 +11,7 @@ import {
   SUPPLY_CATEGORY_LABELS,
   type SupplyCategory,
 } from "@/lib/supply";
-import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
+import { KIT_CATEGORIES, KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
 
 function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
@@ -75,6 +75,30 @@ function supplyCategoriesMatchingLabel(q: string): SupplyCategory[] {
  */
 function kitCategoryLabel(category: string): string {
   return KIT_CATEGORY_LABELS[category as KitCategory] ?? category;
+}
+
+/**
+ * The kit categories whose HUMAN LABEL matches `q` — the same treatment gear
+ * and supplies get above, and derived from KIT_CATEGORIES rather than
+ * hand-listing the six, so a category added later is covered the day it lands.
+ *
+ * BE HONEST ABOUT WHAT THIS CLAUSE DOES TODAY. All six current kit labels
+ * differ from their stored token by CASE ALONE ("Medical" against MEDICAL), and
+ * `containsInsensitive` on the column already handles case — so the clause on
+ * the column below is what actually makes "medical" find a MEDICAL kit right
+ * now, and this function returns a list that the column clause would have
+ * matched anyway. It is here for the same reason the gear version is: the
+ * moment a kit category's label is more than a re-casing of its token — a
+ * "FIRST_AID" whose label is "First Aid" — the column clause stops finding it
+ * and this one takes over. Supplies learned that the expensive way (CBRN_FILTER
+ * displayed as "CBRN Filter" and matched nothing), and gear inherited the fix
+ * before it needed it.
+ */
+function kitCategoriesMatchingLabel(q: string): KitCategory[] {
+  const needle = q.toLowerCase();
+  return KIT_CATEGORIES.filter((category) =>
+    KIT_CATEGORY_LABELS[category].toLowerCase().includes(needle),
+  );
 }
 
 export async function GET(request: NextRequest) {
@@ -182,11 +206,21 @@ export async function GET(request: NextRequest) {
   });
 
   // Kits were NOT searchable before this: the global search covered five
-  // sections and a kit could only be found by browsing to /kits. Name and
-  // notes, both through containsInsensitive so the match is case-insensitive
-  // on Postgres as well as SQLite — a bare Prisma `contains` is
-  // case-SENSITIVE on Postgres, which is the bug that helper exists to
+  // sections and a kit could only be found by browsing to /kits. Name, notes
+  // and category, all through containsInsensitive so the match is
+  // case-insensitive on Postgres as well as SQLite — a bare Prisma `contains`
+  // is case-SENSITIVE on Postgres, which is the bug that helper exists to
   // prevent from coming back.
+  //
+  // CATEGORY is matched on the same TWO clauses gear and supplies use, and the
+  // pairing is not redundant. The column clause finds a category stored
+  // outside the enum — restore inserts kit rows unvalidated, so a `SCUBA` from
+  // a later build can be there, and it has no label to match. The label clause
+  // finds a category whose displayed label is not just a re-casing of its
+  // token. Without the category clauses at all, the same word found a gear
+  // item and a supply but not a kit, which reads as a bug rather than a design
+  // decision: "medical" matched a MEDICAL supply and skipped a MEDICAL kit
+  // called "Truck Bag".
   //
   // The `select` is EXPLICIT and narrow, like every other query in this file.
   // That is not decoration: it is the reason the serial-number leak that hit
@@ -195,11 +229,18 @@ export async function GET(request: NextRequest) {
   // `include` here would pull them in on a path no strip in this file visits.
   // Nothing about a kit's CONTENTS is selected at all — the result is a link
   // to the kit, and the kit page loads its own contents.
+  const kitCategoryMatches = kitCategoriesMatchingLabel(q);
   const kits = await prisma.kit.findMany({
     where: {
       OR: [
         { name: containsInsensitive(q) },
         { notes: containsInsensitive(q) },
+        { category: containsInsensitive(q) },
+        // Only when something matched: an empty `in` would match no row, which
+        // is harmless but noise in the query the tests assert on.
+        ...(kitCategoryMatches.length > 0
+          ? [{ category: { in: kitCategoryMatches } }]
+          : []),
       ],
     },
     take: 5,

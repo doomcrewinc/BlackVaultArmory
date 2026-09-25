@@ -362,7 +362,7 @@ describe("GET /api/search", () => {
     ]);
   });
 
-  it("searches kit name and notes through containsInsensitive", async () => {
+  it("searches kit name, notes and category through containsInsensitive", async () => {
     await GET(request("bug"));
 
     expect(mocks.findKits).toHaveBeenCalledTimes(1);
@@ -371,9 +371,120 @@ describe("GET /api/search", () => {
     // spied-on real helper, so this is the shape it actually produces on this
     // provider, not a re-spelling of it.
     const clause = vi.mocked(containsInsensitive).getMockImplementation()!("bug");
-    expect(where.OR).toEqual([{ name: clause }, { notes: clause }]);
+    // Three column clauses plus the label clause. Pinned before the assertion
+    // rather than written out: this expectation was ORIGINALLY `[]` here, on
+    // the assumption that "bug" matched no kit label — it is a substring of
+    // "Bugout", and the pin is what caught that rather than an assertion that
+    // quietly agreed with a wrong belief.
+    const matching = KIT_CATEGORIES.filter((c) =>
+      KIT_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
+    );
+    expect(matching).toEqual(["BUGOUT"]);
+    expect(where.OR).toEqual([
+      { name: clause },
+      { notes: clause },
+      { category: clause },
+      { category: { in: matching } },
+    ]);
     // Never a bare Prisma `contains`, which is case-SENSITIVE on Postgres.
     expect(containsInsensitive).toHaveBeenCalledWith("bug");
+  });
+
+  it("finds a MEDICAL kit when searching for medical, though its name and notes say no such thing", async () => {
+    // The parity bug this closes: the same word found a MEDICAL supply and a
+    // MEDICAL_KIT gear item and skipped a MEDICAL kit, because kits matched
+    // only name and notes. A user reading that sees a bug, not a decision.
+    //
+    // PIN THE DERIVED LIST FIRST. A derived expectation that collapses to
+    // `{ in: [] }` passes while asserting nothing, which a phase-5 review
+    // caught in this very file's neighbourhood.
+    const matching = KIT_CATEGORIES.filter((c) =>
+      KIT_CATEGORY_LABELS[c].toLowerCase().includes("medical"),
+    );
+    expect(matching).toEqual(["MEDICAL"]);
+
+    mocks.findKits.mockResolvedValue([
+      {
+        id: "kit-med",
+        // Neither the name nor the notes contain "medical" — the category is
+        // the only thing that can match.
+        name: "Truck Bag",
+        category: "MEDICAL",
+        location: "F-250 rear seat",
+      },
+    ]);
+
+    const json = await (await GET(request("medical"))).json();
+
+    expect(json.kits).toEqual([
+      {
+        id: "kit-med",
+        name: "Truck Bag",
+        subtitle: "Medical · F-250 rear seat",
+        url: "/kits/kit-med",
+      },
+    ]);
+
+    const where = mocks.findKits.mock.calls[0][0].where;
+    // BOTH category clauses reach the database, and they are not redundant:
+    // the column clause is what matches MEDICAL today (the label "Medical"
+    // differs from the token by case alone, which containsInsensitive
+    // handles), and the label clause is what will still match when a kit
+    // category's label stops being a re-casing of its token.
+    expect(where.OR).toContainEqual({
+      category: containsInsensitive("medical"),
+    });
+    expect(where.OR).toContainEqual({ category: { in: matching } });
+  });
+
+  it.each([...KIT_CATEGORIES])(
+    "puts %s in the kit label clause when its own label is searched",
+    async (category) => {
+      await GET(request(KIT_CATEGORY_LABELS[category]));
+
+      const where = mocks.findKits.mock.calls[0][0].where;
+      const inClause = where.OR.find(
+        (clause: Record<string, unknown>) =>
+          typeof clause.category === "object" &&
+          clause.category !== null &&
+          "in" in (clause.category as object),
+      );
+      expect(inClause).toBeDefined();
+      expect(inClause.category.in).toContain(category);
+    },
+  );
+
+  it("omits the kit category-label clause when no label matches", async () => {
+    await GET(request("zzzz"));
+
+    const where = mocks.findKits.mock.calls[0][0].where;
+    // Three clauses, not four: no trailing `{ category: { in: [] } }`.
+    expect(where.OR).toEqual([
+      { name: containsInsensitive("zzzz") },
+      { notes: containsInsensitive("zzzz") },
+      { category: containsInsensitive("zzzz") },
+    ]);
+  });
+
+  it("still finds a kit whose category this build does not recognise", async () => {
+    // The half the label clause cannot do: restore inserts kit rows
+    // unvalidated, so a category from a later build has no label to match and
+    // the column clause is the only thing that can find it.
+    const matching = KIT_CATEGORIES.filter((c) =>
+      KIT_CATEGORY_LABELS[c].toLowerCase().includes("scuba"),
+    );
+    expect(matching).toEqual([]);
+
+    mocks.findKits.mockResolvedValue([
+      { id: "kit-scuba", name: "Dive Bag", category: "SCUBA", location: null },
+    ]);
+
+    const json = await (await GET(request("scuba"))).json();
+
+    expect(json.kits[0].subtitle).toBe("SCUBA");
+    expect(mocks.findKits.mock.calls[0][0].where.OR).toContainEqual({
+      category: containsInsensitive("scuba"),
+    });
   });
 
   it("selects only the kit's own columns — nothing about its contents", async () => {

@@ -645,6 +645,52 @@ function LowAmmoWidget({ items, totalStocks }: { items: AmmoStockItem[]; totalSt
  * Every status it renders was resolved server-side. It calls expiryStatus
  * nowhere, and must not: see GearAlertItem.
  */
+/**
+ * The per-source breakdown under a tile's headline number.
+ *
+ * ONE ROW PER SOURCE, not one line with separators. The line it replaces read
+ * `1 supplies · 0 gear · 2 kits`, and MEASURED at 390px it wrapped onto two
+ * lines inside a 147px tile — legible, but already at its limit with three
+ * sources, and the category registry is explicitly built to take more.
+ *
+ * Rows rather than a shorter line, because only rows survive a fourth source.
+ * Dropping the zero segments (which this also does) makes the TYPICAL install
+ * fit on one line again, but it does nothing for the worst case where every
+ * source has a count — and the worst case is the install with the most to
+ * report, which is exactly when the widget must stay readable. A vertical list
+ * grows without a width budget; a separator-joined line does not. Shrinking
+ * the font was not on the table: the numbers are already 10px.
+ *
+ * Zero counts are dropped, so a source with nothing wrong does not spend a row
+ * saying so. INVARIANT: the rows always sum to the headline number above them,
+ * because only zeros are ever removed — a reader can add them up and get the
+ * big figure back. All-zero renders nothing rather than an empty list, which
+ * happens when one tile has counts and the other does not.
+ */
+function AlertSourceBreakdown({
+  sources,
+}: {
+  sources: { label: string; count: number }[];
+}) {
+  const present = sources.filter((source) => source.count > 0);
+  if (present.length === 0) return null;
+
+  return (
+    <dl className="mt-1.5 space-y-0.5">
+      {present.map((source) => (
+        <div key={source.label} className="flex items-baseline justify-between gap-2">
+          <dt className="text-[10px] uppercase tracking-widest text-vault-text-faint">
+            {source.label}
+          </dt>
+          <dd className="text-[10px] font-mono text-vault-text-faint">
+            {formatNumber(source.count)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function SupplyAlertsWidget({
   items,
   expiredCount,
@@ -716,10 +762,13 @@ function SupplyAlertsWidget({
         )}
       </div>
 
-      {/* The headline number is supplies AND gear, with the split spelled out
-          underneath. A single combined figure would leave the reader unable to
-          tell which store needs attention; two unlabelled tiles that silently
-          counted supplies only is the half-truth this change exists to end. */}
+      {/* The headline number is supplies AND gear AND kits, with the split
+          spelled out underneath, one row per source. A single combined figure
+          would leave the reader unable to tell which store needs attention;
+          two unlabelled tiles that silently counted supplies only is the
+          half-truth this widget exists to end. The split was one
+          separator-joined line until it was measured at 390px and found to
+          wrap — see AlertSourceBreakdown. */}
       {(totalExpired > 0 || totalExpiringSoon > 0) && (
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div className="bg-vault-surface border border-[#E53935]/30 rounded-lg p-3">
@@ -729,10 +778,13 @@ function SupplyAlertsWidget({
             <p className="text-lg font-mono font-bold text-[#E53935]">
               {formatNumber(totalExpired)}
             </p>
-            <p className="text-[10px] font-mono text-vault-text-faint mt-0.5">
-              {formatNumber(expiredCount)} supplies · {formatNumber(expiredGearCount)} gear ·{" "}
-              {formatNumber(expiredKitCount)} kits
-            </p>
+            <AlertSourceBreakdown
+              sources={[
+                { label: "Supplies", count: expiredCount },
+                { label: "Gear", count: expiredGearCount },
+                { label: "Kits", count: expiredKitCount },
+              ]}
+            />
           </div>
           <div className="bg-vault-surface border border-[#F5A623]/30 rounded-lg p-3">
             <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
@@ -741,10 +793,13 @@ function SupplyAlertsWidget({
             <p className="text-lg font-mono font-bold text-[#F5A623]">
               {formatNumber(totalExpiringSoon)}
             </p>
-            <p className="text-[10px] font-mono text-vault-text-faint mt-0.5">
-              {formatNumber(expiringSoonCount)} supplies · {formatNumber(expiringSoonGearCount)} gear ·{" "}
-              {formatNumber(expiringSoonKitCount)} kits
-            </p>
+            <AlertSourceBreakdown
+              sources={[
+                { label: "Supplies", count: expiringSoonCount },
+                { label: "Gear", count: expiringSoonGearCount },
+                { label: "Kits", count: expiringSoonKitCount },
+              ]}
+            />
           </div>
         </div>
       )}
