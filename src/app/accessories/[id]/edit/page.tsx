@@ -44,15 +44,6 @@ interface Accessory {
   nfaRegisteredTo: string | null;
 }
 
-function toDateInputValue(dateStr: string | null): string {
-  if (!dateStr) return "";
-  try {
-    return new Date(dateStr).toISOString().split("T")[0];
-  } catch {
-    return "";
-  }
-}
-
 export default function EditAccessoryPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -439,7 +430,7 @@ export default function EditAccessoryPage() {
                   id="acquisitionDate"
                   name="acquisitionDate"
                   type="date"
-                  defaultValue={toDateInputValue(accessory.acquisitionDate)}
+                  defaultValue={toISODate(accessory.acquisitionDate)}
                   className={INPUT_CLASS}
                 />
               </div>
@@ -564,7 +555,7 @@ export default function EditAccessoryPage() {
                 id="lastBatteryChangeDate"
                 name="lastBatteryChangeDate"
                 type="date"
-                defaultValue={toDateInputValue(accessory.lastBatteryChangeDate)}
+                defaultValue={toISODate(accessory.lastBatteryChangeDate)}
                 className={INPUT_CLASS}
               />
             </div>
