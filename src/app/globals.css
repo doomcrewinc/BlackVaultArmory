@@ -195,6 +195,23 @@ body {
     overflow: visible !important;
   }
 
+  /* Measured (emulateMedia print, 739.2px-wide viewport — letter minus the
+     0.4in @page margins above, getBoundingClientRect on the table vs. its
+     .armory-print-scroll wrapper): Master Inventory ran 11.75px past its
+     container and Supplies 56.3px, both spilling into the card's own p-5
+     padding rather than off the sheet, so nothing was clipped. No cell's
+     content was truncated (every td's scrollWidth matched its clientWidth)
+     — table-layout:auto was sizing each column to ITS OWN preferred width,
+     pr-4 (1rem) included, before checking whether the total fit the
+     container, on tables with nine to eleven columns. Tightening the
+     padding these cells already carry (rather than any column's content)
+     gives every column the room back without moving a value or reaching
+     for the screen/print column split Master Inventory's NFA columns and
+     Gear's protection columns already use. */
+  .armory-preview-print .pr-4 {
+    padding-right: 0.5rem !important;
+  }
+
   .armory-page-break {
     break-before: page;
   }
