@@ -4,12 +4,14 @@ import { expiryStatus } from "@/lib/supply";
 const mocks = vi.hoisted(() => ({
   findAppSettings: vi.fn(),
   findSupplies: vi.fn(),
+  findGear: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     appSettings: { findUnique: mocks.findAppSettings },
     supply: { findMany: mocks.findSupplies },
+    gear: { findMany: mocks.findGear },
     firearm: {
       count: vi.fn().mockResolvedValue(0),
       findMany: vi.fn().mockResolvedValue([]),
@@ -46,9 +48,20 @@ function supply(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function gear(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "gear-1",
+    name: "Front Plate",
+    category: "ARMOR",
+    expirationDate: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mocks.findAppSettings.mockReset().mockResolvedValue(null);
   mocks.findSupplies.mockReset().mockResolvedValue([]);
+  mocks.findGear.mockReset().mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -155,5 +168,107 @@ describe("getDashboardStats — the expiry timezone boundary", () => {
 
     expect(stats.supplies.expiringSoonCount).toBe(1);
     expect(stats.supplies.expiredCount).toBe(0);
+  });
+});
+
+describe("getDashboardStats — expiring gear", () => {
+  it("returns expired and expiring-soon gear, and neither the fine nor the dateless", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "UTC",
+      expiryWarningDays: 10,
+    });
+    // The route narrows `expirationDate: { not: null }` in SQL, so a dateless
+    // row never reaches the mapper — the `fine` row does, and must be dropped
+    // there.
+    mocks.findGear.mockResolvedValue([
+      gear({
+        id: "plate-expired",
+        name: "Front Plate",
+        expirationDate: new Date("2026-05-01T00:00:00.000Z"),
+      }),
+      gear({
+        id: "filter-soon",
+        name: "CBRN Filter",
+        category: "CBRN",
+        expirationDate: new Date("2026-06-20T00:00:00.000Z"),
+      }),
+      gear({
+        id: "plate-fine",
+        name: "Spare Plate",
+        expirationDate: new Date("2027-06-01T00:00:00.000Z"),
+      }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.gear.expiredCount).toBe(1);
+    expect(stats.gear.expiringSoonCount).toBe(1);
+    expect(stats.gear.expiringItems.map((item) => [item.id, item.expiry])).toEqual([
+      ["plate-expired", "expired"],
+      ["filter-soon", "soon"],
+    ]);
+    // The human label, as every other gear surface shows it — not the token.
+    expect(stats.gear.expiringItems[0].category).toBe("Armor");
+    expect(stats.gear.expiringItems[1].category).toBe("CBRN Protection");
+  });
+
+  it("asks the database only for gear that carries a date", async () => {
+    await getDashboardStats();
+
+    expect(mocks.findGear).toHaveBeenCalledTimes(1);
+    expect(mocks.findGear.mock.calls[0][0].where).toEqual({
+      expirationDate: { not: null },
+    });
+  });
+
+  it("falls back to the raw category for one this build does not know", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+    mocks.findGear.mockResolvedValue([
+      gear({ category: "EXOSUIT", expirationDate: new Date("2026-05-01T00:00:00.000Z") }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.gear.expiringItems[0].category).toBe("EXOSUIT");
+  });
+
+  it("judges gear against the SETTINGS timezone, the same day the supply counts used", async () => {
+    // The same boundary the supply tests above pin, for gear: 21:00 on the
+    // 15th in Denver is already the 16th in UTC, so a plate expiring on the
+    // 15th is `soon` for the user and `expired` for the raw instant. A second
+    // resolution of "today" for gear would put an expired plate in the list
+    // beside a supply the same date called `soon`.
+    vi.useFakeTimers();
+    vi.setSystemTime(EVENING_IN_DENVER);
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "America/Denver",
+      expiryWarningDays: 90,
+    });
+    mocks.findSupplies.mockResolvedValue([
+      supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+    mocks.findGear.mockResolvedValue([
+      gear({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.gear.expiringSoonCount).toBe(1);
+    expect(stats.gear.expiredCount).toBe(0);
+    // Both stores agree, which is the point of the single resolution.
+    expect(stats.supplies.expiringSoonCount).toBe(1);
+    // The negative control: the verdict a second, raw-instant resolution gives.
+    expect(expiryStatus(EXPIRES_TODAY_IN_DENVER, EVENING_IN_DENVER, 90)).toBe(
+      "expired",
+    );
+  });
+
+  it("reads AppSettings exactly once for both stores", async () => {
+    await getDashboardStats();
+    expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
   });
 });

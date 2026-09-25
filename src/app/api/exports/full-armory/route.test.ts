@@ -42,6 +42,10 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { GET } from "./route";
+// The renderers' own formatter, asserted against rather than a re-spelled
+// literal: if the wording changes, every renderer changes with it and these
+// assertions follow, while a drifted PDF or CSV line still fails.
+import { formatExpiryFootnote } from "@/lib/exports/full-armory";
 
 // The generated PDF draws each line as an uncompressed `(text) Tj` operator, so
 // the text it actually puts on the page can be read straight back out. The
@@ -202,6 +206,12 @@ describe("GET /api/exports/full-armory", () => {
         purchasePrice: 150,
         currentValue: 130,
         acquisitionDate: "2025-03-01",
+        // A knife: no rated life, no plate rating, no cut. Each of the three
+        // is EMPTY on its own, never a dash and never the string "null".
+        expirationDate: "",
+        expiryStatus: "none",
+        protectionLevel: "",
+        armorSize: "",
         storageLocation: "Safe A",
         receiptCount: 0,
         documentCount: 0,
@@ -1152,5 +1162,288 @@ describe("GET /api/exports/full-armory", () => {
     expect(text).toContain("1. FIREARM Acme M4 | Type: RIFLE | Serial:");
     expect(text).not.toContain("Class:");
     expect(text).not.toContain("NFA:");
+  });
+  // ─── Gear expiry, the armor columns and the timezone footnote ────────────
+
+  it("exports the expiry and both armor columns, each in its own field", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "gear-plate",
+          name: "Front Plate",
+          manufacturer: "PlateCo",
+          model: "III+",
+          serialNumber: null,
+          category: "ARMOR",
+          quantity: 1,
+          purchasePrice: 300,
+          currentValue: 300,
+          acquisitionDate: null,
+          expirationDate: new Date("2026-01-01T00:00:00.000Z"),
+          protectionLevel: "NIJ III+",
+          armorSize: "Medium SAPI",
+          storageLocation: null,
+          notes: null,
+          imageUrl: null,
+        },
+      ]);
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+
+      // Three distinct fields. The rating is NOT folded into the category —
+      // that fold is what printed "Class: PISTOL" for an SBR in phase 3.
+      expect(json.gear[0]).toMatchObject({
+        category: "Armor",
+        expirationDate: "2026-01-01",
+        expiryStatus: "expired",
+        protectionLevel: "NIJ III+",
+        armorSize: "Medium SAPI",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves both armor cells EMPTY on a non-armor row, never a dash or \"null\"", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-knife",
+        name: "Bugout",
+        manufacturer: "Benchmade",
+        model: "535",
+        serialNumber: null,
+        category: "KNIFE",
+        quantity: 1,
+        purchasePrice: null,
+        currentValue: null,
+        acquisitionDate: null,
+        // What the write path stores for a non-armor item: nulls.
+        expirationDate: null,
+        protectionLevel: null,
+        armorSize: null,
+        storageLocation: null,
+        notes: null,
+        imageUrl: null,
+      },
+    ]);
+
+    const json = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+    ).json();
+
+    expect(json.gear[0].protectionLevel).toBe("");
+    expect(json.gear[0].armorSize).toBe("");
+    expect(json.gear[0].expirationDate).toBe("");
+    expect(json.gear[0].expiryStatus).toBe("none");
+
+    // And in the CSV, where a "null" or "—" would be read as a value by every
+    // spreadsheet that opens it.
+    const csv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))
+    ).text();
+    const headers = csv.split("\n")[0].split(",");
+    const gearLine = csv.split("\n").find((line) => line.startsWith("gear,"));
+    expect(gearLine).toBeDefined();
+    const cells = (gearLine as string).split(",");
+    for (const column of ["protectionLevel", "armorSize", "expirationDate"]) {
+      const index = headers.indexOf(column);
+      expect(index).toBeGreaterThan(-1);
+      expect(cells[index]).toBe("");
+    }
+  });
+
+  it("resolves gear expiry against the SAME today the supply rows used", async () => {
+    // 21:00 on June 15 in Denver is already the 16th in UTC. A gear row judged
+    // by a second resolution of "today" would read `expired` beside a supply
+    // with the identical date reading `soon`.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-16T03:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({
+        timezone: "America/Denver",
+        expiryWarningDays: 90,
+      });
+      const expiresToday = new Date("2026-06-15T00:00:00.000Z");
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "gear-plate",
+          name: "Front Plate",
+          manufacturer: null,
+          model: null,
+          serialNumber: null,
+          category: "ARMOR",
+          quantity: 1,
+          purchasePrice: null,
+          currentValue: null,
+          acquisitionDate: null,
+          expirationDate: expiresToday,
+          protectionLevel: "NIJ III",
+          armorSize: null,
+          storageLocation: null,
+          notes: null,
+          imageUrl: null,
+        },
+      ]);
+      mocks.findSupplies.mockResolvedValue([
+        {
+          id: "supply-1",
+          name: "Iodine",
+          brand: null,
+          category: "MEDICAL",
+          quantity: 1,
+          unit: "COUNT",
+          lowStockAlert: null,
+          expirationDate: expiresToday,
+          purchasePrice: null,
+          purchaseDate: null,
+          storageLocation: null,
+          notes: null,
+        },
+      ]);
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+
+      expect(json.gear[0].expiryStatus).toBe("soon");
+      expect(json.supplies[0].expiryStatus).toBe("soon");
+      // ONE AppSettings read for both, so the two cannot diverge.
+      expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
+      // And the footnote names that same day, in that same zone.
+      expect(json.meta.expiryTimezone).toBe("America/Denver");
+      expect(json.meta.expiryTimezoneFromSetting).toBe(true);
+      expect(json.meta.expiryEvaluatedOn).toBe("2026-06-15");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prints the footnote naming the configured timezone in the PDF and the CSV", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-24T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({
+        timezone: "America/Denver",
+        expiryWarningDays: 90,
+      });
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+      expect(formatExpiryFootnote(json.meta)).toBe(
+        "Expiry evaluated in America/Denver on 2026-09-24.",
+      );
+
+      const pdf = extractPdfFlatText(
+        await (
+          await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+        ).text(),
+      );
+      // Beside the generated-at line, which is where the brief asked for it.
+      expect(pdf).toContain(
+        "Generated: 2026-09-24T12:00:00.000Z Expiry evaluated in America/Denver on 2026-09-24.",
+      );
+
+      const csv = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))
+      ).text();
+      // Its own summary row, right after generatedAt. Unquoted because the
+      // sentence carries no comma, quote or newline — csvEscape only quotes
+      // when it must.
+      expect(csv).toContain(
+        "summary,expiryFootnote,Expiry evaluated in America/Denver on 2026-09-24.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the host timezone and says so when AppSettings has none", async () => {
+    // The out-of-the-box state. The suite pins TZ=America/Denver, so the host
+    // zone is knowable here; the point is the "(server default)" disclosure,
+    // which tells the reader the zone was not chosen.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-24T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue(null);
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+
+      expect(json.meta.expiryTimezoneFromSetting).toBe(false);
+      expect(json.meta.expiryTimezone).toBe("America/Denver");
+      expect(formatExpiryFootnote(json.meta)).toBe(
+        "Expiry evaluated in America/Denver (server default) on 2026-09-24.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prints the gear expiry and armor values as labelled segments in the PDF", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "gear-plate",
+          name: "Front Plate",
+          manufacturer: "PlateCo",
+          model: "III+",
+          serialNumber: null,
+          category: "ARMOR",
+          quantity: 1,
+          purchasePrice: 300,
+          currentValue: 300,
+          acquisitionDate: null,
+          expirationDate: new Date("2026-01-01T00:00:00.000Z"),
+          protectionLevel: "NIJ III+",
+          armorSize: "Medium SAPI",
+          storageLocation: null,
+          notes: null,
+          imageUrl: null,
+        },
+      ]);
+
+      const text = extractPdfFlatText(
+        await (
+          await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+        ).text(),
+      );
+
+      expect(text).toContain("Expires: 2026-01-01 (expired)");
+      expect(text).toContain("Protection: NIJ III+");
+      expect(text).toContain("Size/Cut: Medium SAPI");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prints no armor or expiry segments in the PDF for a knife", async () => {
+    const text = extractPdfFlatText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+      ).text(),
+    );
+
+    // The default fixture is a knife. "Protection: N/A" on every knife and
+    // case would double the page count to say nothing, the same reason the NFA
+    // line is printed only for registered items.
+    expect(text).toContain("1. Knife Bugout | Serial: GSN-1 | Qty: 2");
+    expect(text).not.toContain("Protection:");
+    expect(text).not.toContain("Size/Cut:");
+    expect(text).not.toContain("Expires:");
   });
 });

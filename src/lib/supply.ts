@@ -224,13 +224,90 @@ function systemTimeZone(): string | null {
  * nothing in this module reads the clock itself.
  */
 export function todayForExpiry(timezone: string | null, now: Date): Date {
+  return calendarDayInTimeZone(resolveExpiryTimeZone(timezone).timeZone, now);
+}
+
+/** The calendar day `now` falls on in `timeZone`, as a UTC-midnight Date. */
+function calendarDayInTimeZone(timeZone: string, now: Date): Date {
   let parts: { year: number; month: number; day: number };
   try {
-    parts = calendarPartsInTimeZone(timezone ?? systemTimeZone() ?? "UTC", now);
+    parts = calendarPartsInTimeZone(timeZone, now);
   } catch {
     parts = calendarPartsInTimeZone("UTC", now);
   }
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+}
+
+/**
+ * WHICH timezone decided an expiry verdict, and whether the user chose it.
+ *
+ * Extracted out of todayForExpiry rather than reimplemented beside it, because
+ * a renderer that wants to disclose the deciding zone ("Expiry evaluated in
+ * America/Denver (server default) on 2026-09-24.") must name the zone the
+ * verdicts were ACTUALLY computed in. A second, independent resolution — even
+ * one written to the same rules — can disagree with the rows it annotates the
+ * moment either side changes. todayForExpiry now calls this, so there is one
+ * resolution and one answer.
+ *
+ * `fromSetting` is false in two distinct cases that render identically: no
+ * timezone saved at all (the out-of-the-box state), and a saved value Intl
+ * does not recognise, which todayForExpiry discards in favour of UTC. Both are
+ * "not the zone this install is configured for", which is the only distinction
+ * a disclosure line needs to draw; a corrupt setting is not silently reported
+ * as if it had been honoured.
+ */
+export function resolveExpiryTimeZone(timezone: string | null): {
+  timeZone: string;
+  fromSetting: boolean;
+} {
+  const candidate = timezone ?? systemTimeZone() ?? "UTC";
+  try {
+    // Constructing the formatter is what throws on an unrecognised zone; the
+    // day itself is resolved by calendarDayInTimeZone from the answer here.
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate });
+    return { timeZone: candidate, fromSetting: timezone !== null };
+  } catch {
+    return { timeZone: "UTC", fromSetting: false };
+  }
+}
+
+/** The AppSettings columns an expiry verdict depends on. */
+export interface ExpirySettings {
+  timezone?: string | null;
+  expiryWarningDays?: number | null;
+}
+
+export interface ExpiryContext {
+  /** Pass straight to expiryStatus. */
+  today: Date;
+  /** Pass straight to expiryStatus. */
+  warningDays: number;
+  /** The IANA zone the verdicts were computed in. */
+  timezone: string;
+  /** False when `timezone` came from the host rather than AppSettings. */
+  timezoneFromSetting: boolean;
+}
+
+/**
+ * Everything an expiry verdict needs, resolved ONCE from ONE AppSettings read.
+ *
+ * Callers that only render badges can keep using todayForExpiry. Callers that
+ * also DISCLOSE which timezone decided — the full-armory export's footnote,
+ * the dashboard — take the whole context from here, so the disclosure and the
+ * verdicts it annotates cannot come from two different resolutions of "today".
+ */
+export function resolveExpiryContext(
+  settings: ExpirySettings | null | undefined,
+  now: Date,
+): ExpiryContext {
+  const setting = settings?.timezone ?? null;
+  const { timeZone, fromSetting } = resolveExpiryTimeZone(setting);
+  return {
+    today: calendarDayInTimeZone(timeZone, now),
+    warningDays: settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS,
+    timezone: timeZone,
+    timezoneFromSetting: fromSetting,
+  };
 }
 
 /**

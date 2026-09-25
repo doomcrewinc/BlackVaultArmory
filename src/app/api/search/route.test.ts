@@ -32,6 +32,7 @@ vi.mock("@/lib/db/text-search", async (importOriginal) => {
 import { GET } from "./route";
 import { containsInsensitive } from "@/lib/db/text-search";
 import { GEAR_CATEGORIES, GEAR_CATEGORY_LABELS } from "@/lib/gear";
+import { gearSectionForItem, sectionHref } from "@/lib/categories";
 
 function request(query: string): NextRequest {
   return new NextRequest(
@@ -252,5 +253,98 @@ describe("GET /api/search", () => {
       { model: containsInsensitive("zzzz") },
       { category: containsInsensitive("zzzz") },
     ]);
+  });
+  // ─── Phase 5's eighteen new categories ───────────────────────────────────
+  // The derivation was PREDICTED to cover them (see the comment on
+  // gearCategoriesMatchingLabel). These verify it rather than trusting it.
+
+  it("finds an ARMOR gear item when searching for armor", async () => {
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        manufacturer: "PlateCo",
+        model: "III+",
+        category: "ARMOR",
+      },
+    ]);
+
+    const response = await GET(request("armor"));
+    const json = await response.json();
+
+    // The query reached the label clause...
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ category: { in: ["ARMOR"] } });
+    // ...and the row comes back rendered, not just matched.
+    expect(json.gear).toEqual([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        subtitle: "PlateCo · Armor",
+        url: "/gear/item/gear-plate",
+      },
+    ]);
+  });
+
+  it("matches MEDICAL_KIT by its two-word human label", async () => {
+    // The exact shape the supplies bug had: the column stores MEDICAL_KIT and
+    // every surface shows "Medical Kit", so a substring match on the column
+    // alone finds nothing for what the user typed.
+    await GET(request("medical kit"));
+
+    const where = mocks.findGear.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ category: { in: ["MEDICAL_KIT"] } });
+    expect(where.OR).toContainEqual({
+      category: containsInsensitive("medical kit"),
+    });
+    // The negative control: the token-only clause could not have found it.
+    expect("MEDICAL_KIT".toLowerCase().includes("medical kit")).toBe(false);
+  });
+
+  it("keeps the gear item URL at /gear/item/<id> for a category whose section moved under /prep", async () => {
+    // ARMOR's SECTION now lives under /prep, but the item route is not
+    // section-scoped, so the search result must not follow the section there.
+    // Asserted against the registry rather than a literal, so a later
+    // re-grouping of ARMOR keeps this test honest.
+    const section = gearSectionForItem({ category: "ARMOR" });
+    expect(section).toBeDefined();
+    expect(sectionHref(section!)).toMatch(/^\/prep\//);
+
+    mocks.findGear.mockResolvedValue([
+      {
+        id: "gear-plate",
+        name: "Front Plate",
+        manufacturer: null,
+        model: null,
+        category: "ARMOR",
+      },
+    ]);
+
+    const json = await (await GET(request("armor"))).json();
+
+    expect(json.gear[0].url).toBe("/gear/item/gear-plate");
+  });
+
+  it("points every gear category at the same unscoped item route", async () => {
+    // Fourteen of the twenty categories now sit in a /prep section and six do
+    // not. One route serves all of them; this fails the moment a url starts
+    // being derived from the section.
+    for (const category of GEAR_CATEGORIES) {
+      mocks.findGear.mockResolvedValue([
+        {
+          id: `gear-${category}`,
+          name: `A ${category}`,
+          manufacturer: null,
+          model: null,
+          category,
+        },
+      ]);
+
+      const json = await (
+        await GET(request(GEAR_CATEGORY_LABELS[category]))
+      ).json();
+
+      expect(json.gear[0].url).toBe(`/gear/item/gear-${category}`);
+    }
   });
 });

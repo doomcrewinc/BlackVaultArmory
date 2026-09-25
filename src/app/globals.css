@@ -209,7 +209,16 @@ body {
      while leaving their text light — measured white-on-white on `/` — so any
      other page printed with background graphics enabled went from readable
      light-on-dark to invisible. */
-  body:has(.armory-preview-print) {
+  /* `main` as well as `body`: the preview page's own
+     <main class="bg-vault-bg"> sits BETWEEN body and the preview div, so
+     whitening body alone left a near-black panel (#080B0F) painted over the
+     white sheet the moment the reader enables "Background graphics" — under
+     the `color: #000` the rule below forces, that prints black on black.
+     Measured in print emulation while exercising the print path for the new
+     gear columns. Scoped by :has the same way body is, and for the same
+     reason: unscoped it would whiten every other page's main too. */
+  body:has(.armory-preview-print),
+  main:has(.armory-preview-print) {
     background: #fff !important;
   }
 

@@ -110,6 +110,33 @@ export interface FullArmoryGearRow {
   purchasePrice: number | null;
   currentValue: number | null;
   acquisitionDate: string;
+  /**
+   * Armor plates and filters have a rated life; a knife does not. Blank on a
+   * row with no date, exactly as acquisitionDate is.
+   */
+  expirationDate: string;
+  /**
+   * "none" | "fine" | "soon" | "expired", resolved server-side against the one
+   * `today` the route resolves per request — the same value the supply rows
+   * used, and the one the meta footnote names a timezone for.
+   */
+  expiryStatus: string;
+  /**
+   * The armor rating and the plate cut, EACH IN ITS OWN FIELD and neither
+   * folded into `category`. Phase 3 folded a firearm's platform into its NFA
+   * class and printed "Class: PISTOL" for an SBR; a plate's category is
+   * "Armor" and its rating is "NIJ III+", and a claims sheet needs both.
+   *
+   * Empty string on a row that has no rating — which is every non-armor row,
+   * because the write path clears both fields the moment a category stops
+   * being ARMOR. Deliberately NOT gated on the category here: a category this
+   * build does not recognise keeps whatever it stored (see
+   * normalizeGearArmorFields), and an export must not be the one place that
+   * drops it. Empty, never "—" and never the string "null": a dash is a
+   * renderer's choice and belongs in the renderer.
+   */
+  protectionLevel: string;
+  armorSize: string;
   storageLocation: string;
   receiptCount: number;
   documentCount: number;
@@ -160,6 +187,21 @@ export interface FullArmoryExportResponse {
     preset: ExportPreset;
     includesAllUploadedReceipts: boolean;
     exportOptions: FullArmoryExportOptions;
+    /**
+     * Which timezone decided every `expiryStatus` in this payload, and which
+     * calendar day it decided them on — taken from the ONE resolved expiry
+     * context the gear and supply rows were mapped with, never a second
+     * `new Date()` and never a second AppSettings read. Carried on the payload
+     * rather than recomputed by each renderer so the CSV, the PDF and the
+     * preview cannot disclose a different day than the rows they annotate.
+     *
+     * `expiryTimezoneFromSetting` is false when AppSettings.timezone is unset
+     * (or unusable) and the host's zone stood in — see resolveExpiryTimeZone.
+     */
+    expiryTimezone: string;
+    expiryTimezoneFromSetting: boolean;
+    /** YYYY-MM-DD, the resolved "today" in `expiryTimezone`. */
+    expiryEvaluatedOn: string;
   };
   summary: {
     totalItems: number;
@@ -194,6 +236,34 @@ export interface VisualEvidenceImage {
   linkedItemId: string;
   linkedItemName: string;
   uploadedAt?: string;
+}
+
+/**
+ * The one sentence that says which timezone decided "expired" in this export,
+ * and on which day.
+ *
+ * The export is the fourth expiryStatus call site and was the only one that
+ * disclosed nothing: a sheet handed to an adjuster said a plate was expired
+ * without saying whose calendar it was read against, which is a day-wide
+ * difference on either side of local midnight.
+ *
+ * Both values come off `payload.meta`, which the route fills from the single
+ * resolved expiry context its rows were mapped with. Every renderer — CSV,
+ * PDF, the print preview — calls this, so the wording cannot drift between
+ * them and none of them can reach for its own clock.
+ *
+ * "(server default)" is appended when AppSettings.timezone is unset, naming
+ * the host zone that stood in rather than pretending it was chosen.
+ */
+export function formatExpiryFootnote(meta: {
+  expiryTimezone: string;
+  expiryTimezoneFromSetting: boolean;
+  expiryEvaluatedOn: string;
+}): string {
+  const zone = meta.expiryTimezoneFromSetting
+    ? meta.expiryTimezone
+    : `${meta.expiryTimezone} (server default)`;
+  return `Expiry evaluated in ${zone} on ${meta.expiryEvaluatedOn}.`;
 }
 
 /**
