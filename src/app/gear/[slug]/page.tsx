@@ -13,9 +13,33 @@ import {
   sectionBySlug,
   supplyWhereForSection,
 } from "@/lib/categories";
+import {
+  DEFAULT_EXPIRY_WARNING_DAYS,
+  expiryStatus,
+  todayForExpiry,
+} from "@/lib/supply";
 
+// `today` is resolved once from AppSettings.timezone via todayForExpiry, the
+// same boundary getSupplySectionItems and the gear detail page use — never a
+// raw `new Date()`, which reads an item expiring "today" as already expired
+// every evening in a negative-UTC-offset timezone. GearClientPage is a
+// client component and must not compute this itself, so the status is
+// resolved here and handed down per item. Two sequential awaits, not
+// Promise.all — SQLite here runs with connection_limit=1.
 async function getSectionGear(where: object) {
-  return prisma.gear.findMany({ where, orderBy: { name: "asc" } });
+  const settings = await prisma.appSettings.findUnique({
+    where: { id: "singleton" },
+  });
+  const today = todayForExpiry(settings?.timezone ?? null, new Date());
+  const warningDays =
+    settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+
+  const gear = await prisma.gear.findMany({ where, orderBy: { name: "asc" } });
+
+  return gear.map((item) => ({
+    ...item,
+    expiry: expiryStatus(item.expirationDate, today, warningDays),
+  }));
 }
 
 async function getSectionAccessories(where: object | undefined) {

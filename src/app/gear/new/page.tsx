@@ -7,6 +7,7 @@ import {
   GEAR_CATEGORIES,
   GEAR_CATEGORY_LABELS,
   DEFAULT_GEAR_CATEGORY,
+  isArmorCategory,
 } from "@/lib/gear";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
@@ -22,6 +23,7 @@ export default function NewGearPage() {
   const [error, setError] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [category, setCategory] = useState<string>(DEFAULT_GEAR_CATEGORY);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -48,6 +50,9 @@ export default function NewGearPage() {
         ? Number(data.get("currentValue"))
         : null,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
+      expirationDate: (data.get("expirationDate") as string) || null,
+      protectionLevel: (data.get("protectionLevel") as string) || null,
+      armorSize: (data.get("armorSize") as string) || null,
       storageLocation: (data.get("storageLocation") as string) || null,
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
@@ -138,7 +143,8 @@ export default function NewGearPage() {
               <select
                 id="category"
                 name="category"
-                defaultValue={DEFAULT_GEAR_CATEGORY}
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
                 className={INPUT_CLASS}
               >
                 {GEAR_CATEGORIES.map((c) => (
@@ -148,6 +154,43 @@ export default function NewGearPage() {
                 ))}
               </select>
             </div>
+
+            {isArmorCategory(category) && (
+              <fieldset className="rounded-lg border border-vault-border p-4">
+                <legend className="px-2 text-sm font-medium text-vault-text">
+                  Armor
+                </legend>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="protectionLevel" className={LABEL_CLASS}>
+                      Protection Level
+                    </label>
+                    <input
+                      type="text"
+                      id="protectionLevel"
+                      name="protectionLevel"
+                      placeholder="IIIA, III, IV"
+                      className={INPUT_CLASS}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="armorSize" className={LABEL_CLASS}>
+                      Size / Cut
+                    </label>
+                    <input
+                      type="text"
+                      id="armorSize"
+                      name="armorSize"
+                      placeholder="M SAPI, Swimmer, 10x12"
+                      className={INPUT_CLASS}
+                    />
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-vault-text-muted">
+                  Free text — NIJ ratings and plate cuts vary by maker.
+                </p>
+              </fieldset>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
@@ -239,6 +282,21 @@ export default function NewGearPage() {
                   className={INPUT_CLASS}
                 />
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="expirationDate" className={LABEL_CLASS}>
+                Expiration Date
+              </label>
+              <input
+                type="date"
+                id="expirationDate"
+                name="expirationDate"
+                className={INPUT_CLASS}
+              />
+              <p className="mt-1 text-xs text-vault-text-muted">
+                Optional. Plates, filters and medical kits have a rated life.
+              </p>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
