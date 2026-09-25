@@ -49,17 +49,50 @@ function mergedSource(
   return merged;
 }
 
+/**
+ * THE LINE MUST BELONG TO THE KIT IN THE PATH.
+ *
+ * `findUnique({ where: { id: itemId } })` alone answered for ANY line in the
+ * database, whichever kit the `[id]` segment named. `DELETE
+ * /api/kits/<some-other-kit>/items/<itemId>` therefore deleted a line out of a
+ * different bag and returned `{ success: true }` — the caller was told it had
+ * emptied a slot in the kit it asked about, and the kit that actually lost a
+ * line was never mentioned. A stale kit id in a tab left open across a kit
+ * delete-and-recreate is enough to produce it.
+ *
+ * Not a privilege boundary — this is a single-user, self-hosted app — but the
+ * route path ASSERTS a parent-child relation, and a path that asserts a
+ * relation it does not check is a lie the client cannot detect. The sibling
+ * POST in `../route.ts` already resolves and 404s the parent kit, so this
+ * closes an inconsistency inside one feature rather than inventing a rule.
+ *
+ * 404, not 403: as far as this URL is concerned the line does not exist, which
+ * is the same answer a genuinely missing id gets, and the same shape. The two
+ * cases are deliberately INDISTINGUISHABLE to the caller — "no such line here"
+ * is the whole truth either way.
+ *
+ * A type guard, so one call both rejects the mismatch and narrows `existing`
+ * away from null for the PUT below; two conditions would let a later edit drop
+ * the kit check while TypeScript stayed happy.
+ */
+function belongsToKit<T extends { kitId: string }>(
+  existing: T | null,
+  kitId: string,
+): existing is T {
+  return existing !== null && existing.kitId === kitId;
+}
+
 // PUT /api/kits/[id]/items/[itemId] - Update a kit line
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; itemId: string }> },
 ) {
   try {
-    const { itemId } = await params;
+    const { id: kitId, itemId } = await params;
     const body = await request.json();
 
     const existing = await prisma.kitItem.findUnique({ where: { id: itemId } });
-    if (!existing) {
+    if (!belongsToKit(existing, kitId)) {
       return NextResponse.json({ error: "Kit item not found" }, { status: 404 });
     }
 
@@ -114,10 +147,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; itemId: string }> },
 ) {
   try {
-    const { itemId } = await params;
+    const { id: kitId, itemId } = await params;
 
     const existing = await prisma.kitItem.findUnique({ where: { id: itemId } });
-    if (!existing) {
+    if (!belongsToKit(existing, kitId)) {
       return NextResponse.json({ error: "Kit item not found" }, { status: 404 });
     }
 
