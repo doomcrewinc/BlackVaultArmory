@@ -509,7 +509,7 @@ export default function FullArmoryPreviewPage() {
           <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Kits</h2>
           <p className="text-xs text-vault-text-faint mt-1">
             A kit is a packing list, not a copy: its contents are listed in full in the sections above. No
-            prices or serials here — six columns that say what each bag is, where it is, and what it is short of.
+            prices or serials here — nine columns that say what each bag is, where it is, and what it is short of.
           </p>
           {/* MEASURED, not eyeballed. Phase 5's gear table ran 174px off a
               letter sheet and a reviewer logged it as merely "cramped", so
@@ -529,7 +529,7 @@ export default function FullArmoryPreviewPage() {
             <table className="w-full text-xs border-collapse" data-print-measure="kits">
               <thead>
                 <tr className="border-b border-vault-border text-vault-text-faint">
-                  {/* SIX columns, each one value. Phase 3 folded a firearm's
+                  {/* NINE columns, each one value. Phase 3 folded a firearm's
                       platform into its NFA class and printed "Class: PISTOL"
                       for an SBR; "Bugout Bag — 12 items (2 missing)" is the
                       same mistake in a nicer font. */}

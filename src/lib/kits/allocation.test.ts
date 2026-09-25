@@ -5,6 +5,7 @@ import {
   allocationSourceOf,
   isOverAllocated,
   kitExpiryRollup,
+  kitRollupHasExpiryBadges,
   missingQuantity,
 } from "./allocation";
 import { KIT_ITEM_SOURCES } from "@/lib/kit";
@@ -147,5 +148,32 @@ describe("kitExpiryRollup", () => {
       expired: 0,
       soon: 0,
     });
+  });
+});
+
+describe("kitRollupHasExpiryBadges", () => {
+  const rollup = (expired: number, soon: number, earliest: Date | null = null) => ({
+    earliest,
+    expired,
+    soon,
+  });
+
+  it("is true when either count is above zero", () => {
+    expect(kitRollupHasExpiryBadges(rollup(1, 0))).toBe(true);
+    expect(kitRollupHasExpiryBadges(rollup(0, 1))).toBe(true);
+    expect(kitRollupHasExpiryBadges(rollup(2, 3))).toBe(true);
+  });
+
+  it("is false for a kit with nothing expired or expiring", () => {
+    expect(kitRollupHasExpiryBadges(rollup(0, 0))).toBe(false);
+  });
+
+  it("is false for a kit that has a date but no verdict", () => {
+    // The case that mattered: a bag whose nearest expiry is years out renders
+    // `exp 2030-01-01` and no EXPIRED/SOON badge, so the notice explaining
+    // those badges must not appear. `earliest` is not part of the rule.
+    expect(
+      kitRollupHasExpiryBadges(rollup(0, 0, new Date(Date.UTC(2030, 0, 1)))),
+    ).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ import {
   kitSupplyUnitLabel,
   type KitSourceGroup,
   type KitSourceResult,
+  type KitSourceSearchResponse,
 } from "@/lib/kits/sourceDisplay";
 import { expiryStatus, resolveExpiryContext } from "@/lib/supply";
 
@@ -69,7 +70,9 @@ export async function GET(request: NextRequest) {
     const q = (request.nextUrl.searchParams.get("q") ?? "").trim();
 
     if (q.length < MIN_QUERY_LENGTH) {
-      return NextResponse.json({ groups: emptyGroups() });
+      return NextResponse.json<KitSourceSearchResponse>({
+        groups: emptyGroups(),
+      });
     }
 
     const settings = await prisma.appSettings.findUnique({
@@ -236,7 +239,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ groups });
+    // Typed with the contract the client decodes, so a renamed or dropped
+    // field is a compile error here rather than an undefined in the picker.
+    return NextResponse.json<KitSourceSearchResponse>({ groups });
   } catch (error) {
     console.error("GET /api/kits/item-sources error:", error);
     return NextResponse.json(

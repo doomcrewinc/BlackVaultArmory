@@ -621,31 +621,6 @@ function LowAmmoWidget({ items, totalStocks }: { items: AmmoStockItem[]; totalSt
 }
 
 /**
- * Low and expiring SUPPLIES, plus expiring GEAR.
- *
- * Gear is here rather than in a widget of its own because armour plates and
- * respirator filters expire exactly the way iodine tablets do, and a board
- * that showed only half the expiring inventory read "0 expired" while a plate
- * was out of date — worse than showing nothing. Supply rows and gear rows
- * carry their own badge so the two are never mistaken for each other.
- *
- * Name and file unchanged on purpose. This widget duplicates LowAmmoWidget's
- * whole shell — the heading row, the alert-count badge, the empty state, the
- * low-stock bar and its critical/warning colour rule — and that duplication is
- * noted, not fixed here; deduplicating the three dashboard widgets is its own
- * change, not a rider on this one. It is NOT a byte-for-byte copy, though this
- * comment used to say so: the rows already carried a badge, a name and a unit
- * label that LowAmmoWidget has no equivalent for, and the gear list below adds
- * more. Whoever does the dedup should expect a shared shell plus three
- * genuinely different row renderers, not three identical components.
- *
- * The widget id ("supply-alerts") is untouched: it is a key in every user's
- * saved layout in localStorage.
- *
- * Every status it renders was resolved server-side. It calls expiryStatus
- * nowhere, and must not: see GearAlertItem.
- */
-/**
  * The per-source breakdown under a tile's headline number.
  *
  * ONE ROW PER SOURCE, not one line with separators. The line it replaces read
@@ -691,6 +666,33 @@ function AlertSourceBreakdown({
   );
 }
 
+/**
+ * Low and expiring SUPPLIES, plus expiring GEAR and expiring KITS.
+ *
+ * Gear is here rather than in a widget of its own because armour plates and
+ * respirator filters expire exactly the way iodine tablets do, and a board
+ * that showed only half the expiring inventory read "0 expired" while a plate
+ * was out of date — worse than showing nothing. Kits joined them for the same
+ * reason: a bugout bag's expiring contents are inventory too. All THREE row
+ * kinds — supply, gear and kit — carry their own badge, so no row is ever
+ * mistaken for a row of another kind.
+ *
+ * Name and file unchanged on purpose. This widget duplicates LowAmmoWidget's
+ * whole shell — the heading row, the alert-count badge, the empty state, the
+ * low-stock bar and its critical/warning colour rule — and that duplication is
+ * noted, not fixed here; deduplicating the three dashboard widgets is its own
+ * change, not a rider on this one. It is NOT a byte-for-byte copy, though this
+ * comment used to say so: the rows already carried a badge, a name and a unit
+ * label that LowAmmoWidget has no equivalent for, and the gear list below adds
+ * more. Whoever does the dedup should expect a shared shell plus three
+ * genuinely different row renderers, not three identical components.
+ *
+ * The widget id ("supply-alerts") is untouched: it is a key in every user's
+ * saved layout in localStorage.
+ *
+ * Every status it renders was resolved server-side. It calls expiryStatus
+ * nowhere, and must not: see GearAlertItem.
+ */
 function SupplyAlertsWidget({
   items,
   expiredCount,

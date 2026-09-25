@@ -16,7 +16,10 @@ import {
   resolveKitItemSource,
   type KitItemSourceReason,
 } from "@/lib/kits/kitItemSource";
-import type { KitSourceGroup } from "@/lib/kits/sourceDisplay";
+import type {
+  KitSourceGroup,
+  KitSourceSearchResponse,
+} from "@/lib/kits/sourceDisplay";
 
 const INPUT_CLASS =
   "w-full rounded-md border border-vault-border bg-vault-bg px-3 py-2 text-sm text-vault-text placeholder-vault-text-faint transition-colors focus:border-[#00C2FF] focus:outline-none";
@@ -129,7 +132,9 @@ export function AddKitItem({ kitId }: { kitId: string }) {
           setGroups([]);
           return;
         }
-        const json = await res.json();
+        // Decoded as the contract the route now declares, so the two ends of
+        // /api/kits/item-sources are typed from one declaration.
+        const json = (await res.json()) as Partial<KitSourceSearchResponse>;
         setGroups(json.groups ?? []);
       } catch {
         setSearchError("Network error while searching.");

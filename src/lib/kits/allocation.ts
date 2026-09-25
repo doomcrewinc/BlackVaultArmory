@@ -137,6 +137,22 @@ export interface KitExpiryRollup {
 }
 
 /**
+ * Whether a kit's rollup renders any expiry badge. This is the EXACT condition
+ * `ExpiryBadges` gates its two spans on (`expired > 0` / `soon > 0`), spelled
+ * once so the amber timezone notice — which exists only to explain those
+ * badges' verdicts — cannot appear on a page that renders none of them. The
+ * kits list used to gate that notice on `items.length > 0`, which showed it
+ * above a grid of accessory-and-firearm bags carrying no date at all.
+ *
+ * `earliest` is deliberately NOT part of it: a kit whose nearest expiry is
+ * still "fine" reports the date but renders no verdict, and the notice is
+ * about verdicts.
+ */
+export function kitRollupHasExpiryBadges(rollup: KitExpiryRollup): boolean {
+  return rollup.expired > 0 || rollup.soon > 0;
+}
+
+/**
  * Rolls a kit's contents up into one earliest-expiry date and expired/soon
  * counts. Calls `expiryStatus` from `@/lib/supply` rather than re-deriving
  * "expired" or "soon" — two implementations of that question disagreeing is

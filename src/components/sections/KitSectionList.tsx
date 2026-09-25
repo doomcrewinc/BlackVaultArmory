@@ -5,7 +5,10 @@ import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { formatDateOnly } from "@/lib/date";
 import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
-import type { KitExpiryRollup } from "@/lib/kits/allocation";
+import {
+  kitRollupHasExpiryBadges,
+  type KitExpiryRollup,
+} from "@/lib/kits/allocation";
 
 /**
  * The Kits block of the Preparedness group: one card per kit, showing what is
@@ -98,6 +101,14 @@ export function KitSectionList({
   subheading,
   embedded = false,
 }: Props) {
+  // The SAME rule KitContents uses, via the shared predicate rather than a
+  // second spelling: the notice appears only where a verdict badge does. Not
+  // `items.length > 0` — that put the amber box above a grid of bags holding
+  // nothing dated, which is the gate the comment below has always described.
+  const hasExpiryBadges = items.some((kit) =>
+    kitRollupHasExpiryBadges(kit.expiry),
+  );
+
   const addAction = (
     <Link
       href="/kits/new"
@@ -127,7 +138,7 @@ export function KitSectionList({
             embedded — SectionView renders the one notice for the whole page
             in that case, and two copies on one page is the failure that
             guard exists to prevent. */}
-        {!embedded && items.length > 0 && (
+        {!embedded && hasExpiryBadges && (
           <SupplyTimezoneNotice
             timezoneConfigured={timezoneConfigured}
             className="mb-4"

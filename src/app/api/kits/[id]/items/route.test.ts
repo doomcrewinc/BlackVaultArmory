@@ -17,6 +17,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { POST } from "./route";
+import { KIT_ITEM_SOURCE_LABELS } from "@/lib/kit";
 
 const params = Promise.resolve({ id: "k1" });
 
@@ -131,5 +132,50 @@ describe("POST /api/kits/[id]/items", () => {
       { params } as never,
     );
     expect(mocks.create.mock.calls[0][0].data.targetQuantity).toBe(10);
+  });
+
+  // A STALE SOURCE ID IS A BAD REQUEST. Before this, the FK constraint fell
+  // into the generic catch and answered 500 "Failed to add kit item", which
+  // reads as an outage for what is a tab left open across a delete.
+  it("400s a stale foreign key rather than 500ing, and names the field", async () => {
+    mocks.create.mockRejectedValue(
+      Object.assign(new Error("FK constraint failed"), { code: "P2003" }),
+    );
+    const response = await POST(postRequest({ gearId: "gone" }) as never, {
+      params,
+    } as never);
+    expect(response.status).toBe(400);
+    const payload = await response.json();
+    // The message must name WHICH source, or the user cannot tell which of the
+    // five pickers to re-open.
+    expect(payload.error).toContain("Gear");
+    expect(payload.fields).toEqual(["gearId"]);
+  });
+
+  it("names the right source kind for a stale key on another table", async () => {
+    // Derived from the route's own label map, so a renamed label cannot leave
+    // this test asserting a string the route no longer produces.
+    mocks.create.mockRejectedValue(
+      Object.assign(new Error("FK constraint failed"), { code: "P2003" }),
+    );
+    const response = await POST(postRequest({ firearmId: "gone" }) as never, {
+      params,
+    } as never);
+    expect(response.status).toBe(400);
+    const payload = await response.json();
+    expect(payload.error).toContain(KIT_ITEM_SOURCE_LABELS.firearmId);
+    expect(payload.fields).toEqual(["firearmId"]);
+  });
+
+  it("still 500s a failure that is not a foreign-key violation", async () => {
+    // The guard must translate ONE code, not swallow every write failure into
+    // a 400 — a disk-full or a locked database is genuinely a server fault.
+    mocks.create.mockRejectedValue(
+      Object.assign(new Error("database is locked"), { code: "P2024" }),
+    );
+    const response = await POST(postRequest({ gearId: "g1" }) as never, {
+      params,
+    } as never);
+    expect(response.status).toBe(500);
   });
 });

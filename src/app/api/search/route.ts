@@ -206,11 +206,19 @@ export async function GET(request: NextRequest) {
   });
 
   // Kits were NOT searchable before this: the global search covered five
-  // sections and a kit could only be found by browsing to /kits. Name, notes
-  // and category, all through containsInsensitive so the match is
-  // case-insensitive on Postgres as well as SQLite — a bare Prisma `contains`
-  // is case-SENSITIVE on Postgres, which is the bug that helper exists to
-  // prevent from coming back.
+  // sections and a kit could only be found by browsing to /kits. Name,
+  // location, notes and category, all through containsInsensitive so the match
+  // is case-insensitive on Postgres as well as SQLite — a bare Prisma
+  // `contains` is case-SENSITIVE on Postgres, which is the bug that helper
+  // exists to prevent from coming back.
+  //
+  // LOCATION is searched because it is PRINTED: every kit subtitle below reads
+  // "Vehicle · F-250 rear seat", so a user who can see "F-250 rear seat" in a
+  // result typed it and found nothing. Gear and supplies both search their
+  // second identity field (`manufacturer` / `brand`), and for a kit — whose
+  // other columns are a name and an enum — where the bag lives IS its second
+  // identity. Searching a field the results display is the rule; the gap was
+  // the exception.
   //
   // CATEGORY is matched on the same TWO clauses gear and supplies use, and the
   // pairing is not redundant. The column clause finds a category stored
@@ -234,6 +242,7 @@ export async function GET(request: NextRequest) {
     where: {
       OR: [
         { name: containsInsensitive(q) },
+        { location: containsInsensitive(q) },
         { notes: containsInsensitive(q) },
         { category: containsInsensitive(q) },
         // Only when something matched: an empty `in` would match no row, which

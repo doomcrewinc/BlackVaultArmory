@@ -362,7 +362,7 @@ describe("GET /api/search", () => {
     ]);
   });
 
-  it("searches kit name, notes and category through containsInsensitive", async () => {
+  it("searches kit name, location, notes and category through containsInsensitive", async () => {
     await GET(request("bug"));
 
     expect(mocks.findKits).toHaveBeenCalledTimes(1);
@@ -371,7 +371,7 @@ describe("GET /api/search", () => {
     // spied-on real helper, so this is the shape it actually produces on this
     // provider, not a re-spelling of it.
     const clause = vi.mocked(containsInsensitive).getMockImplementation()!("bug");
-    // Three column clauses plus the label clause. Pinned before the assertion
+    // FOUR column clauses plus the label clause. Pinned before the assertion
     // rather than written out: this expectation was ORIGINALLY `[]` here, on
     // the assumption that "bug" matched no kit label — it is a substring of
     // "Bugout", and the pin is what caught that rather than an assertion that
@@ -380,14 +380,51 @@ describe("GET /api/search", () => {
       KIT_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
     );
     expect(matching).toEqual(["BUGOUT"]);
+    // `location` sits second, beside `name`: it is the kit's second identity
+    // field, the way `manufacturer` is gear's and `brand` is a supply's.
     expect(where.OR).toEqual([
       { name: clause },
+      { location: clause },
       { notes: clause },
       { category: clause },
       { category: { in: matching } },
     ]);
     // Never a bare Prisma `contains`, which is case-SENSITIVE on Postgres.
     expect(containsInsensitive).toHaveBeenCalledWith("bug");
+  });
+
+  it("finds a kit by its location alone, which the subtitle already printed", async () => {
+    // The gap this closes: "F-250 rear seat" is rendered into every kit
+    // subtitle, so a user reads it in one result and types it into the box —
+    // and before this clause got nothing back. A field the results DISPLAY
+    // must be a field the query MATCHES.
+    //
+    // Pin the negative first, or this test would pass on the name clause
+    // alone and prove nothing: neither the name, the notes nor any category
+    // label contains "f-250".
+    const q = "f-250";
+    expect("Truck Bag".toLowerCase()).not.toContain(q);
+    expect(
+      KIT_CATEGORIES.filter((c) =>
+        KIT_CATEGORY_LABELS[c].toLowerCase().includes(q),
+      ),
+    ).toEqual([]);
+
+    mocks.findKits.mockResolvedValue([
+      {
+        id: "kit-truck",
+        name: "Truck Bag",
+        category: "VEHICLE",
+        location: "F-250 rear seat",
+      },
+    ]);
+
+    const json = await (await GET(request(q))).json();
+
+    const where = mocks.findKits.mock.calls[0][0].where;
+    const clause = vi.mocked(containsInsensitive).getMockImplementation()!(q);
+    expect(where.OR).toContainEqual({ location: clause });
+    expect(json.kits[0].subtitle).toBe("Vehicle · F-250 rear seat");
   });
 
   it("finds a MEDICAL kit when searching for medical, though its name and notes say no such thing", async () => {
@@ -458,9 +495,10 @@ describe("GET /api/search", () => {
     await GET(request("zzzz"));
 
     const where = mocks.findKits.mock.calls[0][0].where;
-    // Three clauses, not four: no trailing `{ category: { in: [] } }`.
+    // FOUR column clauses, not five: no trailing `{ category: { in: [] } }`.
     expect(where.OR).toEqual([
       { name: containsInsensitive("zzzz") },
+      { location: containsInsensitive("zzzz") },
       { notes: containsInsensitive("zzzz") },
       { category: containsInsensitive("zzzz") },
     ]);
