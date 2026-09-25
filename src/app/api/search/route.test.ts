@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   findBuilds: vi.fn(),
   findGear: vi.fn(),
   findSupplies: vi.fn(),
+  findKits: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -18,6 +19,7 @@ vi.mock("@/lib/prisma", () => ({
     build: { findMany: mocks.findBuilds },
     gear: { findMany: mocks.findGear },
     supply: { findMany: mocks.findSupplies },
+    kit: { findMany: mocks.findKits },
   },
 }));
 
@@ -33,6 +35,8 @@ import { GET } from "./route";
 import { containsInsensitive } from "@/lib/db/text-search";
 import { GEAR_CATEGORIES, GEAR_CATEGORY_LABELS } from "@/lib/gear";
 import { gearSectionForItem, sectionHref } from "@/lib/categories";
+import { KIT_CATEGORIES, KIT_CATEGORY_LABELS } from "@/lib/kit";
+import { existsSync } from "node:fs";
 
 function request(query: string): NextRequest {
   return new NextRequest(
@@ -62,6 +66,14 @@ describe("GET /api/search", () => {
         name: "Bug Out Bandages",
         brand: "MedCo",
         category: "MEDICAL",
+      },
+    ]);
+    mocks.findKits.mockResolvedValue([
+      {
+        id: "kit-1",
+        name: "Bugout Bag",
+        category: "BUGOUT",
+        location: "Hall closet",
       },
     ]);
   });
@@ -127,6 +139,7 @@ describe("GET /api/search", () => {
       builds: [],
       gear: [],
       supplies: [],
+      kits: [],
     });
     expect(mocks.findGear).not.toHaveBeenCalled();
   });
@@ -327,6 +340,100 @@ describe("GET /api/search", () => {
     expect(tokenWhere.OR).toContainEqual({
       category: containsInsensitive("medical_kit"),
     });
+  });
+
+  // --------------------------------------------------------------- kits ----
+
+  it("returns a kits key alongside the existing sections", async () => {
+    // Kits were NOT searchable before this task: two earlier briefs claimed
+    // they were and they were not, so this is the test that pins it.
+    const response = await GET(request("bug"));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json).toHaveProperty("kits");
+    expect(json.kits).toEqual([
+      {
+        id: "kit-1",
+        name: "Bugout Bag",
+        subtitle: "Bugout · Hall closet",
+        url: "/kits/kit-1",
+      },
+    ]);
+  });
+
+  it("searches kit name and notes through containsInsensitive", async () => {
+    await GET(request("bug"));
+
+    expect(mocks.findKits).toHaveBeenCalledTimes(1);
+    const where = mocks.findKits.mock.calls[0][0].where;
+    // Pin the derivation before asserting with it: containsInsensitive is the
+    // spied-on real helper, so this is the shape it actually produces on this
+    // provider, not a re-spelling of it.
+    const clause = vi.mocked(containsInsensitive).getMockImplementation()!("bug");
+    expect(where.OR).toEqual([{ name: clause }, { notes: clause }]);
+    // Never a bare Prisma `contains`, which is case-SENSITIVE on Postgres.
+    expect(containsInsensitive).toHaveBeenCalledWith("bug");
+  });
+
+  it("selects only the kit's own columns — nothing about its contents", async () => {
+    // A kit's lines point at Firearm, Accessory and Gear rows, all three of
+    // which carry a serialNumber. An `include` here would pull them in on a
+    // path nothing in this file strips, which is how the exports route leaked
+    // a serial four separate times. The explicit narrow select is why that
+    // leak never reached search; this keeps the property.
+    await GET(request("bug"));
+
+    const args = mocks.findKits.mock.calls[0][0];
+    expect(args.select).toEqual({
+      id: true,
+      name: true,
+      category: true,
+      location: true,
+    });
+    expect(args).not.toHaveProperty("include");
+    expect(args.take).toBe(5);
+  });
+
+  it("falls back to the category label of the kit, and to the token when unknown", async () => {
+    for (const category of KIT_CATEGORIES) {
+      mocks.findKits.mockResolvedValue([
+        { id: "fixed-kit-id", name: "A kit", category, location: null },
+      ]);
+      const json = await (await GET(request("kit"))).json();
+      // No location, so the label stands alone rather than leaving a blank.
+      expect(json.kits[0].subtitle).toBe(KIT_CATEGORY_LABELS[category]);
+    }
+
+    // Restore inserts kit rows unvalidated, so a category from a later build
+    // can be stored; it must show as itself.
+    mocks.findKits.mockResolvedValue([
+      { id: "fixed-kit-id", name: "A kit", category: "SCUBA", location: null },
+    ]);
+    const json = await (await GET(request("kit"))).json();
+    expect(json.kits[0].subtitle).toBe("SCUBA");
+  });
+
+  it("points a kit result at /kits/<id>, and that route exists", async () => {
+    mocks.findKits.mockResolvedValue([
+      { id: "fixed-kit-id", name: "A kit", category: "RANGE", location: null },
+    ]);
+
+    const json = await (await GET(request("kit"))).json();
+    expect(json.kits[0].url).toBe("/kits/fixed-kit-id");
+
+    // The url is only useful if something serves it. `/kits/<id>` is a dynamic
+    // App Router segment, so the proof that it resolves is the page file — a
+    // literal asserted against a literal would pass just as happily against a
+    // dead link, which is how two earlier surfaces in this epic shipped one.
+    expect(existsSync("src/app/kits/[id]/page.tsx")).toBe(true);
+  });
+
+  it("returns an empty kits section for a short query, without querying", async () => {
+    const json = await (await GET(request("b"))).json();
+
+    expect(json.kits).toEqual([]);
+    expect(mocks.findKits).not.toHaveBeenCalled();
   });
 
   it("keeps the gear item URL at /gear/item/<id> for a category whose section moved under /prep", async () => {

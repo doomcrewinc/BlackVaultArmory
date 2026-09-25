@@ -147,6 +147,89 @@ describe("POST /api/backup/restore", () => {
     expect(json.counts.dateNormalizationAudits).toBe(0);
   });
 
+  // Task 1 deliberately kept Kit and KitItem out of V1_0_MODEL_NAMES, so a
+  // backup file written before the kits branch existed carries neither key.
+  // The spec's rule for that is explicit — "a missing key is an empty table,
+  // not a failure" — and it matters more here than for gear: a restore that
+  // 400'd on every backup a user already has on disk would make the feature
+  // land as data loss. Asserted as its own test rather than leaning on the
+  // v1.0 case above, because that payload omits five keys at once and would
+  // still pass if `kits` alone became required.
+  it("accepts a backup written before kits existed, with neither kits nor kitItems", async () => {
+    const {
+      kits: _kits,
+      kitItems: _kitItems,
+      ...payload
+    } = v11Payload() as Record<string, unknown>;
+    void _kits;
+    void _kitItems;
+
+    const response = await POST(restoreRequest(payload));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    // Empty tables, not a failure and not a skipped wipe: both delegates were
+    // still cleared, and neither was written to.
+    expect(created("kit")).toBeUndefined();
+    expect(created("kitItem")).toBeUndefined();
+    expect(json.counts.kits).toBe(0);
+    expect(json.counts.kitItems).toBe(0);
+    expect(
+      mocks.calls.filter(
+        (c) => c.op === "deleteMany" && (c.delegate === "kit" || c.delegate === "kitItem"),
+      ),
+    ).toHaveLength(2);
+    // And the rest of the file still restored, so this is not a vacuous pass
+    // on a payload the route rejected.
+    expect(created("firearm")).toMatchObject([{ id: "firearms-1" }]);
+    expect(created("gear")).toEqual([{ id: "gear-1" }]);
+  });
+
+  it("restores kits and their lines from a payload that carries them", async () => {
+    const response = await POST(
+      restoreRequest({
+        ...v11Payload(),
+        kits: [{ id: "kit-1", name: "Bugout Bag", category: "BUGOUT" }],
+        kitItems: [
+          { id: "kit-item-1", kitId: "kit-1", gearId: "gear-1", quantity: 1 },
+        ],
+      }),
+    );
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(created("kit")).toEqual([
+      { id: "kit-1", name: "Bugout Bag", category: "BUGOUT" },
+    ]);
+    expect(created("kitItem")).toEqual([
+      { id: "kit-item-1", kitId: "kit-1", gearId: "gear-1", quantity: 1 },
+    ]);
+    expect(json.counts.kits).toBe(1);
+    expect(json.counts.kitItems).toBe(1);
+  });
+
+  // KitItem references five inventory models plus Kit, so it is last in
+  // BACKUP_MODELS. Pinned here at the unit level; the executed proof is the
+  // round trip in route.kits.roundtrip.test.ts, which fails on a foreign key
+  // if this ordering is wrong.
+  it("inserts every model a KitItem references before KitItem itself", () => {
+    const order = BACKUP_MODELS.map((m) => m.delegate);
+    for (const referenced of [
+      "kit",
+      "gear",
+      "supply",
+      "accessory",
+      "ammoStock",
+      "firearm",
+    ]) {
+      expect(order.indexOf(referenced), referenced).toBeGreaterThan(-1);
+      expect(order.indexOf(referenced), referenced).toBeLessThan(
+        order.indexOf("kitItem"),
+      );
+    }
+  });
+
   // The clearing rules have to hold however a write arrives, and restore is a
   // write path: it hands uploaded JSON to createMany with no validation beyond
   // "is it an array". A hand-edited or foreign backup must not be able to

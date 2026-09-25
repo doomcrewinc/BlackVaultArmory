@@ -6,6 +6,8 @@ import {
   type ExpiryStatus,
 } from "@/lib/supply";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
+import { kitExpiryRollup, type KitExpiryLine } from "@/lib/kits/allocation";
 
 export interface DashboardStatsResponse {
   totals: {
@@ -92,6 +94,46 @@ export interface DashboardStatsResponse {
        */
       expiry: Extract<ExpiryStatus, "expired" | "soon">;
     }>;
+    expiredCount: number;
+    expiringSoonCount: number;
+  };
+  /**
+   * Kits whose CONTENTS are expiring, alongside the expiring supplies and gear
+   * above. A packed bag is exactly what this widget is for: a bugout bag is
+   * the thing a user grabs without checking, so a water pouch that went out of
+   * date inside one is less likely to be noticed than the same pouch on a
+   * shelf. The supply and gear lists above do carry that pouch as its own row
+   * — this says which BAG it is in, which is the part those rows cannot.
+   *
+   * Only the kits that need attention: at least one line `expired` or `soon`.
+   * A kit whose contents are all fine, or which holds nothing dated at all, is
+   * not an alert and is not carried here.
+   */
+  kits: {
+    expiringItems: Array<{
+      id: string;
+      name: string;
+      /** The human label ("Bugout"), as every other surface shows it. */
+      category: string;
+      /** The earliest-expiring thing IN the kit, never the kit itself. */
+      expirationDate: Date | null;
+      /**
+       * The kit's worst verdict: `expired` if any line already is, else
+       * `soon`. Resolved SERVER-SIDE from the same `today` the supply and gear
+       * figures used — the widget is a client component with no access to
+       * AppSettings.timezone and must never recompute it.
+       */
+      expiry: Extract<ExpiryStatus, "expired" | "soon">;
+      /** How many of the kit's lines are in that state. */
+      lineCount: number;
+    }>;
+    /**
+     * Counts KITS, not lines: one per entry in `expiringItems`, bucketed by
+     * that kit's worst verdict. A bag holding four expired pouches is one
+     * thing to go and deal with, and the four pouches are already counted
+     * individually in `supplies` above — counting them twice here would make
+     * the widget's headline larger than the number of problems.
+     */
     expiredCount: number;
     expiringSoonCount: number;
   };
@@ -224,6 +266,37 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
     orderBy: { expirationDate: "asc" },
   });
 
+  // Sequential, after the gear read — SQLite here runs connection_limit=1.
+  // Narrowed in SQL to the kits that can possibly be an alert: a kit holding
+  // only firearms and optics has nothing that expires, and an install with
+  // twenty range bags should not ship all of them to Node to find that out.
+  // ONE query with the lines included rather than one per kit, for the same
+  // reason getKitDetail gives.
+  const kitsWithDatedContents = await prisma.kit.findMany({
+    where: {
+      items: {
+        some: {
+          OR: [
+            { gear: { expirationDate: { not: null } } },
+            { supply: { expirationDate: { not: null } } },
+          ],
+        },
+      },
+    },
+    select: {
+      id: true,
+      name: true,
+      category: true,
+      items: {
+        select: {
+          gear: { select: { expirationDate: true } },
+          supply: { select: { expirationDate: true } },
+        },
+      },
+    },
+    orderBy: { name: "asc" },
+  });
+
   const ammoByCaliber: Record<
     string,
     { caliber: string; totalRounds: number; stockCount: number; lowStock: boolean }
@@ -308,6 +381,43 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
     });
   }
 
+  const expiringKits: DashboardStatsResponse["kits"]["expiringItems"] = [];
+  let expiredKitCount = 0;
+  let expiringSoonKitCount = 0;
+  for (const kit of kitsWithDatedContents) {
+    const lines: KitExpiryLine[] = [];
+    for (const item of kit.items) {
+      // A KitItem sets at most one source, so at most one of these is
+      // non-null; `??` picks whichever it is.
+      const expirationDate =
+        item.gear?.expirationDate ?? item.supply?.expirationDate ?? null;
+      if (expirationDate) lines.push({ expirationDate });
+    }
+    // The SAME rollup the kit detail page, the section cards and the export
+    // use, against the SAME `today` the supply and gear figures above used.
+    // One implementation of "expired", so the widget cannot disagree with the
+    // page it links to.
+    const rollup = kitExpiryRollup(lines, today, warningDays);
+    if (rollup.expired === 0 && rollup.soon === 0) continue;
+
+    // Worst verdict wins, and the count is that verdict's lines. A bag with
+    // one expired pouch and three expiring ones reads "Expired", because that
+    // is the thing to act on.
+    const expiry = rollup.expired > 0 ? "expired" : "soon";
+    if (expiry === "expired") expiredKitCount += 1;
+    else expiringSoonKitCount += 1;
+
+    expiringKits.push({
+      id: kit.id,
+      name: kit.name,
+      category:
+        KIT_CATEGORY_LABELS[kit.category as KitCategory] ?? kit.category,
+      expirationDate: rollup.earliest,
+      expiry,
+      lineCount: expiry === "expired" ? rollup.expired : rollup.soon,
+    });
+  }
+
   return {
     totals: {
       firearms: firearmCount,
@@ -366,6 +476,11 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       expiringItems: expiringGear,
       expiredCount: expiredGearCount,
       expiringSoonCount: expiringSoonGearCount,
+    },
+    kits: {
+      expiringItems: expiringKits,
+      expiredCount: expiredKitCount,
+      expiringSoonCount: expiringSoonKitCount,
     },
     recent: {
       firearms: recentFirearms,

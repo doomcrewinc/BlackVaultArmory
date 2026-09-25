@@ -11,6 +11,7 @@ import {
   SUPPLY_CATEGORY_LABELS,
   type SupplyCategory,
 } from "@/lib/supply";
+import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
 
 function gearCategoryLabel(category: string): string {
   return GEAR_CATEGORY_LABELS[category as GearCategory] ?? category;
@@ -67,12 +68,29 @@ function supplyCategoriesMatchingLabel(q: string): SupplyCategory[] {
   );
 }
 
+/**
+ * Falls back to the stored token for a category this build does not know, the
+ * same way the gear and supply label helpers above do — restore inserts kit
+ * rows unvalidated, so a category from a later build can be stored.
+ */
+function kitCategoryLabel(category: string): string {
+  return KIT_CATEGORY_LABELS[category as KitCategory] ?? category;
+}
+
 export async function GET(request: NextRequest) {
   const rawQ = request.nextUrl.searchParams.get("q") ?? "";
   // Not lowercased: containsInsensitive handles case on both providers.
   const q = rawQ.trim();
 
-  const empty = { firearms: [], accessories: [], ammo: [], builds: [], gear: [], supplies: [] };
+  const empty = {
+    firearms: [],
+    accessories: [],
+    ammo: [],
+    builds: [],
+    gear: [],
+    supplies: [],
+    kits: [],
+  };
 
   if (q.length < 2) {
     return NextResponse.json(empty);
@@ -163,6 +181,31 @@ export async function GET(request: NextRequest) {
     select: { id: true, name: true, brand: true, category: true },
   });
 
+  // Kits were NOT searchable before this: the global search covered five
+  // sections and a kit could only be found by browsing to /kits. Name and
+  // notes, both through containsInsensitive so the match is case-insensitive
+  // on Postgres as well as SQLite — a bare Prisma `contains` is
+  // case-SENSITIVE on Postgres, which is the bug that helper exists to
+  // prevent from coming back.
+  //
+  // The `select` is EXPLICIT and narrow, like every other query in this file.
+  // That is not decoration: it is the reason the serial-number leak that hit
+  // the exports route four separate times never reached search. A kit's lines
+  // point at Firearm, Accessory and Gear rows that all carry a serial, and an
+  // `include` here would pull them in on a path no strip in this file visits.
+  // Nothing about a kit's CONTENTS is selected at all — the result is a link
+  // to the kit, and the kit page loads its own contents.
+  const kits = await prisma.kit.findMany({
+    where: {
+      OR: [
+        { name: containsInsensitive(q) },
+        { notes: containsInsensitive(q) },
+      ],
+    },
+    take: 5,
+    select: { id: true, name: true, category: true, location: true },
+  });
+
   return NextResponse.json({
     firearms: firearms.map((f) => ({
       id: f.id,
@@ -203,6 +246,17 @@ export async function GET(request: NextRequest) {
         ? `${s.brand} · ${supplyCategoryLabel(s.category)}`
         : supplyCategoryLabel(s.category),
       url: `/supplies/item/${s.id}`,
+    })),
+    kits: kits.map((k) => ({
+      id: k.id,
+      name: k.name,
+      // The category label plus where the bag lives, which is the one thing a
+      // reader needs to tell two range bags apart. Location alone would leave
+      // an unlocated kit with a blank subtitle, so the label always leads.
+      subtitle: k.location
+        ? `${kitCategoryLabel(k.category)} · ${k.location}`
+        : kitCategoryLabel(k.category),
+      url: `/kits/${k.id}`,
     })),
   });
 }

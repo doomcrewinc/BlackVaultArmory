@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   findAppSettings: vi.fn(),
   findSupplies: vi.fn(),
   findGear: vi.fn(),
+  findKits: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -12,6 +13,7 @@ vi.mock("@/lib/prisma", () => ({
     appSettings: { findUnique: mocks.findAppSettings },
     supply: { findMany: mocks.findSupplies },
     gear: { findMany: mocks.findGear },
+    kit: { findMany: mocks.findKits },
     firearm: {
       count: vi.fn().mockResolvedValue(0),
       findMany: vi.fn().mockResolvedValue([]),
@@ -48,6 +50,24 @@ function supply(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** One KitItem line, as far as the dashboard rollup reads it. */
+function kitLine(expirationDate: Date | null, source: "gear" | "supply" = "supply") {
+  return {
+    gear: source === "gear" ? { expirationDate } : null,
+    supply: source === "supply" ? { expirationDate } : null,
+  };
+}
+
+function kit(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "kit-1",
+    name: "Bugout Bag",
+    category: "BUGOUT",
+    items: [],
+    ...overrides,
+  };
+}
+
 function gear(overrides: Record<string, unknown> = {}) {
   return {
     id: "gear-1",
@@ -62,6 +82,7 @@ beforeEach(() => {
   mocks.findAppSettings.mockReset().mockResolvedValue(null);
   mocks.findSupplies.mockReset().mockResolvedValue([]);
   mocks.findGear.mockReset().mockResolvedValue([]);
+  mocks.findKits.mockReset().mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -270,5 +291,183 @@ describe("getDashboardStats — expiring gear", () => {
   it("reads AppSettings exactly once for both stores", async () => {
     await getDashboardStats();
     expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("getDashboardStats — expiring kit contents", () => {
+  it("returns the kits whose contents are expiring, and neither the fine nor the dateless", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "UTC",
+      expiryWarningDays: 10,
+    });
+    mocks.findKits.mockResolvedValue([
+      kit({
+        id: "kit-expired",
+        name: "Vehicle Kit",
+        category: "VEHICLE",
+        items: [
+          kitLine(new Date("2026-05-01T00:00:00.000Z")),
+          kitLine(new Date("2026-06-18T00:00:00.000Z")),
+        ],
+      }),
+      kit({
+        id: "kit-soon",
+        name: "Range Bag",
+        category: "RANGE",
+        items: [kitLine(new Date("2026-06-20T00:00:00.000Z"), "gear")],
+      }),
+      kit({
+        id: "kit-fine",
+        name: "Home Kit",
+        category: "HOME",
+        items: [kitLine(new Date("2027-06-01T00:00:00.000Z"))],
+      }),
+      kit({
+        // A kit whose only line is a firearm, an accessory, an ammo lot or a
+        // bare label has no expiry at all. The SQL `where` keeps most of these
+        // out; one that slips through (a kit holding both a dated pouch and an
+        // undated optic) must still be judged on its dated lines only.
+        id: "kit-undated",
+        name: "Optics Case",
+        items: [kitLine(null), kitLine(null, "gear")],
+      }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.kits.expiredCount).toBe(1);
+    expect(stats.kits.expiringSoonCount).toBe(1);
+    expect(stats.kits.expiringItems.map((item) => [item.id, item.expiry])).toEqual([
+      ["kit-expired", "expired"],
+      ["kit-soon", "soon"],
+    ]);
+    // The human label, as every other kit surface shows it — not the token.
+    expect(stats.kits.expiringItems[0].category).toBe("Vehicle");
+    expect(stats.kits.expiringItems[1].category).toBe("Range");
+    // The EARLIEST dated line, not the one that decided the verdict.
+    expect(stats.kits.expiringItems[0].expirationDate).toEqual(
+      new Date("2026-05-01T00:00:00.000Z"),
+    );
+    // Worst verdict wins and the count is that verdict's lines: the vehicle
+    // kit has one expired pouch and one expiring one, and reads "1 expired".
+    expect(stats.kits.expiringItems[0].lineCount).toBe(1);
+  });
+
+  it("counts KITS, not the lines inside them", async () => {
+    // Four expired pouches in one bag is ONE thing to go and deal with, and
+    // the four pouches are already counted in stats.supplies. Counting them
+    // twice would make the widget headline larger than the number of problems.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+    mocks.findKits.mockResolvedValue([
+      kit({
+        items: [
+          kitLine(new Date("2026-05-01T00:00:00.000Z")),
+          kitLine(new Date("2026-05-02T00:00:00.000Z")),
+          kitLine(new Date("2026-05-03T00:00:00.000Z")),
+          kitLine(new Date("2026-05-04T00:00:00.000Z")),
+        ],
+      }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.kits.expiredCount).toBe(1);
+    expect(stats.kits.expiringItems).toHaveLength(1);
+    // And the line count is carried, so the widget can still say "4 items
+    // expired" on that one row.
+    expect(stats.kits.expiringItems[0].lineCount).toBe(4);
+  });
+
+  it("asks the database only for kits that hold something with a date", async () => {
+    await getDashboardStats();
+
+    expect(mocks.findKits).toHaveBeenCalledTimes(1);
+    expect(mocks.findKits.mock.calls[0][0].where).toEqual({
+      items: {
+        some: {
+          OR: [
+            { gear: { expirationDate: { not: null } } },
+            { supply: { expirationDate: { not: null } } },
+          ],
+        },
+      },
+    });
+  });
+
+  it("selects nothing that could carry a serial off a kit's lines", async () => {
+    // A kit line points at Firearm, Accessory and Gear rows, all three of
+    // which carry a serialNumber. The dashboard needs dates and nothing else,
+    // and a widened include here would ship serials to a client component.
+    await getDashboardStats();
+
+    const select = mocks.findKits.mock.calls[0][0].select;
+    expect(select).toEqual({
+      id: true,
+      name: true,
+      category: true,
+      items: {
+        select: {
+          gear: { select: { expirationDate: true } },
+          supply: { select: { expirationDate: true } },
+        },
+      },
+    });
+  });
+
+  it("falls back to the raw category for one this build does not know", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+    mocks.findKits.mockResolvedValue([
+      kit({
+        category: "SCUBA",
+        items: [kitLine(new Date("2026-05-01T00:00:00.000Z"))],
+      }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.kits.expiringItems[0].category).toBe("SCUBA");
+  });
+
+  it("judges kits against the SETTINGS timezone, the same day the supply and gear counts used", async () => {
+    // The same boundary the supply and gear tests above pin. A second
+    // resolution of "today" for kits would put an expired bag on the board
+    // beside a supply the same date called `soon` — and the bag and the pouch
+    // are THE SAME POUCH.
+    vi.useFakeTimers();
+    vi.setSystemTime(EVENING_IN_DENVER);
+    mocks.findAppSettings.mockResolvedValue({
+      timezone: "America/Denver",
+      expiryWarningDays: 90,
+    });
+    mocks.findSupplies.mockResolvedValue([
+      supply({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+    mocks.findGear.mockResolvedValue([
+      gear({ expirationDate: EXPIRES_TODAY_IN_DENVER }),
+    ]);
+    mocks.findKits.mockResolvedValue([
+      kit({ items: [kitLine(EXPIRES_TODAY_IN_DENVER)] }),
+    ]);
+
+    const stats = await getDashboardStats();
+
+    expect(stats.kits.expiringSoonCount).toBe(1);
+    expect(stats.kits.expiredCount).toBe(0);
+    expect(stats.kits.expiringItems[0].expiry).toBe("soon");
+    // All three stores agree, which is the point of the single resolution.
+    expect(stats.supplies.expiringSoonCount).toBe(1);
+    expect(stats.gear.expiringSoonCount).toBe(1);
+    // ONE AppSettings read for all three.
+    expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
+    // The negative control: the verdict a second, raw-instant resolution gives.
+    expect(expiryStatus(EXPIRES_TODAY_IN_DENVER, EVENING_IN_DENVER, 90)).toBe(
+      "expired",
+    );
   });
 });

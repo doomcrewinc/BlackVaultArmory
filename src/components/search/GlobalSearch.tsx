@@ -18,6 +18,7 @@ interface SearchResults {
   builds: SearchResult[];
   gear: SearchResult[];
   supplies: SearchResult[];
+  kits: SearchResult[];
 }
 
 const EMPTY: SearchResults = {
@@ -27,6 +28,7 @@ const EMPTY: SearchResults = {
   builds: [],
   gear: [],
   supplies: [],
+  kits: [],
 };
 const CATEGORIES: { key: keyof SearchResults; label: string }[] = [
   { key: "firearms", label: "FIREARMS" },
@@ -35,6 +37,7 @@ const CATEGORIES: { key: keyof SearchResults; label: string }[] = [
   { key: "builds", label: "BUILDS" },
   { key: "gear", label: "GEAR" },
   { key: "supplies", label: "SUPPLIES" },
+  { key: "kits", label: "KITS" },
 ];
 
 export function GlobalSearch() {
@@ -100,7 +103,10 @@ export function GlobalSearch() {
     setOpen(false);
   }
 
-  const hasResults = CATEGORIES.some((c) => results[c.key].length > 0);
+  // `?? []` on both reads: the payload is whatever /api/search returned, and a
+  // section missing from it must render as empty rather than throwing on
+  // `.length` and blanking the whole overlay.
+  const hasResults = CATEGORIES.some((c) => (results[c.key] ?? []).length > 0);
   const showEmpty = q.length >= 2 && !loading && !hasResults;
 
   if (!open) return null;
@@ -119,7 +125,7 @@ export function GlobalSearch() {
           ref={inputRef}
           value={q}
           onChange={handleChange}
-          placeholder="Search firearms, accessories, ammo, gear, supplies…"
+          placeholder="Search firearms, accessories, ammo, gear, supplies, kits…"
           className="flex-1 bg-transparent text-vault-text text-sm placeholder-vault-text-faint outline-none"
         />
         {q && (
@@ -154,7 +160,7 @@ export function GlobalSearch() {
           </p>
         )}
         {CATEGORIES.map(({ key, label }) => {
-          const items = results[key];
+          const items = results[key] ?? [];
           if (items.length === 0) return null;
           return (
             <div key={key} className="mb-4">

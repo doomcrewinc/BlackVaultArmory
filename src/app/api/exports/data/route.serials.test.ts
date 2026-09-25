@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   firearmFindMany: vi.fn(),
   accessoryFindMany: vi.fn(),
   gearFindMany: vi.fn(),
+  kitFindMany: vi.fn(),
   buildFindMany: vi.fn(),
   documentFindMany: vi.fn(),
   ammoStockFindMany: vi.fn(),
@@ -26,6 +27,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     gear: {
       findMany: mocks.gearFindMany,
+    },
+    kit: {
+      findMany: mocks.kitFindMany,
     },
     build: {
       findMany: mocks.buildFindMany,
@@ -107,9 +111,53 @@ describe("/api/exports/data serial number handling", () => {
       },
     ]);
 
+    // A kit line pointing at the SAME firearm and accessory rows as above —
+    // the nested shape a build's slots have, one table further out.
+    mocks.kitFindMany.mockResolvedValue([
+      {
+        id: "k1",
+        name: "Range Bag",
+        category: "RANGE",
+        items: [
+          {
+            id: "ki1",
+            kitId: "k1",
+            firearmId: "f1",
+            firearm: { id: "f1", name: "Duty Rifle", serialNumber: "FIREARM-SERIAL-1" },
+          },
+          {
+            id: "ki2",
+            kitId: "k1",
+            accessoryId: "a1",
+            accessory: { id: "a1", name: "Optic", serialNumber: "ACCESSORY-SERIAL-1" },
+          },
+        ],
+      },
+    ]);
+
     mocks.documentFindMany.mockResolvedValue([]);
     mocks.ammoStockFindMany.mockResolvedValue([]);
     mocks.rangeSessionFindMany.mockResolvedValue([]);
+  });
+
+  it("keeps a kit line's firearm and accessory serials out of the export", async () => {
+    const withoutSerials = await callExport(`${BASE_QUERY}&kits=true`);
+
+    const kitLines = withoutSerials.body.split("\n").filter((line) => line.startsWith("kits,"));
+    expect(kitLines).toHaveLength(1);
+    // The lines array is JSON-stringified into the row, nested rows and all,
+    // so the kit is genuinely exported — only the serials are withheld.
+    expect(kitLines[0]).toContain("Range Bag");
+    expect(kitLines[0]).toContain("Duty Rifle");
+    expect(kitLines[0]).not.toContain("FIREARM-SERIAL-1");
+    expect(kitLines[0]).not.toContain("ACCESSORY-SERIAL-1");
+
+    const withSerials = await callExport(`${BASE_QUERY}&kits=true&includeSerialNumbers=true`);
+    const withSerialsKitLine = withSerials.body
+      .split("\n")
+      .find((line) => line.startsWith("kits,"));
+    expect(withSerialsKitLine).toContain("FIREARM-SERIAL-1");
+    expect(withSerialsKitLine).toContain("ACCESSORY-SERIAL-1");
   });
 
   it("keeps an accessory serial number out of the export unless it was requested", async () => {
@@ -185,8 +233,11 @@ describe("/api/exports/data — the serial sentinel sweep", () => {
   // Distinctive enough that a substring match is meaningful, and impossible to
   // produce by accident from any other field in the payload.
   const GEAR_SENTINEL = "ZZ-GEAR-SENTINEL-7391";
+  // A sentinel of its own for the kit path, so a failure names which nesting
+  // leaked rather than pointing at the gear row nine assertions away.
+  const KIT_FIREARM_SENTINEL = "ZZ-KIT-FIREARM-SENTINEL-4417";
   const ALL_SECTIONS =
-    "firearms=true&accessories=true&gear=true&builds=true&ammo=true&rangeSessions=true&documents=true&settings=true";
+    "firearms=true&accessories=true&gear=true&builds=true&ammo=true&kits=true&rangeSessions=true&documents=true&settings=true";
 
   // A sibling describe does not inherit the block above's beforeEach, so this
   // one arms every delegate the route touches with all sections on.
@@ -224,6 +275,49 @@ describe("/api/exports/data — the serial sentinel sweep", () => {
     ]);
     mocks.ammoStockFindMany.mockResolvedValue([
       { id: "am1", caliber: "5.56", brand: "Federal", quantity: 300, transactions: [] },
+    ]);
+    // A kit line pointing at a firearm that carries a serial: the exact nested
+    // shape build slots leaked through, one table further out. The label-only
+    // line is here so the strip is proved not to depend on a relation being
+    // present, and the ammo line so a source with no serial column is walked
+    // too.
+    mocks.kitFindMany.mockResolvedValue([
+      {
+        id: "kit-bugout",
+        name: "Bugout Bag",
+        category: "BUGOUT",
+        location: "Hall closet",
+        items: [
+          {
+            id: "kit-line-firearm",
+            kitId: "kit-bugout",
+            firearmId: "f-kit",
+            quantity: 1,
+            firearm: {
+              id: "f-kit",
+              name: "Truck Gun",
+              manufacturer: "Acme",
+              model: "M4",
+              caliber: "5.56",
+              type: "RIFLE",
+              serialNumber: KIT_FIREARM_SENTINEL,
+            },
+          },
+          {
+            id: "kit-line-ammo",
+            kitId: "kit-bugout",
+            ammoStockId: "am1",
+            quantity: 60,
+            ammoStock: { id: "am1", brand: "Federal", caliber: "5.56", quantity: 300 },
+          },
+          {
+            id: "kit-line-label",
+            kitId: "kit-bugout",
+            label: "Spare bootlaces",
+            quantity: 2,
+          },
+        ],
+      },
     ]);
     mocks.rangeSessionFindMany.mockResolvedValue([
       { id: "rs1", sessionDate: new Date("2026-05-01T00:00:00.000Z"), sessionDrills: [], ammoLinks: [] },
@@ -289,6 +383,77 @@ describe("/api/exports/data — the serial sentinel sweep", () => {
 
     const pdf = await callExport(`format=pdf&${ALL_SECTIONS}&includeSerialNumbers=true`);
     expect(pdf.body).toContain(GEAR_SENTINEL);
+  });
+
+  it("puts a kit line's firearm serial nowhere in the CSV payload when the toggle is off", async () => {
+    const { status, body } = await callExport(`format=csv&${ALL_SECTIONS}`);
+
+    expect(status).toBe(200);
+    // The kit and the line are still exported, the firearm's name and all —
+    // only the serial is withheld, so a vacuous "nothing came back" cannot
+    // pass this.
+    expect(body).toContain("Bugout Bag");
+    expect(body).toContain("Truck Gun");
+    expect(body).toContain("Spare bootlaces");
+    expect(body).not.toContain(KIT_FIREARM_SENTINEL);
+  });
+
+  it("puts a kit line's firearm serial nowhere in the PDF payload either", async () => {
+    // The PDF summarizer collapses `items` to "3 items" rather than printing
+    // the nested rows, so this is a weaker guard than the CSV one above by
+    // construction. It is here anyway: the sweep's rule is that the sentinel
+    // appears NOWHERE in a rendered payload, and a renderer that starts
+    // expanding kit lines must not be the first place anyone notices.
+    const { status, body } = await callExport(`format=pdf&${ALL_SECTIONS}`);
+
+    expect(status).toBe(200);
+    expect(body).toContain("Bugout Bag");
+    expect(body).not.toContain(KIT_FIREARM_SENTINEL);
+  });
+
+  it("does emit the kit line's serial once serials are requested", async () => {
+    // The control for the two above: if the kit row were silently missing, or
+    // the sentinel misspelled, this fails.
+    const csv = await callExport(`format=csv&${ALL_SECTIONS}&includeSerialNumbers=true`);
+    expect(csv.body).toContain(KIT_FIREARM_SENTINEL);
+  });
+
+  it("never asks the database for a serial on a kit line's relations", async () => {
+    // The nesting path a mock cannot police, the same argument as the document
+    // relations below: the kit query narrows each of the five source relations
+    // with an explicit `select`, and `serialNumber` is asked for only when the
+    // export includes serials. Widen any of them to `true` and a serial rides
+    // along on a path the strip would then be the only thing standing in.
+    await callExport(`format=csv&${ALL_SECTIONS}`);
+
+    const include = mocks.kitFindMany.mock.calls[0][0].include.items.include;
+    for (const relation of ["gear", "accessory", "firearm"] as const) {
+      expect(include[relation].select.serialNumber, relation).toBe(false);
+    }
+    // Supply and AmmoStock have no serial column at all, so the field must not
+    // be named on their selects in either direction.
+    for (const relation of ["supply", "ammoStock"] as const) {
+      expect(include[relation].select).not.toHaveProperty("serialNumber");
+    }
+
+    vi.clearAllMocks();
+    mocks.requireAuth.mockResolvedValue(null);
+    mocks.appSettingsFindUnique.mockResolvedValue({ id: "singleton", includeUploadsInBackup: false });
+    mocks.firearmFindMany.mockResolvedValue([]);
+    mocks.accessoryFindMany.mockResolvedValue([]);
+    mocks.gearFindMany.mockResolvedValue([]);
+    mocks.buildFindMany.mockResolvedValue([]);
+    mocks.ammoStockFindMany.mockResolvedValue([]);
+    mocks.rangeSessionFindMany.mockResolvedValue([]);
+    mocks.documentFindMany.mockResolvedValue([]);
+    mocks.kitFindMany.mockResolvedValue([]);
+
+    await callExport(`format=csv&${ALL_SECTIONS}&includeSerialNumbers=true`);
+
+    const withSerials = mocks.kitFindMany.mock.calls[0][0].include.items.include;
+    for (const relation of ["gear", "accessory", "firearm"] as const) {
+      expect(withSerials[relation].select.serialNumber, relation).toBe(true);
+    }
   });
 
   it("never asks the database for a serial on a document's nested gear relation", async () => {
