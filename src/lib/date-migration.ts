@@ -45,6 +45,7 @@ export const DATE_ONLY_FIELDS = [
   { model: "Accessory", delegate: "accessory", field: "lastBatteryChangeDate" },
   { model: "Accessory", delegate: "accessory", field: "nfaApprovalDate" },
   { model: "Gear", delegate: "gear", field: "acquisitionDate" },
+  { model: "Gear", delegate: "gear", field: "expirationDate" },
   { model: "Supply", delegate: "supply", field: "expirationDate" },
   { model: "Supply", delegate: "supply", field: "purchaseDate" },
   { model: "AmmoStock", delegate: "ammoStock", field: "purchaseDate" },
