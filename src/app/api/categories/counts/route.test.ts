@@ -37,9 +37,10 @@ describe("GET /api/categories/counts", () => {
     accessoryCount.mockReset().mockResolvedValue(5);
     // Where-aware: a mock that answers the same number to every query can't
     // tell a right query from a wrong one. `knives`' where is a bare
-    // `{ category: { in: [...] } }`; `cases`' where is the `{ OR: [...] }`
-    // combination — distinguish them so a regression that sends the wrong
-    // fragment to the wrong section shows up as a wrong count, not a match.
+    // `{ category: { in: [...] } }`; `other-prep`'s where is the
+    // `{ OR: [...] }` combination — distinguish them so a regression that
+    // sends the wrong fragment to the wrong section shows up as a wrong
+    // count, not a match.
     gearCount.mockReset().mockImplementation(
       (args: {
         where?: {
@@ -53,7 +54,7 @@ describe("GET /api/categories/counts", () => {
       },
     );
     // Same where-aware shape as gearCount: cleaning's where is a bare
-    // `{ category: { in: [...] } }`, food-water's is the `{ OR: [...] }`
+    // `{ category: { in: [...] } }`, other-prep's is the `{ OR: [...] }`
     // combination — distinguish them the same way.
     supplyCount.mockReset().mockImplementation(
       (args: {
@@ -86,28 +87,29 @@ describe("GET /api/categories/counts", () => {
     expect(body.counts.optics).toBe(5);
   });
 
-  it("counts gear for gear-backed sections (knives, cases), each from its own where", async () => {
+  it("counts gear for gear-backed sections (knives, cases), each from its own bare where", async () => {
     const body = await (await GET()).json();
+    // Phase 5 gave cases a plain explicit list (the gear catch-all moved to
+    // other-prep), so both are the same "bare `in`" shape now — the mock
+    // answers 7 to either.
     expect(body.counts.knives).toBe(7);
-    expect(body.counts.cases).toBe(11);
+    expect(body.counts.cases).toBe(7);
     expect(gearCount).toHaveBeenCalledWith({
       where: { category: { in: ["KNIFE"] } },
     });
     expect(gearCount).toHaveBeenCalledWith({
-      where: {
-        OR: [
-          { category: { in: ["CASE"] } },
-          { category: { notIn: ["KNIFE", "CASE"] } },
-        ],
-      },
+      where: { category: { in: ["CASE"] } },
     });
   });
 
-  it("counts supplies for supply-backed sections (cleaning, medical, food-water), each from its own where", async () => {
+  it("counts supplies for supply-backed sections (cleaning, medical, food-water), each from its own bare where", async () => {
     const body = await (await GET()).json();
+    // medical and food-water each sum a gear count (7, bare `in`) and a
+    // supply count (9, bare `in`) — they are mixed sections now, not
+    // supply-only.
     expect(body.counts.cleaning).toBe(9);
-    expect(body.counts.medical).toBe(9);
-    expect(body.counts["food-water"]).toBe(13);
+    expect(body.counts.medical).toBe(16);
+    expect(body.counts["food-water"]).toBe(16);
     expect(supplyCount).toHaveBeenCalledWith({
       where: { category: { in: ["CLEANING"] } },
     });
@@ -115,12 +117,79 @@ describe("GET /api/categories/counts", () => {
       where: { category: { in: ["MEDICAL"] } },
     });
     expect(supplyCount).toHaveBeenCalledWith({
+      where: { category: { in: ["FOOD", "WATER", "FILTER"] } },
+    });
+  });
+
+  it("counts other-prep from the OR shape of both its gear and supply matchers", async () => {
+    const body = await (await GET()).json();
+    // other-prep sums a gear count (11, OR shape) and a supply count (13, OR
+    // shape) — it is the section both catch-alls ride on now.
+    expect(body.counts["other-prep"]).toBe(24);
+    expect(gearCount).toHaveBeenCalledWith({
       where: {
         OR: [
-          { category: { in: ["FOOD", "WATER", "FILTER"] } },
           {
             category: {
-              notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+              in: [
+                "SANITATION",
+                "CBRN",
+                "NAVIGATION",
+                "DOCUMENTS",
+                "SAFETY",
+                "BUGOUT",
+                "OTHER",
+              ],
+            },
+          },
+          {
+            category: {
+              notIn: [
+                "KNIFE",
+                "CASE",
+                "ARMOR",
+                "MEDICAL_KIT",
+                "WATER_TREATMENT",
+                "POWER",
+                "COMMS",
+                "SHELTER",
+                "CLOTHING",
+                "TOOL",
+                "FIRE",
+                "LIGHT",
+                "SIGNALING",
+                "SANITATION",
+                "CBRN",
+                "NAVIGATION",
+                "DOCUMENTS",
+                "SAFETY",
+                "BUGOUT",
+                "OTHER",
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(supplyCount).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { category: { in: ["SANITATION", "CBRN_FILTER", "OTHER"] } },
+          {
+            category: {
+              notIn: [
+                "CLEANING",
+                "MEDICAL",
+                "FOOD",
+                "WATER",
+                "FILTER",
+                "BATTERY",
+                "FUEL",
+                "SIGNAL",
+                "SANITATION",
+                "CBRN_FILTER",
+                "OTHER",
+              ],
             },
           },
         ],

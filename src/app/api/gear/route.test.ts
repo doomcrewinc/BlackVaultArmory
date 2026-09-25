@@ -44,12 +44,61 @@ describe("GET /api/gear", () => {
     });
   });
 
-  it("filters by the literal OR shape for a multi-matcher section", async () => {
+  it("filters by the cases section's categories", async () => {
     await GET(request("http://localhost/api/gear?section=cases") as never);
+    // Phase 5 gave cases a plain explicit list and moved the gear catch-all
+    // to other-prep, so this is a bare `in` fragment again rather than the
+    // `{ OR: [...] }` it carried while it doubled as the catch-all's home.
+    expect(mocks.findMany.mock.calls[0][0].where).toEqual({
+      category: { in: ["CASE"] },
+    });
+  });
+
+  it("filters by the literal OR shape for a multi-matcher section", async () => {
+    await GET(
+      request("http://localhost/api/gear?section=other-prep") as never,
+    );
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({
       OR: [
-        { category: { in: ["CASE"] } },
-        { category: { notIn: ["KNIFE", "CASE"] } },
+        {
+          category: {
+            in: [
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
+        {
+          category: {
+            notIn: [
+              "KNIFE",
+              "CASE",
+              "ARMOR",
+              "MEDICAL_KIT",
+              "WATER_TREATMENT",
+              "POWER",
+              "COMMS",
+              "SHELTER",
+              "CLOTHING",
+              "TOOL",
+              "FIRE",
+              "LIGHT",
+              "SIGNALING",
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
       ],
     });
   });

@@ -60,23 +60,46 @@ describe("GET /api/supplies", () => {
     });
   });
 
-  it("filters by food-water's explicit categories plus its catch-all", async () => {
+  it("filters by the food-water section's categories", async () => {
     await GET(
       request("http://localhost/api/supplies?section=food-water") as never,
     );
-    // Shape change from Task 3's collapsed `notIn`: the registry now models
-    // food-water as two matchers (an explicit `in` for FOOD/WATER/FILTER
-    // plus a catch-all `notIn` for everything else), the same way `cases`
-    // is modelled — so supplyWhereForSection wraps them in `{ OR: [...] }`.
-    // Semantically identical to the old single fragment (every category not
-    // CLEANING or MEDICAL still matches), just expressed as two branches
-    // instead of one collapsed negation.
+    // Phase 5 gave food-water its own explicit category list and moved the
+    // supply catch-all to other-prep, so this is a bare `in` fragment again
+    // rather than the `{ OR: [...] }` it carried while it doubled as the
+    // catch-all's home.
+    expect(mocks.findMany.mock.calls[0][0].where).toEqual({
+      category: { in: ["FOOD", "WATER", "FILTER"] },
+    });
+  });
+
+  it("filters by other-prep's explicit categories plus its catch-all", async () => {
+    await GET(
+      request("http://localhost/api/supplies?section=other-prep") as never,
+    );
+    // other-prep carries two supply matchers (an explicit `in` for
+    // SANITATION/CBRN_FILTER/OTHER plus a catch-all `notIn` for everything
+    // else) — the same shape food-water used to carry before phase 5 gave
+    // the catch-all its own home — so supplyWhereForSection wraps them in
+    // `{ OR: [...] }`.
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({
       OR: [
-        { category: { in: ["FOOD", "WATER", "FILTER"] } },
+        { category: { in: ["SANITATION", "CBRN_FILTER", "OTHER"] } },
         {
           category: {
-            notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+            notIn: [
+              "CLEANING",
+              "MEDICAL",
+              "FOOD",
+              "WATER",
+              "FILTER",
+              "BATTERY",
+              "FUEL",
+              "SIGNAL",
+              "SANITATION",
+              "CBRN_FILTER",
+              "OTHER",
+            ],
           },
         },
       ],

@@ -7,6 +7,7 @@ import {
   accessoryWhereForSection,
   firearmWhereForSection,
   gearSectionForAccessory,
+  gearSectionForItem,
   gearWhereForSection,
   groupHref,
   sectionBySlug,
@@ -76,8 +77,13 @@ describe("registry shape", () => {
       "cleaning",
     ]);
     expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
+      "armor",
       "medical",
       "food-water",
+      "power-comms",
+      "shelter-clothing",
+      "tools-fire",
+      "other-prep",
     ]);
   });
 });
@@ -318,15 +324,17 @@ describe("where fragments agree with holds", () => {
     }
   });
 
-  it("selects the same gear as holds, for every gear category — including cases' OR fragment", () => {
+  it("selects the same gear as holds, for every gear category — including other-prep's OR fragment", () => {
     const categories = [
       ...GEAR_CATEGORIES,
       "ZZ_JUNK",
       "",
       "knife", // wrong case
-      "ARMOR",
+      "EXOSUIT",
     ];
-    for (const section of sectionsForGroup("gear")) {
+    // Gear-backed sections span the "gear" and "prep" groups now, the same
+    // reason the supplies check below spans every group.
+    for (const section of CATEGORY_SECTIONS) {
       const where = gearWhereForSection(section) as Where | null;
       if (!where) continue;
       for (const category of categories) {
@@ -341,7 +349,7 @@ describe("where fragments agree with holds", () => {
     }
   });
 
-  it("selects the same supplies as holds, for every supply category — including food-water's OR fragment", () => {
+  it("selects the same supplies as holds, for every supply category — including other-prep's OR fragment", () => {
     const categories = [
       ...SUPPLY_CATEGORIES,
       "ZZ_JUNK",
@@ -349,8 +357,9 @@ describe("where fragments agree with holds", () => {
       "cleaning", // wrong case
       "ARMOR",
     ];
-    // Supply-backed sections span two groups (cleaning is "gear", medical and
-    // food-water are "prep"), so check every section, not one group's.
+    // Supply-backed sections span two groups (cleaning is "gear", the rest
+    // of the supply-backed sections are "prep"), so check every section, not
+    // one group's.
     for (const section of CATEGORY_SECTIONS) {
       const where = supplyWhereForSection(section) as Where | null;
       if (!where) continue;
@@ -383,8 +392,12 @@ describe("gear-backed sections", () => {
   });
 
   it("places every gear category in exactly one section", () => {
+    // Gear-backed sections now span the "gear" and "prep" groups (armor,
+    // medical, etc. moved to prep), so search every section, the same reason
+    // supplySectionsMatching below searches CATEGORY_SECTIONS rather than
+    // one group's.
     for (const category of GEAR_CATEGORIES) {
-      const matches = sectionsForGroup("gear").filter((section) =>
+      const matches = CATEGORY_SECTIONS.filter((section) =>
         section.sources.some(
           (source) => source.source === "gear" && source.holds({ category }),
         ),
@@ -397,8 +410,8 @@ describe("gear-backed sections", () => {
   });
 
   it("never loses gear with an unrecognised category", () => {
-    for (const category of ["ZZ_JUNK", "", "knife", "ARMOR"]) {
-      const matches = sectionsForGroup("gear").filter((section) =>
+    for (const category of ["ZZ_JUNK", "", "knife", "EXOSUIT"]) {
+      const matches = CATEGORY_SECTIONS.filter((section) =>
         section.sources.some(
           (source) => source.source === "gear" && source.holds({ category }),
         ),
@@ -421,12 +434,51 @@ describe("gear-backed sections", () => {
     expect(gearWhereForSection(optics)).toBeNull();
   });
 
-  it("combines cases' two matchers into a literal OR, not flattened or reordered", () => {
-    const cases = sectionBySlug("cases")!;
-    expect(gearWhereForSection(cases)).toEqual({
+  it("combines other-prep's two gear matchers into a literal OR, not flattened or reordered", () => {
+    // Phase 4's version of this test named `cases`, which carried the gear
+    // catch-all back then. The catch-all rides on other-prep now.
+    const otherPrep = sectionBySlug("other-prep")!;
+    expect(gearWhereForSection(otherPrep)).toEqual({
       OR: [
-        { category: { in: ["CASE"] } },
-        { category: { notIn: ["KNIFE", "CASE"] } },
+        {
+          category: {
+            in: [
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
+        {
+          category: {
+            notIn: [
+              "KNIFE",
+              "CASE",
+              "ARMOR",
+              "MEDICAL_KIT",
+              "WATER_TREATMENT",
+              "POWER",
+              "COMMS",
+              "SHELTER",
+              "CLOTHING",
+              "TOOL",
+              "FIRE",
+              "LIGHT",
+              "SIGNALING",
+              "SANITATION",
+              "CBRN",
+              "NAVIGATION",
+              "DOCUMENTS",
+              "SAFETY",
+              "BUGOUT",
+              "OTHER",
+            ],
+          },
+        },
       ],
     });
   });
@@ -474,33 +526,10 @@ describe("supply-backed sections", () => {
     }
   });
 
-  it("groups the supply categories the way the spec says", () => {
-    expect(supplySectionForItem({ category: "CLEANING" })?.slug).toBe(
-      "cleaning",
-    );
-    expect(supplySectionForItem({ category: "MEDICAL" })?.slug).toBe("medical");
-    expect(supplySectionForItem({ category: "FOOD" })?.slug).toBe("food-water");
-    expect(supplySectionForItem({ category: "WATER" })?.slug).toBe(
-      "food-water",
-    );
-    expect(supplySectionForItem({ category: "FILTER" })?.slug).toBe(
-      "food-water",
-    );
-    // The catch-all: categories with no section of their own yet, deliberately
-    // and temporarily homed under food-water until phase 5.
-    for (const category of [
-      "BATTERY",
-      "FUEL",
-      "SANITATION",
-      "CBRN_FILTER",
-      "SIGNAL",
-      "OTHER",
-    ]) {
-      expect(supplySectionForItem({ category })?.slug, category).toBe(
-        "food-water",
-      );
-    }
-  });
+  // "groups the supply categories the way the spec says" moved to the
+  // "preparedness sections" describe below, where it covers every supply
+  // category rather than repeating the food-water-only slice phase 4 left
+  // behind.
 
   it("keeps supply sections free of gear/accessory/firearm rows and vice versa", () => {
     const cleaning = sectionBySlug("cleaning")!;
@@ -524,17 +553,129 @@ describe("supply-backed sections", () => {
     });
   });
 
-  it("combines food-water's two matchers into a literal OR, not flattened or reordered", () => {
-    const foodWater = sectionBySlug("food-water")!;
-    expect(supplyWhereForSection(foodWater)).toEqual({
+  it("combines other-prep's two supply matchers into a literal OR, not flattened or reordered", () => {
+    // Phase 4's version of this test named `food-water`, which carried the
+    // supply catch-all back then. The catch-all rides on other-prep now.
+    const otherPrep = sectionBySlug("other-prep")!;
+    expect(supplyWhereForSection(otherPrep)).toEqual({
       OR: [
-        { category: { in: ["FOOD", "WATER", "FILTER"] } },
+        { category: { in: ["SANITATION", "CBRN_FILTER", "OTHER"] } },
         {
           category: {
-            notIn: ["CLEANING", "MEDICAL", "FOOD", "WATER", "FILTER"],
+            notIn: [
+              "CLEANING",
+              "MEDICAL",
+              "FOOD",
+              "WATER",
+              "FILTER",
+              "BATTERY",
+              "FUEL",
+              "SIGNAL",
+              "SANITATION",
+              "CBRN_FILTER",
+              "OTHER",
+            ],
           },
         },
       ],
+    });
+  });
+});
+
+describe("preparedness sections", () => {
+  it("declares the seven sections the spec names, in order", () => {
+    expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
+      "armor",
+      "medical",
+      "food-water",
+      "power-comms",
+      "shelter-clothing",
+      "tools-fire",
+      "other-prep",
+    ]);
+  });
+
+  it("groups the gear categories the way the spec says", () => {
+    const expected: Record<string, string> = {
+      KNIFE: "knives",
+      CASE: "cases",
+      ARMOR: "armor",
+      MEDICAL_KIT: "medical",
+      WATER_TREATMENT: "food-water",
+      POWER: "power-comms",
+      COMMS: "power-comms",
+      LIGHT: "tools-fire",
+      FIRE: "tools-fire",
+      SHELTER: "shelter-clothing",
+      CLOTHING: "shelter-clothing",
+      TOOL: "tools-fire",
+      SANITATION: "other-prep",
+      CBRN: "other-prep",
+      NAVIGATION: "other-prep",
+      SIGNALING: "tools-fire",
+      DOCUMENTS: "other-prep",
+      SAFETY: "other-prep",
+      BUGOUT: "other-prep",
+      OTHER: "other-prep",
+    };
+    for (const category of GEAR_CATEGORIES) {
+      expect(
+        gearSectionForItem({ category })?.slug,
+        `${category} landed in the wrong section`,
+      ).toBe(expected[category]);
+    }
+  });
+
+  it("groups the supply categories the way the spec says", () => {
+    const expected: Record<string, string> = {
+      CLEANING: "cleaning",
+      MEDICAL: "medical",
+      FOOD: "food-water",
+      WATER: "food-water",
+      FILTER: "food-water",
+      BATTERY: "power-comms",
+      FUEL: "tools-fire",
+      SANITATION: "other-prep",
+      CBRN_FILTER: "other-prep",
+      SIGNAL: "tools-fire",
+      OTHER: "other-prep",
+    };
+    for (const category of SUPPLY_CATEGORIES) {
+      expect(
+        supplySectionForItem({ category })?.slug,
+        `${category} landed in the wrong section`,
+      ).toBe(expected[category]);
+    }
+  });
+
+  it("sends an unrecognised gear category to other-prep, not to cases", () => {
+    // Phase 4 parked the gear catch-all on `cases` because prep had no home
+    // for it. It has one now, and a bugout-bag category must not surface
+    // under Gear > Cases.
+    expect(gearSectionForItem({ category: "EXOSUIT" })?.slug).toBe("other-prep");
+  });
+
+  it("sends an unrecognised supply category to other-prep, not to food-water", () => {
+    expect(supplySectionForItem({ category: "PLUTONIUM" })?.slug).toBe("other-prep");
+  });
+
+  it("finds a gear item whose section lives outside the gear group", () => {
+    // gearSectionForItem searched only sectionsForGroup("gear"), which was
+    // correct while every gear category was a Gear section. Armor is a prep
+    // section, so a group-scoped search returns undefined and the detail
+    // page's back link falls back to "/" for fourteen of twenty categories.
+    const section = gearSectionForItem({ category: "ARMOR" });
+    expect(section?.slug).toBe("armor");
+    expect(section?.group).toBe("prep");
+  });
+
+  it("keeps mixed sections' two sources independent", () => {
+    const medical = sectionBySlug("medical")!;
+    expect(gearWhereForSection(medical)).toEqual({
+      category: { in: ["MEDICAL_KIT"] },
+    });
+    expect(supplyWhereForSection(medical)).toEqual({
+      category: { in: ["MEDICAL"] },
     });
   });
 });
