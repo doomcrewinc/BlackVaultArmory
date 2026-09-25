@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import {
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
   isLowStock,
-  todayForExpiry,
+  resolveExpiryContext,
   type ExpiryStatus,
 } from "@/lib/supply";
 
@@ -89,9 +88,14 @@ export async function getSupplySectionItems(
     where: { id: "singleton" },
   });
 
-  const today = todayForExpiry(settings?.timezone ?? null, new Date());
-  const warningDays =
-    settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+  // One resolution for both the verdicts and the disclosure. A separate
+  // Boolean(settings.timezone) disagrees with it for a zone that is SET BUT
+  // UNRECOGNISED — resolveExpiryTimeZone discards such a zone and computes in
+  // UTC, so the notice must appear, and the hand-rolled predicate hid it.
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   const supplies = await prisma.supply.findMany({
     where,
@@ -100,6 +104,6 @@ export async function getSupplySectionItems(
 
   return {
     items: supplies.map((supply) => mapSupplyRow(supply, today, warningDays)),
-    timezoneConfigured: Boolean(settings?.timezone),
+    timezoneConfigured: timezoneFromSetting,
   };
 }

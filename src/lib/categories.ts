@@ -543,8 +543,20 @@ export function gearWhereForSection(section: CategorySection): object | null {
  * and unlike vaultSectionForFirearm. Gear categories are spread across both
  * the "gear" group (knives, cases) and the "prep" group (armor, medical kits,
  * shelter and the rest), so a group-scoped search would return undefined for
- * fourteen of the twenty categories — and the callers treat undefined as
- * "no section", falling back to "/" for the back link.
+ * EIGHTEEN of the twenty categories — everything but KNIFE and CASE.
+ *
+ * Its caller is the gear detail page's back link
+ * (src/app/gear/item/[id]/page.tsx), which resolves the item's own section
+ * instead of the "/gear" it used to hardcode: /gear is a section index over
+ * the gear group alone, so an ARMOR item's "Back to Gear" landed on a page
+ * that did not contain it. That page treats undefined as "no section" and
+ * falls back to "/" with the label "Home", matching what the supply detail
+ * page does with supplySectionForItem.
+ *
+ * Measured, not predicted: undefined is unreachable for all twenty current
+ * categories — other-prep's catch-all matcher is the negation of the full
+ * grouped list, so it holds anything the named sections do not. The fallback
+ * is there for a category a later build adds while this registry lags.
  */
 export function gearSectionForItem(row: GearRow): CategorySection | undefined {
   return CATEGORY_SECTIONS.find((section) =>

@@ -6,10 +6,9 @@ import { prisma } from "@/lib/prisma";
 import {
   SUPPLY_CATEGORY_LABELS,
   SUPPLY_UNIT_LABELS,
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
   isLowStock,
-  todayForExpiry,
+  resolveExpiryContext,
   type SupplyCategory,
   type SupplyUnit,
 } from "@/lib/supply";
@@ -31,17 +30,21 @@ async function getSupplyWithExpiry(id: string) {
   const settings = await prisma.appSettings.findUnique({
     where: { id: "singleton" },
   });
-  const today = todayForExpiry(settings?.timezone ?? null, new Date());
-  const warningDays =
-    settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   return {
     supply,
     isLow: isLowStock(supply),
     expiry: expiryStatus(supply.expirationDate, today, warningDays),
-    // Same read, handed on: this page renders Expired / Expiring Soon badges
-    // too, so it carries the same notice as the list pages and the dashboard.
-    timezoneConfigured: Boolean(settings?.timezone),
+    // Same read AND the same resolution, handed on: this page renders Expired
+    // / Expiring Soon badges too, so it carries the same notice as the list
+    // pages and the dashboard. Taken off resolveExpiryContext rather than
+    // recomputed as Boolean(settings.timezone), which claims "configured" for
+    // a set-but-unrecognised zone that was actually evaluated in UTC.
+    timezoneConfigured: timezoneFromSetting,
   };
 }
 

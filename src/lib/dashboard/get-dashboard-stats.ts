@@ -276,7 +276,10 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
   // counts and the gear alerts below. Two resolutions could land on different
   // calendar days either side of local midnight and put a "0 expired" tile
   // next to an expired row.
-  const { today, warningDays } = resolveExpiryContext(settings, new Date());
+  const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+    settings,
+    new Date(),
+  );
 
   const lowStockSupplies = supplies.filter((s) => isLowStock(s));
   let expiredSupplyCount = 0;
@@ -353,7 +356,11 @@ export async function getDashboardStats(): Promise<DashboardStatsResponse> {
       lowStockCount: lowStockSupplies.length,
       expiredCount: expiredSupplyCount,
       expiringSoonCount: expiringSoonSupplyCount,
-      timezoneConfigured: Boolean(settings?.timezone),
+      // Off the same resolution as the counts above, not a second
+      // Boolean(settings.timezone): a set-but-unrecognised zone is discarded
+      // in favour of UTC, so the notice has to appear even though a timezone
+      // is stored.
+      timezoneConfigured: timezoneFromSetting,
     },
     gear: {
       expiringItems: expiringGear,

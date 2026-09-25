@@ -221,6 +221,78 @@ describe("POST /api/backup/restore", () => {
     expect(row.nfaApprovalDate).toBe("2024-03-12T00:00:00.000Z");
   });
 
+  // Same rule, the armor group. normalizeGearArmorFields' own docblock names
+  // "restore and the copier" as the callers that matter, and restore is the
+  // one that has to enforce it: the copier's job is a faithful whole-row copy.
+  it("clears the armor fields carried by a non-armor gear row in the payload", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        gear: [
+          {
+            id: "gear-1",
+            name: "Hand-edited Knife",
+            category: "KNIFE",
+            protectionLevel: "IV",
+            armorSize: "SAPI M",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("gear") as Record<string, unknown>[];
+    expect(row.name).toBe("Hand-edited Knife");
+    expect(row.category).toBe("KNIFE");
+    expect(row.protectionLevel).toBeNull();
+    expect(row.armorSize).toBeNull();
+  });
+
+  it("restores a legitimate armor row with its armor fields intact", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        gear: [
+          {
+            id: "gear-1",
+            name: "Plate Carrier",
+            category: "ARMOR",
+            protectionLevel: "III",
+            armorSize: "L",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("gear") as Record<string, unknown>[];
+    expect(row.protectionLevel).toBe("III");
+    expect(row.armorSize).toBe("L");
+  });
+
+  // The other side, and the one an earlier phase of this epic got wrong on
+  // the NFA columns: a category from a LATER build cannot be judged here, so
+  // clearing it would silently destroy data on a recovery path.
+  it("leaves a gear row with an unrecognised category and its armor fields untouched", async () => {
+    await POST(
+      restoreRequest({
+        ...v11Payload(),
+        gear: [
+          {
+            id: "gear-1",
+            name: "Future Exosuit",
+            category: "EXOSUIT",
+            protectionLevel: "IV",
+            armorSize: "SAPI M",
+          },
+        ],
+      }),
+    );
+
+    const [row] = created("gear") as Record<string, unknown>[];
+    expect(row.category).toBe("EXOSUIT");
+    expect(row.protectionLevel).toBe("IV");
+    expect(row.armorSize).toBe("SAPI M");
+  });
+
   it("clears paperwork carried by a non-suppressor accessory in the payload", async () => {
     await POST(
       restoreRequest({

@@ -148,4 +148,19 @@ describe("normalizeGearArmorFields", () => {
       }),
     ).toEqual({ protectionLevel: "IIIA", armorSize: "M SAPI" });
   });
+
+  // An empty existing.category is not a category at all, and the gate cannot
+  // tell it apart from one a later build added: it is unknown, so the fields
+  // are preserved. That is correct FOR THE GATE and wrong for a CALLER, which
+  // is why no caller may seed it — POST /api/gear used to, and stored plate
+  // ratings on knives until it was changed to seed the category it is about
+  // to store. Pinned here so the sentinel cannot come back as "harmless".
+  it("cannot judge an empty existing category, so it preserves the fields", () => {
+    expect(
+      normalizeGearArmorFields({
+        existing: { category: "", protectionLevel: null, armorSize: null },
+        body: { protectionLevel: "IV", armorSize: "SAPI M" },
+      }),
+    ).toEqual({ protectionLevel: "IV", armorSize: "SAPI M" });
+  });
 });

@@ -13,10 +13,12 @@ import {
   expiryStatus,
   todayForExpiry,
 } from "@/lib/supply";
+import { gearSectionForItem, sectionHref } from "@/lib/categories";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { DeleteGearButton } from "./DeleteGearButton";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
+import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 // No `include: { documents }`: ItemDocumentPanel fetches its own list from
@@ -59,14 +61,11 @@ export default async function GearDetailPage({
   try {
     result = await getGearWithExpiry(id);
   } catch {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-vault-text-muted text-sm">Failed to load item.</p>
-        <Link href="/gear" className="text-[#00C2FF] text-sm hover:underline">
-          Back to gear
-        </Link>
-      </div>
-    );
+    // Retry this page rather than link to a section: the load failed, so
+    // there is no category to resolve a section from — and "/gear" would be
+    // the wrong guess for the eighteen categories that live under /prep.
+    // Same component and same shape as the supply detail page's error branch.
+    return <SectionLoadError label="item" href={`/gear/item/${id}`} />;
   }
 
   if (!result) {
@@ -74,17 +73,26 @@ export default async function GearDetailPage({
   }
 
   const { gear, expiry } = result;
+  // Resolved from the item, not hardcoded. /gear is a section INDEX over the
+  // gear group only, so "Back to Gear" stranded an ARMOR, MEDICAL_KIT or
+  // SHELTER item on a page that does not contain it — eighteen of the twenty
+  // categories live in the prep group. gearSectionForItem searches every
+  // group for exactly this; sectionHref owns the path shape. Mirrors
+  // supplies/item/[id].
+  const section = gearSectionForItem({ category: gear.category });
+  const backHref = section ? sectionHref(section) : "/";
+  const backLabel = section ? section.label : "Home";
 
   return (
     <div className="min-h-full">
       {/* Breadcrumb header */}
       <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
         <Link
-          href="/gear"
+          href={backHref}
           className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Gear
+          Back to {backLabel}
         </Link>
         <div className="flex items-center gap-2">
           <Link
@@ -94,7 +102,7 @@ export default async function GearDetailPage({
             <Pencil className="w-4 h-4" />
             Edit
           </Link>
-          <DeleteGearButton id={gear.id} />
+          <DeleteGearButton id={gear.id} redirectTo={backHref} />
         </div>
       </div>
 

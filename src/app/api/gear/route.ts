@@ -78,13 +78,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Resolved once and used twice: the column below and the armor gate's
+    // `existing.category` must be the SAME category, or create and update
+    // disagree about the armor fields. Seeding the gate with a sentinel that
+    // is not a real category made it unable to judge eligibility, so it took
+    // the forward-compatibility branch — "a category this build does not
+    // recognise, leave the fields alone" — and a POST of
+    // `{ category: "KNIFE", protectionLevel: "IV" }` stored the rating. The
+    // detail page hides it; the full-armory export prints it. That branch is
+    // for a category a LATER BUILD stored, which a create can never produce:
+    // normalizeGearCategory has already collapsed anything unknown to KNIFE.
+    const resolvedCategory = normalizeGearCategory(category);
+
     const gear = await prisma.gear.create({
       data: {
         name: normalizedName,
         manufacturer: normalizeString(manufacturer) || null,
         model: normalizeString(model) || null,
         serialNumber: normalizeString(serialNumber) || null,
-        category: normalizeGearCategory(category),
+        category: resolvedCategory,
         quantity: normalizeQuantity(quantity),
         purchasePrice: normalizeMoney(purchasePrice),
         currentValue: normalizeMoney(currentValue),
@@ -93,7 +105,11 @@ export async function POST(request: NextRequest) {
           : null,
         expirationDate: expirationDate ? toDateOnlyUTC(expirationDate) : null,
         ...normalizeGearArmorFields({
-          existing: { category: "", protectionLevel: null, armorSize: null },
+          existing: {
+            category: resolvedCategory,
+            protectionLevel: null,
+            armorSize: null,
+          },
           body,
         }),
         storageLocation: normalizeString(storageLocation) || null,

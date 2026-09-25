@@ -8,9 +8,8 @@ import {
   type CategorySection,
 } from "@/lib/categories";
 import {
-  DEFAULT_EXPIRY_WARNING_DAYS,
   expiryStatus,
-  todayForExpiry,
+  resolveExpiryContext,
   type ExpiryStatus,
 } from "@/lib/supply";
 import {
@@ -113,18 +112,25 @@ export async function loadSectionItems(
     configured: boolean;
   } | null = null;
 
-  const resolveExpiryContext = async () => {
+  const loadExpiryContext = async () => {
     if (expiryContext) return expiryContext;
     const settings = await prisma.appSettings.findUnique({
       where: { id: "singleton" },
     });
-    expiryContext = {
-      // Never a raw `new Date()`: its UTC day is already tomorrow every
-      // evening west of UTC, which reads an item expiring today as expired.
-      today: todayForExpiry(settings?.timezone ?? null, new Date()),
-      warningDays: settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS,
-      configured: Boolean(settings?.timezone),
-    };
+    // Never a raw `new Date()`: its UTC day is already tomorrow every evening
+    // west of UTC, which reads an item expiring today as expired.
+    //
+    // `configured` comes off the same resolution as `today` rather than a
+    // second Boolean(settings.timezone). The two disagree for a zone that is
+    // SET BUT UNRECOGNISED: resolveExpiryTimeZone discards it and computes in
+    // UTC, so the notice has to appear — the hand-rolled predicate said
+    // "configured", hiding it on exactly the install whose verdicts were
+    // decided by a zone the user did not choose.
+    const { today, warningDays, timezoneFromSetting } = resolveExpiryContext(
+      settings,
+      new Date(),
+    );
+    expiryContext = { today, warningDays, configured: timezoneFromSetting };
     return expiryContext;
   };
 
@@ -156,7 +162,7 @@ export async function loadSectionItems(
       case "gear": {
         const where = gearWhereForSection(section);
         if (!where) continue;
-        const { today, warningDays, configured } = await resolveExpiryContext();
+        const { today, warningDays, configured } = await loadExpiryContext();
         const rows = await prisma.gear.findMany({
           where,
           orderBy: { name: "asc" },
@@ -174,7 +180,7 @@ export async function loadSectionItems(
       case "supply": {
         const where = supplyWhereForSection(section);
         if (!where) continue;
-        const { today, warningDays, configured } = await resolveExpiryContext();
+        const { today, warningDays, configured } = await loadExpiryContext();
         const rows = await prisma.supply.findMany({
           where,
           orderBy: { name: "asc" },

@@ -171,9 +171,9 @@ describe("POST /api/gear", () => {
   });
 
   it("drops the armor fields when the sent category is not armor, even though there is no stored row to gate against", async () => {
-    // POST has no `existing` row, so the gate is seeded with category: "" —
-    // an unrecognised category, which falls through to "use what was sent".
-    // The merged body.category is TOOL, so the fields must not survive.
+    // POST has no `existing` row, so the gate is seeded with the category the
+    // row is about to be stored with. Here that is TOOL, so the fields must
+    // not survive.
     await POST(
       request("http://localhost/api/gear", {
         name: "Hammer",
@@ -182,6 +182,57 @@ describe("POST /api/gear", () => {
       }) as never,
     );
     const data = mocks.create.mock.calls[0][0].data;
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  // The three cases where the request does NOT hand the gate a usable
+  // category. The row is still stored with normalizeGearCategory's answer, so
+  // the gate has to be seeded with that same answer — otherwise create and
+  // update disagree and the export prints "Protection: IV" under a Knife.
+  it("drops the armor fields when the request sends no category at all", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "No Category",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("drops the armor fields when the request sends a blank category", async () => {
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Blank Category",
+        category: "   ",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
+    expect(data.protectionLevel).toBeNull();
+    expect(data.armorSize).toBeNull();
+  });
+
+  it("drops the armor fields for a category this build does not recognise, because the row is stored as the fallback", async () => {
+    // Forward compatibility belongs to the STORED category, and a create
+    // never stores an unknown one — normalizeGearCategory has already made it
+    // KNIFE. Preserving here would attach plate ratings to a knife.
+    await POST(
+      request("http://localhost/api/gear", {
+        name: "Exosuit",
+        category: "EXOSUIT",
+        protectionLevel: "IV",
+        armorSize: "SAPI M",
+      }) as never,
+    );
+    const data = mocks.create.mock.calls[0][0].data;
+    expect(data.category).toBe("KNIFE");
     expect(data.protectionLevel).toBeNull();
     expect(data.armorSize).toBeNull();
   });
