@@ -3,6 +3,7 @@ import { ExternalLink, PackageOpen, TriangleAlert } from "lucide-react";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { formatDateOnly } from "@/lib/date";
 import { KitLineControls } from "./KitLineControls";
+import { formatKitQuantity as formatQuantity } from "@/lib/kits/sourceDisplay";
 import type { KitContentGroup, KitContentLine } from "./getKitDetail";
 
 /**
@@ -13,17 +14,6 @@ import type { KitContentGroup, KitContentLine } from "./getKitDetail";
  * resolved from AppSettings. Nothing here reads a clock, and nothing here
  * re-derives a threshold.
  */
-
-/**
- * A KitItem's quantity is a Float — solvent comes in fractions of a bottle —
- * so a whole number must print as "2" and a fraction must not be rounded
- * away. `String(2)` is "2" and `String(2.5)` is "2.5", so that is the whole
- * rule; it is a named function only so every quantity on this page goes
- * through one, rather than half of them picking up a `toFixed` later.
- */
-function formatQuantity(value: number): string {
-  return String(value);
-}
 
 /**
  * Every badge is `shrink-0` and a SIBLING of the truncating name element,

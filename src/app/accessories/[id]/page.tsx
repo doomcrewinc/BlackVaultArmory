@@ -9,6 +9,8 @@ import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types"
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
+import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
+import type { ItemAllocation } from "@/lib/kits/itemAllocation";
 import {
   ArrowLeft,
   Shield,
@@ -99,6 +101,17 @@ interface Accessory {
   nfaApprovalDate: string | null;
   nfaTaxPaid: number | null;
   nfaRegisteredTo: string | null;
+  /**
+   * How much of this accessory is assigned across kits, resolved SERVER-SIDE
+   * by `getItemAllocation` on `/api/accessories/[id]` and handed over whole.
+   * Null when it is in no kit.
+   *
+   * A VERDICT, not raw rows for the browser to sum: this page is the only one
+   * of the four item detail pages that is a client component, and a second
+   * implementation of the allocation maths living here is exactly the drift
+   * `allocation.ts` exists to prevent. `overAllocated` arrives decided.
+   */
+  kitAllocation: ItemAllocation | null;
 }
 
 const BARREL_TYPES = new Set(["BARREL", "SUPPRESSOR", "MUZZLE", "COMPENSATOR"]);
@@ -336,6 +349,11 @@ export default function AccessoryDetailPage() {
       </div>
 
       <div className="p-6 space-y-6">
+        {/* Above the stats, as on the gear, supply and firearm detail pages —
+            the SAME component, so the four cannot drift into four phrasings of
+            one number. Renders nothing when this accessory is in no kit. */}
+        <ItemKitAllocation allocation={accessory.kitAllocation ?? null} />
+
         {/* Stats row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {/* Round count - prominent */}

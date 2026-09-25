@@ -19,6 +19,8 @@ import { formatDateOnly } from "@/lib/date";
 import { DeleteGearButton } from "./DeleteGearButton";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
+import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
+import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 // No `include: { documents }`: ItemDocumentPanel fetches its own list from
@@ -40,9 +42,16 @@ async function getGearWithExpiry(id: string) {
   const warningDays =
     settings?.expiryWarningDays ?? DEFAULT_EXPIRY_WARNING_DAYS;
 
+  // ONE more sequential query, and only one: how much of this gear is packed
+  // across kits. `owned` is gear.quantity from the record already in hand, so
+  // this adds no read of the gear table. Null when it is in no kit, which is
+  // the usual case and renders nothing.
+  const allocation = await getItemAllocation("gearId", gear.id, gear.quantity);
+
   return {
     gear,
     expiry: expiryStatus(gear.expirationDate, today, warningDays),
+    allocation,
   };
 }
 
@@ -72,7 +81,7 @@ export default async function GearDetailPage({
     notFound();
   }
 
-  const { gear, expiry } = result;
+  const { gear, expiry, allocation } = result;
   // Resolved from the item, not hardcoded. /gear is a section INDEX over the
   // gear group only, so "Back to Gear" stranded an ARMOR, MEDICAL_KIT or
   // SHELTER item on a page that does not contain it — eighteen of the twenty
@@ -143,6 +152,12 @@ export default async function GearDetailPage({
             </p>
           )}
         </div>
+
+        {/* Directly under the title, ABOVE the stats: an over-allocation is
+            the most urgent thing this page has to say, and burying it under
+            four price tiles is how the kit half of the rule came to be the
+            only half anyone saw. Renders nothing when the item is in no kit. */}
+        <ItemKitAllocation allocation={allocation} />
 
         {/* Stats row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
