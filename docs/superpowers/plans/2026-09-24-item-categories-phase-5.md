@@ -4,7 +4,7 @@
 
 **Goal:** Ship the full `Gear` category set, the armor fields, gear expiry, and the seven Preparedness sections with a section renderer that can show more than one source on one page.
 
-**Architecture:** `Gear` grows fourteen categories, two armor-only free-text columns and an `expirationDate`. The category registry gains five prep sections and moves both catch-alls onto "Other Prep". The single-source-early-return in `/gear/[slug]` and `/prep/[slug]` is replaced by one shared loader plus one shared view, because prep sections are mixed: Medical is gear `MEDICAL_KIT` **and** supply `MEDICAL`. The loader's `switch` over source kinds is exhaustive, so a new source kind fails `tsc` rather than silently rendering nothing.
+**Architecture:** `Gear` grows fourteen categories, two armor-only free-text columns and an `expirationDate`. The category registry gains five prep sections and moves both catch-alls onto "Other Prep". The single-source-early-return in `/gear/[slug]` and `/prep/[slug]` is replaced by one shared loader plus one shared view, because prep sections are mixed: Medical is gear `MEDICAL_KIT` **and** supply `MEDICAL`. The loader's `switch` over source kinds is made exhaustive by a `const unhandled: never = kind` after it — NOT by the absence of a `default`, which type-checks clean in this tsconfig — so a new source kind fails `tsc` rather than silently rendering nothing.
 
 **Tech Stack:** Next.js 16 App Router, React 19, Prisma 5.22, vitest, Tailwind.
 
@@ -1273,7 +1273,15 @@ Keep `src/app/supplies/getSupplySectionItems.ts` in place; `/supplies/item/[id]`
 
 - [ ] **Step 4: Prove the exhaustive switch is load-bearing**
 
-Temporarily add `"kit"` to `SectionSource` in `src/lib/categories.ts` and run `npx tsc --noEmit -p .`. Expected: an error on the `switch` in `loadSectionItems.ts` (TS2322 or TS7030, depending on how the branch returns). Revert. Record the exact error code in the report — phase 6 adds a `kit` source and will rely on this firing.
+**CORRECTED after implementation.** A `switch` whose cases end in `break`, with no `default`, does NOT produce a type error for an unhandled union member — not in this tsconfig, which does not set `noImplicitReturns`. Implemented literally as first written, adding `"kit"` to `SectionSource` produced **zero** new errors: the guard would have shipped dead, and phase 6 would have discovered it by shipping a section that silently renders one fewer list.
+
+The shape that actually fires: every case `continue`s, and after the switch comes an explicit
+
+```ts
+const unhandled: never = kind;
+```
+
+Adding `"kit"` then gives `TS2322: Type '"kit"' is not assignable to type 'never'` at that line. Verify it that way — add `"kit"`, run `npx tsc --noEmit -p .`, confirm TS2322 names `loadSectionItems.ts`, revert — and record the error code. A guard nobody has watched fail is not known to be a guard.
 
 - [ ] **Step 5: Create the shared error UI**
 
