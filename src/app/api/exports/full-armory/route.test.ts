@@ -302,7 +302,7 @@ describe("GET /api/exports/full-armory", () => {
         manufacturer: null,
         model: null,
         serialNumber: null,
-        category: "ARMOR",
+        category: "EXOSUIT",
         quantity: 1,
         purchasePrice: null,
         currentValue: null,
@@ -316,7 +316,7 @@ describe("GET /api/exports/full-armory", () => {
     const request = new NextRequest("http://localhost/api/exports/full-armory");
     const json = await (await GET(request)).json();
 
-    expect(json.gear[0].category).toBe("ARMOR");
+    expect(json.gear[0].category).toBe("EXOSUIT");
   });
 
   // ─── Supplies ───────────────────────────────────────────────────────────

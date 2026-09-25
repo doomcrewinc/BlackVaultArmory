@@ -91,6 +91,18 @@ describe("GET /api/search", () => {
       { manufacturer: containsInsensitive("bug") },
       { model: containsInsensitive("bug") },
       { category: containsInsensitive("bug") },
+      // "bug" matches the BUGOUT label, so the label clause fires too. Derived
+      // from GEAR_CATEGORY_LABELS rather than hardcoded: the phase-4 comment on
+      // gearCategoriesMatchingLabel predicted this would start firing "the day"
+      // a matching category was added, and phase 5 added it — but this
+      // expectation was a literal, so it broke instead of covering the case.
+      {
+        category: {
+          in: GEAR_CATEGORIES.filter((c) =>
+            GEAR_CATEGORY_LABELS[c].toLowerCase().includes("bug"),
+          ),
+        },
+      },
     ]);
 
     // Every field in the gear OR clause was produced by the spied helper, not a
