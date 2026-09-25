@@ -231,14 +231,25 @@ export function SectionView({
 
   // Any payload whose verdicts came from an unconfigured timezone puts the
   // notice on the page — once, above every block, not once per block.
+  //
+  // DERIVED, not listed. This read `payload.kind === "gear" || payload.kind
+  // === "supply" || payload.kind === "kit"` — a hand-maintained answer to
+  // "which kinds carry an expiry verdict?" with no guard on it, so a sixth
+  // kind that carries one would be omitted from this decision silently and
+  // its EXPIRED badges would show with no timezone disclosure. That is the
+  // same looks-present-does-nothing shape as the dead `every` guard in
+  // `sectionIsRenderable` and the unguarded builder list in
+  // /api/categories/counts, both fixed in this phase; this is the third.
+  //
+  // `"timezoneConfigured" in payload` IS the fact meant: a payload carries
+  // that flag precisely because the loader resolved a timezone to decide its
+  // verdicts. The `in` operator narrows the union, so `payload` is the
+  // verdict-carrying subset here with no cast, and a new payload kind is
+  // included or excluded by whether it actually has the field — which cannot
+  // drift from the truth.
   const timezoneConfigured = !payloads.some(
     (payload) =>
-      // Every kind that renders an expiry verdict, kit included: a kit card
-      // shows "n EXPIRED" off the same resolution, so a page carrying one
-      // must disclose which timezone decided it.
-      (payload.kind === "gear" ||
-        payload.kind === "supply" ||
-        payload.kind === "kit") &&
+      "timezoneConfigured" in payload &&
       payload.items.length > 0 &&
       !payload.timezoneConfigured,
   );

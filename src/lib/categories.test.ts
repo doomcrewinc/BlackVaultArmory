@@ -897,11 +897,34 @@ describe("the kits section", () => {
     expect(sectionIsRenderable(kits)).toBe(true);
   });
 
-  it("names a lucide-react icon that exists in the installed package", async () => {
+  it("names a lucide-react icon that is a renderable component", async () => {
     // `icon` is declared but nothing renders it yet, so a wrong name fails
     // silently now and crashes whichever later phase starts rendering it.
-    const lucide = await import("lucide-react");
+    //
+    // A key-membership check was not enough: lucide-react has 5841 exports
+    // and only ~1700 are icons, so `icon: "icons"` (the name→component map)
+    // or `icon: "createLucideIcon"` (a factory) would both have passed and
+    // then crashed on render. A lucide icon is a `forwardRef` component with
+    // a displayName; that is what gets asserted, and the negative controls
+    // below keep the predicate itself honest.
+    const lucide = (await import("lucide-react")) as unknown as Record<
+      string,
+      unknown
+    >;
+    const isIconComponent = (value: unknown): boolean =>
+      typeof value === "object" &&
+      value !== null &&
+      (value as { $$typeof?: symbol }).$$typeof ===
+        Symbol.for("react.forward_ref") &&
+      typeof (value as { displayName?: unknown }).displayName === "string";
+
     expect(Object.keys(lucide)).toContain(kits.icon);
+    expect(isIconComponent(lucide[kits.icon])).toBe(true);
+
+    // The teeth. Both are real exports of the package and neither renders as
+    // an icon, so a predicate that accepted them would prove nothing.
+    expect(isIconComponent(lucide.icons)).toBe(false);
+    expect(isIconComponent(lucide.createLucideIcon)).toBe(false);
   });
 
   it("matches every kit, and no other section claims one", () => {

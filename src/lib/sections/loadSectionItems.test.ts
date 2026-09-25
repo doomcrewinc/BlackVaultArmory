@@ -115,12 +115,21 @@ describe("loadSectionItems", () => {
     }
   });
 
-  it("still fails an empty where on a source the spec does not exempt", async () => {
-    // Proof the exemption above did not disarm the guard. `armor` declares a
-    // gear source, which is NOT on UNFILTERED_SECTION_SOURCES, so forging
-    // `where: {}` onto it must trip the key-count assertion. Without the
-    // `exempt.has(kind)` skip this is what the real loop would report for
-    // any matcher that shipped `{}`.
+  it("passes an empty where straight through to Prisma, unsanitized", async () => {
+    // WHY the guard has to exist, stated as behaviour: the loader does not
+    // reject, clamp or sanitize an empty `where`. A gear matcher that ships
+    // `{}` produces one real query with `where: {}` — an unfiltered read of
+    // the whole table — so nothing downstream will save a matcher that gets
+    // this wrong. `armor`'s gear source is NOT on
+    // UNFILTERED_SECTION_SOURCES, so `{}` here is a defect, not the spec.
+    //
+    // This test does NOT prove the guard fires. It used to claim that with
+    // `expect(() => expect(Object.keys({}).length).toBeGreaterThan(0))
+    // .toThrow()`, which only asserts that vitest throws on a failed
+    // expectation — true of vitest, silent about this code. Measured: with
+    // UNFILTERED_SECTION_SOURCES widened to ["kit", "gear"], this test still
+    // passed and exactly one test failed, the derived set-equality one in
+    // categories.test.ts. THAT is where the exemption is pinned.
     const forged = {
       ...sectionBySlug("armor")!,
       sources: [{ source: "gear", where: {}, holds: () => true }],
@@ -131,11 +140,6 @@ describe("loadSectionItems", () => {
     const calls = (prisma.gear.findMany as unknown as Mock).mock.calls;
     expect(calls.length).toBe(1);
     expect(calls[0][0].where).toEqual({});
-    expect(() =>
-      expect(Object.keys(calls[0][0].where as object).length).toBeGreaterThan(
-        0,
-      ),
-    ).toThrow();
   });
 
   it("skips a source whose where-builder returns null", async () => {
@@ -344,15 +348,23 @@ describe("loadSectionItems", () => {
   it("reports an unconfigured timezone on the kit payload too", async () => {
     // A kit card renders "n EXPIRED", so the page must be able to disclose
     // which timezone decided it.
+    //
+    // NARROWED BY A THROW, never by `&&`. This assertion was written
+    // `expect(payloads[0].kind === "kit" && payloads[0].timezoneConfigured)
+    // .toBe(false)`, which short-circuits to `false` when the payload is not
+    // a kit at all and becomes `expect(false).toBe(false)` — passing
+    // precisely when the thing it checks is absent. Exactly the
+    // looks-present-does-nothing shape this phase spent itself removing,
+    // reintroduced in the test that was meant to hold the line.
     mocks.findAppSettings.mockResolvedValue({
       id: "singleton",
       timezone: null,
       expiryWarningDays: 90,
     });
     const payloads = await loadSectionItems(sectionBySlug("kits")!);
-    expect(payloads[0].kind === "kit" && payloads[0].timezoneConfigured).toBe(
-      false,
-    );
+    const payload = payloads[0];
+    if (payload?.kind !== "kit") throw new Error("expected a kit payload");
+    expect(payload.timezoneConfigured).toBe(false);
   });
 
   it("skips a section that declares a kit source with no where", async () => {
