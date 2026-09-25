@@ -5,6 +5,7 @@ import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice
 import { AccessoriesClientPage } from "@/app/accessories/AccessoriesClientPage";
 import { GearClientPage } from "@/app/gear/GearClientPage";
 import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
+import { KitSectionList } from "@/components/sections/KitSectionList";
 import type { CategorySection } from "@/lib/categories";
 import type { SectionPayload } from "@/lib/sections/loadSectionItems";
 import type { SectionViewSource } from "@/lib/sections/renderableSources";
@@ -15,6 +16,7 @@ const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
   accessory: "Accessories",
   gear: "Gear",
   supply: "Supplies",
+  kit: "Kits",
 };
 
 /**
@@ -77,6 +79,16 @@ function RenderablePayloadList({
       return (
         <AccessoriesClientPage
           accessories={payload.items}
+          heading={heading}
+          subheading={subheading}
+          embedded={embedded}
+        />
+      );
+    case "kit":
+      return (
+        <KitSectionList
+          items={payload.items}
+          timezoneConfigured={payload.timezoneConfigured}
           heading={heading}
           subheading={subheading}
           embedded={embedded}
@@ -221,7 +233,12 @@ export function SectionView({
   // notice on the page — once, above every block, not once per block.
   const timezoneConfigured = !payloads.some(
     (payload) =>
-      (payload.kind === "gear" || payload.kind === "supply") &&
+      // Every kind that renders an expiry verdict, kit included: a kit card
+      // shows "n EXPIRED" off the same resolution, so a page carrying one
+      // must disclose which timezone decided it.
+      (payload.kind === "gear" ||
+        payload.kind === "supply" ||
+        payload.kind === "kit") &&
       payload.items.length > 0 &&
       !payload.timezoneConfigured,
   );

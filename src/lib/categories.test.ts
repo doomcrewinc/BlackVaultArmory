@@ -10,6 +10,7 @@ import {
   gearSectionForItem,
   gearWhereForSection,
   groupHref,
+  kitWhereForSection,
   sectionBySlug,
   sectionHref,
   sectionIsRenderable,
@@ -17,8 +18,10 @@ import {
   sectionsForGroup,
   supplySectionForItem,
   supplyWhereForSection,
+  UNFILTERED_SECTION_SOURCES,
   vaultSectionForFirearm,
   type CategorySection,
+  type SectionSource,
 } from "./categories";
 import { RENDERABLE_SOURCES_BY_GROUP } from "./sections/renderableSources";
 import { GEAR_CATEGORIES } from "./gear";
@@ -88,6 +91,7 @@ describe("registry shape", () => {
       "shelter-clothing",
       "tools-fire",
       "other-prep",
+      "kits",
     ]);
   });
 });
@@ -587,7 +591,7 @@ describe("supply-backed sections", () => {
 });
 
 describe("preparedness sections", () => {
-  it("declares the seven sections the spec names, in order", () => {
+  it("declares the eight sections the spec names, in order", () => {
     expect(sectionsForGroup("prep").map((s) => s.slug)).toEqual([
       "armor",
       "medical",
@@ -596,6 +600,7 @@ describe("preparedness sections", () => {
       "shelter-clothing",
       "tools-fire",
       "other-prep",
+      "kits",
     ]);
   });
 
@@ -656,11 +661,15 @@ describe("preparedness sections", () => {
     // Phase 4 parked the gear catch-all on `cases` because prep had no home
     // for it. It has one now, and a bugout-bag category must not surface
     // under Gear > Cases.
-    expect(gearSectionForItem({ category: "EXOSUIT" })?.slug).toBe("other-prep");
+    expect(gearSectionForItem({ category: "EXOSUIT" })?.slug).toBe(
+      "other-prep",
+    );
   });
 
   it("sends an unrecognised supply category to other-prep, not to food-water", () => {
-    expect(supplySectionForItem({ category: "PLUTONIUM" })?.slug).toBe("other-prep");
+    expect(supplySectionForItem({ category: "PLUTONIUM" })?.slug).toBe(
+      "other-prep",
+    );
   });
 
   it("finds a gear item whose section lives outside the gear group", () => {
@@ -789,12 +798,20 @@ describe("section renderability", () => {
     // A section can declare a source kind whose where-builder returns null —
     // the loader skips it, and a section whose ONLY source did that would
     // render an empty page forever while every matching test stayed green.
-    const builders = {
+    // Keyed by SectionSource with no index signature, so a source kind added
+    // to the union is TS7053 on `builders[kind]` below rather than a kind
+    // this test walks past. That fired for `kit` in phase 6 and is the third
+    // guard that caught the new source.
+    const builders: Record<
+      SectionSource,
+      (section: CategorySection) => object | null
+    > = {
       firearm: firearmWhereForSection,
       accessory: accessoryWhereForSection,
       gear: gearWhereForSection,
       supply: supplyWhereForSection,
-    } as const;
+      kit: kitWhereForSection,
+    };
     for (const section of CATEGORY_SECTIONS) {
       for (const kind of sectionSources(section)) {
         expect(
@@ -861,5 +878,84 @@ describe("section renderability", () => {
       group: "vault",
     };
     expect(sectionIsRenderable(vaultBacked)).toBe(true);
+  });
+});
+
+describe("the kits section", () => {
+  const kits = sectionBySlug("kits")!;
+
+  it("is a renderable prep section drawing from the kit source", () => {
+    expect(kits.group).toBe("prep");
+    expect(sectionSources(kits)).toEqual(["kit"]);
+    // Both halves: a where clause for the loader AND a renderer in the prep
+    // group's view. Phase 6 found this gate's exhaustiveness switch was
+    // unchecked — `Array.prototype.every` takes `(value) => unknown`, so the
+    // missing `: boolean` annotation let a new source kind fall out of the
+    // switch as `undefined`, which is falsy, so a correctly registered
+    // section would have 404'd through both [slug] pages. The annotation is
+    // in place; this asserts the outcome it protects.
+    expect(sectionIsRenderable(kits)).toBe(true);
+  });
+
+  it("names a lucide-react icon that exists in the installed package", async () => {
+    // `icon` is declared but nothing renders it yet, so a wrong name fails
+    // silently now and crashes whichever later phase starts rendering it.
+    const lucide = await import("lucide-react");
+    expect(Object.keys(lucide)).toContain(kits.icon);
+  });
+
+  it("matches every kit, and no other section claims one", () => {
+    const rows = [
+      { category: "BUGOUT" },
+      { category: "MEDICAL" },
+      { category: "RANGE" },
+      { category: "VEHICLE" },
+      { category: "HOME" },
+      { category: "OTHER" },
+      // Not a KitCategory this build knows. "All kits" has to mean all of
+      // them, including a category a later version adds or a backup restore
+      // writes unvalidated — the same hole the firearm and gear catch-alls
+      // close by negation.
+      { category: "ZZ_FUTURE_CATEGORY" },
+      { category: "" },
+    ];
+    for (const row of rows) {
+      const matching = CATEGORY_SECTIONS.filter((section) =>
+        section.sources.some(
+          (source) => source.source === "kit" && source.holds(row),
+        ),
+      );
+      expect(
+        matching.map((section) => section.slug),
+        `kit category ${JSON.stringify(row.category)}`,
+      ).toEqual(["kits"]);
+    }
+  });
+
+  it("is the only section whose matcher carries an empty where", () => {
+    // The other half of UNFILTERED_SECTION_SOURCES' contract. The loader
+    // suite skips its key-count assertion for the kinds on that list, so
+    // this test is what keeps the list from growing to cover a genuinely
+    // accidental `where: {}`: stated by negation over EVERY matcher in the
+    // registry, not as an allowlist of the ones expected to be filtered.
+    const unfiltered = new Set<SectionSource>();
+    for (const section of CATEGORY_SECTIONS) {
+      for (const source of section.sources) {
+        if (Object.keys(source.where).length === 0) {
+          unfiltered.add(source.source);
+        }
+      }
+    }
+    expect([...unfiltered].sort()).toEqual(
+      [...UNFILTERED_SECTION_SOURCES].sort(),
+    );
+  });
+
+  it("returns {} from kitWhereForSection, and null for a section without the source", () => {
+    // `{}`, not null: the loader gates on null to skip a source, so "all
+    // kits" and "no kit matcher here" must stay distinguishable. A
+    // `?? undefined` on this builder would collapse them.
+    expect(kitWhereForSection(kits)).toEqual({});
+    expect(kitWhereForSection(sectionBySlug("armor")!)).toBeNull();
   });
 });

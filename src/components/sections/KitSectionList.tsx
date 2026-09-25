@@ -1,0 +1,179 @@
+import { Backpack, PackageOpen } from "lucide-react";
+import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
+import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
+import { formatDateOnly } from "@/lib/date";
+import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
+import type { KitExpiryRollup } from "@/lib/kits/allocation";
+
+/**
+ * The Kits block of the Preparedness group: one card per kit, showing what is
+ * packed, what is missing and what is going off.
+ *
+ * A SERVER component, unlike GearClientPage and SupplyClientPage. Those are
+ * `"use client"` because they own an "Add …" action and interactive rows; this
+ * list has no interaction yet — kit CRUD pages are not built (only
+ * `/api/kits` exists) — so there is nothing to hydrate and no link to a
+ * detail route that would 404.
+ *
+ * Every number on the card is resolved SERVER-SIDE by `loadSectionItems`:
+ * `expiry` comes from `kitExpiryRollup` against the one `today` that loader
+ * shares with its gear and supply branches. This component must never compute
+ * a verdict itself — a browser-derived "expired" and a server-derived one
+ * disagree for every user west of UTC after 17:00.
+ */
+
+interface KitItem {
+  id: string;
+  name: string;
+  category: string;
+  location: string | null;
+  itemCount: number;
+  missing: number;
+  expiry: KitExpiryRollup;
+}
+
+interface Props {
+  items: KitItem[];
+  /**
+   * REQUIRED with no default, exactly as on GearClientPage and
+   * SupplyClientPage: a kit card renders EXPIRED and SOON badges, and an
+   * optional prop defaulting to `true` would fail open and silently drop the
+   * notice on the next surface that forgets to pass it.
+   */
+  timezoneConfigured: boolean;
+  heading?: string;
+  subheading?: string;
+  /** True when this is one block of a multi-source section page. */
+  embedded?: boolean;
+}
+
+function categoryLabel(category: string): string {
+  return KIT_CATEGORY_LABELS[category as KitCategory] ?? category;
+}
+
+/**
+ * The card's badges. Each is `shrink-0` and a SIBLING of the truncating name
+ * element rather than a descendant: `truncate` plus `flex` on one element
+ * hides its siblings, which hid a quantity badge outright in this repo once
+ * (see GearClientPage's ExpiryBadge). Markup that read correctly and only a
+ * browser caught — so the name gets its own `truncate min-w-0` span and every
+ * badge sits outside it.
+ */
+function ExpiryBadges({ expiry }: { expiry: KitExpiryRollup }) {
+  return (
+    <>
+      {expiry.expired > 0 && (
+        <span className="shrink-0 rounded border border-[#E53935]/20 bg-[#E53935]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#E53935]">
+          {expiry.expired} EXPIRED
+        </span>
+      )}
+      {expiry.soon > 0 && (
+        <span className="shrink-0 rounded border border-[#F5A623]/20 bg-[#F5A623]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#F5A623]">
+          {expiry.soon} SOON
+        </span>
+      )}
+    </>
+  );
+}
+
+export function KitSectionList({
+  items,
+  timezoneConfigured,
+  heading = "KITS",
+  subheading,
+  embedded = false,
+}: Props) {
+  return (
+    <div className={embedded ? undefined : "min-h-full"}>
+      {embedded ? (
+        <SectionBlockHeader title={heading} />
+      ) : (
+        <PageHeader
+          title={heading}
+          subtitle={
+            subheading ?? `${items.length} kit${items.length !== 1 ? "s" : ""}`
+          }
+        />
+      )}
+
+      <div className="p-4 sm:p-6">
+        {/* Only where the badges it explains actually appear, and never when
+            embedded — SectionView renders the one notice for the whole page
+            in that case, and two copies on one page is the failure that
+            guard exists to prevent. */}
+        {!embedded && items.length > 0 && (
+          <SupplyTimezoneNotice
+            timezoneConfigured={timezoneConfigured}
+            className="mb-4"
+          />
+        )}
+
+        {items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-[#00C2FF]/20 bg-[#00C2FF]/10">
+              <Backpack className="h-8 w-8 text-[#00C2FF]" />
+            </div>
+            <h3 className="mb-2 text-lg font-semibold text-vault-text">
+              No kits yet
+            </h3>
+            <p className="max-w-sm text-sm text-vault-text-muted">
+              A kit is a packing list — a bugout bag, a range bag, a vehicle kit
+              — that points at gear and supplies you already track.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {items.map((kit) => (
+              <div
+                key={kit.id}
+                className="rounded-lg border border-vault-border bg-vault-surface p-3"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded border border-vault-border bg-vault-bg">
+                    <Backpack className="h-4 w-4 text-vault-text-faint" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    {/* The name truncates alone; the badges are siblings. */}
+                    <p className="flex flex-wrap items-center gap-2 font-semibold text-vault-text">
+                      <span className="min-w-0 truncate">{kit.name}</span>
+                      <span className="shrink-0 rounded border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[#00C2FF]">
+                        {categoryLabel(kit.category)}
+                      </span>
+                      <ExpiryBadges expiry={kit.expiry} />
+                    </p>
+                    {kit.location && (
+                      <p className="truncate text-xs text-vault-text-faint">
+                        {kit.location}
+                      </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="flex items-center gap-1 font-mono text-xs text-vault-text-muted">
+                        <PackageOpen className="h-3 w-3" />
+                        {kit.itemCount} item{kit.itemCount !== 1 ? "s" : ""}
+                      </span>
+                      {/* Amber, not red: a short kit is a packing task, not
+                          an error. Rendered only when > 0 — a kit whose lines
+                          carry no targetQuantity sums to 0 and must not read
+                          as "0 missing", which implies a target was met. */}
+                      {kit.missing > 0 && (
+                        <span className="font-mono text-xs text-[#F5A623]">
+                          {kit.missing} missing
+                        </span>
+                      )}
+                      {kit.expiry.earliest && (
+                        <span className="font-mono text-xs text-vault-text-muted">
+                          exp {formatDateOnly(kit.expiry.earliest)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -11,12 +11,49 @@ import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
 export const SECTION_GROUPS = ["vault", "gear", "prep"] as const;
 
 export type SectionGroup = (typeof SECTION_GROUPS)[number];
-export type SectionSource = "firearm" | "accessory" | "gear" | "supply";
+export type SectionSource = "firearm" | "accessory" | "gear" | "supply" | "kit";
+
+/**
+ * The source kinds whose section draws the WHOLE table, so their matcher
+ * carries `where: {}` on purpose.
+ *
+ * Every other matcher in this file filters, and `loadSectionItems.test.ts`
+ * asserts no query is issued with an empty `where` — `{}` IS an unfiltered
+ * query, and a `?? undefined` coercion that produced one has caused two live
+ * bugs in this epic. The spec's section table says `Preparedness | Kits |
+ * kit, all`, so for `kit` an unfiltered query is the honest intent rather
+ * than a bug, and that ONE test cannot be true of both.
+ *
+ * It is resolved here, in the registry, rather than by exempting a delegate
+ * inside the test. Two things read this list and they check each other:
+ *
+ *   - the empty-`where` assertion skips the key-count check for these kinds
+ *     alone, so an accidental `where: {}` on a firearm, accessory, gear or
+ *     supply matcher still fails;
+ *   - a second test asserts this list is EXACTLY the set of kinds for which
+ *     some registered matcher carries an empty `where`. So a kind listed
+ *     here that actually filters fails, and a kind that ships `{}` without
+ *     being listed fails.
+ *
+ * A tautological `where` (`{ OR: [{ category: { in: ALL } }, { category: {
+ * notIn: ALL } }] }`) was the alternative, and was rejected: it would satisfy
+ * a guard built to detect unfiltered queries while BEING an unfiltered query.
+ * That is the dead-guard shape phase 5 spent itself removing — the invariant
+ * "every query this loader issues carries a filter" has genuinely stopped
+ * being true, and the guard should say so out loud instead of being fooled.
+ *
+ * `satisfies` keeps the entries inside `SectionSource`, so a renamed source
+ * kind is a compile error here rather than a silently dead exemption.
+ */
+export const UNFILTERED_SECTION_SOURCES = [
+  "kit",
+] as const satisfies readonly SectionSource[];
 
 export type FirearmRow = { type: string; nfaClass: string };
 export type AccessoryRow = { type: string };
 export type GearRow = { category: string };
 export type SupplyRow = { category: string };
+export type KitRow = { category: string };
 
 export type SectionMatcher =
   | { source: "firearm"; where: object; holds: (row: FirearmRow) => boolean }
@@ -34,6 +71,11 @@ export type SectionMatcher =
       source: "supply";
       where: object;
       holds: (row: SupplyRow) => boolean;
+    }
+  | {
+      source: "kit";
+      where: object;
+      holds: (row: KitRow) => boolean;
     };
 
 export type CategorySection = {
@@ -241,6 +283,26 @@ function otherSupplySection(): SectionMatcher {
     source: "supply",
     where: { category: { notIn: GROUPED_SUPPLIES } },
     holds: (row) => !GROUPED_SUPPLIES.includes(row.category),
+  };
+}
+
+/**
+ * Every kit, whatever its category — the spec's section table reads
+ * `Preparedness | Kits | kit, all`.
+ *
+ * The only matcher in this file with no filter, and the only member of
+ * `UNFILTERED_SECTION_SOURCES`; read its docblock before copying this shape.
+ * `where: {}` rather than a tautology, and `holds: () => true` rather than a
+ * category test: a kit is not sorted into one of several kit sections the way
+ * gear and supplies are, so there is no axis to gate on and nothing for a
+ * catch-all to be the negation of. Every kit lands here exactly once, which
+ * is what the other sources need their `notIn` branches to achieve.
+ */
+function kitSection(): SectionMatcher {
+  return {
+    source: "kit",
+    where: {},
+    holds: () => true,
   };
 }
 
@@ -462,6 +524,14 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
       otherSupplySection(),
     ],
   },
+  {
+    slug: "kits",
+    label: "Kits",
+    description: "Bugout, medical, range & vehicle packing lists",
+    group: "prep",
+    icon: "Backpack",
+    sources: [kitSection()],
+  },
 ];
 
 export function sectionBySlug(slug: string): CategorySection | undefined {
@@ -592,6 +662,19 @@ export function supplySectionForItem(
 }
 
 /**
+ * `{}` for the kits section, and that is not a bug — see
+ * `UNFILTERED_SECTION_SOURCES`. Still `?? null` rather than `?? undefined`,
+ * and the loader still gates on null: `{}` is truthy, so the kits query goes
+ * out unfiltered on purpose, while a section with NO kit matcher returns null
+ * and is skipped. `?? undefined` would collapse those two into one.
+ */
+export function kitWhereForSection(section: CategorySection): object | null {
+  return (
+    section.sources.find((source) => source.source === "kit")?.where ?? null
+  );
+}
+
+/**
  * The distinct source kinds a section draws from, in declaration order. The
  * section renderer walks this rather than probing each where-builder for null,
  * so "this section has no data source at all" is a case the caller can see
@@ -630,13 +713,25 @@ export function sectionSources(section: CategorySection): SectionSource[] {
 export function sectionIsRenderable(section: CategorySection): boolean {
   const kinds = sectionSources(section);
   if (kinds.length === 0) return false;
-  return kinds.every((kind) => {
+  // The `: boolean` return annotation is LOAD-BEARING and was missing until
+  // phase 6 added the `kit` source and caught it. `Array.prototype.every`
+  // takes `(value) => unknown`, so with no annotation the callback's inferred
+  // `boolean | undefined` was assignable to the contextual type and the
+  // switch's exhaustiveness was NEVER CHECKED: adding a fifth SectionSource
+  // produced no error here at all, and the new kind fell out of the switch as
+  // `undefined` — falsy — so `sectionIsRenderable` returned false and both
+  // [slug] pages `notFound()`. A section registered per spec would have
+  // 404'd, which is the exact silent-omission shape the docblock above says
+  // this gate prevents. Same failure as `RenderablePayloadList`'s explicit
+  // `ReactElement`, and the same fix. Verified by removing the annotation:
+  // the `kit` case below can be deleted and tsc stays clean without it.
+  return kinds.every((kind): boolean => {
     // Half 2: the group's view has a renderer for this kind.
     if (!isRenderableSource(section.group, kind)) return false;
     // Half 1: the loader has something to query with. The switch is
     // exhaustive over SectionSource with no `default`, so a source kind added
-    // to the registry is a tsc error here rather than a kind this gate waves
-    // through unchecked.
+    // to the registry is a tsc error here (TS2366, via the annotation above)
+    // rather than a kind this gate waves through unchecked.
     switch (kind) {
       case "firearm":
         return firearmWhereForSection(section) !== null;
@@ -646,6 +741,10 @@ export function sectionIsRenderable(section: CategorySection): boolean {
         return gearWhereForSection(section) !== null;
       case "supply":
         return supplyWhereForSection(section) !== null;
+      // `{}`, not null: truthy, so this passes. "All kits" is a real where
+      // clause for the loader's purposes — see UNFILTERED_SECTION_SOURCES.
+      case "kit":
+        return kitWhereForSection(section) !== null;
     }
   });
 }

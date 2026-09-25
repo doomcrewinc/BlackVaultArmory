@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   CATEGORY_SECTIONS,
+  UNFILTERED_SECTION_SOURCES,
   accessoryWhereForSection,
   sectionBySlug,
   sectionSources,
   type CategorySection,
+  type SectionSource,
 } from "@/lib/categories";
 
 const mocks = vi.hoisted(() => ({
@@ -13,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   findAccessories: vi.fn(),
   findGear: vi.fn(),
   findSupplies: vi.fn(),
+  findKits: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -22,6 +25,7 @@ vi.mock("@/lib/prisma", () => ({
     accessory: { findMany: mocks.findAccessories },
     gear: { findMany: mocks.findGear },
     supply: { findMany: mocks.findSupplies },
+    kit: { findMany: mocks.findKits },
   },
 }));
 
@@ -34,6 +38,7 @@ beforeEach(() => {
   mocks.findAccessories.mockReset().mockResolvedValue([]);
   mocks.findGear.mockReset().mockResolvedValue([]);
   mocks.findSupplies.mockReset().mockResolvedValue([]);
+  mocks.findKits.mockReset().mockResolvedValue([]);
 });
 
 describe("loadSectionItems", () => {
@@ -56,32 +61,81 @@ describe("loadSectionItems", () => {
     expect(prisma.firearm.findMany).not.toHaveBeenCalled();
   });
 
-  it("never issues a query with no where clause", async () => {
+  it("never issues a query with no where clause, except where the spec says all", async () => {
     // `?? undefined` on a where-builder has caused two live bugs in this
-    // epic: it turns "matches nothing here" into "match everything". Every
-    // query this loader issues carries a filter.
+    // epic: it turns "matches nothing here" into "match everything".
     //
     // A bare `toBeTruthy()` would pass for `where: {}`, which IS an
     // unfiltered query — the very thing being guarded against — so the key
-    // count is asserted too.
+    // count is asserted too. Phase 6 then registered a section the spec
+    // defines as `kit, all`, for which an unfiltered query is the honest
+    // intent, and one assertion cannot be true of both.
+    //
+    // Resolved by exempting the kinds on UNFILTERED_SECTION_SOURCES — a
+    // registry constant, not a delegate named in this file — and NOT by
+    // deleting the assertion. `categories.test.ts` asserts that list is
+    // exactly the set of kinds whose matcher carries an empty `where`, so an
+    // accidental `where: {}` on a firearm, accessory, gear or supply matcher
+    // still fails here, and a kind exempted without earning it fails there.
+    //
+    // The delegate list is keyed BY SOURCE KIND and typed
+    // Record<SectionSource, …>, so a sixth source kind is a compile error
+    // here rather than a table this loop silently walks past — which is what
+    // the old bare array did to `kit`.
+    const delegates: Record<SectionSource, { findMany: unknown }> = {
+      firearm: prisma.firearm,
+      accessory: prisma.accessory,
+      gear: prisma.gear,
+      supply: prisma.supply,
+      kit: prisma.kit,
+    };
+    const exempt = new Set<SectionSource>(UNFILTERED_SECTION_SOURCES);
+
     for (const section of CATEGORY_SECTIONS) {
       vi.clearAllMocks();
       await loadSectionItems(section);
-      for (const delegate of [
-        prisma.firearm,
-        prisma.accessory,
-        prisma.gear,
-        prisma.supply,
-      ]) {
-        for (const call of (delegate.findMany as unknown as Mock).mock.calls) {
-          expect(call[0]?.where).toBeTruthy();
+      for (const [kind, delegate] of Object.entries(delegates) as [
+        SectionSource,
+        { findMany: unknown },
+      ][]) {
+        for (const call of (delegate.findMany as Mock).mock.calls) {
+          // Asserted for every kind, exempt or not: `{ where: undefined }`
+          // is the `?? undefined` coercion itself, and is never acceptable.
+          expect(
+            call[0]?.where,
+            `${section.slug} issued a ${kind} query with no where at all`,
+          ).toBeTruthy();
+          if (exempt.has(kind)) continue;
           expect(
             Object.keys(call[0].where as object).length,
-            `${section.slug} issued a query with an empty where`,
+            `${section.slug} issued a ${kind} query with an empty where`,
           ).toBeGreaterThan(0);
         }
       }
     }
+  });
+
+  it("still fails an empty where on a source the spec does not exempt", async () => {
+    // Proof the exemption above did not disarm the guard. `armor` declares a
+    // gear source, which is NOT on UNFILTERED_SECTION_SOURCES, so forging
+    // `where: {}` onto it must trip the key-count assertion. Without the
+    // `exempt.has(kind)` skip this is what the real loop would report for
+    // any matcher that shipped `{}`.
+    const forged = {
+      ...sectionBySlug("armor")!,
+      sources: [{ source: "gear", where: {}, holds: () => true }],
+    } as unknown as CategorySection;
+
+    await loadSectionItems(forged);
+
+    const calls = (prisma.gear.findMany as unknown as Mock).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][0].where).toEqual({});
+    expect(() =>
+      expect(Object.keys(calls[0][0].where as object).length).toBeGreaterThan(
+        0,
+      ),
+    ).toThrow();
   });
 
   it("skips a source whose where-builder returns null", async () => {
@@ -206,5 +260,117 @@ describe("loadSectionItems", () => {
   it("does not read AppSettings for a section with no expiring source", async () => {
     await loadSectionItems(sectionBySlug("optics")!);
     expect(prisma.appSettings.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("queries every kit, with its items included, for the kits section", async () => {
+    await loadSectionItems(sectionBySlug("kits")!);
+    const call = (prisma.kit.findMany as unknown as Mock).mock.calls[0][0];
+    // `{}`, on purpose: the spec's section table reads `kit, all`.
+    expect(call.where).toEqual({});
+    expect(call.orderBy).toEqual({ name: "asc" });
+    // ONE query with an include, not a query per kit — sqlite runs
+    // connection_limit=1, so N+1 would serialize into N round trips.
+    expect(call.include.items.select.gear.select.expirationDate).toBe(true);
+    expect(call.include.items.select.supply.select.expirationDate).toBe(true);
+  });
+
+  it("rolls a kit's items up into counts and drops the items themselves", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-16T03:00:00.000Z"));
+    mocks.findAppSettings.mockResolvedValue({
+      id: "singleton",
+      timezone: "America/Denver",
+      expiryWarningDays: 90,
+    });
+    mocks.findKits.mockResolvedValue([
+      {
+        id: "k1",
+        name: "Bugout Bag",
+        category: "BUGOUT",
+        location: "Hall closet",
+        notes: null,
+        imageUrl: null,
+        items: [
+          // 2 of a target 5 → 3 missing, and a gear line already expired.
+          {
+            quantity: 2,
+            targetQuantity: 5,
+            gear: { expirationDate: new Date("2020-01-01T00:00:00.000Z") },
+            supply: null,
+          },
+          // 1 of a target 2 → 1 missing, and a supply line expiring soon.
+          {
+            quantity: 1,
+            targetQuantity: 2,
+            gear: null,
+            supply: { expirationDate: new Date("2026-06-15T00:00:00.000Z") },
+          },
+          // No target → contributes nothing to `missing`, and no expiry row
+          // at all (a label-only or firearm/accessory line).
+          { quantity: 1, targetQuantity: null, gear: null, supply: null },
+        ],
+      },
+    ]);
+
+    const payloads = await loadSectionItems(sectionBySlug("kits")!);
+    expect(payloads.map((p) => p.kind)).toEqual(["kit"]);
+    const payload = payloads[0];
+    if (payload.kind !== "kit") throw new Error("expected a kit payload");
+    const kit = payload.items[0];
+
+    expect(kit.itemCount).toBe(3);
+    expect(kit.missing).toBe(4);
+    // Off the SAME resolved `today` the gear and supply branches use: 21:00
+    // on June 15 in Denver. A raw `new Date()` here would be June 16 UTC and
+    // would read the second line as expired rather than soon.
+    expect(kit.expiry.expired).toBe(1);
+    expect(kit.expiry.soon).toBe(1);
+    expect(kit.expiry.earliest).toEqual(new Date("2020-01-01T00:00:00.000Z"));
+    // `items` is destructured out: a KitItem's five nullable foreign keys and
+    // its joined rows must not cross the server/client boundary for a card
+    // that shows three numbers.
+    expect("items" in kit).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("resolves today ONCE for a page carrying a kit payload", async () => {
+    // Two resolutions on one page is how two lists come to disagree about
+    // what day it is. The kit branch shares `loadExpiryContext` rather than
+    // calling resolveExpiryContext again.
+    await loadSectionItems(sectionBySlug("kits")!);
+    expect(prisma.appSettings.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an unconfigured timezone on the kit payload too", async () => {
+    // A kit card renders "n EXPIRED", so the page must be able to disclose
+    // which timezone decided it.
+    mocks.findAppSettings.mockResolvedValue({
+      id: "singleton",
+      timezone: null,
+      expiryWarningDays: 90,
+    });
+    const payloads = await loadSectionItems(sectionBySlug("kits")!);
+    expect(payloads[0].kind === "kit" && payloads[0].timezoneConfigured).toBe(
+      false,
+    );
+  });
+
+  it("skips a section that declares a kit source with no where", async () => {
+    // `{}` and null are different answers and the loader must keep them
+    // apart: `{}` means all kits, null means this section has no kit matcher.
+    const forged = {
+      slug: "forged-null-kit-where",
+      label: "Forged",
+      description: "A section whose kit matcher carries no where",
+      group: "prep",
+      icon: "Backpack",
+      sources: [{ source: "kit", holds: () => true }],
+    } as unknown as CategorySection;
+
+    expect(sectionSources(forged)).toEqual(["kit"]);
+    const payloads = await loadSectionItems(forged);
+
+    expect(payloads).toEqual([]);
+    expect(prisma.kit.findMany).not.toHaveBeenCalled();
   });
 });

@@ -39,6 +39,7 @@ export const SECTION_VIEW_SOURCES = [
   "accessory",
   "gear",
   "supply",
+  "kit",
 ] as const satisfies readonly SectionSource[];
 
 export type SectionViewSource = (typeof SECTION_VIEW_SOURCES)[number];
