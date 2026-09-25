@@ -243,4 +243,40 @@ describe("PUT /api/firearms/[id]", () => {
     expect(data.nfaTaxPaid).toBe(200);
     expect(data.nfaRegisteredTo).toBe("Doe Family Trust");
   });
+
+  it("stores a blank purchasePrice and currentValue as null, not 0", async () => {
+    mocks.findUnique.mockResolvedValue(existingFirearm());
+
+    await PUT(putRequest({ purchasePrice: "", currentValue: "   " }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.purchasePrice).toBeNull();
+    expect(data.currentValue).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice and currentValue as 0", async () => {
+    mocks.findUnique.mockResolvedValue(existingFirearm());
+
+    await PUT(putRequest({ purchasePrice: 0, currentValue: 0 }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data.purchasePrice).toBe(0);
+    expect(data.currentValue).toBe(0);
+  });
+
+  it("leaves purchasePrice and currentValue untouched when the body doesn't mention them", async () => {
+    mocks.findUnique.mockResolvedValue(existingFirearm());
+
+    await PUT(putRequest({ name: "Renamed Carbine" }), {
+      params: Promise.resolve({ id: "firearm-1" }),
+    });
+
+    const { data } = mocks.update.mock.calls[0][0];
+    expect(data).not.toHaveProperty("purchasePrice");
+    expect(data).not.toHaveProperty("currentValue");
+  });
 });

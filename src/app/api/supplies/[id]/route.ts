@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 import {
   normalizeAmount,
   normalizeSupplyCategory,
@@ -106,7 +107,9 @@ export async function PUT(
         ...(expirationDate !== undefined && {
           expirationDate: expirationDate ? toDateOnlyUTC(expirationDate) : null,
         }),
-        ...(purchasePrice !== undefined && { purchasePrice }),
+        ...(purchasePrice !== undefined && {
+          purchasePrice: normalizeMoney(purchasePrice),
+        }),
         ...(purchaseDate !== undefined && {
           purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         }),

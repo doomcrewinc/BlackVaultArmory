@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
+import { normalizeMoney } from "@/lib/money";
 import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
 
@@ -170,8 +171,8 @@ export async function POST(request: NextRequest) {
         acquisitionDate: acquisitionDate
           ? toDateOnlyUTC(acquisitionDate)
           : toDateOnlyUTC(new Date()),
-        purchasePrice: purchasePrice ?? null,
-        currentValue: currentValue ?? null,
+        purchasePrice: normalizeMoney(purchasePrice),
+        currentValue: normalizeMoney(currentValue),
         notes: notes ? normalizeString(notes) : null,
         imageUrl: imageUrl ?? null,
         imageSource: imageSource ?? null,

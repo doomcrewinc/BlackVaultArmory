@@ -186,4 +186,32 @@ describe("POST /api/firearms", () => {
     expect(data.nfaRegisteredTo).toBe("Doe Family Trust");
     expect(data.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
   });
+
+  it("stores a blank purchasePrice and currentValue as null, not 0", async () => {
+    await POST(
+      postRequest({
+        name: "New Rifle",
+        purchasePrice: "",
+        currentValue: " ",
+      }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.purchasePrice).toBeNull();
+    expect(data.currentValue).toBeNull();
+  });
+
+  it("stores a legitimate zero purchasePrice and currentValue as 0", async () => {
+    await POST(
+      postRequest({
+        name: "New Rifle",
+        purchasePrice: 0,
+        currentValue: 0,
+      }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.purchasePrice).toBe(0);
+    expect(data.currentValue).toBe(0);
+  });
 });

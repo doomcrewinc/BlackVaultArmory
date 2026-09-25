@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
+import { normalizeMoney } from "@/lib/money";
 import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 
 function normalizeString(value: unknown) {
@@ -185,8 +186,12 @@ export async function PUT(
             ? toDateOnlyUTC(acquisitionDate)
             : existing.acquisitionDate,
         }),
-        ...(purchasePrice !== undefined && { purchasePrice }),
-        ...(currentValue !== undefined && { currentValue }),
+        ...(purchasePrice !== undefined && {
+          purchasePrice: normalizeMoney(purchasePrice),
+        }),
+        ...(currentValue !== undefined && {
+          currentValue: normalizeMoney(currentValue),
+        }),
         ...(notes !== undefined && {
           notes: notes ? normalizeString(notes) : null,
         }),

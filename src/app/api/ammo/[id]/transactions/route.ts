@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { normalizeMoney } from "@/lib/money";
 
 // Types that subtract from quantity
 const SUBTRACT_TYPES = new Set(["RANGE_USE", "TRANSFER_OUT", "EXPENDED"]);
@@ -98,8 +99,8 @@ export async function POST(
           previousQty,
           newQty,
           note: note ?? null,
-          purchasePrice: purchasePrice ?? null,
-          pricePerRound: pricePerRound ?? null,
+          purchasePrice: normalizeMoney(purchasePrice),
+          pricePerRound: normalizeMoney(pricePerRound),
           purchaseDate: purchaseDate ? toDateOnlyUTC(purchaseDate) : null,
         },
       }),
