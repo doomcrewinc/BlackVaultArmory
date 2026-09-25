@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Plus, Boxes, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatNumber } from "@/lib/utils";
 import {
   SUPPLY_CATEGORY_LABELS,
@@ -27,6 +28,13 @@ interface Props {
   timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
+  /**
+   * True when this list is one block of a multi-source section page (see
+   * SectionView). The page owns the `h1` AND the timezone notice — the notice
+   * is rendered exactly once per page, so an embedded block must not render a
+   * second copy of it.
+   */
+  embedded?: boolean;
 }
 
 function unitLabel(unit: string): string {
@@ -101,30 +109,39 @@ export function SupplyClientPage({
   timezoneConfigured,
   heading = "SUPPLIES",
   subheading,
+  embedded = false,
 }: Props) {
+  const addAction = (
+    <Link
+      href="/supplies/new"
+      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+    >
+      <Plus className="w-4 h-4" />
+      Add Supply
+    </Link>
+  );
+
   return (
-    <div className="min-h-full">
-      <PageHeader
-        title={heading}
-        subtitle={
-          subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
-        }
-        actions={
-          <Link
-            href="/supplies/new"
-            className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add Supply
-          </Link>
-        }
-      />
+    <div className={embedded ? undefined : "min-h-full"}>
+      {embedded ? (
+        <SectionBlockHeader title={heading} action={addAction} />
+      ) : (
+        <PageHeader
+          title={heading}
+          subtitle={
+            subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
+          }
+          actions={addAction}
+        />
+      )}
 
       <div className="p-4 sm:p-6">
         {/* Only where the badges it explains actually appear: the empty state
             below renders no LOW/SOON/EXPIRED badge, so there is nothing for
-            the notice to qualify. */}
-        {items.length > 0 && (
+            the notice to qualify. Skipped entirely when embedded — SectionView
+            renders the one notice for the whole page in that case, and two
+            copies on one page is the failure this guard exists to prevent. */}
+        {!embedded && items.length > 0 && (
           <SupplyTimezoneNotice
             timezoneConfigured={timezoneConfigured}
             className="mb-4"

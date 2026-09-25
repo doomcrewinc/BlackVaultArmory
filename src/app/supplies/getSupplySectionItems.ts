@@ -19,6 +19,45 @@ export interface SupplySectionItem {
   expiry: ExpiryStatus;
 }
 
+/**
+ * One Supply row as a section list renders it.
+ *
+ * Derived from the Prisma delegate rather than hand-written, so a schema
+ * change updates it automatically — hand-written row interfaces are the shape
+ * that fell behind the schema in DATE_ONLY_FIELDS.
+ */
+type SupplyRow = Awaited<ReturnType<typeof prisma.supply.findMany>>[number];
+
+/**
+ * The row shape every supply list renders, with `isLow` and `expiry` already
+ * resolved.
+ *
+ * Exported and shared by `getSupplySectionItems` and the section loader's
+ * supply branch rather than copied into each, so the supply row shape cannot
+ * drift between `/supplies/item/[id]` and the section pages.
+ *
+ * `today` is an argument, never read from the clock here: the caller resolves
+ * it once per request through `todayForExpiry(settings?.timezone ?? null, …)`,
+ * so every list on one page agrees about what "today" is.
+ */
+export function mapSupplyRow(
+  supply: SupplyRow,
+  today: Date,
+  warningDays: number,
+): SupplySectionItem {
+  return {
+    id: supply.id,
+    name: supply.name,
+    brand: supply.brand,
+    category: supply.category,
+    quantity: supply.quantity,
+    unit: supply.unit,
+    storageLocation: supply.storageLocation,
+    isLow: isLowStock(supply),
+    expiry: expiryStatus(supply.expirationDate, today, warningDays),
+  };
+}
+
 export interface SupplySectionResult {
   items: SupplySectionItem[];
   /**
@@ -60,17 +99,7 @@ export async function getSupplySectionItems(
   });
 
   return {
-    items: supplies.map((supply) => ({
-      id: supply.id,
-      name: supply.name,
-      brand: supply.brand,
-      category: supply.category,
-      quantity: supply.quantity,
-      unit: supply.unit,
-      storageLocation: supply.storageLocation,
-      isLow: isLowStock(supply),
-      expiry: expiryStatus(supply.expirationDate, today, warningDays),
-    })),
+    items: supplies.map((supply) => mapSupplyRow(supply, today, warningDays)),
     timezoneConfigured: Boolean(settings?.timezone),
   };
 }

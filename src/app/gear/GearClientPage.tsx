@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Plus, Package, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import type { ExpiryStatus } from "@/lib/supply";
@@ -30,6 +31,12 @@ interface Props {
   items: GearItem[];
   heading?: string;
   subheading?: string;
+  /**
+   * True when this list is one block of a multi-source section page (see
+   * SectionView). The page owns the `h1`, so the block gets the lighter
+   * SectionBlockHeader instead of a second PageHeader.
+   */
+  embedded?: boolean;
 }
 
 function categoryLabel(category: string): string {
@@ -60,24 +67,35 @@ function ExpiryBadge({ expiry }: { expiry: ExpiryStatus }) {
   return null;
 }
 
-export function GearClientPage({ items, heading = "GEAR", subheading }: Props) {
+export function GearClientPage({
+  items,
+  heading = "GEAR",
+  subheading,
+  embedded = false,
+}: Props) {
+  const addAction = (
+    <Link
+      href="/gear/new"
+      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+    >
+      <Plus className="w-4 h-4" />
+      Add Gear
+    </Link>
+  );
+
   return (
-    <div className="min-h-full">
-      <PageHeader
-        title={heading}
-        subtitle={
-          subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
-        }
-        actions={
-          <Link
-            href="/gear/new"
-            className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add Gear
-          </Link>
-        }
-      />
+    <div className={embedded ? undefined : "min-h-full"}>
+      {embedded ? (
+        <SectionBlockHeader title={heading} action={addAction} />
+      ) : (
+        <PageHeader
+          title={heading}
+          subtitle={
+            subheading ?? `${items.length} item${items.length !== 1 ? "s" : ""}`
+          }
+          actions={addAction}
+        />
+      )}
 
       <div className="p-4 sm:p-6">
         {items.length === 0 ? (
