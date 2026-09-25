@@ -11,6 +11,7 @@ type SectionFlags = {
   gear: boolean;
   builds: boolean;
   ammo: boolean;
+  kits: boolean;
   rangeSessions: boolean;
   documents: boolean;
   settings: boolean;
@@ -34,6 +35,7 @@ function parseFlags(searchParams: URLSearchParams): SectionFlags {
     gear: parseBool(searchParams.get("gear"), true),
     builds: parseBool(searchParams.get("builds"), true),
     ammo: parseBool(searchParams.get("ammo"), true),
+    kits: parseBool(searchParams.get("kits"), true),
     rangeSessions: parseBool(searchParams.get("rangeSessions"), true),
     documents: parseBool(searchParams.get("documents"), true),
     settings: parseBool(searchParams.get("settings"), false),
@@ -52,11 +54,49 @@ function normalizeIncludeUploadReferences(value: unknown): boolean {
 
 // Firearm, Accessory and Gear are the only models this route emits that carry a
 // serialNumber. None of them may keep it when includeSerialNumbers is off —
-// including the Accessory rows nested inside a build's slots.
+// including the Accessory rows nested inside a build's slots, and the Firearm,
+// Accessory and Gear rows nested inside a kit's lines.
 function withoutSerialNumber(row: object): Record<string, unknown> {
   const rest = { ...row } as Record<string, unknown>;
   delete rest.serialNumber;
   return rest;
+}
+
+/**
+ * Strips `serialNumber` from EVERY nested object on every line of a kit.
+ *
+ * A KitItem points at one of five inventory tables, three of which carry a
+ * serial (Firearm, Accessory, Gear). That is the same shape a build's slots
+ * have — an inventory row embedded one level below a row this route already
+ * strips — and it is the shape that leaked a serial twice in this epic, the
+ * second time two levels deep through a build slot, past tests that checked
+ * the top-level `accessories` array.
+ *
+ * So this does NOT name the three relations that happen to carry a serial
+ * today. It walks every object-valued property of the line and strips the
+ * field from each one, which also covers a sixth source kind added later and
+ * a serial column added to Supply or AmmoStock. The field name is the one
+ * invariant; the relation list is not.
+ *
+ * It is the SECOND line of defence, not the first: the query below asks for
+ * `serialNumber` only when the export includes serials, so with the toggle
+ * off the column never leaves the database. Both, because a narrow select is
+ * invisible to a test with a mocked Prisma client and a JS strip is invisible
+ * to a reader of the query — the whole-payload sweep needs one of them to be
+ * provable and a real deployment deserves both.
+ */
+function withoutKitLineSerials(kit: object): Record<string, unknown> {
+  const row = { ...kit } as Record<string, unknown>;
+  const lines = Array.isArray(row.items) ? row.items : [];
+  row.items = lines.map((line) => {
+    if (!isFlatObject(line)) return line;
+    const lineRow = withoutSerialNumber(line);
+    for (const [key, value] of Object.entries(lineRow)) {
+      if (isFlatObject(value)) lineRow[key] = withoutSerialNumber(value);
+    }
+    return lineRow;
+  });
+  return row;
 }
 
 function isLocalUploadUrl(url: string): boolean {
@@ -241,6 +281,7 @@ function buildPdfLines(
     { title: "Gear", enabled: flags.gear, rows: asRows(payload.gear) },
     { title: "Builds", enabled: flags.builds, rows: asRows(payload.builds) },
     { title: "Ammo Stocks", enabled: flags.ammo, rows: asRows(payload.ammoStocks) },
+    { title: "Kits", enabled: flags.kits, rows: asRows(payload.kits) },
     { title: "Range Sessions", enabled: flags.rangeSessions, rows: asRows(payload.rangeSessions) },
     { title: "Documents", enabled: flags.documents, rows: asRows(payload.documents) },
     { title: "Settings", enabled: flags.settings, rows: asRows(payload.settings) },
@@ -421,6 +462,75 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // A kit is a packing list: its lines point at inventory rows elsewhere, so
+    // the export carries the line plus enough of the row it points at to name
+    // it. Three of the five source tables carry a serial, and every relation
+    // is narrowed by an explicit `select` that asks for `serialNumber` only
+    // when the export includes serials — the same property that kept the
+    // serial leak out of /api/search. `withoutKitLineSerials` then strips the
+    // field from every nested object regardless; see its docblock for why both.
+    if (flags.kits) {
+      const rows = await prisma.kit.findMany({
+        include: {
+          items: {
+            orderBy: { createdAt: "asc" },
+            include: {
+              gear: {
+                select: {
+                  id: true,
+                  name: true,
+                  manufacturer: true,
+                  model: true,
+                  category: true,
+                  quantity: true,
+                  expirationDate: true,
+                  serialNumber: includeSerialNumbers,
+                },
+              },
+              supply: {
+                select: {
+                  id: true,
+                  name: true,
+                  brand: true,
+                  category: true,
+                  quantity: true,
+                  unit: true,
+                  expirationDate: true,
+                },
+              },
+              accessory: {
+                select: {
+                  id: true,
+                  name: true,
+                  manufacturer: true,
+                  model: true,
+                  type: true,
+                  quantity: true,
+                  serialNumber: includeSerialNumbers,
+                },
+              },
+              ammoStock: {
+                select: { id: true, brand: true, caliber: true, quantity: true },
+              },
+              firearm: {
+                select: {
+                  id: true,
+                  name: true,
+                  manufacturer: true,
+                  model: true,
+                  caliber: true,
+                  type: true,
+                  serialNumber: includeSerialNumbers,
+                },
+              },
+            },
+          },
+        },
+        orderBy: [{ category: "asc" }, { name: "asc" }],
+      });
+      payload.kits = includeSerialNumbers ? rows : rows.map(withoutKitLineSerials);
+    }
+
     if (flags.rangeSessions) {
       payload.rangeSessions = await prisma.rangeSession.findMany({
         include: {
@@ -554,6 +664,7 @@ export async function GET(request: NextRequest) {
       if (flags.gear) csvSections.push({ section: "gear", rows: payload.gear ?? [] });
       if (flags.builds) csvSections.push({ section: "builds", rows: payload.builds ?? [] });
       if (flags.ammo) csvSections.push({ section: "ammoStocks", rows: payload.ammoStocks ?? [] });
+      if (flags.kits) csvSections.push({ section: "kits", rows: payload.kits ?? [] });
       if (flags.rangeSessions) csvSections.push({ section: "rangeSessions", rows: payload.rangeSessions ?? [] });
       if (flags.documents) csvSections.push({ section: "documents", rows: payload.documents ?? [] });
       if (flags.settings) csvSections.push({ section: "settings", rows: payload.settings ?? [] });

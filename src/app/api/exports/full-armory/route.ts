@@ -16,6 +16,8 @@ import {
 } from "@/lib/exports/full-armory";
 import { requireAuth } from "@/lib/server/auth";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
+import { KIT_CATEGORY_LABELS, type KitCategory } from "@/lib/kit";
+import { kitExpiryRollup, missingQuantity, type KitExpiryLine } from "@/lib/kits/allocation";
 import {
   SUPPLY_CATEGORY_LABELS,
   SUPPLY_UNIT_LABELS,
@@ -35,6 +37,16 @@ function supplyCategoryLabel(category: string): string {
 
 function supplyUnitLabel(unit: string): string {
   return SUPPLY_UNIT_LABELS[unit as SupplyUnit] ?? unit;
+}
+
+/**
+ * Falls back to the stored token for a category this build does not know —
+ * the same rule gearCategoryLabel and supplyCategoryLabel follow, and for the
+ * same reason: restore inserts kit rows unvalidated, and a category from a
+ * later build must print as itself rather than vanish.
+ */
+function kitCategoryLabel(category: string): string {
+  return KIT_CATEGORY_LABELS[category as KitCategory] ?? category;
 }
 
 /** The paperwork group as it comes off a firearm or an accessory row. */
@@ -189,6 +201,36 @@ type SupplyExportRecord = {
   notes: string | null;
 };
 
+/**
+ * One kit as this export reads it: its own scalars plus only what the rollups
+ * need off each line.
+ *
+ * The `select` is narrow on purpose and asks for NO serial number anywhere —
+ * not on the kit, and not on any of the five rows a line can point at. Three
+ * of those five tables carry a serial, and an `include: { firearm: true }`
+ * here would have put one in a claims sheet on a path neither the
+ * includeSerialNumbers gate nor any strip in this route visits. The kit
+ * section reports counts and dates; it never restates an inventory row, which
+ * the Master Inventory and Gear sections already carry in full.
+ *
+ * Only Gear and Supply are asked for an expirationDate, because they are the
+ * only two sources that have one — an Accessory, an AmmoStock, a Firearm and a
+ * label-only line have no expiry to roll up.
+ */
+type KitExportRecord = {
+  id: string;
+  name: string;
+  category: string;
+  location: string | null;
+  notes: string | null;
+  items: Array<{
+    quantity: number;
+    targetQuantity: number | null;
+    gear: { expirationDate: Date | null } | null;
+    supply: { expirationDate: Date | null } | null;
+  }>;
+};
+
 type PrismaWithOptionalDocument = typeof prisma & {
   document?: {
     findMany: (args: {
@@ -273,6 +315,7 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     { section: "summary", key: "totalAccessories", value: payload.summary.totalAccessories },
     { section: "summary", key: "totalGear", value: payload.summary.totalGear },
     { section: "summary", key: "totalSupplies", value: payload.summary.totalSupplies },
+    { section: "summary", key: "totalKits", value: payload.summary.totalKits },
     { section: "summary", key: "totalAmmoStocks", value: payload.summary.totalAmmoStocks },
     { section: "summary", key: "totalDocuments", value: payload.summary.totalDocuments },
     { section: "summary", key: "totalReceipts", value: payload.summary.totalReceipts },
@@ -300,6 +343,10 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     section: "supplies",
     ...flattenRecord(row as unknown as Record<string, unknown>),
   }));
+  const kitRows = payload.kits.map((row) => ({
+    section: "kits",
+    ...flattenRecord(row as unknown as Record<string, unknown>),
+  }));
 
   return rowsToCsv([
     ...metaRows,
@@ -308,6 +355,7 @@ function buildExportCsv(payload: FullArmoryExportResponse): string {
     ...attachmentRows,
     ...gearRows,
     ...supplyRows,
+    ...kitRows,
   ]);
 }
 
@@ -421,10 +469,21 @@ function pushWrapped(lines: string[], line: string, indent = ""): void {
  * when the status is "none", which is the only status a dateless row can have
  * — so it never appears in practice, and the guard is there because
  * expiryStatus also returns "none" for a date it could not parse.
+ *
+ * `label` exists for the kit rows and for nothing else. A kit does not expire;
+ * the earliest-expiring thing INSIDE it does, so that row reads "Earliest
+ * Expiry" while a plate and a water pouch read "Expires". Sharing the function
+ * and varying the label keeps one implementation of the print-nothing-where-
+ * there-is-nothing convention without printing a date under a heading that
+ * claims something the value does not say.
  */
-function expirySegment(expirationDate: string, expiryStatus: string): string | null {
+function expirySegment(
+  expirationDate: string,
+  expiryStatus: string,
+  label = "Expires"
+): string | null {
   if (!expirationDate) return null;
-  return `Expires: ${expirationDate}${expiryStatus !== "none" ? ` (${expiryStatus})` : ""}`;
+  return `${label}: ${expirationDate}${expiryStatus !== "none" ? ` (${expiryStatus})` : ""}`;
 }
 
 function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
@@ -524,6 +583,25 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
       pushWrapped(
         lines,
         `${index + 1}. ${row.category} ${row.name} | Brand: ${row.brand || "N/A"} | Qty: ${row.quantity} ${row.unit} | Threshold: ${row.lowStockAlert ?? "N/A"}${expiry ? ` | ${expiry}` : ""} | Price: ${row.purchasePrice ?? "N/A"} | Storage: ${row.storageLocation || "N/A"}`
+      );
+    });
+  }
+
+  lines.push("", "Kits");
+  if (payload.kits.length === 0) {
+    lines.push("No kit records included");
+  } else {
+    payload.kits.forEach((row, index) => {
+      // SIX labelled segments, one per value, never collapsed into a sentence
+      // — the phase-3 "Class: PISTOL" mistake was two fields sharing a column,
+      // and "Bugout Bag: 12 items, 2 missing, 2026-11-01" is the same mistake.
+      // `Expires` uses the shared expirySegment helper, so a kit with nothing
+      // dated in it prints nothing rather than "Expires: N/A (none)" — the one
+      // convention the gear and supply blocks above already follow.
+      const expiry = expirySegment(row.earliestExpiry, row.expiryStatus, "Earliest Expiry");
+      pushWrapped(
+        lines,
+        `${index + 1}. ${row.category} ${row.name} | Location: ${row.location || "N/A"} | Items: ${row.itemCount} | Missing: ${row.missingCount}${expiry ? ` | ${expiry}` : ""}`
       );
     });
   }
@@ -661,6 +739,29 @@ export async function GET(request: NextRequest) {
       },
       orderBy: [{ category: "asc" }, { name: "asc" }],
     })) as SupplyExportRecord[];
+
+    // Sequential, after the supply read — SQLite here runs connection_limit=1,
+    // so never Promise.all. ONE query for every kit with its lines included,
+    // not one per kit: a KitItem row is a packing-list entry, so the whole
+    // set comes back in a single round trip and the rollups run in memory.
+    const kits = (await prisma.kit.findMany({
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        location: true,
+        notes: true,
+        items: {
+          select: {
+            quantity: true,
+            targetQuantity: true,
+            gear: { select: { expirationDate: true } },
+            supply: { select: { expirationDate: true } },
+          },
+        },
+      },
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+    })) as KitExportRecord[];
 
     const receiptDocuments = documents.filter((doc) => doc.type === "RECEIPT");
 
@@ -854,6 +955,44 @@ export async function GET(request: NextRequest) {
       notes: supply.notes ?? "",
     }));
 
+    // A kit is a container: six values, six columns, and no price or serial at
+    // all — its contents are already listed in full by the sections above, so
+    // restating them here would double-count the armory. `missingCount` and
+    // the expiry rollup come from the SAME pure helpers the kit detail page
+    // and the section cards use (`missingQuantity`, `kitExpiryRollup`), which
+    // in turn call the SAME `expiryStatus` against the SAME `today` the gear
+    // and supply rows above were mapped with — so one sheet cannot carry two
+    // verdicts about the same calendar day, and the footnote in meta names
+    // that one day for these rows too.
+    const kitRows = kits.map((kit) => {
+      let missingCount = 0;
+      const expiryLines: KitExpiryLine[] = [];
+      for (const item of kit.items) {
+        missingCount += missingQuantity(item);
+        // A KitItem sets at most one source, so at most one of these is
+        // non-null; `??` picks whichever it is. Accessory, AmmoStock, Firearm
+        // and label-only lines have no expiry at all.
+        const expirationDate =
+          item.gear?.expirationDate ?? item.supply?.expirationDate ?? null;
+        if (expirationDate) expiryLines.push({ expirationDate });
+      }
+      const rollup = kitExpiryRollup(expiryLines, today, expiryWarningDays);
+
+      return {
+        kitId: kit.id,
+        name: kit.name,
+        category: kitCategoryLabel(kit.category),
+        location: kit.location || "",
+        itemCount: kit.items.length,
+        missingCount,
+        earliestExpiry: toISODate(rollup.earliest),
+        expiryStatus: expiryStatus(rollup.earliest, today, expiryWarningDays),
+        expiredLineCount: rollup.expired,
+        expiringSoonLineCount: rollup.soon,
+        notes: kit.notes ?? "",
+      };
+    });
+
     // Accessories participate in totalItems and totalPurchaseValue but never carry a
     // replacementValue (their record has no currentValue field, so that row's
     // contribution is always 0). Gear does track currentValue, so it feeds all three
@@ -888,6 +1027,11 @@ export async function GET(request: NextRequest) {
         totalAccessories: accessories.length,
         totalGear: gearRows.length,
         totalSupplies: supplyRows.length,
+        // Reported beside totalItems, never added into it — a kit's lines
+        // point at rows already counted as gear, supplies, firearms,
+        // accessories and ammo, so adding it would inflate the headline by
+        // the number of bags the user owns.
+        totalKits: kitRows.length,
         totalDocuments: attachmentsRows.length,
         totalReceipts: receiptDocuments.length,
         totalAmmoStocks: ammoRows.length,
@@ -911,6 +1055,7 @@ export async function GET(request: NextRequest) {
       ammo: ammoRows,
       gear: gearRows,
       supplies: supplyRows,
+      kits: kitRows,
     };
 
     if (format === "csv") {

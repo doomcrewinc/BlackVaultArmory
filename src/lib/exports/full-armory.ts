@@ -181,6 +181,57 @@ export interface FullArmorySupplyRow {
   notes: string;
 }
 
+/**
+ * One kit, as its own row of the export's Kits section.
+ *
+ * SIX SEPARATE VALUES, none folded into another. Phase 3 shipped an export
+ * that folded a firearm's platform into its NFA class and printed
+ * "Class: PISTOL" for an SBR; "Bugout Bag — 12 items (2 missing), expires
+ * 2026-11-01" is the same mistake in a nicer font. A claims reader sorting by
+ * location, or counting what is short, needs each of these to be its own
+ * column.
+ *
+ * A kit is a CONTAINER, not an item: its lines point at Firearm, Accessory,
+ * Gear, Supply and AmmoStock rows that the export already lists in full
+ * elsewhere. So this row carries no price and no serial — nothing here is a
+ * second copy of an inventory row — and kits are deliberately absent from
+ * `totalItems` and from both value totals, which would otherwise double-count
+ * every packed item. `totalKits` reports them separately.
+ */
+export interface FullArmoryKitRow {
+  kitId: string;
+  name: string;
+  /** The human label ("Bugout"), matching how gear and supply categories are exported. */
+  category: string;
+  /** Where the kit itself lives. Blank, never "—": a dash is a renderer's choice. */
+  location: string;
+  /** How many KitItem lines the kit holds, packed or not. */
+  itemCount: number;
+  /**
+   * Summed `missingQuantity` across the kit's lines — how many more of
+   * everything are needed to reach the targets that are set. 0 when nothing
+   * has a target, which is not the same as "the kit is complete" and is why
+   * `itemCount` sits beside it.
+   */
+  missingCount: number;
+  /**
+   * YYYY-MM-DD of the earliest-expiring thing in the kit, or "" when nothing
+   * in it carries a date. Only Gear and Supply lines can: Accessory,
+   * AmmoStock, Firearm and label-only lines have no expiry to roll up.
+   */
+  earliestExpiry: string;
+  /**
+   * "none" | "fine" | "soon" | "expired" for `earliestExpiry`, resolved
+   * server-side against the SAME `today` the gear and supply rows used — the
+   * one the meta footnote names a timezone and a day for.
+   */
+  expiryStatus: string;
+  /** How many of the kit's lines are already expired, and how many are inside the window. */
+  expiredLineCount: number;
+  expiringSoonLineCount: number;
+  notes: string;
+}
+
 export interface FullArmoryExportResponse {
   meta: {
     generatedAt: string;
@@ -209,6 +260,13 @@ export interface FullArmoryExportResponse {
     totalAccessories: number;
     totalGear: number;
     totalSupplies: number;
+    /**
+     * Counted and reported SEPARATELY from totalItems. A kit is a container
+     * whose lines point at rows already counted as gear, supplies, firearms,
+     * accessories and ammo; adding it to totalItems would inflate the headline
+     * by the number of bags the user owns.
+     */
+    totalKits: number;
     totalDocuments: number;
     totalReceipts: number;
     totalAmmoStocks: number;
@@ -226,6 +284,7 @@ export interface FullArmoryExportResponse {
   ammo: FullArmoryAmmoRow[];
   gear: FullArmoryGearRow[];
   supplies: FullArmorySupplyRow[];
+  kits: FullArmoryKitRow[];
 }
 
 export interface VisualEvidenceImage {
@@ -246,6 +305,13 @@ export interface VisualEvidenceImage {
  * disclosed nothing: a sheet handed to an adjuster said a plate was expired
  * without saying whose calendar it was read against, which is a day-wide
  * difference on either side of local midnight.
+ *
+ * It covers the KIT rows as well as the gear and supply ones, and does so
+ * without a word changing: every verdict on the sheet — a plate's, a water
+ * pouch's, and a kit's rolled-up earliest expiry — comes from the one resolved
+ * context this sentence reports, so one sentence is the honest count. The kit
+ * rollup calls the same `expiryStatus` against the same `today`; it does not
+ * read a clock of its own.
  *
  * Both values come off `payload.meta`, which the route fills from the single
  * resolved expiry context its rows were mapped with. Every renderer — CSV,

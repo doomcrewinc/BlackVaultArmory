@@ -17,6 +17,8 @@ import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
+import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
+import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { DeleteSupplyButton } from "./DeleteSupplyButton";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
@@ -35,8 +37,19 @@ async function getSupplyWithExpiry(id: string) {
     new Date(),
   );
 
+  // ONE more sequential query, and only one: how much of this supply is
+  // packed across kits. `owned` is supply.quantity from the record already in
+  // hand, so no second read of the supply table. Never Promise.all — SQLite
+  // runs with connection_limit=1 here.
+  const allocation = await getItemAllocation(
+    "supplyId",
+    supply.id,
+    supply.quantity,
+  );
+
   return {
     supply,
+    allocation,
     isLow: isLowStock(supply),
     expiry: expiryStatus(supply.expirationDate, today, warningDays),
     // Same read AND the same resolution, handed on: this page renders Expired
@@ -74,7 +87,7 @@ export default async function SupplyDetailPage({
     notFound();
   }
 
-  const { supply, isLow, expiry, timezoneConfigured } = result;
+  const { supply, isLow, expiry, timezoneConfigured, allocation } = result;
   const section = supplySectionForItem({ category: supply.category });
   const backHref = section
     ? `/${section.group === "prep" ? "prep" : "gear"}/${section.slug}`
@@ -134,6 +147,10 @@ export default async function SupplyDetailPage({
             <p className="text-sm text-vault-text-muted">{supply.brand}</p>
           )}
         </div>
+
+        {/* Under the title, above the stats — see the note on the gear detail
+            page. Renders nothing when this supply is in no kit. */}
+        <ItemKitAllocation allocation={allocation} />
 
         {/* Stats row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

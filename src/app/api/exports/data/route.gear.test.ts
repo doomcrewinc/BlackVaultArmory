@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   firearmFindMany: vi.fn(),
   accessoryFindMany: vi.fn(),
   gearFindMany: vi.fn(),
+  kitFindMany: vi.fn(),
   documentFindMany: vi.fn(),
   requireAuth: vi.fn(),
 }));
@@ -23,6 +24,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     gear: {
       findMany: mocks.gearFindMany,
+    },
+    kit: {
+      findMany: mocks.kitFindMany,
     },
     document: {
       findMany: mocks.documentFindMany,
@@ -85,6 +89,8 @@ describe("/api/exports/data gear section", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireAuth.mockResolvedValue(null);
+    // The kits section defaults ON; nothing here asserts about it.
+    mocks.kitFindMany.mockResolvedValue([]);
     mocks.appSettingsFindUnique.mockResolvedValue({
       id: "singleton",
       includeUploadsInBackup: true,

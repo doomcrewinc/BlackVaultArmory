@@ -109,6 +109,12 @@ export const DATE_ONLY_EXCLUDED_FIELDS = [
   // a provisional zone be corrected later.
   "DateNormalizationAudit.originalValue",
   "DateNormalizationAudit.appliedValue",
+  // Row bookkeeping, same reasoning as Firearm/Build/etc above: never
+  // presented as a calendar day the user chose.
+  "Kit.createdAt",
+  "Kit.updatedAt",
+  "KitItem.createdAt",
+  "KitItem.updatedAt",
 ] as const;
 
 export interface MigrationSummary {

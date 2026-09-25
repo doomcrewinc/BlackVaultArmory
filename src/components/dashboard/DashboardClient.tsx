@@ -115,6 +115,27 @@ interface GearAlertItem {
   expiry: "expired" | "soon";
 }
 
+/**
+ * One kit with expiring CONTENTS, as the alerts widget renders it.
+ *
+ * Same contract as GearAlertItem above: `expiry` arrives already decided by
+ * the server, this file never calls expiryStatus, and `expirationDate` is a
+ * Date on the server render and an ISO string after a /api/stats refresh has
+ * round-tripped it through JSON.
+ *
+ * `lineCount` is how many of the kit's lines carry that verdict — a bag is one
+ * row here however many pouches went out of date inside it, and this is the
+ * number that says how many.
+ */
+interface KitAlertItem {
+  id: string;
+  name: string;
+  category: string;
+  expirationDate: Date | string | null;
+  expiry: "expired" | "soon";
+  lineCount: number;
+}
+
 interface RecentFirearm {
   id: string;
   name: string;
@@ -390,6 +411,9 @@ interface DashboardData {
   expiringGear: GearAlertItem[];
   expiredGearCount: number;
   expiringSoonGearCount: number;
+  expiringKits: KitAlertItem[];
+  expiredKitCount: number;
+  expiringSoonKitCount: number;
 }
 
 interface StatsResponse {
@@ -413,6 +437,11 @@ interface StatsResponse {
   };
   gear?: {
     expiringItems?: GearAlertItem[];
+    expiredCount?: number;
+    expiringSoonCount?: number;
+  };
+  kits?: {
+    expiringItems?: KitAlertItem[];
     expiredCount?: number;
     expiringSoonCount?: number;
   };
@@ -592,13 +621,61 @@ function LowAmmoWidget({ items, totalStocks }: { items: AmmoStockItem[]; totalSt
 }
 
 /**
- * Low and expiring SUPPLIES, plus expiring GEAR.
+ * The per-source breakdown under a tile's headline number.
+ *
+ * ONE ROW PER SOURCE, not one line with separators. The line it replaces read
+ * `1 supplies · 0 gear · 2 kits`, and MEASURED at 390px it wrapped onto two
+ * lines inside a 147px tile — legible, but already at its limit with three
+ * sources, and the category registry is explicitly built to take more.
+ *
+ * Rows rather than a shorter line, because only rows survive a fourth source.
+ * Dropping the zero segments (which this also does) makes the TYPICAL install
+ * fit on one line again, but it does nothing for the worst case where every
+ * source has a count — and the worst case is the install with the most to
+ * report, which is exactly when the widget must stay readable. A vertical list
+ * grows without a width budget; a separator-joined line does not. Shrinking
+ * the font was not on the table: the numbers are already 10px.
+ *
+ * Zero counts are dropped, so a source with nothing wrong does not spend a row
+ * saying so. INVARIANT: the rows always sum to the headline number above them,
+ * because only zeros are ever removed — a reader can add them up and get the
+ * big figure back. All-zero renders nothing rather than an empty list, which
+ * happens when one tile has counts and the other does not.
+ */
+function AlertSourceBreakdown({
+  sources,
+}: {
+  sources: { label: string; count: number }[];
+}) {
+  const present = sources.filter((source) => source.count > 0);
+  if (present.length === 0) return null;
+
+  return (
+    <dl className="mt-1.5 space-y-0.5">
+      {present.map((source) => (
+        <div key={source.label} className="flex items-baseline justify-between gap-2">
+          <dt className="text-[10px] uppercase tracking-widest text-vault-text-faint">
+            {source.label}
+          </dt>
+          <dd className="text-[10px] font-mono text-vault-text-faint">
+            {formatNumber(source.count)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * Low and expiring SUPPLIES, plus expiring GEAR and expiring KITS.
  *
  * Gear is here rather than in a widget of its own because armour plates and
  * respirator filters expire exactly the way iodine tablets do, and a board
  * that showed only half the expiring inventory read "0 expired" while a plate
- * was out of date — worse than showing nothing. Supply rows and gear rows
- * carry their own badge so the two are never mistaken for each other.
+ * was out of date — worse than showing nothing. Kits joined them for the same
+ * reason: a bugout bag's expiring contents are inventory too. All THREE row
+ * kinds — supply, gear and kit — carry their own badge, so no row is ever
+ * mistaken for a row of another kind.
  *
  * Name and file unchanged on purpose. This widget duplicates LowAmmoWidget's
  * whole shell — the heading row, the alert-count badge, the empty state, the
@@ -623,6 +700,9 @@ function SupplyAlertsWidget({
   gearItems,
   expiredGearCount,
   expiringSoonGearCount,
+  kitItems,
+  expiredKitCount,
+  expiringSoonKitCount,
   timezoneConfigured,
 }: {
   items: SupplyAlertItem[];
@@ -631,6 +711,15 @@ function SupplyAlertsWidget({
   gearItems: GearAlertItem[];
   expiredGearCount: number;
   expiringSoonGearCount: number;
+  kitItems: KitAlertItem[];
+  /**
+   * Counts KITS, not lines — see the docblock on DashboardStatsResponse.kits.
+   * The pouches inside those bags are already counted in the supply figures,
+   * so adding their lines here would make the headline bigger than the number
+   * of problems.
+   */
+  expiredKitCount: number;
+  expiringSoonKitCount: number;
   /**
    * From the server. The notice owns its own mount gate and its own
    * localStorage dismissal — shared with the section and detail pages, so one
@@ -638,8 +727,9 @@ function SupplyAlertsWidget({
    */
   timezoneConfigured: boolean;
 }) {
-  const totalExpired = expiredCount + expiredGearCount;
-  const totalExpiringSoon = expiringSoonCount + expiringSoonGearCount;
+  const totalExpired = expiredCount + expiredGearCount + expiredKitCount;
+  const totalExpiringSoon =
+    expiringSoonCount + expiringSoonGearCount + expiringSoonKitCount;
   // Gear counts in the headline too — via the two totals above, NOT by adding
   // gearItems.length on top: that list holds exactly the expired and soon gear
   // rows, so counting both would double every plate. Left out entirely, the
@@ -647,6 +737,7 @@ function SupplyAlertsWidget({
   // notice below — gated on this — would stay hidden on an install whose only
   // expiry verdicts are gear ones.
   const totalAlerts = items.length + totalExpired + totalExpiringSoon;
+  const hasRows = items.length > 0 || gearItems.length > 0 || kitItems.length > 0;
 
   return (
     <section>
@@ -664,7 +755,7 @@ function SupplyAlertsWidget({
       <div className="flex items-center gap-2 mb-3">
         <AlertTriangle className="w-4 h-4 text-[#F5A623]" />
         <h2 className="text-sm font-semibold tracking-widest uppercase text-[#F5A623]">
-          Supply &amp; Gear Alerts
+          Supply, Gear &amp; Kit Alerts
         </h2>
         {totalAlerts > 0 && (
           <span className="ml-auto text-xs font-mono bg-[#F5A623]/10 border border-[#F5A623]/30 text-[#F5A623] px-2 py-0.5 rounded">
@@ -673,10 +764,13 @@ function SupplyAlertsWidget({
         )}
       </div>
 
-      {/* The headline number is supplies AND gear, with the split spelled out
-          underneath. A single combined figure would leave the reader unable to
-          tell which store needs attention; two unlabelled tiles that silently
-          counted supplies only is the half-truth this change exists to end. */}
+      {/* The headline number is supplies AND gear AND kits, with the split
+          spelled out underneath, one row per source. A single combined figure
+          would leave the reader unable to tell which store needs attention;
+          two unlabelled tiles that silently counted supplies only is the
+          half-truth this widget exists to end. The split was one
+          separator-joined line until it was measured at 390px and found to
+          wrap — see AlertSourceBreakdown. */}
       {(totalExpired > 0 || totalExpiringSoon > 0) && (
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div className="bg-vault-surface border border-[#E53935]/30 rounded-lg p-3">
@@ -686,9 +780,13 @@ function SupplyAlertsWidget({
             <p className="text-lg font-mono font-bold text-[#E53935]">
               {formatNumber(totalExpired)}
             </p>
-            <p className="text-[10px] font-mono text-vault-text-faint mt-0.5">
-              {formatNumber(expiredCount)} supplies · {formatNumber(expiredGearCount)} gear
-            </p>
+            <AlertSourceBreakdown
+              sources={[
+                { label: "Supplies", count: expiredCount },
+                { label: "Gear", count: expiredGearCount },
+                { label: "Kits", count: expiredKitCount },
+              ]}
+            />
           </div>
           <div className="bg-vault-surface border border-[#F5A623]/30 rounded-lg p-3">
             <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
@@ -697,23 +795,28 @@ function SupplyAlertsWidget({
             <p className="text-lg font-mono font-bold text-[#F5A623]">
               {formatNumber(totalExpiringSoon)}
             </p>
-            <p className="text-[10px] font-mono text-vault-text-faint mt-0.5">
-              {formatNumber(expiringSoonCount)} supplies · {formatNumber(expiringSoonGearCount)} gear
-            </p>
+            <AlertSourceBreakdown
+              sources={[
+                { label: "Supplies", count: expiringSoonCount },
+                { label: "Gear", count: expiringSoonGearCount },
+                { label: "Kits", count: expiringSoonKitCount },
+              ]}
+            />
           </div>
         </div>
       )}
 
       <div className="bg-vault-surface border border-vault-border rounded-lg overflow-hidden">
-        {items.length === 0 && gearItems.length === 0 ? (
+        {!hasRows ? (
           <div className="p-8 text-center">
             <div className="w-10 h-10 rounded-full bg-[#00C853]/10 border border-[#00C853]/20 flex items-center justify-center mx-auto mb-3">
               <Boxes className="w-5 h-5 text-[#00C853]" />
             </div>
-            {/* Gated on BOTH lists: the old copy claimed all was well while an
-                expired plate sat in the gear list right below it. */}
+            {/* Gated on ALL THREE lists: the old copy claimed all was well
+                while an expired plate sat in the gear list right below it, and
+                a kit list would have reintroduced the same lie. */}
             <p className="text-sm text-vault-text-muted">
-              All supplies are well stocked and no gear has expired
+              All supplies are well stocked, and nothing in your gear or kits has expired
             </p>
           </div>
         ) : (
@@ -781,6 +884,49 @@ function SupplyAlertsWidget({
                       </span>
                     </div>
                     <p className="text-xs text-vault-text-faint truncate">{item.category}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className={`text-sm font-mono font-bold ${statusColor}`}>
+                      {isExpired ? "Expired" : "Expiring"}
+                    </p>
+                    <p className="text-xs text-vault-text-faint">
+                      {formatDateOnly(item.expirationDate)}
+                    </p>
+                  </div>
+                </Link>
+              );
+            })}
+            {/* Kit rows carry a "Kit" badge against the supply rows' "Supply"
+                and the gear rows' "Gear", so the three are never mistaken for
+                each other — the same distinction the two tiles above draw in
+                their split lines. What differs is the sub-line: a kit's row
+                says HOW MANY of its contents are in this state, which is the
+                one thing the loose supply and gear rows below cannot tell you,
+                and the date is the earliest of them. The status word is the
+                server's verdict, rendered, never recomputed. */}
+            {kitItems.map((item) => {
+              const isExpired = item.expiry === "expired";
+              const statusColor = isExpired ? "text-[#E53935]" : "text-[#F5A623]";
+              return (
+                <Link
+                  key={item.id}
+                  href={`/kits/${item.id}`}
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-vault-surface-2 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="shrink-0 text-[9px] font-mono uppercase tracking-widest text-vault-text-faint border border-vault-border rounded px-1 py-0.5">
+                        Kit
+                      </span>
+                      <span className="text-sm font-mono font-semibold text-vault-text truncate min-w-0">
+                        {item.name}
+                      </span>
+                    </div>
+                    <p className="text-xs text-vault-text-faint truncate">
+                      {item.category} · {formatNumber(item.lineCount)}{" "}
+                      {item.lineCount === 1 ? "item" : "items"}{" "}
+                      {isExpired ? "expired" : "expiring"}
+                    </p>
                   </div>
                   <div className="text-right shrink-0">
                     <p className={`text-sm font-mono font-bold ${statusColor}`}>
@@ -1005,6 +1151,12 @@ export function DashboardClient({ data }: { data: DashboardData }) {
         expiringGear: stats.gear?.expiringItems ?? [],
         expiredGearCount: stats.gear?.expiredCount ?? 0,
         expiringSoonGearCount: stats.gear?.expiringSoonCount ?? 0,
+        // Defaulted like the gear block above, and for the same reason: an
+        // absent kits block means "nothing to alert on", not "keep whatever
+        // was there", which would leave an emptied bag on the board.
+        expiringKits: stats.kits?.expiringItems ?? [],
+        expiredKitCount: stats.kits?.expiredCount ?? 0,
+        expiringSoonKitCount: stats.kits?.expiringSoonCount ?? 0,
       }));
       setLastUpdated(new Date());
     } catch {
@@ -1087,6 +1239,9 @@ export function DashboardClient({ data }: { data: DashboardData }) {
             gearItems={liveData.expiringGear}
             expiredGearCount={liveData.expiredGearCount}
             expiringSoonGearCount={liveData.expiringSoonGearCount}
+            kitItems={liveData.expiringKits}
+            expiredKitCount={liveData.expiredKitCount}
+            expiringSoonKitCount={liveData.expiringSoonKitCount}
             timezoneConfigured={liveData.supplyTimezoneConfigured}
           />
         );

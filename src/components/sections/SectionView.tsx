@@ -5,6 +5,7 @@ import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice
 import { AccessoriesClientPage } from "@/app/accessories/AccessoriesClientPage";
 import { GearClientPage } from "@/app/gear/GearClientPage";
 import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
+import { KitSectionList } from "@/components/sections/KitSectionList";
 import type { CategorySection } from "@/lib/categories";
 import type { SectionPayload } from "@/lib/sections/loadSectionItems";
 import type { SectionViewSource } from "@/lib/sections/renderableSources";
@@ -15,6 +16,7 @@ const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
   accessory: "Accessories",
   gear: "Gear",
   supply: "Supplies",
+  kit: "Kits",
 };
 
 /**
@@ -77,6 +79,16 @@ function RenderablePayloadList({
       return (
         <AccessoriesClientPage
           accessories={payload.items}
+          heading={heading}
+          subheading={subheading}
+          embedded={embedded}
+        />
+      );
+    case "kit":
+      return (
+        <KitSectionList
+          items={payload.items}
+          timezoneConfigured={payload.timezoneConfigured}
           heading={heading}
           subheading={subheading}
           embedded={embedded}
@@ -219,9 +231,25 @@ export function SectionView({
 
   // Any payload whose verdicts came from an unconfigured timezone puts the
   // notice on the page — once, above every block, not once per block.
+  //
+  // DERIVED, not listed. This read `payload.kind === "gear" || payload.kind
+  // === "supply" || payload.kind === "kit"` — a hand-maintained answer to
+  // "which kinds carry an expiry verdict?" with no guard on it, so a sixth
+  // kind that carries one would be omitted from this decision silently and
+  // its EXPIRED badges would show with no timezone disclosure. That is the
+  // same looks-present-does-nothing shape as the dead `every` guard in
+  // `sectionIsRenderable` and the unguarded builder list in
+  // /api/categories/counts, both fixed in this phase; this is the third.
+  //
+  // `"timezoneConfigured" in payload` IS the fact meant: a payload carries
+  // that flag precisely because the loader resolved a timezone to decide its
+  // verdicts. The `in` operator narrows the union, so `payload` is the
+  // verdict-carrying subset here with no cast, and a new payload kind is
+  // included or excluded by whether it actually has the field — which cannot
+  // drift from the truth.
   const timezoneConfigured = !payloads.some(
     (payload) =>
-      (payload.kind === "gear" || payload.kind === "supply") &&
+      "timezoneConfigured" in payload &&
       payload.items.length > 0 &&
       !payload.timezoneConfigured,
   );

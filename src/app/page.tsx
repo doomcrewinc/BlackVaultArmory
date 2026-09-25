@@ -30,6 +30,11 @@ async function getDashboardData() {
     expiringGear: stats.gear.expiringItems,
     expiredGearCount: stats.gear.expiredCount,
     expiringSoonGearCount: stats.gear.expiringSoonCount,
+    // Same contract as the gear block above: already resolved, server-side,
+    // from the one `today` getDashboardStats resolves per request.
+    expiringKits: stats.kits.expiringItems,
+    expiredKitCount: stats.kits.expiredCount,
+    expiringSoonKitCount: stats.kits.expiringSoonCount,
   };
 }
 

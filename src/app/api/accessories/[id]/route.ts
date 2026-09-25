@@ -5,6 +5,7 @@ import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeQuantity } from "@/lib/quantity";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 import { normalizeTypeToken } from "@/lib/types";
+import { getItemAllocation } from "@/lib/kits/itemAllocation";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -57,10 +58,26 @@ export async function GET(
       );
     }
 
+    // ONE more sequential query, and only one. The accessory DETAIL PAGE is a
+    // client component, so unlike the gear, supply and firearm detail pages it
+    // cannot call getItemAllocation itself — the allocation rides along on the
+    // response it already fetches, rather than costing the page a second round
+    // trip to a new endpoint. Null when this accessory is in no kit, and the
+    // shared ItemKitAllocation component renders nothing for null.
+    //
+    // `owned` is accessory.quantity, off the record already in hand. Never
+    // Promise.all with the read above — SQLite runs connection_limit=1 here.
+    const kitAllocation = await getItemAllocation(
+      "accessoryId",
+      accessory.id,
+      accessory.quantity,
+    );
+
     const activeSlot = accessory.buildSlots.find((slot) => slot.build.isActive);
 
     return NextResponse.json({
       ...accessory,
+      kitAllocation,
       currentBuild: activeSlot
         ? {
             id: activeSlot.build.id,

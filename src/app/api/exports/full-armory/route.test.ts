@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   findAmmoStocks: vi.fn(),
   findGear: vi.fn(),
   findSupplies: vi.fn(),
+  findKits: vi.fn(),
   findAppSettings: vi.fn(),
 }));
 
@@ -37,6 +38,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     supply: {
       findMany: mocks.findSupplies,
+    },
+    kit: {
+      findMany: mocks.findKits,
     },
   },
 }));
@@ -139,6 +143,8 @@ describe("GET /api/exports/full-armory", () => {
     // totalPurchaseValue, missingEvidence, etc.) are unaffected; the supply
     // tests further down override this mock and their own expectations.
     mocks.findSupplies.mockResolvedValue([]);
+    // Same reasoning for kits: empty by default, overridden by the kit tests.
+    mocks.findKits.mockResolvedValue([]);
 
     mocks.findFirearms.mockResolvedValue([
       {
@@ -1418,6 +1424,293 @@ describe("GET /api/exports/full-armory", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ---------------------------------------------------------------- kits ----
+
+  function kitLine(overrides: Record<string, unknown> = {}) {
+    return { quantity: 1, targetQuantity: null, gear: null, supply: null, ...overrides };
+  }
+
+  function kit(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "kit-1",
+      name: "Bugout Bag",
+      category: "BUGOUT",
+      location: "Hall closet",
+      notes: null,
+      items: [],
+      ...overrides,
+    };
+  }
+
+  it("exports every kit value in its OWN field, and counts kits apart from totalItems", async () => {
+    mocks.findKits.mockResolvedValue([
+      kit({
+        items: [
+          kitLine({ quantity: 1, targetQuantity: 3 }),
+          kitLine({ quantity: 2, targetQuantity: 2 }),
+          kitLine({ quantity: 1 }),
+        ],
+      }),
+    ]);
+
+    const json = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+    ).json();
+
+    // Six values, six fields. None folded into another — the phase-3 mistake
+    // was two fields sharing a column.
+    expect(json.kits).toHaveLength(1);
+    expect(json.kits[0]).toMatchObject({
+      kitId: "kit-1",
+      name: "Bugout Bag",
+      category: "Bugout",
+      location: "Hall closet",
+      itemCount: 3,
+      // Only the first line is short, by 2.
+      missingCount: 2,
+    });
+    // Nothing in this kit carries a date, so there is no expiry to report —
+    // blank, not "—" and not the string "null".
+    expect(json.kits[0].earliestExpiry).toBe("");
+    expect(json.kits[0].expiryStatus).toBe("none");
+
+    // A kit is a container. Its lines point at rows the other sections already
+    // list, so it is counted beside totalItems, never inside it.
+    expect(json.summary.totalKits).toBe(1);
+    expect(json.summary.totalItems).toBe(
+      json.items.length + json.gear.length + json.supplies.length,
+    );
+  });
+
+  it("falls back to the raw category when a kit has an unrecognised one", async () => {
+    // Restore inserts kit rows unvalidated, so a category from a later build
+    // can be stored. It must print as itself rather than vanish or coerce.
+    mocks.findKits.mockResolvedValue([kit({ category: "SCUBA" })]);
+
+    const json = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+    ).json();
+
+    expect(json.kits[0].category).toBe("SCUBA");
+  });
+
+  it("rolls a kit's expiry up against the SAME today the gear and supply rows used", async () => {
+    // 21:00 on June 15 in Denver is already June 16 in UTC. A plate, a water
+    // pouch and a kit holding both must all read `soon`, not `expired`.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-16T03:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({
+        timezone: "America/Denver",
+        expiryWarningDays: 90,
+      });
+      const expiresToday = new Date("2026-06-15T00:00:00.000Z");
+      const expiresLater = new Date("2026-08-01T00:00:00.000Z");
+
+      mocks.findGear.mockResolvedValue([
+        {
+          id: "gear-plate",
+          name: "Front Plate",
+          manufacturer: null,
+          model: null,
+          serialNumber: null,
+          category: "ARMOR",
+          quantity: 1,
+          purchasePrice: null,
+          currentValue: null,
+          acquisitionDate: null,
+          expirationDate: expiresToday,
+          protectionLevel: null,
+          armorSize: null,
+          storageLocation: null,
+          notes: null,
+          imageUrl: null,
+        },
+      ]);
+      mocks.findSupplies.mockResolvedValue([
+        {
+          id: "supply-1",
+          name: "Iodine",
+          brand: null,
+          category: "MEDICAL",
+          quantity: 1,
+          unit: "COUNT",
+          lowStockAlert: null,
+          expirationDate: expiresToday,
+          purchasePrice: null,
+          purchaseDate: null,
+          storageLocation: null,
+          notes: null,
+        },
+      ]);
+      mocks.findKits.mockResolvedValue([
+        kit({
+          items: [
+            kitLine({ gear: { expirationDate: expiresLater } }),
+            kitLine({ supply: { expirationDate: expiresToday } }),
+            // No source, so no date: a label-only line contributes nothing to
+            // the rollup rather than a "fine" verdict.
+            kitLine(),
+          ],
+        }),
+      ]);
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+
+      expect(json.gear[0].expiryStatus).toBe("soon");
+      expect(json.supplies[0].expiryStatus).toBe("soon");
+      // The earliest of the kit's two dated lines, and the same verdict the
+      // loose supply row got for the identical date. `expired` here would mean
+      // the kit rows had been judged against a second, UTC-day `today`.
+      expect(json.kits[0].earliestExpiry).toBe("2026-06-15");
+      expect(json.kits[0].expiryStatus).toBe("soon");
+      expect(json.kits[0].expiredLineCount).toBe(0);
+      // Both dated lines are inside the 90-day window the settings above set
+      // (June 15 + 90 days is September 13), so both count as soon. The
+      // rollup counts LINES, while `expiryStatus` above is the verdict for the
+      // earliest one — two different questions, two separate fields.
+      expect(json.kits[0].expiringSoonLineCount).toBe(2);
+      // ONE AppSettings read for all three sections, so they cannot diverge.
+      expect(mocks.findAppSettings).toHaveBeenCalledTimes(1);
+      // And the footnote names that same day, in that same zone — the one
+      // sentence that covers the kit verdicts as well as the other two.
+      expect(json.meta.expiryEvaluatedOn).toBe("2026-06-15");
+      expect(formatExpiryFootnote(json.meta)).toBe(
+        "Expiry evaluated in America/Denver on 2026-06-15.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never asks the database for a serial on a kit or any row its lines point at", async () => {
+    // A kit line points at Firearm, Accessory and Gear rows, all three of
+    // which carry a serial. An `include: { firearm: true }` here would put one
+    // in a claims sheet on a path the includeSerialNumbers gate never visits,
+    // which is how this route leaked a serial through a build slot twice.
+    // Serials ON, because the dangerous case is the one where nothing else
+    // would notice.
+    await GET(
+      new NextRequest("http://localhost/api/exports/full-armory?includeSerialNumbers=true"),
+    );
+
+    const select = mocks.findKits.mock.calls[0][0].select;
+    expect(select).not.toHaveProperty("serialNumber");
+    for (const relation of ["gear", "supply"] as const) {
+      expect(select.items.select[relation].select).toEqual({ expirationDate: true });
+    }
+    // The three sources with no expiry are not joined at all, so there is no
+    // row for a serial to ride in on.
+    for (const relation of ["accessory", "ammoStock", "firearm"] as const) {
+      expect(select.items.select).not.toHaveProperty(relation);
+    }
+  });
+
+  it("prints the kit values as separate labelled segments in the PDF", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue({ timezone: "UTC", expiryWarningDays: 10 });
+      mocks.findKits.mockResolvedValue([
+        kit({
+          items: [
+            kitLine({ quantity: 1, targetQuantity: 4, supply: { expirationDate: new Date("2026-06-20T00:00:00.000Z") } }),
+            kitLine({ quantity: 1 }),
+          ],
+        }),
+      ]);
+
+      const text = extractPdfFlatText(
+        await (
+          await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+        ).text(),
+      );
+
+      expect(text).toContain("Kits");
+      // Category first, then name, then one labelled segment per value — the
+      // same shape the Gear and Supplies blocks of this document use.
+      expect(text).toContain(
+        "1. Bugout Bugout Bag | Location: Hall closet | Items: 2 | Missing: 3 | Earliest Expiry: 2026-06-20 (soon)",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prints no expiry segment in the PDF for a kit with nothing dated in it", async () => {
+    // The same print-nothing-where-there-is-nothing convention the gear and
+    // supply blocks follow. "Earliest Expiry: N/A (none)" on every range bag
+    // would double the page count to say nothing.
+    mocks.findKits.mockResolvedValue([kit({ items: [kitLine()] })]);
+
+    const text = extractPdfFlatText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+      ).text(),
+    );
+
+    expect(text).toContain("Bugout Bag");
+    expect(text).not.toContain("Earliest Expiry:");
+    expect(text).not.toContain("(none)");
+  });
+
+  it("says so in the PDF when there are no kits to report", async () => {
+    mocks.findKits.mockResolvedValue([]);
+
+    const text = extractPdfText(
+      await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))
+      ).text(),
+    );
+
+    expect(text).toContain("Kits");
+    expect(text).toContain("No kit records included");
+  });
+
+  it("gives each kit value its own CSV column", async () => {
+    mocks.findKits.mockResolvedValue([
+      kit({
+        location: "Hall closet",
+        items: [kitLine({ quantity: 1, targetQuantity: 3, gear: { expirationDate: new Date("2026-01-01T00:00:00.000Z") } })],
+      }),
+    ]);
+
+    const csv = await (
+      await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))
+    ).text();
+    const rows = parseCsv(csv);
+    const header = rows[0];
+    const kitRow = rows.find((row) => row[header.indexOf("section")] === "kits");
+
+    expect(kitRow).toBeDefined();
+    const cell = (column: string) => kitRow![header.indexOf(column)];
+
+    // Six distinct columns. A column index of -1 would read the LAST cell of
+    // the row, so each header is asserted present before its value is read.
+    for (const column of [
+      "name",
+      "category",
+      "location",
+      "itemCount",
+      "missingCount",
+      "earliestExpiry",
+    ]) {
+      expect(header, column).toContain(column);
+    }
+    expect(cell("name")).toBe("Bugout Bag");
+    expect(cell("category")).toBe("Bugout");
+    expect(cell("location")).toBe("Hall closet");
+    expect(cell("itemCount")).toBe("1");
+    expect(cell("missingCount")).toBe("2");
+    expect(cell("earliestExpiry")).toBe("2026-01-01");
+    // And the headline count rides in the summary block beside the others.
+    expect(csv).toContain("summary,totalKits,1");
   });
 
   it("prints the footnote naming the configured timezone in the PDF and the CSV", async () => {

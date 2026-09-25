@@ -18,6 +18,9 @@ import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
 import { MaintenanceSection } from "@/components/vault/MaintenanceSection";
+import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
+import { getItemAllocation } from "@/lib/kits/itemAllocation";
+import { FIREARM_OWNED_QUANTITY } from "@/lib/kits/sourceDisplay";
 import {
   ArrowLeft,
   Edit,
@@ -110,7 +113,21 @@ async function getFirearm(id: string) {
       },
     },
   });
-  return firearm;
+  if (!firearm) return null;
+
+  // ONE more sequential query, and only one: how many of this firearm are
+  // packed across kits. A Firearm row carries NO quantity column and stands
+  // for one physical object, so `owned` is FIREARM_OWNED_QUANTITY — read from
+  // the shared constant, the same one getKitDetail's describeSource and the
+  // inventory picker use, so a rifle in two range bags reads "2 of 1 assigned"
+  // on the kit page and on this one alike.
+  const allocation = await getItemAllocation(
+    "firearmId",
+    firearm.id,
+    FIREARM_OWNED_QUANTITY,
+  );
+
+  return { firearm, allocation };
 }
 
 export default async function FirearmDetailPage({
@@ -119,9 +136,9 @@ export default async function FirearmDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  let firearm: Awaited<ReturnType<typeof getFirearm>>;
+  let result: Awaited<ReturnType<typeof getFirearm>>;
   try {
-    firearm = await getFirearm(id);
+    result = await getFirearm(id);
   } catch {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -133,9 +150,11 @@ export default async function FirearmDetailPage({
     );
   }
 
-  if (!firearm) {
+  if (!result) {
     notFound();
   }
+
+  const { firearm, allocation } = result;
 
   const typeBadge =
     TYPE_BADGE_COLORS[firearm.type] ??
@@ -246,6 +265,11 @@ export default async function FirearmDetailPage({
       </div>
 
       <div className="p-6 space-y-6">
+        {/* First thing under the hero: a rifle packed into two range bags is
+            over-allocated, and that is more urgent than its purchase price.
+            Renders nothing when it is in no kit. */}
+        <ItemKitAllocation allocation={allocation} />
+
         {/* Metadata Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <div className="bg-vault-surface border border-vault-border rounded-lg p-4">

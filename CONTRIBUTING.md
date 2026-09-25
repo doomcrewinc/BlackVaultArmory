@@ -70,7 +70,18 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
    > becomes its own timestamped migration — `--from-migrations prisma/postgres/migrations`
    > with a scratch `--shadow-database-url` (Prisma wipes it; its name needs `shadow`,
    > `scratch` or `test` as a word) instead of `--from-empty`. Check `git tag` first.
-5. Run the drift check. It must pass for **both** providers before you open the PR:
+5. Regenerate **both** Prisma clients:
+   ```bash
+   npm run db:generate
+   ```
+   Use this, not a single `prisma generate --schema prisma/sqlite/schema.prisma`. The
+   date-only guard in `src/lib/date-migration.ts` imports `Prisma` from `@prisma/client`,
+   which is the **PostgreSQL** client, and derives the set of `DateTime` columns it audits
+   from that DMMF. Generating only the SQLite client leaves `@prisma/client` stale, so the
+   guard keeps auditing the previous schema and a newly added date column passes unnoticed —
+   the guard reports green while seeing nothing. `db:generate` runs both.
+
+6. Run the drift check. It must pass for **both** providers before you open the PR:
    ```bash
    SHADOW_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/blackvault_shadow npm run db:check-drift
    ```

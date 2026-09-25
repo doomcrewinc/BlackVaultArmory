@@ -1,6 +1,12 @@
 import type { NextRequest, NextResponse } from "next/server";
 
-export type WritableEntityType = "firearm" | "accessory" | "ammo" | "build" | "gear";
+export type WritableEntityType =
+  | "firearm"
+  | "accessory"
+  | "ammo"
+  | "build"
+  | "gear"
+  | "kit";
 
 export async function requireEntityWriteAccess(
   _request: NextRequest,

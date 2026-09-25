@@ -4,6 +4,7 @@ const firearmCount = vi.fn();
 const accessoryCount = vi.fn();
 const gearCount = vi.fn();
 const supplyCount = vi.fn();
+const kitCount = vi.fn();
 
 // Every count goes through here so the test can watch how many are in flight.
 let inFlight = 0;
@@ -26,6 +27,7 @@ vi.mock("@/lib/prisma", () => ({
     accessory: { count: (args: unknown) => tracked(accessoryCount(args)) },
     gear: { count: (args: unknown) => tracked(gearCount(args)) },
     supply: { count: (args: unknown) => tracked(supplyCount(args)) },
+    kit: { count: (args: unknown) => tracked(kitCount(args)) },
   },
 }));
 
@@ -35,6 +37,7 @@ describe("GET /api/categories/counts", () => {
   beforeEach(() => {
     firearmCount.mockReset().mockResolvedValue(3);
     accessoryCount.mockReset().mockResolvedValue(5);
+    kitCount.mockReset().mockResolvedValue(7);
     // Where-aware: a mock that answers the same number to every query can't
     // tell a right query from a wrong one. `knives`' where is a bare
     // `{ category: { in: [...] } }`; `other-prep`'s where is the
@@ -208,6 +211,20 @@ describe("GET /api/categories/counts", () => {
     );
     const body = await (await GET()).json();
     expect(body.legacySmgCount).toBe(2);
+  });
+
+  it("counts kits from the kit delegate, not as a silent zero", async () => {
+    // The route used to probe four hand-listed where-builders with no
+    // exhaustiveness guard, so phase 6's `kit` source walked straight past
+    // it: `counts.kits` would have been 0 forever, a nav badge reading zero
+    // beside a section full of kits, with nothing failing. It now walks the
+    // section's own declared kinds behind a `never` guard.
+    const body = await (await GET()).json();
+    expect(body.counts.kits).toBe(7);
+    // `{}` — all kits, by spec — reaching the delegate unchanged.
+    expect(kitCount).toHaveBeenCalledWith({ where: {} });
+    // And no other section pulls a kit count in.
+    expect(kitCount).toHaveBeenCalledTimes(1);
   });
 
   it("queries sequentially, never concurrently (SQLite connection_limit=1)", async () => {

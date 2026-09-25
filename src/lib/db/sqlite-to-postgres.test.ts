@@ -26,12 +26,12 @@ async function run(
 }
 
 describe("MIGRATION_MODELS", () => {
-  it("is AppSettings followed by every backup model, in registry order (18 total)", () => {
+  it("is AppSettings followed by every backup model, in registry order (20 total)", () => {
     expect(MIGRATION_MODELS.map((m) => m.model)).toEqual([
       "AppSettings",
       ...BACKUP_MODELS.map((m) => m.model),
     ]);
-    expect(MIGRATION_MODELS).toHaveLength(18);
+    expect(MIGRATION_MODELS).toHaveLength(20);
   });
 });
 
@@ -42,7 +42,7 @@ describe("migrateSqliteToPostgres", () => {
     const { code, out } = await run(source, target);
 
     expect(code).toBe(0);
-    expect(out).toContain("VERIFIED: all 18 models match");
+    expect(out).toContain("VERIFIED: all 20 models match");
     for (const m of MIGRATION_MODELS) {
       expect(target.delegates[m.delegate].rows).toEqual(
         source.delegates[m.delegate].rows,
@@ -62,7 +62,7 @@ describe("migrateSqliteToPostgres", () => {
     });
     expect(code).toBe(0);
     expect(connectTarget).not.toHaveBeenCalled();
-    expect(out).toContain("36 rows across 18 models would be copied");
+    expect(out).toContain("40 rows across 20 models would be copied");
   });
 
   it("refuses a non-empty target without --force and writes nothing", async () => {
@@ -200,7 +200,7 @@ describe("onVerified", () => {
     expect(code).toBe(0);
     expect(onVerified).toHaveBeenCalledTimes(1);
     const [counts, total] = onVerified.mock.calls[0];
-    expect(total).toBe(36);
+    expect(total).toBe(40);
     expect(counts.get("Firearm")).toBe(2);
   });
 

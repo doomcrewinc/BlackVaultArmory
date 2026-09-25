@@ -133,10 +133,13 @@ export default function FullArmoryPreviewPage() {
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h1 className="text-lg font-semibold text-vault-text">Full Armory Export</h1>
           <p className="text-xs text-vault-text-faint mt-1">Generated {new Date(data.meta.generatedAt).toLocaleString()}</p>
-          {/* The gear and supply tables below both carry an expiry verdict.
+          {/* The gear, supply AND kit tables below all carry an expiry verdict.
               This says whose calendar day decided them — the same sentence the
               CSV and the PDF print, from the same meta the rows came with, so
-              the printout an adjuster reads cannot disagree with either. */}
+              the printout an adjuster reads cannot disagree with either. One
+              sentence covers all three because all three verdicts came from the
+              one context the route resolved; the kit rollup calls the same
+              expiryStatus against the same today and reads no clock of its own. */}
           <p className="text-xs text-vault-text-faint mt-0.5">{formatExpiryFootnote(data.meta)}</p>
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
             <div className="rounded-md border border-vault-border bg-vault-bg p-3">
@@ -493,6 +496,78 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.purchasePrice)}</td>
                       <td className="py-2 pr-4">{formatDateOnly(item.purchaseDate)}</td>
                       <td className="py-2 pr-4">{item.storageLocation || "—"}</td>
+                      <td className="py-2">{item.notes || "—"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Kits</h2>
+          <p className="text-xs text-vault-text-faint mt-1">
+            A kit is a packing list, not a copy: its contents are listed in full in the sections above. No
+            prices or serials here — nine columns that say what each bag is, where it is, and what it is short of.
+          </p>
+          {/* MEASURED, not eyeballed. Phase 5's gear table ran 174px off a
+              letter sheet and a reviewer logged it as merely "cramped", so
+              this one was printed before it shipped: emulating @page letter
+              (8.5in less 0.4in margins = 739.2px), max-width:none,
+              overflow:visible and print:hidden, the nine columns below measure
+              a min-content width of 536.66px against the 665px this section
+              leaves for a table — 128px of slack, so NO print split is needed
+              and every column prints.
+
+              `data-print-measure` is the hook that measurement used; it is
+              kept so the next person to add a column can re-run it rather than
+              guess. Re-measure if a column is added: the clip threshold is
+              min-content width, not the rendered width, because the table is
+              w-full and only overflows once its cells cannot narrow further. */}
+          <div className="armory-print-scroll mt-3 overflow-x-auto">
+            <table className="w-full text-xs border-collapse" data-print-measure="kits">
+              <thead>
+                <tr className="border-b border-vault-border text-vault-text-faint">
+                  {/* NINE columns, each one value. Phase 3 folded a firearm's
+                      platform into its NFA class and printed "Class: PISTOL"
+                      for an SBR; "Bugout Bag — 12 items (2 missing)" is the
+                      same mistake in a nicer font. */}
+                  <th className="py-2 pr-4 text-left">Name</th>
+                  <th className="py-2 pr-4 text-left">Category</th>
+                  <th className="py-2 pr-4 text-left">Location</th>
+                  <th className="py-2 pr-4 text-right">Items</th>
+                  <th className="py-2 pr-4 text-right">Missing</th>
+                  <th className="py-2 pr-4 text-left">Earliest Expiry</th>
+                  <th className="py-2 pr-4 text-right">Expired</th>
+                  <th className="py-2 pr-4 text-right">Soon</th>
+                  <th className="py-2 text-left">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.kits.length === 0 ? (
+                  <tr>
+                    <td className="py-3 text-vault-text-faint" colSpan={9}>
+                      No kits included for this export.
+                    </td>
+                  </tr>
+                ) : (
+                  data.kits.map((item) => (
+                    <tr key={item.kitId} className="border-b border-vault-border/60">
+                      <td className="py-2 pr-4">{item.name}</td>
+                      <td className="py-2 pr-4">{item.category}</td>
+                      <td className="py-2 pr-4">{item.location || "—"}</td>
+                      <td className="py-2 pr-4 text-right">{item.itemCount}</td>
+                      <td className="py-2 pr-4 text-right">{item.missingCount}</td>
+                      {/* A kit with nothing dated in it shows a dash, the same
+                          convention the Supplies table uses for a missing
+                          date: a gap in the record, not a withheld value. */}
+                      <td className="py-2 pr-4">
+                        {item.earliestExpiry ? formatDateOnly(item.earliestExpiry) : "—"}
+                        {item.expiryStatus !== "none" ? ` (${item.expiryStatus})` : ""}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{item.expiredLineCount}</td>
+                      <td className="py-2 pr-4 text-right">{item.expiringSoonLineCount}</td>
                       <td className="py-2">{item.notes || "—"}</td>
                     </tr>
                   ))
