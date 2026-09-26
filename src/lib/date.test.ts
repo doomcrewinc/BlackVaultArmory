@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
+import { hostTimeZone } from "@/test/host-timezone";
 import {
   formatDateOnly,
   formatTimestamp,
@@ -175,17 +175,74 @@ describe("toISODate", () => {
 });
 
 describe("todayLocalISO", () => {
-  it.skipIf(!IS_PINNED_HOST_ZONE)("returns the LOCAL date, not the UTC one, across the boundary", () => {
-    // 01:30Z on the 21st is 19:30 on the 20th in America/Denver.
-    // The old `new Date().toISOString().split("T")[0]` returned 2026-09-21 here.
-    expect(todayLocalISO(new Date("2026-09-21T01:30:00.000Z"))).toBe("2026-09-20");
+  // todayLocalISO is the ONLY genuinely host-zone-sensitive function in the
+  // app: everything else either uses Date.UTC or passes an explicit timeZone
+  // to Intl, and is therefore zone-invariant by construction. So this block is
+  // what the CI timezone matrix is actually for, and none of it may be gated
+  // behind the pinned zone — a second leg that skipped these would re-run ~895
+  // zone-invariant tests and prove nothing.
+  //
+  // Every expectation below is built with the LOCAL-time Date constructor
+  // (`new Date(y, m, d, h, min)`), which means "this wall-clock moment in
+  // whatever zone is running". No zone arithmetic is baked into any expected
+  // value, so these hold in Denver, Auckland and anywhere else.
+
+  // An INDEPENDENT oracle for "the calendar day in the host zone".
+  // todayLocalISO reads Date's local-time getters (ECMA-262); this asks ICU
+  // with an explicit zone. Two different implementations, so agreement is a
+  // real result rather than a tautology. en-CA formats as YYYY-MM-DD.
+  const localDayOracle = (d: Date) =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: hostTimeZone(),
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
+
+  // The naive implementation todayLocalISO replaced, kept to prove these
+  // tests are not vacuous.
+  const naiveUtc = (d: Date) => d.toISOString().slice(0, 10);
+
+  it("returns the LOCAL date, not the UTC one, across the boundary", () => {
+    // One minute either side of local midnight. In ANY zone offset from UTC by
+    // at least a minute, at least one of these lands on a different UTC day.
+    const justAfterMidnight = new Date(2026, 8, 20, 0, 1);
+    const justBeforeMidnight = new Date(2026, 8, 20, 23, 59);
+
+    for (const d of [justAfterMidnight, justBeforeMidnight]) {
+      expect(todayLocalISO(d)).toBe("2026-09-20");
+      expect(todayLocalISO(d)).toBe(localDayOracle(d));
+    }
+
+    // Not vacuous: anywhere but UTC itself, the naive rendering is WRONG for at
+    // least one of those two instants. That off-by-one is exactly what
+    // `new Date().toISOString().split("T")[0]` used to produce, and it is the
+    // reason this function exists.
+    const bothMatchNaiveUtc =
+      naiveUtc(justAfterMidnight) === "2026-09-20" &&
+      naiveUtc(justBeforeMidnight) === "2026-09-20";
+    expect(bothMatchNaiveUtc).toBe(justAfterMidnight.getTimezoneOffset() === 0);
   });
 
-  it.skipIf(!IS_PINNED_HOST_ZONE)("agrees with UTC when the local day matches", () => {
-    expect(todayLocalISO(new Date("2026-09-20T18:00:00.000Z"))).toBe("2026-09-20");
+  it("agrees with the naive UTC rendering exactly when the two calendar days coincide", () => {
+    const localNoon = new Date(2026, 8, 20, 12, 0);
+    expect(todayLocalISO(localNoon)).toBe("2026-09-20");
+    expect(todayLocalISO(localNoon)).toBe(localDayOracle(localNoon));
+
+    // Local noon shares the UTC calendar day in every zone within 12 hours of
+    // UTC. Beyond that (Pacific/Kiritimati at +14) it does not, and the LOCAL
+    // day still wins — which is the whole contract.
+    if (naiveUtc(localNoon) === "2026-09-20") {
+      expect(todayLocalISO(localNoon)).toBe(naiveUtc(localNoon));
+    }
   });
 
-  it.skipIf(!IS_PINNED_HOST_ZONE)("zero-pads month and day", () => {
-    expect(todayLocalISO(new Date("2026-01-05T18:00:00.000Z"))).toBe("2026-01-05");
+  it("zero-pads month and day", () => {
+    // January 5th, local, in whatever zone is running. Unpadded output
+    // ("2026-1-5") is the exact historical bug family this matrix exists to
+    // catch, and the property is entirely zone-independent.
+    const earlyJanuary = new Date(2026, 0, 5, 12, 0);
+    expect(todayLocalISO(earlyJanuary)).toBe("2026-01-05");
+    expect(todayLocalISO(earlyJanuary)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });

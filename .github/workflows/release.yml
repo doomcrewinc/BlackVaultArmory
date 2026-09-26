@@ -53,8 +53,57 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           CALVER="${TAG%%-*}"
           SHA="$(git rev-parse --short=7 HEAD | cut -c1-7)"
-          echo "calver=$CALVER" >> "$GITHUB_OUTPUT"
-          echo "full=$CALVER-$SHA"  >> "$GITHUB_OUTPUT"
+
+          # A tag carrying a suffix after the first "-" is a PRE-RELEASE:
+          # v2026.09.25-rc1, -beta2, -test. Note CALVER strips that suffix, so
+          # without this gate a pre-release would publish BOTH the floating
+          # :latest that every user pulls AND the bare :2026.09.25 tag that the
+          # real release is going to want — pre-claiming the GA version from a
+          # release candidate. A pre-release must publish its own immutable
+          # full tag and nothing else.
+          if [ "$TAG" != "$CALVER" ]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+
+          # $TAG, not $CALVER, so a pre-release keeps its suffix here. With
+          # $CALVER the immutable tag for v2026.09.25-rc1 would have been
+          # "2026.09.25-<sha>" — indistinguishable from the GA build, and
+          # colliding with -rc2 on the same commit.
+          # For a GA tag, TAG == CALVER, so this is unchanged.
+          FULL="$TAG-$SHA"
+
+          IMAGE=ghcr.io/doomcrewinc/blackvaultarmory
+
+          # The floating tags are published for GA ONLY.
+          {
+            echo "tags<<TAGS_EOF"
+            echo "$IMAGE:$FULL"
+            if [ "$PRERELEASE" = "false" ]; then
+              echo "$IMAGE:$CALVER"
+              echo "$IMAGE:latest"
+            fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "calver=$CALVER"
+            echo "full=$FULL"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+          # Printed into the log so the pushed tag list is auditable after the
+          # fact, without reading the buildx output.
+          echo "::notice::tag=$TAG calver=$CALVER prerelease=$PRERELEASE"
+          echo "Will push:"
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "  $IMAGE:$FULL   (pre-release: no :$CALVER, no :latest)"
+          else
+            echo "  $IMAGE:$FULL"
+            echo "  $IMAGE:$CALVER"
+            echo "  $IMAGE:latest"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -77,9 +126,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             APP_VERSION=${{ steps.ver.outputs.full }}
-          tags: |
-            ghcr.io/doomcrewinc/blackvaultarmory:${{ steps.ver.outputs.full }}
-            ghcr.io/doomcrewinc/blackvaultarmory:${{ steps.ver.outputs.calver }}
-            ghcr.io/doomcrewinc/blackvaultarmory:latest
+          # Built by the derive step, NOT listed here, because :latest and the
+          # bare :calver must not be published by a pre-release tag. See that
+          # step for the reasoning.
+          tags: ${{ steps.ver.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

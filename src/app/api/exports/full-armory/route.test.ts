@@ -1755,10 +1755,39 @@ describe("GET /api/exports/full-armory", () => {
     }
   });
 
+  // Split in two so the zone-independent half runs on BOTH matrix legs. The
+  // "(server default)" disclosure and the footnote's shape are the substance
+  // here; only the literal zone name and the resolved day are fixture-bound.
+  it("discloses '(server default)' in the footnote when AppSettings has no timezone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-24T12:00:00.000Z"));
+
+    try {
+      mocks.findAppSettings.mockResolvedValue(null);
+
+      const json = await (
+        await GET(new NextRequest("http://localhost/api/exports/full-armory"))
+      ).json();
+
+      expect(json.meta.expiryTimezoneFromSetting).toBe(false);
+      expect(json.meta.expiryTimezone).toBeTruthy();
+      // The day is deliberately NOT asserted: at 12:00Z it is the 24th west of
+      // UTC and the 25th at +12, which is correct behaviour, not a defect.
+      expect(formatExpiryFootnote(json.meta)).toMatch(
+        /^Expiry evaluated in .+ \(server default\) on \d{4}-\d{2}-\d{2}\.$/,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.skipIf(!IS_PINNED_HOST_ZONE)("names the host timezone and says so when AppSettings has none", async () => {
     // The out-of-the-box state. The suite pins TZ=America/Denver, so the host
     // zone is knowable here; the point is the "(server default)" disclosure,
     // which tells the reader the zone was not chosen.
+    //
+    // Gated: the literal zone name and the resolved day are only knowable in
+    // the pinned zone. The portable half of this assertion is the test above.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-24T12:00:00.000Z"));
 

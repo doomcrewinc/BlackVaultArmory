@@ -284,10 +284,24 @@ describe("resolveExpiryTimeZone", () => {
     });
   });
 
+  // Split in two so the zone-independent half runs on BOTH matrix legs.
+  // Only the literal zone name is fixture-bound; the disclosure flag and the
+  // "a zone was resolved at all" property hold everywhere.
+  it("does not claim an unsaved zone came from the setting, and still names one", () => {
+    const resolved = resolveExpiryTimeZone(null);
+    expect(resolved.fromSetting).toBe(false);
+    // A real IANA zone, not "" and not a silent UTC fallback standing in for
+    // "we could not tell" — the footnote has to name something truthful.
+    expect(resolved.timeZone).toMatch(/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$|^UTC$/);
+  });
+
   it.skipIf(!IS_PINNED_HOST_ZONE)("names the HOST zone, not UTC, when nothing is saved", () => {
     // Hardcoding UTC here is the off-by-one todayForExpiry exists to close, so
     // a disclosure line that claimed UTC would be doubly wrong: wrong zone AND
     // inconsistent with the verdicts.
+    //
+    // Gated: the literal name is only knowable in the pinned zone. The
+    // portable half of this assertion is the test above.
     expect(resolveExpiryTimeZone(null)).toEqual({
       timeZone: "America/Denver",
       fromSetting: false,

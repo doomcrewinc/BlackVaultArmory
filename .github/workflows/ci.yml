@@ -201,7 +201,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   windows-installers:
-    name: install.bat / update.bat (Windows)
+    # The name says "Docker stubbed" on purpose. A green tick here means the
+    # scripts' own logic works on Windows; it does NOT mean an install
+    # succeeds, because the one thing this job cannot do is build or run the
+    # container. Do not shorten this name.
+    name: Windows installer logic (Docker stubbed)
     runs-on: windows-latest
     permissions:
       contents: read
