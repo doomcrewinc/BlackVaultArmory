@@ -32,13 +32,19 @@ env:
   # does not exist there. 24 is the current Active LTS (to 2026-10-20, then
   # maintenance to 2028-04-30) and is what the toolchain is developed on.
   #
-  # NOTE THE DIVERGENCE: the Dockerfile still ships node:20-alpine, so this
-  # value no longer matches the runtime users get. That is deliberate — jsdom
-  # is a test-only dependency and bumping the shipped runtime moves native
-  # binaries (sharp, Prisma) that CI builds but never executes. The Node 20
-  # build path stays covered by the docker-image job. See the report: bumping
-  # the Dockerfile off an EOL runtime is a recommended follow-up, not
-  # something to do blind.
+  # The divergence this comment used to describe is gone: the Dockerfile now
+  # ships node:24-alpine in all three stages, so CI and the runtime users get
+  # are the same major. Keep them in step — if this value moves, move the
+  # Dockerfile with it.
+  #
+  # The bump was verified by RUNNING the image, not just building it, because
+  # the docker-image job below builds and never executes: sharp and the Prisma
+  # query engine are native and only fail at runtime. On node:24-alpine
+  # (Alpine 3.24, OpenSSL 3.5.8) both were exercised in a live container —
+  # `prisma migrate deploy` + /api/health on SQLite and on PostgreSQL, and a
+  # real JPEG/PNG resized through /_next/image by sharp 0.34.5 / libvips
+  # 8.17.3. Prisma 5.22 ships only ...-openssl-3.0.x musl engines and they
+  # load fine against OpenSSL 3.5 (libssl.so.3 is ABI-stable across 3.x).
   NODE_VERSION: "24"
 
 jobs:

@@ -74,9 +74,16 @@ NODE_MINOR="$(echo "$NODE_VERSION" | cut -d. -f2)"
 if [ "$NODE_MAJOR" -lt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 12 ]; }; then
   die "Node $NODE_VERSION is too old. BlackVault needs Node 20.12 or newer."
 fi
-if [ "$NODE_MAJOR" -ne 20 ]; then
-  warn "Running Node $NODE_MAJOR; the Docker image uses Node 20. Usually fine, but if you hit"
-  warn "something that only breaks locally, try Node 20 before assuming it is a real bug."
+if [ "$NODE_MAJOR" -ne 24 ]; then
+  warn "Running Node $NODE_MAJOR; the Docker image ships Node 24 and CI tests on 24. Usually"
+  warn "fine, but if you hit something that only breaks locally, try Node 24 before assuming"
+  warn "it is a real bug."
+  # The app itself runs on 20.12+, but `npm test` does not: jsdom 30 needs
+  # ^22.22.2 || ^24.15.0 || >=26, and on Node 20 the suite dies with
+  # `webidl.util.markAsUncloneable is not a function`.
+  if [ "$NODE_MAJOR" -lt 22 ]; then
+    warn "Node $NODE_MAJOR cannot run the test suite (jsdom 30 needs Node 22.22+ or 24.15+)."
+  fi
 fi
 ok "node $(node --version), npm $(npm --version)"
 
