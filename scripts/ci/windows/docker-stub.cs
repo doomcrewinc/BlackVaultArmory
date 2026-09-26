@@ -85,7 +85,9 @@ internal static class DockerStub
             return 1;
         }
 
-        Console.WriteLine("[stub] docker compose " + joined);
+        // `joined` already begins with "compose", so this prints
+        // "[stub] docker compose up -d", not "...docker compose compose up -d".
+        Console.WriteLine("[stub] docker " + joined);
         return 0;
     }
 }

@@ -128,10 +128,29 @@ function Invoke-Bat {
   }
   $oldPath = $env:PATH
   $env:PATH = "$StubDir;$oldPath"   # the stub must win over any real docker
+
+  # RUN FROM THE SCRIPT'S OWN FOLDER. cmd.exe inherits this process's working
+  # directory, and a user double-clicking the .bat gets the folder it lives in.
+  #
+  # This is not cosmetic. The current install.bat and update.bat open with
+  # `cd /d "%~dp0"` and so were immune, but the PRE-POSTGRESQL update.bat used
+  # by the resume scenario has no such line — so its bare `git pull` ran in
+  # whatever directory happened to be current. On the runner that was the
+  # Actions workspace, checked out at a detached PR merge ref, and git replied
+  # "You are not currently on a branch." The pull never happened, the sandbox
+  # copy of update.bat was never replaced, and the byte-offset resume scenario
+  # asserted against a swap that did not occur.
+  #
+  # (That missing `cd /d` is a real historical wart, and it is precisely what
+  # the current scripts' line 14 exists to fix — "Run as administrator" starts
+  # in C:\Windows\System32. Already fixed in the shipped scripts; nothing to do
+  # but drive the harness correctly.)
+  Push-Location $Dir
   try {
     $out = & cmd.exe /c "`"$Dir\$Script`" < `"$answerFile`" 2>&1"
     $code = $LASTEXITCODE
   } finally {
+    Pop-Location
     $env:PATH = $oldPath
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
   }
@@ -382,9 +401,19 @@ Set-SqliteInstall $work "7010"
 Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
 
 $onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headBefore = (& git -C $work rev-parse HEAD)
 $r = Invoke-Bat -Dir $work -Script "update.bat"
 $onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headAfter = (& git -C $work rev-parse HEAD)
 
+# The pull is asserted THREE ways, because the first live run showed how
+# quietly it can not happen: git printed "You are not currently on a branch",
+# the script carried on, and every downstream assertion about the resume was
+# vacuous. A scenario whose premise silently evaporates is worse than no
+# scenario, so the premise is now checked explicitly and first.
+Assert ($r.Output -match "Pulling latest updates") "the old script reached its git pull"
+Assert ($headAfter -ne $headBefore) "git pull actually advanced HEAD (premise of this whole scenario)"
+Assert ($r.Output -notmatch "not currently on a branch") "the pull was not refused for want of a branch"
 Assert ($onDiskBefore -ne $onDiskAfter) "the pull really did replace update.bat mid-run"
 Assert ($onDiskAfter -match "landing pad") "the new update.bat is the current one"
 Assert ($r.ExitCode -eq 0) "cmd.exe survived the swap and exited 0 (got $($r.ExitCode))"
