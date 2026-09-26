@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
@@ -1754,7 +1755,7 @@ describe("GET /api/exports/full-armory", () => {
     }
   });
 
-  it("names the host timezone and says so when AppSettings has none", async () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("names the host timezone and says so when AppSettings has none", async () => {
     // The out-of-the-box state. The suite pins TZ=America/Denver, so the host
     // zone is knowable here; the point is the "(server default)" disclosure,
     // which tells the reader the zone was not chosen.

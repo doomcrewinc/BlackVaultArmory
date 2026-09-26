@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
 import {
   formatDateOnly,
   formatTimestamp,
@@ -174,17 +175,17 @@ describe("toISODate", () => {
 });
 
 describe("todayLocalISO", () => {
-  it("returns the LOCAL date, not the UTC one, across the boundary", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("returns the LOCAL date, not the UTC one, across the boundary", () => {
     // 01:30Z on the 21st is 19:30 on the 20th in America/Denver.
     // The old `new Date().toISOString().split("T")[0]` returned 2026-09-21 here.
     expect(todayLocalISO(new Date("2026-09-21T01:30:00.000Z"))).toBe("2026-09-20");
   });
 
-  it("agrees with UTC when the local day matches", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("agrees with UTC when the local day matches", () => {
     expect(todayLocalISO(new Date("2026-09-20T18:00:00.000Z"))).toBe("2026-09-20");
   });
 
-  it("zero-pads month and day", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("zero-pads month and day", () => {
     expect(todayLocalISO(new Date("2026-01-05T18:00:00.000Z"))).toBe("2026-01-05");
   });
 });

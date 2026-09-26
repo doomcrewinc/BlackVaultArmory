@@ -176,8 +176,8 @@ export default function FullArmoryPreviewPage() {
           <div>
             <p className="text-xs text-vault-text-faint uppercase tracking-widest font-mono">Preview Mode</p>
             <p className="text-sm text-vault-text-muted">
-              Ready for insurance adjuster review. "Download PDF" builds a laid-out packet with photos and
-              your PDF receipts merged in; "Print / Save PDF" prints this page as you see it.
+              Ready for insurance adjuster review. &quot;Download PDF&quot; builds a laid-out packet with photos
+              and your PDF receipts merged in; &quot;Print / Save PDF&quot; prints this page as you see it.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">

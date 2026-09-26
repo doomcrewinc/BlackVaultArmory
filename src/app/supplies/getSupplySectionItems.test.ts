@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
 import { expiryStatus } from "@/lib/supply";
 
 const mocks = vi.hoisted(() => ({
@@ -94,7 +95,7 @@ describe("getSupplySectionItems", () => {
     );
   });
 
-  it("resolves expiry against the host timezone when no timezone is saved", async () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("resolves expiry against the host timezone when no timezone is saved", async () => {
     // AppSettings.timezone is NULL out of the box. The suite runs with
     // TZ=America/Denver, so the correct answer here is still the user's day.
     vi.useFakeTimers();

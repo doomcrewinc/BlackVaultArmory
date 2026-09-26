@@ -11,6 +11,7 @@
     "start": "next start -H 0.0.0.0",
     "lint": "eslint",
     "test": "vitest run",
+    "typecheck": "bash scripts/check-types.sh",
     "test:watch": "vitest",
     "decrypt-serials": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/decrypt-serials.ts",
     "reset-db": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/reset-db.ts",
