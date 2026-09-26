@@ -1,0 +1,189 @@
+name: Promote
+
+# The release ceremony, in one button. There is no tag.
+#
+#   develop --(fast-forward)--> master --(push event)--> publish.yml --> :latest
+#
+# That is the whole of it. This workflow does exactly one thing — move master
+# to develop's commit — and every other step here exists to REFUSE to do it.
+# Publishing is not this workflow's job: publish.yml already runs on a push to
+# master, derives the tags from the same scripts/ci/derive-image-tags.sh, and
+# pushes the multi-arch manifest.
+#
+# WHAT THIS WORKFLOW DELIBERATELY DOES NOT DO
+#
+# It does not make the ghcr.io package public. That is not an omission and it
+# is not a TODO: the GitHub REST API has no endpoint that changes a container
+# package's visibility, so no Action can do it. It is a one-time click in
+# Settings -> Packages -> Package settings -> Change visibility, after the
+# first image exists. Once public it stays public, so later pushes need
+# nothing. A step that pretended to do this would only be a step that lies.
+#
+# WHY NOT A MATRIX
+#
+# A matrix runs the SAME job over parallel variations — ci.yml uses one
+# correctly, for the two timezone legs, where both must report and neither
+# depends on the other. A promotion is one sequential operation behind a gate:
+# check, then push, in that order, once. A matrix of one leg is a matrix in
+# name only, and a matrix of several would mean several things racing to move
+# the same branch.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — report what would be promoted and merge nothing"
+        type: boolean
+        default: false
+
+# Deliberately NOT cancel-in-progress, and deliberately NOT keyed on the ref.
+#
+# Not keyed on the ref, because this workflow always promotes develop to
+# master no matter which branch it was dispatched from. A ref-keyed group would
+# let two dispatches from two branches move the same branch at the same time,
+# which is the one thing a concurrency group here is for.
+#
+# Not cancelling, because a second click must QUEUE, not pre-empt. The queued
+# run then re-reads master and develop from the remote and re-runs every gate,
+# so it either finds nothing to promote (exit 2, a plain no-op) or promotes
+# genuinely newer commits. Cancelling the first run instead would abort it
+# somewhere between its gates and its push, with no way to know from the
+# outside which side of the push it died on.
+#
+# This group is distinct from publish.yml's, which is
+# "${{ github.workflow }}-${{ github.ref }}". Promoting therefore never queues
+# behind, or cancels, an in-flight image push — including the one it is about
+# to cause.
+concurrency:
+  group: promote-master
+  cancel-in-progress: false
+
+# Deny by default; the single job below opts in to exactly what it needs.
+permissions: {}
+
+jobs:
+  promote:
+    name: Fast-forward master to develop
+    runs-on: ubuntu-latest
+
+    permissions:
+      # The one scope that does real work: `git push` moving refs/heads/master.
+      contents: write
+      # Read-only, and needed for the CI gate. check-ci-green.sh asks the
+      # Actions API for the CI runs of the exact commit being promoted, and
+      # "list workflow runs" requires the actions scope — contents: read is not
+      # enough for it even on a public repository. Nothing here writes, cancels
+      # or re-runs a workflow, so `read` is the whole ask.
+      actions: read
+
+    env:
+      # The promotion is hard-coded, not an input. An input would make "which
+      # branch becomes :latest" a thing a dispatcher chooses, and the answer
+      # must be the same every time.
+      SOURCE_BRANCH: develop
+      TARGET_BRANCH: master
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BV_PROMOTE_REPO: ${{ github.repository }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history. merge-base --is-ancestor and the CalVer lookup in
+          # derive-image-tags.sh (which reads the COMMIT date) both need real
+          # objects, and a shallow clone answers "not an ancestor" for commits
+          # it simply does not have — a false divergence report.
+          fetch-depth: 0
+          # Stated, not defaulted, because it is the opposite of what every
+          # other workflow in this repository does.
+          #
+          # This job's entire purpose is to push, so it keeps the credential
+          # actions/checkout writes into .git/config. The reason the other
+          # workflows drop it is `npm ci` running arbitrary postinstall scripts
+          # next to a readable token. This job installs nothing, builds
+          # nothing, and runs no code from the dependency tree: it runs three
+          # first-party shell scripts, jq, gh and git. Keep it that way — the
+          # moment this job needs node_modules, this line has to be
+          # reconsidered.
+          persist-credentials: true
+
+      # Explicit, rather than trusting whatever refspec actions/checkout used.
+      # The two branches below are the subject of every check that follows, and
+      # they must be the REMOTE's current state, not a stale local copy.
+      - name: Fetch develop and master
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}" \
+            "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}"
+
+      # GATE 1 — master must fast-forward.
+      #
+      # Exit 1 = diverged (the script names the offending commits), exit 2 =
+      # nothing to promote. Both stop the run before anything is pushed.
+      - name: Refuse unless master fast-forwards to develop
+        id: ancestry
+        run: bash scripts/ci/check-promote-ancestry.sh "origin/${TARGET_BRANCH}" "origin/${SOURCE_BRANCH}"
+
+      # The SAME script publish.yml uses, given the branch this promotion lands
+      # on. Reusing it is the point: the tags reported here are the tags that
+      # will exist, because the same code derives both. Re-deriving the rule in
+      # this file would create two places for it to be wrong.
+      #
+      # The sha comes from the previous step's output — a 40-hex string this
+      # repository's own script produced — and it still travels through env:,
+      # because "it is probably safe to interpolate" is how the habit erodes.
+      - name: Derive the tags this promotion will publish
+        id: ver
+        env:
+          HEAD_SHA: ${{ steps.ancestry.outputs.head_sha }}
+        run: bash scripts/ci/derive-image-tags.sh "${TARGET_BRANCH}" "${HEAD_SHA}"
+
+      # GATE 2 — CI must be green on the EXACT commit, not merely on develop.
+      - name: Refuse unless CI passed on this exact commit
+        id: ci
+        env:
+          HEAD_SHA: ${{ steps.ancestry.outputs.head_sha }}
+        run: bash scripts/ci/check-ci-green.sh "${SOURCE_BRANCH}" "${HEAD_SHA}"
+
+      # Written BEFORE the push, so a run that fails at the push step still
+      # says what it was trying to do.
+      - name: Report what is being promoted
+        env:
+          PROMOTE_MODE: ${{ inputs.dry_run && 'dry-run' || 'promote' }}
+          BASE_SHA: ${{ steps.ancestry.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.ancestry.outputs.head_sha }}
+          AHEAD: ${{ steps.ancestry.outputs.ahead }}
+          VERSION: ${{ steps.ver.outputs.full }}
+          TAGS: ${{ steps.ver.outputs.tags }}
+          CI_RUN_URL: ${{ steps.ci.outputs.run_url }}
+          CI_RUN_NUMBER: ${{ steps.ci.outputs.run_number }}
+          CI_CONCLUSION: ${{ steps.ci.outputs.conclusion }}
+          PROMOTE_REPO: ${{ github.repository }}
+        run: |
+          # pipefail matters here: the implicit shell is `bash -e {0}`, WITHOUT
+          # it, so a failure inside promote-summary.sh would be hidden by tee's
+          # exit status and the run would look fine.
+          set -euo pipefail
+          bash scripts/ci/promote-summary.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run — stopping here
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::Dry run: every gate passed and nothing was pushed."
+
+      # The promotion itself. One command, and no --force on it anywhere.
+      #
+      # This is a FAST-FORWARD, so master ends up at develop's commit exactly —
+      # no merge commit, and the sha publish.yml sees is the sha CI passed on
+      # and the sha in the image tag. If master moved between gate 1 and here,
+      # the server refuses this push as non-fast-forward and the run fails with
+      # git's own message. That race is why no --force-with-lease is used
+      # either: a lease would let the push win a race it should lose.
+      - name: Fast-forward master
+        if: ${{ !inputs.dry_run }}
+        env:
+          HEAD_SHA: ${{ steps.ancestry.outputs.head_sha }}
+          VERSION: ${{ steps.ver.outputs.full }}
+        run: |
+          set -euo pipefail
+          git push origin "${HEAD_SHA}:refs/heads/${TARGET_BRANCH}"
+          echo "::notice::${TARGET_BRANCH} is now ${HEAD_SHA}. Publish image will push ${VERSION}."

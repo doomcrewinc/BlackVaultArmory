@@ -18,9 +18,10 @@ commits always agree.
 
 Never commit directly to `master` or `develop`. Open a PR; CI must pass before merge.
 
-We do **not** use `release/` branches. A release is a `--no-ff` merge of `develop` into `master`
-followed by a tag. Cut a `release/<calver>` branch only if `develop` must keep moving during a
-long stabilization window.
+We do **not** use `release/` branches, and there are no release tags. Publishing is continuous:
+a `--no-ff` merge of `develop` into `master` publishes `:latest` by itself. See **Publishing**.
+Cut a `release/<calver>` branch only if `develop` must keep moving during a long stabilization
+window.
 
 ## Commits
 
@@ -62,12 +63,13 @@ default) and SQLite (the fallback). A schema change must land in both, in the sa
    ```
    No shadow database is needed here: `--from-empty` replays no history.
 
-   > ⚠️ **Rewriting `0_init` in place is only safe while no tagged release has shipped
-   > PostgreSQL to a user.** `prisma migrate deploy` stores a checksum per applied migration,
-   > so once someone has applied `0_init`, changing it fails their next update with a
-   > checksum mismatch and leaves their database stuck until they intervene by hand. From the
-   > first tag that ships PostgreSQL onward, `0_init` is frozen and every PostgreSQL change
-   > becomes its own timestamped migration — `--from-migrations prisma/postgres/migrations`
+   > ⚠️ **Rewriting `0_init` in place is only safe while no user has applied it.**
+   > `prisma migrate deploy` stores a checksum per applied migration, so once someone has
+   > applied `0_init`, changing it fails their next update with a checksum mismatch and leaves
+   > their database stuck until they intervene by hand. There is no tag to hang this on any
+   > more: `install.sh`/`update.sh` build from the working tree, so the window closes the moment
+   > a PostgreSQL-capable `master` is pullable — which continuous publishing makes immediate.
+   > Treat `0_init` as frozen, and make every PostgreSQL change its own timestamped migration — `--from-migrations prisma/postgres/migrations`
    > with a scratch `--shadow-database-url` (Prisma wipes it; its name needs `shadow`,
    > `scratch` or `test` as a word) instead of `--from-empty`. Check `git tag` first.
 5. Regenerate **both** Prisma clients:
@@ -143,39 +145,67 @@ keep meaning SQLite, forever. Keep it that way:
 
 ## Versioning
 
-CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.20-e991c37`.
+CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.26-81f8b3a`.
 
-- `package.json` holds the CalVer only.
-- Git tags are `v<calver>`, or `v<calver>-<sha7>` for a second release on the same day.
-- Docker publishes three tags: `<calver>-<sha7>`, `<calver>`, and `latest`.
+- The version is **derived, not stamped**. `scripts/ci/derive-image-tags.sh` builds it from the
+  **commit date** (UTC, no leading zeros — the same rule as `calverForDate` in
+  `src/lib/version.ts`) and the commit's sha7. There is nothing to bump by hand.
+- Deriving it from the commit date, rather than from the wall clock at build time, is what makes
+  a re-run of a failed workflow produce the *same* immutable tag instead of minting a second one
+  for unchanged code.
+- That one string is both the image tag and the `APP_VERSION` build arg, so the version the
+  Settings page and `/api/health` report is always an image tag you can pull. Do not introduce a
+  second source for it.
+- `package.json`'s `version` field is npm metadata only. Nothing reads it at runtime.
 
-**No leading zeros.** `2026.9.20` is valid; `2026.09.20` is not valid semver and npm will reject it.
+**No leading zeros.** `2026.9.20` is valid; `2026.09.20` is not valid semver and npm will reject
+it. The derive script strips them.
 
-## Releasing
+## Publishing
 
-Releases are cut from `master`, but the version is stamped on `develop` so the two never diverge.
+There is no release ritual and there are no release tags. **Merging is publishing.**
+
+| Push to  | Publishes                                              |
+| -------- | ------------------------------------------------------ |
+| `master` | `ghcr.io/doomcrewinc/blackvaultarmory:latest` + `:<calver>-<sha7>` |
+| `develop`| `ghcr.io/doomcrewinc/blackvaultarmory:develop` + `:<calver>-<sha7>` |
+
+Every build pushes the immutable `:<calver>-<sha7>`, so any deploy can be pinned to an exact
+commit and rolled back to one. `.github/workflows/publish.yml` builds `linux/amd64,linux/arm64`.
+
+A push to any other ref publishes **nothing**: the derive script has no default arm and exits 1
+on an unmapped ref, and `:latest` is produced in exactly one place — the `master` arm of
+`floating_tag_for`. A redundant assertion in `derive()` re-checks the result, so a careless edit
+to that case statement fails the build instead of overwriting the tag every installed user pulls.
+Both halves are covered by `scripts/ci/derive-image-tags.test.ts`, including a mutation test.
+
+To see what a branch would push, without a runner:
 
 ```bash
-git checkout develop && git pull
-npm run release:stamp                     # writes package.json, prints the tag to use
-git commit -am "chore: release <calver>"
-git push origin develop
-
-git checkout master && git pull
-git merge --no-ff develop -m "chore: release <calver>"
-git tag v<calver>
-git push origin master v<calver>
+bash scripts/ci/derive-image-tags.sh master "$(git rev-parse HEAD)"
+bash scripts/ci/derive-image-tags.sh develop "$(git rev-parse HEAD)"
 ```
 
-The tag push triggers `.github/workflows/release.yml`, which builds `linux/amd64,linux/arm64`
-and pushes to `ghcr.io/doomcrewinc/blackvaultarmory`. Pushes to `develop` and `master` run CI
-but publish nothing.
+`publish.yml` does **not** set `cancel-in-progress`. It pushes a multi-arch manifest, and
+cancelling between the amd64 push, the arm64 push and the manifest list leaves ghcr.io holding
+unreferenced blobs or a `latest` pointing at a half-written list. The concurrency group is
+per-ref, so successive merges to the same branch queue rather than race. Note that GitHub still
+drops a *pending* run when a newer one queues behind the same group: a commit sandwiched between
+two rapid merges may not get an image. Re-run its workflow run from the Actions tab if you need
+one.
 
-> **Note on the no-direct-commits rule.** The release stamp commit on `develop` and the
-> `develop` → `master` merge are the documented exception to it. If you enable branch
-> protection requiring the `verify` check on those branches, the release operator needs
-> permission to bypass it — otherwise route the stamp through a `chore/release-<calver>`
-> PR and merge `develop` → `master` via PR as well.
+To promote `develop` to a published `:latest`, merge it:
+
+```bash
+git checkout master && git pull
+git merge --no-ff develop
+git push origin master
+```
+
+> **Note on the no-direct-commits rule.** The `develop` -> `master` merge is the documented
+> exception to it. If you enable branch protection requiring the `verify` check on those
+> branches, the operator needs permission to bypass it — otherwise merge `develop` -> `master`
+> via PR as well.
 
 ## Hotfixes
 
@@ -184,7 +214,7 @@ git checkout master && git pull
 git checkout -b hotfix/<slug>
 # ...fix, commit...
 gh pr create --base master --title "hotfix: <slug>"
-# after it merges and is tagged, port it back so develop does not regress:
+# merging it publishes :latest; port it back so develop does not regress:
 git checkout develop && git pull && git merge master && git push origin develop
 ```
 

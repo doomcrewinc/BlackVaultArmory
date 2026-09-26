@@ -6,8 +6,8 @@ on:
     branches: [develop, master]
 
 # Cancelling a superseded CI run is safe: nothing it does is half-finished
-# anywhere but in its own workspace. The RELEASE workflow deliberately does
-# NOT cancel — see the comment on release.yml.
+# anywhere but in its own workspace. The PUBLISH workflow deliberately does
+# NOT cancel — see the comment on publish.yml.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -299,10 +299,21 @@ jobs:
     permissions:
       contents: read
 
-    # The Dockerfile is otherwise only ever built by release.yml, at tag time,
-    # on the one path that must not fail. Building it here (amd64 only, never
-    # pushed, no registry credentials) means a broken Dockerfile is caught on
-    # the pull request instead of halfway through a multi-arch manifest push.
+    # PULL REQUESTS ONLY, and that is the whole point of the job.
+    #
+    # Under the old tag-triggered release this ran on every push too, because a
+    # push to master was not yet a publish and the Dockerfile would otherwise
+    # go unbuilt until tag time. It IS a publish now: publish.yml builds the
+    # same Dockerfile on every push to develop and master, so an unconditional
+    # run here would build the image twice for the same commit, fight
+    # publish.yml for the buildx gha cache, and still tell you nothing new.
+    #
+    # On a pull request it remains the ONLY Dockerfile build — amd64 only,
+    # never pushed, no registry credentials — which is what keeps a broken
+    # Dockerfile from being discovered halfway through a multi-arch manifest
+    # push to the tag every installed user pulls.
+    if: github.event_name == 'pull_request'
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
