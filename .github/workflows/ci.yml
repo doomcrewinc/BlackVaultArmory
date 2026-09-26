@@ -25,11 +25,21 @@ concurrency:
 permissions: {}
 
 env:
-  # Matches the Dockerfile (node:20-alpine), which is the only place the
-  # supported runtime is actually declared — package.json has no "engines"
-  # field. Next 16 requires Node >= 20.9, so 20 is valid; if the Dockerfile
-  # moves, move this with it.
-  NODE_VERSION: "20"
+  # 24, not 20. Node 20 reached END OF LIFE on 2026-04-30 (nodejs/Release
+  # schedule.json), and jsdom 30.1.1 — a devDependency of the component tests —
+  # declares engines ^22.22.2 || ^24.15.0 || >=26.0.0. On Node 20 the suite
+  # died with `webidl.util.markAsUncloneable is not a function`, an API that
+  # does not exist there. 24 is the current Active LTS (to 2026-10-20, then
+  # maintenance to 2028-04-30) and is what the toolchain is developed on.
+  #
+  # NOTE THE DIVERGENCE: the Dockerfile still ships node:20-alpine, so this
+  # value no longer matches the runtime users get. That is deliberate — jsdom
+  # is a test-only dependency and bumping the shipped runtime moves native
+  # binaries (sharp, Prisma) that CI builds but never executes. The Node 20
+  # build path stays covered by the docker-image job. See the report: bumping
+  # the Dockerfile off an EOL runtime is a recommended follow-up, not
+  # something to do blind.
+  NODE_VERSION: "24"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -59,6 +69,24 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      # REQUIRED before anything that imports @prisma/client. `npm ci` does not
+      # generate a client, and two suites read Prisma.dmmf directly
+      # (src/lib/backup/models.test.ts, src/lib/date-migration.test.ts); on a
+      # fresh checkout they died with "Cannot read properties of undefined
+      # (reading 'datamodel')" and tsc produced 104 cascading errors. It passed
+      # locally only because a generated client was already sitting in
+      # node_modules.
+      #
+      # It must be `npm run db:generate`, which generates BOTH clients — not a
+      # single `prisma generate --schema prisma/sqlite/schema.prisma`.
+      # date-migration.ts imports Prisma from "@prisma/client", which is the
+      # POSTGRES client; generating only SQLite leaves that DMMF stale and the
+      # guard audits a previous schema while reporting green. This is step 5 of
+      # "Changing the schema" in CONTRIBUTING.md, and naming the npm script
+      # rather than inlining the command is what keeps the two from drifting.
+      - name: Generate Prisma clients (both providers)
+        run: npm run db:generate
 
       # Runs tsc for real and fails on any NEW type error. The tree currently
       # has 16 pre-existing errors in two test files; scripts/check-types.sh
@@ -103,6 +131,24 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # REQUIRED before anything that imports @prisma/client. `npm ci` does not
+      # generate a client, and two suites read Prisma.dmmf directly
+      # (src/lib/backup/models.test.ts, src/lib/date-migration.test.ts); on a
+      # fresh checkout they died with "Cannot read properties of undefined
+      # (reading 'datamodel')" and tsc produced 104 cascading errors. It passed
+      # locally only because a generated client was already sitting in
+      # node_modules.
+      #
+      # It must be `npm run db:generate`, which generates BOTH clients — not a
+      # single `prisma generate --schema prisma/sqlite/schema.prisma`.
+      # date-migration.ts imports Prisma from "@prisma/client", which is the
+      # POSTGRES client; generating only SQLite leaves that DMMF stale and the
+      # guard audits a previous schema while reporting green. This is step 5 of
+      # "Changing the schema" in CONTRIBUTING.md, and naming the npm script
+      # rather than inlining the command is what keeps the two from drifting.
+      - name: Generate Prisma clients (both providers)
+        run: npm run db:generate
 
       # vitest writes test.env into process.env, so it OVERRIDES a TZ exported
       # by the shell. `TZ=Pacific/Auckland npx vitest run` therefore ran in

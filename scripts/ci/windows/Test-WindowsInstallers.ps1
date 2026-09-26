@@ -23,10 +23,16 @@
       to absorb, and scenario 8 is the first time it has ever been executed.
 
   WHAT IS NOT REAL
-    * Docker. scripts/ci/windows/docker.cmd stands in for it, because a GitHub
-      windows runner cannot build this project's Linux image. Nothing here
-      proves the image builds, that compose starts a container, or that the
-      app is reachable. The Linux docker-build job covers the image.
+    * Docker. scripts/ci/windows/docker-stub.cs is compiled to docker.exe and
+      stands in for it, because a GitHub windows runner cannot build this
+      project's Linux image. Nothing here proves the image builds, that
+      compose starts a container, or that the app is reachable. The Linux
+      docker-image job covers the image.
+
+      It must be an .exe. A .cmd stub invalidated the first live run: cmd.exe
+      never returns from a batch file invoked without `call`, and the scripts
+      invoke Docker bare (correctly - the real docker is an .exe). See the
+      header of docker-stub.cs for the full account.
     * Prompt RENDERING. Input is redirected from a file, so `set /p` reads the
       answers but nobody sees the box-drawing characters. The .bat files are
       UTF-8 while cmd.exe defaults to cp437, so the banners are expected to
@@ -53,11 +59,35 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Checks = 0
-$StubDir = $PSScriptRoot
+$ScriptDir = $PSScriptRoot
 $SandboxRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $Sandboxes = Join-Path $SandboxRoot "bv-win"
 if (Test-Path $Sandboxes) { Remove-Item -Recurse -Force $Sandboxes }
 New-Item -ItemType Directory -Force -Path $Sandboxes | Out-Null
+
+# ---------------------------------------------------------------- the stub
+# Compiled to a REAL EXECUTABLE. A .cmd here silently truncated every script
+# after its first Docker call - see docker-stub.cs for why. PATHEXT resolves
+# .EXE before .CMD, so this also wins over a stale stub.
+# Built into the sandbox, never into the repo checkout, so a local run
+# leaves no stray binary beside the sources.
+$StubDir = Join-Path $Sandboxes "stub"
+New-Item -ItemType Directory -Force -Path $StubDir | Out-Null
+$StubExe = Join-Path $StubDir "docker.exe"
+$StubSrc = Join-Path $ScriptDir "docker-stub.cs"
+if (-not (Test-Path $StubSrc)) { throw "missing $StubSrc" }
+Remove-Item -Force $StubExe -ErrorAction SilentlyContinue
+
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (Test-Path $csc) {
+  & $csc /nologo /optimize+ /target:exe "/out:$StubExe" $StubSrc | Out-Null
+} else {
+  # PowerShell 7 cannot always emit an assembly to disk, so csc is preferred.
+  Add-Type -TypeDefinition (Get-Content $StubSrc -Raw) `
+           -OutputAssembly $StubExe -OutputType ConsoleApplication
+}
+if (-not (Test-Path $StubExe)) { throw "could not build the docker stub at $StubExe" }
+Write-Host "docker stub built: $StubExe"
 
 function Assert([bool]$Condition, [string]$Message) {
   $script:Checks++
@@ -122,7 +152,32 @@ function Get-EnvValue([string]$Dir, [string]$Key) {
   return ($line -replace "^\s*$([regex]::Escape($Key))=", "").Trim()
 }
 
-function Write-Scenario([string]$Name) { Write-Host "`n==> $Name" -ForegroundColor Cyan }
+$script:ScenarioFailBase = 0
+
+function Write-Scenario([string]$Name) {
+  $script:ScenarioFailBase = $script:Failures.Count
+  Write-Host "`n==> $Name" -ForegroundColor Cyan
+}
+
+# Dumps everything the run produced, but ONLY when the scenario failed.
+#
+# The first live run reported nine failures and showed none of the evidence,
+# which turned diagnosis into guesswork. A failing assertion that does not
+# print what it actually got is a bad test; this is the fix.
+function Show-EvidenceIfFailed([pscustomobject]$Result) {
+  if ($script:Failures.Count -eq $script:ScenarioFailBase) { return }
+  Write-Host "    ---------------- evidence ----------------" -ForegroundColor Yellow
+  Write-Host "    exit code: $($Result.ExitCode)"
+  Write-Host "    -- stub log (what the scripts asked Docker to do) --"
+  if ([string]::IsNullOrWhiteSpace($Result.StubLog)) {
+    Write-Host "       (empty - the stub was never invoked)"
+  } else {
+    foreach ($l in ($Result.StubLog -split "`r?`n")) { if ($l) { Write-Host "       | $l" } }
+  }
+  Write-Host "    -- script output --"
+  foreach ($l in ($Result.Output -split "`r?`n")) { Write-Host "       | $l" }
+  Write-Host "    ------------------------------------------" -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------- scenario 1
 Write-Scenario "install.bat - fresh install, PostgreSQL (answers: default dir, default port, 1)"
@@ -143,6 +198,8 @@ Assert ($r.StubLog -match "compose build") 'ran docker compose build'
 Assert ($r.StubLog -match "compose up -d") 'ran docker compose up -d'
 Assert ($r.Output -notmatch $pw) "the password is never echoed to the terminal"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 2
 Write-Scenario "install.bat - fresh install, SQLite, custom data dir and port"
 $d = New-Sandbox "install-sqlite"
@@ -157,6 +214,8 @@ Assert ($null -eq (Get-EnvValue $d "COMPOSE_PROFILES")) "no COMPOSE_PROFILES for
 Assert (Test-Path (Join-Path $custom "db")) "custom data dir created"
 Assert (-not (Test-Path (Join-Path $custom "postgres"))) "no postgres dir for SQLite"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 3
 Write-Scenario "install.bat - Docker Compose too old (2.19.0) stops before writing anything"
 $d = New-Sandbox "install-old-compose"
@@ -166,6 +225,8 @@ Assert ($r.Output -match "2\.20 or newer") "explains the v2.20 requirement"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 Assert (-not (Test-Path (Join-Path $d "data"))) "created NO data directories"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 4
 Write-Scenario "install.bat - no Docker Compose v2 at all"
 $d = New-Sandbox "install-no-compose"
@@ -173,12 +234,16 @@ $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "2") -EnvVars @
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 5
 Write-Scenario "install.bat - a leading v on the version is accepted (v2.30.1)"
 $d = New-Sandbox "install-v-prefix"
 $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "v2.30.1" }
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "still configured SQLite"
+
+Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario 6
 Write-Scenario "install.bat - re-run over an existing configured install starts it, does not reconfigure"
@@ -195,6 +260,8 @@ Assert ((Get-Content (Join-Path $d ".env") -Raw) -eq $before) ".env left byte-fo
 Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
 Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
 Assert ($r.Output -match "7777") "reported the configured port"
+
+Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- git helpers
 function New-GitRemote([string]$Name, [string]$UpdateBatSource) {
@@ -254,6 +321,8 @@ Assert ($r.StubLog -match "compose build --pull") 'ran docker compose build --pu
 Assert ($r.StubLog -match "compose up -d") 'ran docker compose up -d'
 Assert ($r.Output -match "7001") "reported the configured port"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 8
 Write-Scenario "update.bat - PostgreSQL .env missing keys warns but does not stop"
 $origin = New-GitRemote "update-pg-warn" (Join-Path $RepoRoot "update.bat")
@@ -269,6 +338,8 @@ Assert ($r.Output -match "BLACKVAULT_POSTGRES_PASSWORD") "named the missing pass
 Assert ($r.Output -match "PostgreSQL data verified") "preflight found the cluster directory"
 Assert ($r.StubLog -match "compose up -d") "still restarted"
 
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario 9
 Write-Scenario "update.bat - compose failure is reported and does not exit 0"
 $origin = New-GitRemote "update-fail" (Join-Path $RepoRoot "update.bat")
@@ -278,6 +349,8 @@ $r = Invoke-Bat -Dir $work -Script "update.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = 
 Assert ($r.ExitCode -eq 1) "exits 1 when compose build fails (got $($r.ExitCode))"
 Assert ($r.Output -match "docker compose failed") "says compose failed"
 Assert ($r.StubLog -notmatch "compose up -d") "did NOT try to start after a failed build"
+
+Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario 10
 Write-Scenario "update.bat - THE BYTE-OFFSET RESUME HAZARD, reproduced end to end"
@@ -320,6 +393,8 @@ Assert ($r.StubLog -match "compose up -d") "it still reached the restart"
 # command it does not recognise.
 Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
 Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error from a mid-line resume"
+
+Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
