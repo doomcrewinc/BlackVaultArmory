@@ -517,7 +517,8 @@ Your data folder is never touched during an update.
 A one-way, verified copy: every table is copied, then every row is compared. **Your `vault.db` is
 never modified or deleted.** It stays on disk as your rollback. Uploaded images and documents stay
 where they are. Mac / Linux, run from the BlackVault folder. You need
-[Node.js 20+](https://nodejs.org/) for the copy step.
+[Node.js](https://nodejs.org/) 20.12 or newer for the copy step — Node 24 LTS is what BlackVault
+ships and tests on, and Node 20 is past end of life.
 
 When the copy is verified, the tool finishes the switch for you:
 - it writes `data/db/.migrated`, a small record of what was copied, so BlackVault knows the
