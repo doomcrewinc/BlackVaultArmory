@@ -1,0 +1,6 @@
+# Batch files are read by cmd.exe, which resumes a running script by BYTE OFFSET
+# after each command. update.bat pulls a new copy of itself mid-run, so its
+# resume pad is sized in bytes for CRLF. A contributor with core.autocrlf=input
+# converting these to LF would shift every offset and land execution somewhere
+# other than the pad. Pin the line endings rather than relying on nobody doing it.
+*.bat text eol=crlf
