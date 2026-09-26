@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Printer, RefreshCw } from "lucide-react";
+import { AlertTriangle, Download, Loader2, Printer, RefreshCw } from "lucide-react";
 import {
   buildExportQueryString,
   formatExpiryFootnote,
@@ -20,6 +20,12 @@ export default function FullArmoryPreviewPage() {
   const [data, setData] = useState<FullArmoryExportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // The rich PDF download. Separate from `error` above, which is the page's own
+  // data load: a failed export must not blank the preview the user is reading.
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfNotice, setPdfNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setQueryString(window.location.search.replace(/^\?/, ""));
@@ -55,6 +61,59 @@ export default function FullArmoryPreviewPage() {
     void load();
     return () => controller.abort();
   }, [options]);
+
+  /**
+   * Build the rich PDF: a laid-out packet with the item photos embedded and the
+   * user's own PDF receipts merged in behind it.
+   *
+   * The generator is reached through a dynamic import, not a static one, for
+   * two reasons. jspdf and pdf-lib are together the largest dependencies in the
+   * app and nothing else uses them, so a static import would put them in this
+   * page's first-load bundle for every visitor who only wanted to read the
+   * preview; and this is a client component, which Next also renders on the
+   * server, so a static import would drag both libraries into the server bundle
+   * as well. Behind an import() inside a handler they land in their own lazy
+   * client chunk and appear in neither.
+   *
+   * This is deliberately ADDITIONAL to the server's own
+   * `?format=pdf` export, which builds a dependency-free text-only PDF and is
+   * untouched. Two different products for two different needs.
+   */
+  async function handleDownloadPdf() {
+    if (!data || pdfBusy) return;
+    setPdfBusy(true);
+    setPdfError(null);
+    setPdfNotice(null);
+    try {
+      const { generateFullArmoryPdf } = await import("@/lib/exports/full-armory-pdf");
+      const result = await generateFullArmoryPdf(data, options);
+
+      // Partial failures are reported, never swallowed. A user whose receipts
+      // all failed to merge should not have to open the file to find out.
+      const problems: string[] = [];
+      if (result.failedAttachments.length > 0) {
+        problems.push(
+          `${result.failedAttachments.length} document(s) could not be merged: ${result.failedAttachments.join(", ")}`
+        );
+      }
+      if (result.failedImages.length > 0) {
+        problems.push(`${result.failedImages.length} image(s) could not be embedded`);
+      }
+      setPdfNotice(
+        problems.length > 0
+          ? `${result.filename} downloaded (${result.pageCount} pages). ${problems.join(". ")}.`
+          : null
+      );
+    } catch (downloadError) {
+      setPdfError(
+        downloadError instanceof Error
+          ? `Could not build the PDF: ${downloadError.message}`
+          : "Could not build the PDF."
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }
 
   const visuals = useMemo(() => {
     if (!data) return [];
@@ -117,18 +176,48 @@ export default function FullArmoryPreviewPage() {
           <div>
             <p className="text-xs text-vault-text-faint uppercase tracking-widest font-mono">Preview Mode</p>
             <p className="text-sm text-vault-text-muted">
-              Ready for insurance adjuster review. Use your browser print flow to save this page as a PDF.
+              Ready for insurance adjuster review. "Download PDF" builds a laid-out packet with photos and
+              your PDF receipts merged in; "Print / Save PDF" prints this page as you see it.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="inline-flex items-center gap-2 rounded-md border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-3 py-2 text-xs text-[#00C2FF]"
-          >
-            <Printer className="h-3.5 w-3.5" />
-            Print / Save PDF
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-2 rounded-md border border-vault-border bg-vault-surface px-3 py-2 text-xs text-vault-text-muted hover:text-vault-text"
+            >
+              <Printer className="h-3.5 w-3.5" />
+              Print / Save PDF
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={pdfBusy}
+              aria-busy={pdfBusy}
+              className="inline-flex items-center gap-2 rounded-md border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-3 py-2 text-xs text-[#00C2FF] disabled:opacity-60"
+            >
+              {pdfBusy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              {pdfBusy ? "Building PDF..." : "Download PDF"}
+            </button>
+          </div>
         </section>
+
+        {pdfError ? (
+          <section className="print:hidden rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 p-3">
+            <p className="text-xs text-[#E53935]">{pdfError}</p>
+          </section>
+        ) : null}
+
+        {pdfNotice ? (
+          <section className="print:hidden rounded-lg border border-[#F5A623]/30 bg-[#F5A623]/10 p-3 flex items-start gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 text-[#F5A623] mt-0.5 shrink-0" />
+            <p className="text-xs text-[#F5A623]">{pdfNotice}</p>
+          </section>
+        ) : null}
 
         <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
           <h1 className="text-lg font-semibold text-vault-text">Full Armory Export</h1>

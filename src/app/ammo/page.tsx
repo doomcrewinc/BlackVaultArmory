@@ -493,7 +493,29 @@ export default function AmmoPage() {
       .then((res) => res.json())
       .then((data) => {
         if (!isMounted) return;
-        setGroups(Array.isArray(data.grouped) ? data.grouped : []);
+        const loaded: CaliberGroup[] = Array.isArray(data.grouped) ? data.grouped : [];
+        setGroups(loaded);
+
+        // `/ammo?edit=<id>` opens THIS page's existing edit modal on that lot.
+        // It is how the detail page's Edit button works: ammo editing has only
+        // ever lived in this modal, and a second edit form built just to give
+        // that button a destination is two forms to keep in step.
+        //
+        // Read off window in an effect, not useSearchParams: a client page
+        // reading search params at render needs a Suspense boundary, and this
+        // never has to affect the server-rendered markup.
+        const requestedEditId = new URLSearchParams(window.location.search).get("edit");
+        if (!requestedEditId) return;
+
+        const group = loaded.find((g) => g.stocks.some((s) => s.id === requestedEditId));
+        const stock = group?.stocks.find((s) => s.id === requestedEditId);
+        if (group && stock) {
+          setExpandedCalibers((prev) => new Set(prev).add(group.caliber));
+          setEditModal(stock);
+        }
+        // Strip the param either way, so a refresh or a back-navigation does
+        // not reopen the modal on a lot the user already finished with.
+        window.history.replaceState(null, "", "/ammo");
       })
       .finally(() => {
         if (isMounted) {
@@ -723,16 +745,26 @@ export default function AmmoPage() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-0.5">
                                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ss.dot}`} />
-                                  <p className="text-sm font-semibold text-vault-text truncate">
+                                  {/* The lot's name is the way into its detail
+                                      page — ammo was the only inventory kind
+                                      with no page to open. The name truncates
+                                      ALONE; the spec badges stay shrink-0
+                                      siblings outside the link, because
+                                      `truncate` on a flex parent has hidden a
+                                      badge outright in this repo. */}
+                                  <Link
+                                    href={`/ammo/${stock.id}`}
+                                    className="min-w-0 truncate text-sm font-semibold text-vault-text hover:text-[#00C2FF] hover:underline"
+                                  >
                                     {stock.brand}
-                                  </p>
+                                  </Link>
                                   {stock.bulletType && (
-                                    <span className="text-[10px] font-mono text-vault-text-faint border border-vault-border px-1.5 py-0.5 rounded">
+                                    <span className="shrink-0 text-[10px] font-mono text-vault-text-faint border border-vault-border px-1.5 py-0.5 rounded">
                                       {stock.bulletType}
                                     </span>
                                   )}
                                   {stock.grainWeight && (
-                                    <span className="text-[10px] text-vault-text-faint">
+                                    <span className="shrink-0 text-[10px] text-vault-text-faint">
                                       {stock.grainWeight}gr
                                     </span>
                                   )}
