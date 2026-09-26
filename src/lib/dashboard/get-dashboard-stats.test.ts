@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
 import { expiryStatus } from "@/lib/supply";
 
 const mocks = vi.hoisted(() => ({
@@ -177,7 +178,7 @@ describe("getDashboardStats — the expiry timezone boundary", () => {
     );
   });
 
-  it("resolves today from the host timezone when no timezone is saved", async () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("resolves today from the host timezone when no timezone is saved", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(EVENING_IN_DENVER);
     mocks.findAppSettings.mockResolvedValue(null);

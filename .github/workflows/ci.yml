@@ -5,21 +5,63 @@ on:
   push:
     branches: [develop, master]
 
+# Cancelling a superseded CI run is safe: nothing it does is half-finished
+# anywhere but in its own workspace. The RELEASE workflow deliberately does
+# NOT cancel — see the comment on release.yml.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Deny by default. Every job below states the scope it needs and nothing more.
+#
+# This is not ceremony: `npm ci` runs arbitrary postinstall scripts from the
+# dependency tree, with whatever GITHUB_TOKEN this job holds. Every job here
+# needs only `contents: read`, so that is all any of them can leak.
+#
+# Note also that this workflow triggers on `pull_request`, never
+# `pull_request_target`. A fork's pull request therefore runs with a read-only
+# token in the fork's context and cannot see repository secrets — and this
+# workflow uses no secrets at all.
+permissions: {}
+
+env:
+  # 24, not 20. Node 20 reached END OF LIFE on 2026-04-30 (nodejs/Release
+  # schedule.json), and jsdom 30.1.1 — a devDependency of the component tests —
+  # declares engines ^22.22.2 || ^24.15.0 || >=26.0.0. On Node 20 the suite
+  # died with `webidl.util.markAsUncloneable is not a function`, an API that
+  # does not exist there. 24 is the current Active LTS (to 2026-10-20, then
+  # maintenance to 2028-04-30) and is what the toolchain is developed on.
+  #
+  # NOTE THE DIVERGENCE: the Dockerfile still ships node:20-alpine, so this
+  # value no longer matches the runtime users get. That is deliberate — jsdom
+  # is a test-only dependency and bumping the shipped runtime moves native
+  # binaries (sharp, Prisma) that CI builds but never executes. The Node 20
+  # build path stays covered by the docker-image job. See the report: bumping
+  # the Dockerfile off an EOL runtime is a recommended follow-up, not
+  # something to do blind.
+  NODE_VERSION: "24"
+
 jobs:
+  # ---------------------------------------------------------------------------
   verify:
+    name: Lint, types and build
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
+          # Keeps the job's token out of .git/config, where a dependency's
+          # postinstall script could read it.
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Stated explicitly: setup-node v5 added automatic caching driven by
+          # package.json's "packageManager" field and v6 narrowed it again.
+          # This repo has no "packageManager" field, so the explicit value is
+          # what keeps the cache working across those majors.
           cache: npm
 
       - name: Install dependencies
@@ -28,8 +70,248 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Test
-        run: npm test
+      # REQUIRED before anything that imports @prisma/client. `npm ci` does not
+      # generate a client, and two suites read Prisma.dmmf directly
+      # (src/lib/backup/models.test.ts, src/lib/date-migration.test.ts); on a
+      # fresh checkout they died with "Cannot read properties of undefined
+      # (reading 'datamodel')" and tsc produced 104 cascading errors. It passed
+      # locally only because a generated client was already sitting in
+      # node_modules.
+      #
+      # It must be `npm run db:generate`, which generates BOTH clients — not a
+      # single `prisma generate --schema prisma/sqlite/schema.prisma`.
+      # date-migration.ts imports Prisma from "@prisma/client", which is the
+      # POSTGRES client; generating only SQLite leaves that DMMF stale and the
+      # guard audits a previous schema while reporting green. This is step 5 of
+      # "Changing the schema" in CONTRIBUTING.md, and naming the npm script
+      # rather than inlining the command is what keeps the two from drifting.
+      - name: Generate Prisma clients (both providers)
+        run: npm run db:generate
+
+      # Runs tsc for real and fails on any NEW type error. The tree currently
+      # has 16 pre-existing errors in two test files; scripts/check-types.sh
+      # records exactly those two files and nothing else, and also fails if a
+      # baselined file stops erroring, so the baseline cannot quietly become
+      # permanent. See the header of that script for the full reasoning.
+      - name: Typecheck (against the recorded baseline)
+        run: npm run typecheck
 
       - name: Build
         run: npm run build
+
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # Both sides of UTC must report. Without this, the first zone to fail
+      # hides the other one's result, which is the whole point of the matrix.
+      fail-fast: false
+      matrix:
+        include:
+          # The historical pin. UTC-6/-7.
+          - label: America/Denver (UTC-, the pin)
+            tz_override: ""
+          # UTC+12/+13. A real bug — toDateOnlyUTC("2026-9-20") resolving to
+          # the 19th — was INVISIBLE under a UTC-negative zone and only
+          # surfaced here. That is why this leg exists.
+          - label: Pacific/Auckland (UTC+)
+            tz_override: Pacific/Auckland
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # REQUIRED before anything that imports @prisma/client. `npm ci` does not
+      # generate a client, and two suites read Prisma.dmmf directly
+      # (src/lib/backup/models.test.ts, src/lib/date-migration.test.ts); on a
+      # fresh checkout they died with "Cannot read properties of undefined
+      # (reading 'datamodel')" and tsc produced 104 cascading errors. It passed
+      # locally only because a generated client was already sitting in
+      # node_modules.
+      #
+      # It must be `npm run db:generate`, which generates BOTH clients — not a
+      # single `prisma generate --schema prisma/sqlite/schema.prisma`.
+      # date-migration.ts imports Prisma from "@prisma/client", which is the
+      # POSTGRES client; generating only SQLite leaves that DMMF stale and the
+      # guard audits a previous schema while reporting green. This is step 5 of
+      # "Changing the schema" in CONTRIBUTING.md, and naming the npm script
+      # rather than inlining the command is what keeps the two from drifting.
+      - name: Generate Prisma clients (both providers)
+        run: npm run db:generate
+
+      # vitest writes test.env into process.env, so it OVERRIDES a TZ exported
+      # by the shell. `TZ=Pacific/Auckland npx vitest run` therefore ran in
+      # Denver and reported success — a matrix built on that would have proved
+      # nothing while looking green. TZ_OVERRIDE is the documented way through
+      # the pin (vitest.config.ts), and src/test/host-timezone.test.ts asserts
+      # inside the suite that the zone actually took effect, so this leg fails
+      # loudly rather than silently running Denver twice.
+      #
+      # An empty value means "the default leg": vitest.config.ts uses `||`, not
+      # `??`, precisely so the empty string this matrix passes is treated as
+      # unset rather than as TZ="".
+      - name: Test
+        env:
+          TZ_OVERRIDE: ${{ matrix.tz_override }}
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  migration-drift:
+    name: Migration drift (sqlite + postgres)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # Both providers ship in every image, so a schema change needs a migration
+    # in BOTH prisma/sqlite/migrations and prisma/postgres/migrations. Without
+    # a Postgres server, scripts/check-migration-drift.sh checks sqlite and
+    # SKIPS postgres — and still exits 0. This service container is the only
+    # thing that has ever validated the Postgres migration history.
+    services:
+      postgres:
+        # Matches docker-compose.yml's db service.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # The database name is not cosmetic. Prisma WIPES the shadow
+          # database, so check-migration-drift.sh refuses any URL whose
+          # database name does not carry shadow, scratch or test as a whole
+          # word. "blackvault_shadow" satisfies that guard; "blackvault" would
+          # be refused, by design.
+          POSTGRES_DB: blackvault_shadow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d blackvault_shadow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # prisma/{sqlite,postgres}/schema.prisma are GENERATED from
+      # prisma/schema.base.prisma and are also committed. Editing the base and
+      # forgetting to regenerate would leave the drift check comparing
+      # migrations against a stale schema — i.e. passing for the wrong reason.
+      - name: Generated Prisma schemas are current
+        run: |
+          npm run gen:schemas
+          git diff --exit-code -- prisma/
+
+      - name: Drift check, both providers
+        env:
+          # Note this is NOT DATABASE_URL or POSTGRES_URL. The script refuses a
+          # shadow URL equal to either of those, and neither is set here.
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/blackvault_shadow
+        run: |
+          set -euo pipefail
+          npm run db:check-drift 2>&1 | tee drift.log
+
+          # The failure mode this guards against: if SHADOW_DATABASE_URL were
+          # ever empty or removed, the script prints "postgres: SKIPPED" and
+          # STILL EXITS 0. CI would then be green while checking only sqlite —
+          # exactly the gap this job was added to close. Assert the postgres
+          # leg actually ran.
+          if grep -q 'postgres: SKIPPED' drift.log; then
+            echo "::error::The postgres drift leg was SKIPPED. SHADOW_DATABASE_URL did not reach the script."
+            exit 1
+          fi
+          if ! grep -q '^==> postgres: prisma/postgres/migrations' drift.log; then
+            echo "::error::The postgres drift leg did not run. Check the service container and SHADOW_DATABASE_URL."
+            exit 1
+          fi
+          echo "Both providers were checked."
+
+  # ---------------------------------------------------------------------------
+  windows-installers:
+    # The name says "Docker stubbed" on purpose. A green tick here means the
+    # scripts' own logic works on Windows; it does NOT mean an install
+    # succeeds, because the one thing this job cannot do is build or run the
+    # container. Do not shorten this name.
+    name: Windows installer logic (Docker stubbed)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    # install.bat and update.bat have NEVER been executed on Windows — the
+    # maintainer's machine has no cmd.exe — so this job is the only
+    # verification that exists for them.
+    #
+    # Docker is stubbed (scripts/ci/windows/docker.cmd), because a GitHub
+    # windows runner cannot build this project's Linux image. EVERYTHING else
+    # runs for real: the Compose version parser, the wizard, the PowerShell
+    # CSPRNG password and its hex validation, .env writing, icacls hardening,
+    # provider detection, the preflight checks, and a real `git pull`.
+    #
+    # It also reproduces the cmd.exe byte-offset resume hazard end to end: the
+    # pre-PostgreSQL update.bat pulls, the pull replaces update.bat underneath
+    # it, and cmd.exe resumes at the old byte position inside the new file.
+    # The colon-only landing pad is what absorbs that, and until now it was
+    # hand-checked arithmetic that had never been run.
+    #
+    # The driver states its own limits in its header. Read them before
+    # treating a green tick here as "the installers work".
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The resume scenario checks out the historical update.bat
+          # (faf7651). A shallow clone does not contain it.
+          fetch-depth: 0
+
+      - name: Exercise the installers
+        shell: pwsh
+        run: ./scripts/ci/windows/Test-WindowsInstallers.ps1
+
+  # ---------------------------------------------------------------------------
+  docker-image:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # The Dockerfile is otherwise only ever built by release.yml, at tag time,
+    # on the one path that must not fail. Building it here (amd64 only, never
+    # pushed, no registry credentials) means a broken Dockerfile is caught on
+    # the pull request instead of halfway through a multi-arch manifest push.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          build-args: |
+            APP_VERSION=ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

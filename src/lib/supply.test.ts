@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { IS_PINNED_HOST_ZONE } from "@/test/host-timezone";
 import {
   DEFAULT_EXPIRY_WARNING_DAYS,
   DEFAULT_SUPPLY_CATEGORY,
@@ -197,7 +198,7 @@ describe("todayForExpiry", () => {
     expect(correctVerdict).toBe("soon");
   });
 
-  it("falls back to the HOST timezone when timezone is null, not to UTC", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("falls back to the HOST timezone when timezone is null, not to UTC", () => {
     // AppSettings.timezone is NULL out of the box and stays NULL on any
     // install whose owner never opened Settings, so this is the DEFAULT path,
     // not an edge case. Hardcoding UTC here re-opened the off-by-one above:
@@ -283,10 +284,24 @@ describe("resolveExpiryTimeZone", () => {
     });
   });
 
-  it("names the HOST zone, not UTC, when nothing is saved", () => {
+  // Split in two so the zone-independent half runs on BOTH matrix legs.
+  // Only the literal zone name is fixture-bound; the disclosure flag and the
+  // "a zone was resolved at all" property hold everywhere.
+  it("does not claim an unsaved zone came from the setting, and still names one", () => {
+    const resolved = resolveExpiryTimeZone(null);
+    expect(resolved.fromSetting).toBe(false);
+    // A real IANA zone, not "" and not a silent UTC fallback standing in for
+    // "we could not tell" — the footnote has to name something truthful.
+    expect(resolved.timeZone).toMatch(/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$|^UTC$/);
+  });
+
+  it.skipIf(!IS_PINNED_HOST_ZONE)("names the HOST zone, not UTC, when nothing is saved", () => {
     // Hardcoding UTC here is the off-by-one todayForExpiry exists to close, so
     // a disclosure line that claimed UTC would be doubly wrong: wrong zone AND
     // inconsistent with the verdicts.
+    //
+    // Gated: the literal name is only knowable in the pinned zone. The
+    // portable half of this assertion is the test above.
     expect(resolveExpiryTimeZone(null)).toEqual({
       timeZone: "America/Denver",
       fromSetting: false,
@@ -307,7 +322,7 @@ describe("resolveExpiryTimeZone", () => {
     });
   });
 
-  it("agrees with the zone todayForExpiry actually resolved the day in", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("agrees with the zone todayForExpiry actually resolved the day in", () => {
     // The whole point of the extraction: one resolution, so a disclosure
     // cannot name a zone other than the one that decided. 21:00 on June 15 in
     // Denver is already the 16th in UTC.
@@ -335,7 +350,7 @@ describe("resolveExpiryContext", () => {
     });
   });
 
-  it("falls back to the host zone and the default window with no settings row", () => {
+  it.skipIf(!IS_PINNED_HOST_ZONE)("falls back to the host zone and the default window with no settings row", () => {
     expect(resolveExpiryContext(null, eveningInDenver)).toEqual({
       today: day("2026-06-15"),
       warningDays: DEFAULT_EXPIRY_WARNING_DAYS,
