@@ -128,10 +128,14 @@ if [ ! -f .env ]; then
 DB_PROVIDER=$DB_PROVIDER
 DATABASE_URL=$DEFAULT_URL
 PORT=$PORT
+PUBLIC_URL=http://localhost:$PORT
+ALLOW_DIRECT_ACCESS=true
 ENVEOF
   ok "wrote .env (local SQLite at prisma/prisma/dev.db)"
 elif grep -q '^DATABASE_URL=' .env; then
-  ok ".env already present — leaving it alone"
+  grep -q '^PUBLIC_URL=' .env || { printf 'PUBLIC_URL=http://localhost:%s\n' "$PORT" >> .env; ok "added PUBLIC_URL to .env"; }
+  grep -q '^ALLOW_DIRECT_ACCESS=' .env || { printf 'ALLOW_DIRECT_ACCESS=true\n' >> .env; ok "added ALLOW_DIRECT_ACCESS to .env"; }
+  ok ".env already present — leaving the rest alone"
 elif grep -q '^[[:space:]]*DATA_DIR=' .env; then
   die ".env has a DATA_DIR line, so it belongs to a Docker install (install.sh / install.bat), not to local development. dev.sh will not add DATABASE_URL to it. Run ./dev.sh from a separate clone, or move that .env aside first."
 else

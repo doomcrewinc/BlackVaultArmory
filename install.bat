@@ -145,6 +145,44 @@ if defined PORT_INPUT set "PORT_INPUT=!PORT_INPUT:"=!"
 if defined PORT_INPUT set "PORT_INPUT=!PORT_INPUT: =!"
 if defined PORT_INPUT (set "PORT=!PORT_INPUT!") else set "PORT=3000"
 
+:: ── Public URL, trusted proxies, direct access ────────────────
+:: Mirrors install.sh and scripts/public-url-prompts.sh: change them together.
+:: The app validates the URL authoritatively at startup; this is a shape check
+:: to catch typos before a build.
+::
+:: End of input: the .sh prompt aborts when `read` hits EOF. `set /p` cannot
+:: tell EOF from an empty line (both leave the variable unset and set
+:: errorlevel 1), so a plain retry loop would spin forever once stdin is
+:: exhausted. Three blank answers in a row abort instead: the same outcome
+:: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
+echo.
+echo Public URL: the address people open BlackVault at, normally your reverse
+echo proxy's HTTPS address, e.g. https://vault.example.com
+set "URL_BLANKS=0"
+:ask_public_url
+set "PUBLIC_URL="
+set /p "PUBLIC_URL=Public URL: "
+if defined PUBLIC_URL set "PUBLIC_URL=!PUBLIC_URL: =!"
+if defined PUBLIC_URL set "PUBLIC_URL=!PUBLIC_URL:	=!"
+if defined PUBLIC_URL (set "URL_BLANKS=0") else set /a URL_BLANKS+=1
+if !URL_BLANKS! GEQ 3 goto :public_url_missing
+call :valid_public_url PUBLIC_URL
+if not errorlevel 1 goto :ask_trusted_proxies
+echo   The URL must start with http:// or https:// and have no path, e.g. https://vault.example.com
+goto :ask_public_url
+
+:ask_trusted_proxies
+call :prompt_trusted_proxies
+set "DIRECT_ACCESS_INITIAL="
+if defined TRUSTED_PROXIES goto :public_settings_done
+echo.
+echo No trusted proxy set. With direct access off, every connection to
+echo BlackVault would be reset until you configure one.
+set "YN_Q=Allow direct access until your proxy is set up?"
+call :prompt_yes_no y
+if "!YN!"=="y" set "DIRECT_ACCESS_INITIAL=on"
+:public_settings_done
+
 :: ── Database ─────────────────────────────────────────────────
 :: Existing SQLite data that the user chose to keep defaults to SQLite, so the
 :: installer never silently starts an empty PostgreSQL database beside it.
@@ -225,6 +263,9 @@ if "!DB_PROVIDER!"=="postgres" goto :write_env_postgres
   echo DATA_DIR=!DATA_DIR!
   echo PORT=!PORT!
   echo BLACKVAULT_DB_PROVIDER=sqlite
+  echo BLACKVAULT_PUBLIC_URL=!PUBLIC_URL!
+  echo BLACKVAULT_TRUSTED_PROXIES=!TRUSTED_PROXIES!
+  echo BLACKVAULT_DIRECT_ACCESS_INITIAL=!DIRECT_ACCESS_INITIAL!
 ) > ".env"
 goto :env_written
 :write_env_postgres
@@ -236,6 +277,9 @@ goto :env_written
   echo BLACKVAULT_DB_PROVIDER=postgres
   echo BLACKVAULT_POSTGRES_PASSWORD=!POSTGRES_PASSWORD!
   echo BLACKVAULT_DATABASE_URL=postgresql://blackvault:!POSTGRES_PASSWORD!@db:5432/blackvault
+  echo BLACKVAULT_PUBLIC_URL=!PUBLIC_URL!
+  echo BLACKVAULT_TRUSTED_PROXIES=!TRUSTED_PROXIES!
+  echo BLACKVAULT_DIRECT_ACCESS_INITIAL=!DIRECT_ACCESS_INITIAL!
 ) > ".env"
 :env_written
 call :restrict_env
@@ -280,9 +324,10 @@ echo ╔════════════════════════
 echo ║  BlackVault is ready^^!                                    ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
-echo   URL:         http://localhost:!PORT!
+echo   URL:         !PUBLIC_URL!
 echo   Data stored: !DATA_DIR!
 echo   Database:    !DB_PROVIDER!
+if "!DIRECT_ACCESS_INITIAL!"=="on" echo   Direct:      http://^<this machine's IP^>:!PORT! (direct access on)
 echo.
 echo   To stop BlackVault:    %COMPOSE% down
 echo   To update BlackVault:  update.bat
@@ -302,6 +347,12 @@ echo   URL: http://localhost:!SUMMARY_PORT!
 echo.
 pause
 exit /b 0
+
+:public_url_missing
+echo.
+echo No input received; BLACKVAULT_PUBLIC_URL is required. Aborting.
+pause
+exit /b 1
 
 :password_failed
 set "POSTGRES_PASSWORD="
@@ -470,4 +521,68 @@ if errorlevel 1 (
 )
 icacls ".env" /inheritance:r >nul 2>&1
 if errorlevel 1 set "ENV_ACL_FAILED=1"
+goto :eof
+
+:: :valid_public_url VAR - errorlevel 0 when the value of VAR is
+:: http(s)://host[:port][/], else 1. Mirrors valid_public_url in
+:: scripts/public-url-prompts.sh (^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$,
+:: case-sensitive like the bash regex): change them together.
+:: Takes a variable NAME, not a value: CALL re-expands its arguments, which
+:: would mangle ^, %% and ! in whatever the user typed.
+:valid_public_url
+set "VPU=!%~1!"
+if not defined VPU exit /b 1
+:: A double quote would break the FOR /F below; the regex rejects it anyway.
+set "VPU_NQ=!VPU:"=!"
+if not "!VPU_NQ!"=="!VPU!" exit /b 1
+set "VPU_REST="
+if "!VPU:~0,8!"=="https://" set "VPU_REST=!VPU:~8!"
+if "!VPU:~0,7!"=="http://" set "VPU_REST=!VPU:~7!"
+if not defined VPU_REST exit /b 1
+if "!VPU_REST:~-1!"=="/" set "VPU_REST=!VPU_REST:~0,-1!"
+if not defined VPU_REST exit /b 1
+if "!VPU_REST:~0,1!"==":" exit /b 1
+:: Every allowed character is a delimiter, so any token left over is a
+:: character the regex does not allow. eol is set to a delimiter so no line
+:: is ever skipped as a comment (the default eol, ;, is not allowed).
+for /f "eol=: delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:" %%X in ("!VPU_REST!") do exit /b 1
+:: No colon: host only, and the host is already known to be non-empty.
+set "VPU_PORT=!VPU_REST:*:=!"
+if "!VPU_PORT!"=="!VPU_REST!" exit /b 0
+:: After the first colon: 1-5 digits and nothing else (a second colon fails).
+if not defined VPU_PORT exit /b 1
+if not "!VPU_PORT:~5!"=="" exit /b 1
+for /f "delims=0123456789" %%X in ("!VPU_PORT!") do exit /b 1
+exit /b 0
+
+:: :prompt_yes_no DEFAULT - asks the question in YN_Q and sets YN to y or n.
+:: Mirrors prompt_yes_no in scripts/public-url-prompts.sh: Enter (or end of
+:: input, which set /p cannot tell apart from Enter) takes DEFAULT, so this
+:: never loops at end of input.
+:prompt_yes_no
+set "YN_HINT=[y/N]"
+if "%~1"=="y" set "YN_HINT=[Y/n]"
+:prompt_yes_no_again
+set "YN_INPUT="
+set /p "YN_INPUT=!YN_Q! !YN_HINT!: "
+if defined YN_INPUT set "YN_INPUT=!YN_INPUT:"=!"
+if defined YN_INPUT set "YN_INPUT=!YN_INPUT: =!"
+if not defined YN_INPUT set "YN_INPUT=%~1"
+set "YN="
+for %%V in (y yes) do if /i "!YN_INPUT!"=="%%V" set "YN=y"
+for %%V in (n no) do if /i "!YN_INPUT!"=="%%V" set "YN=n"
+if defined YN goto :eof
+echo   Please answer y or n.
+goto :prompt_yes_no_again
+
+:: Mirrors prompt_trusted_proxies in scripts/public-url-prompts.sh. Sets
+:: TRUSTED_PROXIES with spaces and tabs removed; undefined when left blank.
+:prompt_trusted_proxies
+echo.
+echo Trusted proxies: IPs, CIDR ranges or host names your reverse proxy connects
+echo from, comma-separated (e.g. 172.28.0.0/16). Leave blank if you have none yet.
+set "TRUSTED_PROXIES="
+set /p "TRUSTED_PROXIES=Trusted proxies []: "
+if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES: =!"
+if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES:	=!"
 goto :eof

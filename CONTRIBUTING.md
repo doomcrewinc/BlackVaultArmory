@@ -143,6 +143,22 @@ keep meaning SQLite, forever. Keep it that way:
 - `docker-compose.migrate.yml` is only an overlay for the SQLite -> PostgreSQL copy, and
   `docker-compose.dev.yml` is only for development.
 
+## The connection gate
+
+`gate/` is plain ESM JavaScript (`.mjs`), run directly by `node` — the Dockerfile's `CMD` runs
+`node gate/gate.mjs` after `prisma migrate deploy`, not `npm start`. It owns the public port
+inside the container, resets connections from untrusted peers before Next ever sees them, and
+proxies everything else to Next's standalone server on `127.0.0.1:3001`. Its tests are vitest
+`.test.ts` files beside the `.mjs` they cover (`gate/gate-core.test.ts`,
+`gate/gate-server.test.ts`); run them with the usual `npm test`. `npm run dev` does not go
+through the gate at all — the dev server binds its port directly, so gate behavior (trusted
+proxies, direct access, connection resets) is only exercised in a built image. The gate reads
+container-side env vars `PUBLIC_URL`,
+`TRUSTED_PROXIES`, `ALLOW_DIRECT_ACCESS` and `DIRECT_ACCESS_INITIAL`, which `docker-compose.yml`
+maps from the host-side `BLACKVAULT_PUBLIC_URL`, `BLACKVAULT_TRUSTED_PROXIES`,
+`BLACKVAULT_ALLOW_DIRECT_ACCESS` and `BLACKVAULT_DIRECT_ACCESS_INITIAL` in `.env` — same
+`BLACKVAULT_*`-prefix convention as the database vars above, for the same reason.
+
 ## Versioning
 
 CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.26-81f8b3a`.

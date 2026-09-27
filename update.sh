@@ -11,6 +11,8 @@ echo ""
 
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/public-url-prompts.sh
+. ./scripts/public-url-prompts.sh
 
 # ── Docker Compose v2.20+ ─────────────────────────────────────
 # docker-compose.yml needs it. Exits before anything is touched (no .env
@@ -102,6 +104,37 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   echo ""
 fi
 
+# ── Public URL, trusted proxies, direct access ────────────────
+# BLACKVAULT_PUBLIC_URL is required from this release on: the container will
+# not start without it. With no .env there is no public URL, so rebuilding
+# and restarting would take a running BlackVault down. Stop here instead,
+# before anything is rebuilt. update.bat stops at the same point.
+if [ ! -f ".env" ]; then
+  echo "ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not"
+  echo "       start without it. Run ./install.sh, or create .env with a line"
+  echo "       BLACKVAULT_PUBLIC_URL=https://vault.example.com and re-run ./update.sh."
+  echo "       Nothing was rebuilt or restarted."
+  exit 1
+fi
+
+CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
+NEW_URL=$(prompt_public_url "$CURRENT_URL")
+[ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
+
+if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
+  echo ""
+  echo "This release can refuse connections that bypass your reverse proxy."
+  if [ "$(prompt_yes_no "Keep allowing direct access by IP (http://<ip>:<port>)?" y)" = "y" ]; then
+    set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL on
+  else
+    set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL off
+  fi
+fi
+
+if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
+  set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
+fi
+
 # ── Rebuild and restart ───────────────────────────────────────
 echo "Rebuilding BlackVault image..."
 $COMPOSE build --pull
@@ -134,8 +167,7 @@ echo "  Status:   $STATUS"
 if [ -n "$ACTIVE_DATA_DIR" ]; then
   echo "  Data:     $ACTIVE_DATA_DIR"
 fi
-ENV_PORT=$(env_value PORT)
-echo "  URL:      http://localhost:${ENV_PORT:-3000}"
+echo "  URL:      $(env_value BLACKVAULT_PUBLIC_URL)"
 echo ""
 echo "  To check logs: $COMPOSE logs -f"
 echo ""

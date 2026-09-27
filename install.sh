@@ -22,6 +22,8 @@ fi
 # .env picks the database.
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/public-url-prompts.sh
+. ./scripts/public-url-prompts.sh
 
 # Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
 # is written when it is missing or older.
@@ -117,6 +119,19 @@ echo ""
 read -rp "Port to run BlackVault on [3000]: " PORT_INPUT
 PORT="${PORT_INPUT:-3000}"
 
+# ── Public URL, trusted proxies, direct access ────────────────
+PUBLIC_URL=$(prompt_public_url)
+TRUSTED_PROXIES=$(prompt_trusted_proxies)
+DIRECT_ACCESS_INITIAL=""
+if [ -z "$TRUSTED_PROXIES" ]; then
+  echo ""
+  echo "No trusted proxy set. With direct access off, every connection to"
+  echo "BlackVault would be reset until you configure one."
+  if [ "$(prompt_yes_no "Allow direct access until your proxy is set up?" y)" = "y" ]; then
+    DIRECT_ACCESS_INITIAL="on"
+  fi
+fi
+
 # ── Database ─────────────────────────────────────────────────
 # Existing SQLite data that the user chose to keep defaults to SQLite, so the
 # installer never silently starts an empty PostgreSQL database beside it.
@@ -185,6 +200,9 @@ COMPOSE_PROFILES=postgres
 BLACKVAULT_DB_PROVIDER=postgres
 BLACKVAULT_POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 BLACKVAULT_DATABASE_URL=postgresql://blackvault:$POSTGRES_PASSWORD@db:5432/blackvault
+BLACKVAULT_PUBLIC_URL=$PUBLIC_URL
+BLACKVAULT_TRUSTED_PROXIES=$TRUSTED_PROXIES
+BLACKVAULT_DIRECT_ACCESS_INITIAL=$DIRECT_ACCESS_INITIAL
 EOF
   else
     cat > .env <<EOF
@@ -192,6 +210,9 @@ EOF
 DATA_DIR=$DATA_DIR
 PORT=$PORT
 BLACKVAULT_DB_PROVIDER=sqlite
+BLACKVAULT_PUBLIC_URL=$PUBLIC_URL
+BLACKVAULT_TRUSTED_PROXIES=$TRUSTED_PROXIES
+BLACKVAULT_DIRECT_ACCESS_INITIAL=$DIRECT_ACCESS_INITIAL
 EOF
   fi
 )
@@ -228,9 +249,12 @@ echo "╔═══════════════════════�
 echo "║  BlackVault is ready!                                    ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
-echo "  URL:         http://localhost:$PORT"
+echo "  URL:         $PUBLIC_URL"
 echo "  Data stored: $DATA_DIR"
 echo "  Database:    $DB_PROVIDER"
+if [ "$DIRECT_ACCESS_INITIAL" = "on" ]; then
+  echo "  Direct:      http://<this machine's IP>:$PORT (direct access on)"
+fi
 echo ""
 echo "  To stop BlackVault:    $COMPOSE down"
 echo "  To update BlackVault:  ./update.sh"

@@ -109,13 +109,28 @@ function New-Sandbox([string]$Name) {
 # exit code plus everything it printed. Answers are written without a trailing
 # newline problem: `set /p` on an empty line leaves the variable unset, which
 # is how these scripts take their default.
+#
+# -NoPad feeds exactly -Answers and then ends the input, instead of padding
+# with five blank lines. It is how a scenario proves a prompt gives up at
+# end-of-input rather than looping on it.
+#
+# Every run is bounded by -TimeoutSeconds. A prompt that re-asks forever once
+# stdin is exhausted used to be a six-hour hang of the whole job (the job has
+# no timeout-minutes); now it is a fast, reported failure: the process tree is
+# killed and the exit code is -1.
 function Invoke-Bat {
   param(
     [string]$Dir, [string]$Script, [string[]]$Answers = @(),
-    [hashtable]$EnvVars = @{}
+    [hashtable]$EnvVars = @{},
+    [switch]$NoPad,
+    [int]$TimeoutSeconds = 180
   )
   $answerFile = Join-Path $Dir "__answers.txt"
-  ($Answers + @("", "", "", "", "")) -join "`r`n" | Set-Content -Path $answerFile -Encoding Ascii
+  # @() because an `if` that yields an empty array yields $null, and
+  # StrictMode then refuses .Count on it.
+  $lines = @(if ($NoPad) { $Answers } else { $Answers + @("", "", "", "", "") })
+  $text = if ($lines.Count -gt 0) { ($lines -join "`r`n") + "`r`n" } else { "" }
+  [IO.File]::WriteAllText($answerFile, $text, [Text.Encoding]::ASCII)
   $logFile = Join-Path $Dir "__stub.log"
   Remove-Item -Force $logFile -ErrorAction SilentlyContinue
 
@@ -145,19 +160,42 @@ function Invoke-Bat {
   # the current scripts' line 14 exists to fix — "Run as administrator" starts
   # in C:\Windows\System32. Already fixed in the shipped scripts; nothing to do
   # but drive the harness correctly.)
-  Push-Location $Dir
+  #
+  # A Process, not `& cmd.exe`, so the run can be bounded: `&` waits forever.
+  # WorkingDirectory is set explicitly because Push-Location only moves
+  # PowerShell's location, not the directory a Process starts in.
+  $timedOut = $false
   try {
-    $out = & cmd.exe /c "`"$Dir\$Script`" < `"$answerFile`" 2>&1"
-    $code = $LASTEXITCODE
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    # /s: strip exactly the outer pair of quotes, keep the inner ones.
+    $psi.Arguments = "/d /s /c `"`"$Dir\$Script`" < `"$answerFile`" 2>&1`""
+    $psi.WorkingDirectory = $Dir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+      $timedOut = $true
+      & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null
+    }
+    $p.WaitForExit()
+    $code = if ($timedOut) { -1 } else { $p.ExitCode }
+    $out = $outTask.Result + $errTask.Result
   } finally {
-    Pop-Location
     $env:PATH = $oldPath
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+  }
+  if ($timedOut) {
+    Write-Host "    TIMEOUT $Script did not finish in $TimeoutSeconds s - killed" -ForegroundColor Red
+    $out += "`r`n[harness] TIMED OUT after $TimeoutSeconds s; process tree killed`r`n"
   }
   $stub = if (Test-Path $logFile) { (Get-Content $logFile -Raw) } else { "" }
   return [pscustomobject]@{
     ExitCode = $code
-    Output   = ($out | Out-String)
+    Output   = $out
     StubLog  = $stub
     Dir      = $Dir
   }
@@ -199,9 +237,9 @@ function Show-EvidenceIfFailed([pscustomobject]$Result) {
 }
 
 # ---------------------------------------------------------------- scenario 1
-Write-Scenario "install.bat - fresh install, PostgreSQL (answers: default dir, default port, 1)"
+Write-Scenario "install.bat - fresh install, PostgreSQL (answers: default dir, default port, public URL, no proxy, direct access, 1)"
 $d = New-Sandbox "install-postgres"
-$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "1")
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "1")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert (Test-Path (Join-Path $d ".env")) ".env was written"
 Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "postgres") "BLACKVAULT_DB_PROVIDER=postgres"
@@ -216,6 +254,8 @@ Assert (Test-Path (Join-Path $d "data\postgres")) "data\postgres created"
 Assert ($r.StubLog -match "compose build") 'ran docker compose build'
 Assert ($r.StubLog -match "compose up -d") 'ran docker compose up -d'
 Assert ($r.Output -notmatch $pw) "the password is never echoed to the terminal"
+Assert ((Get-EnvValue $d "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "public URL written into the PostgreSQL .env"
+Assert ($r.Output -match "URL:\s+https://vault\.example\.com") "the summary shows the public URL"
 
 Show-EvidenceIfFailed $r
 
@@ -223,7 +263,7 @@ Show-EvidenceIfFailed $r
 Write-Scenario "install.bat - fresh install, SQLite, custom data dir and port"
 $d = New-Sandbox "install-sqlite"
 $custom = Join-Path $d "myvault"
-$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @($custom, "8099", "2")
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @($custom, "8099", "https://vault.example.com", "", "", "2")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "BLACKVAULT_DB_PROVIDER=sqlite"
 Assert ((Get-EnvValue $d "PORT") -eq "8099") "PORT honoured the typed value"
@@ -238,7 +278,7 @@ Show-EvidenceIfFailed $r
 # ---------------------------------------------------------------- scenario 3
 Write-Scenario "install.bat - Docker Compose too old (2.19.0) stops before writing anything"
 $d = New-Sandbox "install-old-compose"
-$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0" }
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0" }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "2\.20 or newer") "explains the v2.20 requirement"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
@@ -249,7 +289,7 @@ Show-EvidenceIfFailed $r
 # ---------------------------------------------------------------- scenario 4
 Write-Scenario "install.bat - no Docker Compose v2 at all"
 $d = New-Sandbox "install-no-compose"
-$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = $null }
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = $null }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 
@@ -258,7 +298,7 @@ Show-EvidenceIfFailed $r
 # ---------------------------------------------------------------- scenario 5
 Write-Scenario "install.bat - a leading v on the version is accepted (v2.30.1)"
 $d = New-Sandbox "install-v-prefix"
-$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "v2.30.1" }
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "v2.30.1" }
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "still configured SQLite"
 
@@ -280,6 +320,106 @@ Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
 Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
 Assert ($r.Output -match "7777") "reported the configured port"
 
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P1
+Write-Scenario "install.bat writes the public URL and seeds direct access on when no proxy is given"
+$d = New-Sandbox "p1"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "the public URL prompt ran"
+Assert ($r.Output -match "Allow direct access until your proxy is set up\? \[Y/n\]") "asked about direct access (no proxy given)"
+Assert ((Get-EnvValue $d "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "public URL written"
+Assert ((Get-EnvValue $d "BLACKVAULT_DIRECT_ACCESS_INITIAL") -eq "on") "direct access seeded on"
+Assert ($null -ne (Get-EnvValue $d "BLACKVAULT_TRUSTED_PROXIES")) "BLACKVAULT_TRUSTED_PROXIES line present"
+Assert ((Get-EnvValue $d "BLACKVAULT_TRUSTED_PROXIES") -eq "") "BLACKVAULT_TRUSTED_PROXIES left empty"
+Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database answer still landed on the database prompt"
+Assert ($r.Output -match "Direct:\s+http://<this machine's IP>:3000 \(direct access on\)") "the summary names the direct address"
+Assert ($r.StubLog -match "compose up -d") "reached the start"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P1b
+Write-Scenario "install.bat - 'n' to direct access writes an empty seed"
+$d = New-Sandbox "p1b"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "n", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-EnvValue $d "BLACKVAULT_DIRECT_ACCESS_INITIAL") -eq "") "no seed after answering n"
+Assert ($r.Output -notmatch "Direct:") "the summary does not advertise a direct address"
+Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database answer still landed on the database prompt"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P2
+Write-Scenario "install.bat re-prompts on a URL with a path, and a proxy means no direct-access question"
+$d = New-Sandbox "p2"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com/vault", "https://vault.example.com", "10.10.10.3", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "no path") "invalid URL explained"
+Assert ((Get-EnvValue $d "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "the valid second answer was written"
+Assert ((Get-EnvValue $d "BLACKVAULT_TRUSTED_PROXIES") -eq "10.10.10.3") "trusted proxies written"
+Assert ([string]::IsNullOrEmpty((Get-EnvValue $d "BLACKVAULT_DIRECT_ACCESS_INITIAL"))) "no seed when a proxy is set"
+Assert ($r.Output -notmatch "Allow direct access") "no direct-access question when a proxy is set"
+Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database answer still landed on the database prompt"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P3
+Write-Scenario "install.bat - the URL validator rejects what valid_public_url rejects"
+# Each of these is rejected by the bash regex in scripts/public-url-prompts.sh
+# (^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$). The last answer is valid and
+# is written exactly as typed, trailing slash included, as install.sh does.
+$bad = @(
+  "vault.example.com",                  # no scheme
+  "ftp://vault.example.com",            # wrong scheme
+  "HTTPS://vault.example.com",          # the bash regex is case-sensitive
+  "https://",                           # no host
+  "https:///",                          # no host, just the slash
+  "https://:8443",                      # no host before the port
+  "https://vault.example.com:",         # empty port
+  "https://vault.example.com:123456",   # six-digit port
+  "https://vault.example.com:84a3",     # non-digit port
+  "https://vault.example.com::8443",    # two colons
+  "https://vault.example.com//",        # a path of one slash
+  "https://vault.example.com?x=1",      # query string
+  "https://user@vault.example.com",     # userinfo
+  "https://vault&example.com",          # cmd metacharacter
+  "https://vault!example.com",          # delayed-expansion metacharacter
+  "https://vault.example.com`"",        # a quote
+  "https://vault_example.com"           # underscore
+)
+$r = Invoke-Bat -Dir (New-Sandbox "p3") -Script "install.bat" -Answers (@("", "") + $bad + @("https://vault.example.com:8443/", "", "", "2"))
+$d = $r.Dir
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$rejections = ([regex]::Matches($r.Output, "The URL must start with http:// or https:// and have no path")).Count
+Assert ($rejections -eq $bad.Count) "rejected all $($bad.Count) bad URLs (got $rejections rejections)"
+Assert ((Get-EnvValue $d "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com:8443/") "the valid URL with port and trailing slash written as typed"
+Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database answer still landed on the database prompt"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P4
+Write-Scenario "install.bat - input ends at the public URL prompt: aborts non-zero, writes nothing"
+# Mirrors the EOF test in scripts/public-url-prompts.test.ts. `set /p` cannot
+# tell end-of-input from an empty line (both leave the variable unset), so
+# the batch prompt gives up after three blank answers in a row. -NoPad ends
+# the input right after the data dir and port answers: without that cap this
+# scenario would loop until the harness timeout killed it.
+$d = New-Sandbox "p4"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "") -NoPad -TimeoutSeconds 60
+Assert ($r.ExitCode -ne 0) "exits non-zero (got $($r.ExitCode))"
+Assert ($r.ExitCode -ne -1) "finished on its own, was not killed by the harness timeout"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "reached the public URL prompt (premise)"
+Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\. Aborting\.") "says why it stopped"
+Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
+Assert ($r.StubLog -notmatch "compose build") "did NOT build"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P4b
+Write-Scenario "install.bat - one bad URL then end of input still aborts"
+$d = New-Sandbox "p4b"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com/vault") -NoPad -TimeoutSeconds 60
+Assert ($r.ExitCode -ne 0) "exits non-zero (got $($r.ExitCode))"
+Assert ($r.ExitCode -ne -1) "finished on its own, was not killed by the harness timeout"
+Assert ($r.Output -match "no path") "the bad URL was rejected first (premise)"
+Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\. Aborting\.") "says why it stopped"
+Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- git helpers
@@ -330,7 +470,10 @@ $work = New-WorkingClone $origin "update-sqlite"
 Set-SqliteInstall $work "7001"
 Add-RemoteCommit $origin $null
 $head = (& git -C $work rev-parse HEAD)
-$r = Invoke-Bat -Dir $work -Script "update.bat"
+$envBefore = [IO.File]::ReadAllBytes((Join-Path $work ".env"))
+# The .env predates BLACKVAULT_PUBLIC_URL: prompted for it, then for direct
+# access (Enter = keep it on), then for trusted proxies (Enter = none).
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.Output -match "Database provider: sqlite") "detected the sqlite provider from .env"
 Assert ($r.Output -match "Database verified at") "preflight found the database"
@@ -338,7 +481,36 @@ Assert ((& git -C $work rev-parse HEAD) -ne $head) "git pull really fast-forward
 Assert ((Get-Content (Join-Path $work "README.md") -Raw).Trim() -eq "v2 - a newer release") "the pulled content is on disk"
 Assert ($r.StubLog -match "compose build --pull") 'ran docker compose build --pull'
 Assert ($r.StubLog -match "compose up -d") 'ran docker compose up -d'
-Assert ($r.Output -match "7001") "reported the configured port"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "prompted for the missing public URL"
+Assert ($r.Output -notmatch "still current") "did not ask to confirm a URL that was not there"
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "public URL written"
+Assert ($r.Output -match "Keep allowing direct access by IP \(http://<ip>:<port>\)\? \[Y/n\]") "asked about direct access"
+Assert ((Get-EnvValue $work "BLACKVAULT_DIRECT_ACCESS_INITIAL") -eq "on") "Enter kept direct access on"
+Assert ($r.Output -match "Trusted proxies: IPs, CIDR ranges or host names") "asked for trusted proxies"
+Assert ((Get-EnvValue $work "BLACKVAULT_TRUSTED_PROXIES") -eq "") "BLACKVAULT_TRUSTED_PROXIES line written, empty"
+Assert ((Get-EnvValue $work "PORT") -eq "7001") "PORT untouched"
+$envAfter = [IO.File]::ReadAllBytes((Join-Path $work ".env"))
+$prefixKept = ($envAfter.Length -ge $envBefore.Length) -and
+  ([Text.Encoding]::ASCII.GetString($envAfter, 0, $envBefore.Length) -eq [Text.Encoding]::ASCII.GetString($envBefore))
+Assert $prefixKept "every original .env line kept byte for byte (CRLF), new keys appended"
+Assert (Test-Path (Join-Path $work ".env.bak")) ".env.bak kept"
+Assert (-not (Test-Path (Join-Path $work ".env.tmp"))) "no .env.tmp left behind"
+Assert ($r.Output -match "URL:\s+https://vault\.example\.com") "the summary shows the public URL"
+Assert ($r.StubLog -match "compose build --pull") "the rebuild still ran after the prompts"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P5
+Write-Scenario "update.bat - second run asks only whether the URL is still current"
+$envBefore = [IO.File]::ReadAllBytes((Join-Path $work ".env"))
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Public URL is: https://vault\.example\.com") "showed the current URL"
+Assert ($r.Output -match "Is this still current\? \[Y/n\]") "asked whether it is still current"
+Assert ($r.Output -notmatch "Public URL: the address people open") "did not re-ask for the URL after Enter"
+Assert ($r.Output -notmatch "Keep allowing direct access") "did NOT ask about direct access again"
+Assert ($r.Output -notmatch "Trusted proxies:") "did NOT ask for trusted proxies again"
+Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env"))) -eq [Convert]::ToBase64String($envBefore)) ".env byte-for-byte unchanged"
+Assert ($r.StubLog -match "compose up -d") "still restarted"
 
 Show-EvidenceIfFailed $r
 
@@ -349,7 +521,7 @@ $work = New-WorkingClone $origin "update-pg-warn"
 New-Item -ItemType Directory -Force -Path (Join-Path $work "data\postgres") | Out-Null
 @("DATA_DIR=$work\data", "PORT=3000", "BLACKVAULT_DB_PROVIDER=postgres") |
   Set-Content -Path (Join-Path $work ".env") -Encoding Ascii
-$r = Invoke-Bat -Dir $work -Script "update.bat"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
 Assert ($r.ExitCode -eq 0) "exits 0 despite the warning (got $($r.ExitCode))"
 Assert ($r.Output -match "Database provider: postgres") "detected the postgres provider"
 Assert ($r.Output -match "COMPOSE_PROFILES=postgres") "named the missing COMPOSE_PROFILES key"
@@ -364,7 +536,7 @@ Write-Scenario "update.bat - compose failure is reported and does not exit 0"
 $origin = New-GitRemote "update-fail" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-fail"
 Set-SqliteInstall $work
-$r = Invoke-Bat -Dir $work -Script "update.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "build" }
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "") -EnvVars @{ "BV_STUB_FAIL_ON" = "build" }
 Assert ($r.ExitCode -eq 1) "exits 1 when compose build fails (got $($r.ExitCode))"
 Assert ($r.Output -match "docker compose failed") "says compose failed"
 Assert ($r.StubLog -notmatch "compose up -d") "did NOT try to start after a failed build"
@@ -402,7 +574,9 @@ Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
 
 $onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
 $headBefore = (& git -C $work rev-parse HEAD)
-$r = Invoke-Bat -Dir $work -Script "update.bat"
+# The answers are for the CURRENT update.bat's public-URL prompts, which the
+# resumed run reaches after the landing pad.
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
 $onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
 $headAfter = (& git -C $work rev-parse HEAD)
 
@@ -422,7 +596,149 @@ Assert ($r.StubLog -match "compose up -d") "it still reached the restart"
 # command it does not recognise.
 Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
 Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error from a mid-line resume"
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "the resumed run reached the public-URL prompt and wrote it"
 
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario 10b
+Write-Scenario "update.bat - resume from the e570bd8 update.bat (top-level git pull) reaches the prompts and the rebuild"
+# The update.bat users have today (e570bd8, develop before this release) runs
+# `git pull` as a TOP-LEVEL line. When the pull replaces the file, cmd.exe
+# resumes the NEW file at the byte just past that old line - 7123 on an LF
+# checkout, 7269 on a CRLF one. The new file's own `git pull` line must end at
+# that same byte, so the resume lands on its `if errorlevel 1 (` and flows on.
+# A first cut of this release was 58 bytes short there and landed on
+# "output above." inside the pull-failure block: pause, exit /b 1, no rebuild.
+#
+# scripts/update-bat-landing-pad.test.ts pins the arithmetic. THIS proves
+# cmd.exe survives it. The .env here predates BLACKVAULT_PUBLIC_URL, so the
+# resumed run must also reach the new prompts: public URL, direct access
+# (Enter = keep it on), trusted proxies (Enter = none).
+$oldBat2 = Join-Path $Sandboxes "old-update-e570bd8.bat"
+& cmd.exe /c "git -C ""$RepoRoot"" show e570bd8:update.bat > ""$oldBat2"""
+if ((-not (Test-Path $oldBat2)) -or ((Get-Item $oldBat2).Length -lt 7000)) {
+  throw ("Could not extract e570bd8:update.bat. The Windows job needs the " +
+         "full history - set 'fetch-depth: 0' on its checkout step. If that " +
+         "commit is genuinely gone, update the SHA in this script.")
+}
+
+$origin = New-GitRemote "update-resume-e570bd8" $oldBat2
+$work = New-WorkingClone $origin "update-resume-e570bd8"
+Set-SqliteInstall $work "7011"
+Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
+
+$onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+$onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headAfter = (& git -C $work rev-parse HEAD)
+
+# Premise first, as in scenario 10: the old script ran, and its pull really
+# replaced the file under it. Without these the rest proves nothing.
+Assert ($onDiskBefore -notmatch "Byte pad \(these 2 lines\)") "the script that started is the e570bd8 one (premise)"
+Assert ($r.Output -match "Pulling latest updates") "the old script reached its git pull"
+Assert ($headAfter -ne $headBefore) "git pull actually advanced HEAD (premise of this whole scenario)"
+Assert ($onDiskBefore -ne $onDiskAfter) "the pull really did replace update.bat mid-run"
+Assert ($onDiskAfter -match "Byte pad \(these 2 lines\)") "the new update.bat is the current one"
+# A bad landing runs a line fragment ("output above.") and then the
+# pull-failure block's pause / exit /b 1.
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error from a mid-line resume"
+Assert ($r.Output -notmatch "git pull failed") "did not fall into the pull-failure block"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "the resumed run reached the public-URL prompt"
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "public URL written"
+Assert ((Get-EnvValue $work "BLACKVAULT_DIRECT_ACCESS_INITIAL") -eq "on") "asked about direct access; Enter kept it on"
+Assert ($r.StubLog -match "compose build --pull") "it reached the rebuild"
+Assert ($r.StubLog -match "compose up -d") "it reached the restart"
+Assert ($r.ExitCode -eq 0) "cmd.exe survived the swap and exited 0 (got $($r.ExitCode))"
+
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P6
+Write-Scenario "update.bat - 'n' to still current takes a new URL; other lines untouched (LF, no final newline, & / :)"
+# Review focus: an .env edited by hand, here with LF endings, no newline after
+# the last line, and values holding & / : must keep every other line
+# byte-identical when one key is rewritten, and the value must never be
+# interpreted by cmd.
+$origin = New-GitRemote "update-change-url" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-change-url"
+Set-SqliteInstall $work "7020"
+$kept = @(
+  "DATA_DIR=$work\data",
+  "PORT=7020",
+  "BLACKVAULT_DB_PROVIDER=sqlite",
+  "SOME_TOKEN=a&b/c:d|e",
+  "BLACKVAULT_DIRECT_ACCESS_INITIAL=off",
+  "BLACKVAULT_TRUSTED_PROXIES=10.0.0.1,172.28.0.0/16"
+)
+$original = ($kept[0..3] + @("BLACKVAULT_PUBLIC_URL=https://old.example.com") + $kept[4..5]) -join "`n"
+$envPath = Join-Path $work ".env"
+[IO.File]::WriteAllBytes($envPath, [Text.Encoding]::ASCII.GetBytes($original))
+# Lock .env down the way install.bat's :restrict_env does, so the scenario can
+# prove the rewrite keeps that ACL instead of replacing the file.
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& icacls $envPath /grant:r "*${sid}:F" | Out-Null
+& icacls $envPath /inheritance:r | Out-Null
+$aclBefore = (Get-Acl $envPath).Sddl
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("n", "https://new.example.com:8443")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Public URL is: https://old\.example\.com") "showed the current URL (premise)"
+Assert ($r.Output -match "Public URL: the address people open") "asked for the new URL after n"
+Assert ($r.Output -notmatch "Keep allowing direct access") "direct access already set: not asked"
+Assert ($r.Output -notmatch "Trusted proxies:") "trusted proxies already set: not asked"
+$after = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $work ".env")))
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://new.example.com:8443") "new URL written"
+Assert (([regex]::Matches($after, "(?m)^BLACKVAULT_PUBLIC_URL=")).Count -eq 1) "exactly one BLACKVAULT_PUBLIC_URL line"
+Assert ((Get-EnvValue $work "BLACKVAULT_TRUSTED_PROXIES") -eq "10.0.0.1,172.28.0.0/16") "the last original line was not joined to the new one"
+Assert ((Get-EnvValue $work "SOME_TOKEN") -eq "a&b/c:d|e") "a value holding & / : | survived"
+Assert ($after.StartsWith(($kept -join "`n"))) "every other line kept byte for byte, LF endings included"
+Assert ($after -eq (($kept -join "`n") + "`nBLACKVAULT_PUBLIC_URL=https://new.example.com:8443`n")) "exactly what update.sh would write: newline added to the last line, new key appended LF-terminated"
+Assert ((Get-Acl $envPath).Sddl -eq $aclBefore) "the restricted ACL on .env survived the rewrite"
+$bak = Join-Path $work ".env.bak"
+Assert ((Test-Path $bak) -and ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($bak)) -eq $original)) ".env.bak holds the original bytes"
+Assert ($r.Output -match "URL:\s+https://new\.example\.com:8443") "the summary shows the new URL"
+Show-EvidenceIfFailed $r
+if ($script:Failures.Count -ne $script:ScenarioFailBase) {
+  Write-Host "    -- .env bytes (hex) --"
+  Write-Host ("       " + [BitConverter]::ToString([IO.File]::ReadAllBytes((Join-Path $work ".env"))))
+}
+
+# ---------------------------------------------------------------- scenario P7
+Write-Scenario "update.bat - no .env: stops non-zero before the rebuild, asks nothing, creates no .env"
+# Mirrors update.sh's no-.env stop. With no .env there is no
+# BLACKVAULT_PUBLIC_URL and the container refuses to start, so rebuilding and
+# restarting would take a running BlackVault down. Valid answers are fed, so
+# the stop cannot be an accident of a prompt running out of input: only the
+# no-.env guard can stop this run before the rebuild.
+$origin = New-GitRemote "update-no-env" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-no-env"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "No \.env file found") "the existing no-.env warning ran (premise)"
+Assert ($r.Output -match "No \.env file, so no BLACKVAULT_PUBLIC_URL") "says why it stopped"
+Assert ($r.Output -match "Run install\.bat") "says how to fix it"
+Assert ($r.Output -notmatch "Public URL:") "no public-URL prompt"
+Assert ($r.Output -notmatch "Keep allowing direct access") "no direct-access prompt"
+Assert ($r.Output -notmatch "Trusted proxies:") "no trusted-proxies prompt"
+Assert (-not (Test-Path (Join-Path $work ".env"))) "created no .env"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario P8
+Write-Scenario "update.bat - input ends at the public URL prompt: aborts non-zero before the rebuild"
+$origin = New-GitRemote "update-eof" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-eof"
+Set-SqliteInstall $work
+$envBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env")))
+$r = Invoke-Bat -Dir $work -Script "update.bat" -NoPad -TimeoutSeconds 60
+Assert ($r.ExitCode -ne 0) "exits non-zero (got $($r.ExitCode))"
+Assert ($r.ExitCode -ne -1) "finished on its own, was not killed by the harness timeout"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "reached the public URL prompt (premise)"
+Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\. Aborting\.") "says why it stopped"
+Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env"))) -eq $envBefore) ".env untouched"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report

@@ -71,11 +71,9 @@ if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
 
 :: ── Read DATA_DIR from .env ────────────────────────────────────
 set "ACTIVE_DATA_DIR="
-set "ENV_PORT="
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
     if "%%A"=="DATA_DIR" set "ACTIVE_DATA_DIR=%%B"
-    if "%%A"=="PORT" set "ENV_PORT=%%B"
   )
 )
 if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
@@ -139,6 +137,8 @@ echo.
 :preflight_done
 echo.
 
+:: Byte pad (these 2 lines)
+:: explained after git pull
 :: ── Pull latest code ──────────────────────────────────────────
 git rev-parse --git-dir >nul 2>&1
 if errorlevel 1 goto :rebuild
@@ -150,9 +150,82 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
+:: The two-line byte pad above `git pull` is for the e570bd8 update.bat
+:: (what develop shipped before this release). It runs `git pull` as a
+:: top-level line, so once the pull replaces this file cmd.exe resumes here
+:: at the byte just past its own `git pull` line: 7123 (LF checkout) or 7269
+:: (CRLF checkout). This file's `git pull` line must end at that same byte,
+:: so the resume lands on `if errorlevel 1 (` above and flows on into the
+:: prompts below. Keep the bytes between the landing pad and `git pull`
+:: unchanged; scripts/update-bat-landing-pad.test.ts checks both offsets.
 
 :: ── Rebuild and restart ───────────────────────────────────────
 :rebuild
+:: ── Public URL, trusted proxies, direct access ────────────────
+:: Mirrors update.sh and scripts/public-url-prompts.sh: change them together.
+:: Here, after the pull and before the rebuild, as in update.sh; the
+:: not-a-git-checkout path jumps to :rebuild, so it lands here too.
+:: BLACKVAULT_PUBLIC_URL is required from this release on: the container will
+:: not start without it. With no .env there is no public URL, so rebuilding
+:: and restarting would take a running BlackVault down. Stop here instead,
+:: before anything is rebuilt, as update.sh does.
+::
+:: End of input: the .sh prompt aborts when `read` hits EOF. `set /p` cannot
+:: tell EOF from an empty line (both leave the variable unset and set
+:: errorlevel 1), so a plain retry loop would spin forever once stdin is
+:: exhausted. Three blank answers in a row abort instead: the same outcome
+:: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
+if not exist ".env" goto :no_env_file
+call :read_env
+if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
+echo.
+echo Public URL is: !ENV_PUBLIC_URL!
+set "YN_Q=Is this still current?"
+call :prompt_yes_no y
+if "!YN!"=="y" goto :upd_direct_access
+:upd_public_url_intro
+echo.
+echo Public URL: the address people open BlackVault at, normally your reverse
+echo proxy's HTTPS address, e.g. https://vault.example.com
+set "URL_BLANKS=0"
+:upd_ask_public_url
+set "PUBLIC_URL="
+set /p "PUBLIC_URL=Public URL: "
+if defined PUBLIC_URL set "PUBLIC_URL=!PUBLIC_URL: =!"
+if defined PUBLIC_URL set "PUBLIC_URL=!PUBLIC_URL:	=!"
+if defined PUBLIC_URL (set "URL_BLANKS=0") else set /a URL_BLANKS+=1
+if !URL_BLANKS! GEQ 3 goto :public_url_missing
+call :valid_public_url PUBLIC_URL
+if not errorlevel 1 goto :upd_public_url_write
+echo   The URL must start with http:// or https:// and have no path, e.g. https://vault.example.com
+goto :upd_ask_public_url
+
+:upd_public_url_write
+if "!PUBLIC_URL!"=="!ENV_PUBLIC_URL!" goto :upd_direct_access
+call :set_env_value BLACKVAULT_PUBLIC_URL PUBLIC_URL
+if errorlevel 1 goto :env_write_failed
+
+:upd_direct_access
+findstr /b /c:"BLACKVAULT_DIRECT_ACCESS_INITIAL=" ".env" >nul 2>&1
+if not errorlevel 1 goto :upd_trusted_proxies
+echo.
+echo This release can refuse connections that bypass your reverse proxy.
+set "YN_Q=Keep allowing direct access by IP (http://<ip>:<port>)?"
+call :prompt_yes_no y
+set "DA_VALUE=off"
+if "!YN!"=="y" set "DA_VALUE=on"
+call :set_env_value BLACKVAULT_DIRECT_ACCESS_INITIAL DA_VALUE
+if errorlevel 1 goto :env_write_failed
+
+:upd_trusted_proxies
+findstr /b /c:"BLACKVAULT_TRUSTED_PROXIES=" ".env" >nul 2>&1
+if not errorlevel 1 goto :public_settings_done
+call :prompt_trusted_proxies
+call :set_env_value BLACKVAULT_TRUSTED_PROXIES TRUSTED_PROXIES
+if errorlevel 1 goto :env_write_failed
+:public_settings_done
+echo.
+
 :: Checked again on purpose. cmd.exe re-reads a running batch file by byte
 :: offset, so an older update.bat whose `git pull` just replaced this file
 :: resumes partway through it, possibly past the check at the top and still
@@ -179,8 +252,7 @@ set "STATUS=started, check logs if the app doesn't load"
 if not errorlevel 1 set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
-set "SUMMARY_PORT=3000"
-if defined ENV_PORT set "SUMMARY_PORT=!ENV_PORT!"
+call :read_env
 echo.
 echo ╔══════════════════════════════════════╗
 echo ║   Update complete.                   ║
@@ -188,12 +260,31 @@ echo ╚════════════════════════
 echo.
 echo   Status:   !STATUS!
 if defined ACTIVE_DATA_DIR echo   Data:     !ACTIVE_DATA_DIR!
-echo   URL:      http://localhost:!SUMMARY_PORT!
+echo   URL:      !ENV_PUBLIC_URL!
 echo.
 echo   To check logs: %COMPOSE% logs -f
 echo.
 pause
 exit /b 0
+
+:no_env_file
+echo ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not
+echo        start without it. Run install.bat, or create .env with a line
+echo        BLACKVAULT_PUBLIC_URL=https://vault.example.com and re-run update.bat.
+echo        Nothing was rebuilt or restarted.
+pause
+exit /b 1
+
+:public_url_missing
+echo.
+echo No input received; BLACKVAULT_PUBLIC_URL is required. Aborting.
+pause
+exit /b 1
+
+:env_write_failed
+echo ERROR: could not update .env. The previous .env is kept in .env.bak.
+pause
+exit /b 1
 
 :env_update_failed
 set "BV_NEW_DATA_DIR="
@@ -327,3 +418,111 @@ set "_ATTR="
 for %%I in ("%~1") do set "_ATTR=%%~aI"
 if defined _ATTR if /i "!_ATTR:~0,1!"=="d" set "IS_DIR=1"
 goto :eof
+
+:: :valid_public_url VAR - errorlevel 0 when the value of VAR is
+:: http(s)://host[:port][/], else 1. Mirrors valid_public_url in
+:: scripts/public-url-prompts.sh (^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$,
+:: case-sensitive like the bash regex): change them together.
+:: Takes a variable NAME, not a value: CALL re-expands its arguments, which
+:: would mangle ^, %% and ! in whatever the user typed.
+:valid_public_url
+set "VPU=!%~1!"
+if not defined VPU exit /b 1
+:: A double quote would break the FOR /F below; the regex rejects it anyway.
+set "VPU_NQ=!VPU:"=!"
+if not "!VPU_NQ!"=="!VPU!" exit /b 1
+set "VPU_REST="
+if "!VPU:~0,8!"=="https://" set "VPU_REST=!VPU:~8!"
+if "!VPU:~0,7!"=="http://" set "VPU_REST=!VPU:~7!"
+if not defined VPU_REST exit /b 1
+if "!VPU_REST:~-1!"=="/" set "VPU_REST=!VPU_REST:~0,-1!"
+if not defined VPU_REST exit /b 1
+if "!VPU_REST:~0,1!"==":" exit /b 1
+:: Every allowed character is a delimiter, so any token left over is a
+:: character the regex does not allow. eol is set to a delimiter so no line
+:: is ever skipped as a comment (the default eol, ;, is not allowed).
+for /f "eol=: delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:" %%X in ("!VPU_REST!") do exit /b 1
+:: No colon: host only, and the host is already known to be non-empty.
+set "VPU_PORT=!VPU_REST:*:=!"
+if "!VPU_PORT!"=="!VPU_REST!" exit /b 0
+:: After the first colon: 1-5 digits and nothing else (a second colon fails).
+if not defined VPU_PORT exit /b 1
+if not "!VPU_PORT:~5!"=="" exit /b 1
+for /f "delims=0123456789" %%X in ("!VPU_PORT!") do exit /b 1
+exit /b 0
+
+:: :prompt_yes_no DEFAULT - asks the question in YN_Q and sets YN to y or n.
+:: Mirrors prompt_yes_no in scripts/public-url-prompts.sh: Enter (or end of
+:: input, which set /p cannot tell apart from Enter) takes DEFAULT, so this
+:: never loops at end of input.
+:prompt_yes_no
+set "YN_HINT=[y/N]"
+if "%~1"=="y" set "YN_HINT=[Y/n]"
+:prompt_yes_no_again
+set "YN_INPUT="
+set /p "YN_INPUT=!YN_Q! !YN_HINT!: "
+if defined YN_INPUT set "YN_INPUT=!YN_INPUT:"=!"
+if defined YN_INPUT set "YN_INPUT=!YN_INPUT: =!"
+if not defined YN_INPUT set "YN_INPUT=%~1"
+set "YN="
+for %%V in (y yes) do if /i "!YN_INPUT!"=="%%V" set "YN=y"
+for %%V in (n no) do if /i "!YN_INPUT!"=="%%V" set "YN=n"
+if defined YN goto :eof
+echo   Please answer y or n.
+goto :prompt_yes_no_again
+
+:: Mirrors prompt_trusted_proxies in scripts/public-url-prompts.sh. Sets
+:: TRUSTED_PROXIES with spaces and tabs removed; undefined when left blank.
+:prompt_trusted_proxies
+echo.
+echo Trusted proxies: IPs, CIDR ranges or host names your reverse proxy connects
+echo from, comma-separated (e.g. 172.28.0.0/16). Leave blank if you have none yet.
+set "TRUSTED_PROXIES="
+set /p "TRUSTED_PROXIES=Trusted proxies []: "
+if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES: =!"
+if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES:	=!"
+goto :eof
+
+:: Sets ENV_PUBLIC_URL from .env (last BLACKVAULT_PUBLIC_URL= line wins),
+:: without spaces, tabs or quotes. Mirrors env_value in
+:: scripts/compose-provider.sh closely enough for a URL, which holds none.
+:read_env
+set "ENV_PUBLIC_URL="
+if not exist ".env" goto :eof
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+  if "%%A"=="BLACKVAULT_PUBLIC_URL" set "ENV_PUBLIC_URL=%%B"
+)
+if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL: =!"
+if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL:	=!"
+if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL:"=!"
+if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL:'=!"
+goto :eof
+
+:: :set_env_value KEY VAR - replace or append KEY=<value of VAR> in .env and
+:: keep the previous file as .env.bak. Mirrors set_env_value in
+:: scripts/public-url-prompts.sh.
+::   * Every other line is kept byte for byte, including its line ending
+::     (the file is read and written as Latin-1, which round-trips any byte).
+::     findstr /v was tried first and cannot do this: it copies a last line
+::     that has no newline without adding one, so the appended KEY= line was
+::     glued onto it (seen in the Windows CI job).
+::   * A missing final newline is added before the new line, in the file's
+::     own style (CRLF if it has any CRLF, else LF).
+::   * The value is never interpreted: it is passed by variable NAME (CALL
+::     would re-expand a value passed directly) and reaches PowerShell through
+::     the environment, never through quoting.
+::   * WriteAllText truncates the existing .env rather than replacing it, so
+::     the ACL install.bat put on .env is kept.
+:: errorlevel 1 when .env could not be backed up or rewritten.
+:set_env_value
+copy /y ".env" ".env.bak" >nul
+if errorlevel 1 exit /b 1
+set "BV_KEY=%~1"
+set "BV_VALUE=!%~2!"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $e = [Text.Encoding]::GetEncoding(28591); $p = Join-Path (Get-Location) '.env'; $t = [IO.File]::ReadAllText($p, $e); $cr = [string][char]13; $lf = [string][char]10; $nl = $lf; if ($t.Length -eq 0 -or $t.Contains($cr + $lf)) { $nl = $cr + $lf }; $t = [regex]::Replace($t, '(?m)^' + [regex]::Escape($env:BV_KEY) + '=[^\n]*(\n|$)', ''); if ($t.Length -gt 0 -and -not $t.EndsWith($lf)) { $t += $nl }; [IO.File]::WriteAllText($p, $t + $env:BV_KEY + '=' + $env:BV_VALUE + $nl, $e)"
+set "_SEV_FAILED="
+if errorlevel 1 set "_SEV_FAILED=1"
+set "BV_KEY="
+set "BV_VALUE="
+if defined _SEV_FAILED exit /b 1
+exit /b 0

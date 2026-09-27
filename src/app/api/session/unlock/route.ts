@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     response.cookies.set({
       name: SESSION_COOKIE_NAME,
       value: createSessionCookieValue(appPassword),
-      ...getSessionCookieOptions(),
+      ...getSessionCookieOptions(request),
     });
 
     return response;

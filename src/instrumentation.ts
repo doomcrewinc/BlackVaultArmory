@@ -1,4 +1,19 @@
 export async function register() {
+  // Deliberately OUTSIDE the never-throw blocks below: those exist so a failed
+  // migration cannot block startup, and this check exists to block it. Skipped
+  // during `next build`, which CI runs without a public URL.
+  if (process.env.NEXT_RUNTIME === "nodejs" && process.env.NEXT_PHASE !== "phase-production-build") {
+    const { parsePublicUrl, PublicUrlError } = await import("./lib/server/public-url");
+    try {
+      parsePublicUrl(process.env.PUBLIC_URL);
+    } catch (error) {
+      if (!(error instanceof PublicUrlError)) throw error;
+      console.error(`[startup] ${error.message}`);
+      process.exit(1);
+      return;
+    }
+  }
+
   // Next awaits register() before serving and rethrows anything it throws, so
   // nothing here may ever escape: a failed migration must not block the app.
   try {
@@ -17,5 +32,12 @@ export async function register() {
     await runSplitBrainGuard();
   } catch (error) {
     console.error("[split-brain-guard] startup hook failed; the server will continue:", error);
+  }
+  try {
+    if (process.env.NEXT_RUNTIME !== "nodejs") return;
+    const { seedDirectAccessSetting } = await import("./lib/server/direct-access");
+    await seedDirectAccessSetting();
+  } catch (error) {
+    console.error("[direct-access] startup seed failed; the server will continue:", error);
   }
 }
