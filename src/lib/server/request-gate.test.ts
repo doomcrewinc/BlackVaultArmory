@@ -34,6 +34,18 @@ describe("decideRequest — host routing", () => {
     expect(decideRequest(input({ host: "vault.example.com:443", forwardedProto: "https" }))).toEqual({ kind: "pass" });
   });
 
+  it("passes the public host with default HTTPS port when no X-Forwarded-Proto (proxy missing header)", () => {
+    expect(decideRequest(input({ host: "vault.example.com:443", forwardedProto: null, trustForwardedHeaders: true }))).toEqual({ kind: "pass" });
+  });
+
+  it("passes the public host with default HTTPS port when X-Forwarded-Proto is not trusted", () => {
+    expect(decideRequest(input({ host: "vault.example.com:443", forwardedProto: null, trustForwardedHeaders: false }))).toEqual({ kind: "pass" });
+  });
+
+  it("redirects a LAN IP with default HTTPS port (not public host)", () => {
+    expect(decideRequest(input({ host: "10.10.10.3:443" }))).toMatchObject({ kind: "redirect" });
+  });
+
   it("redirects a LAN IP with 307-style location, keeping path and query", () => {
     expect(decideRequest(input({ host: "10.10.10.3:3000", pathname: "/vault/abc", search: "?tab=docs" }))).toEqual({
       kind: "redirect",

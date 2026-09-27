@@ -67,7 +67,12 @@ export function decideRequest(i: GateInput): GateDecision {
   if (i.pathname === "/api/health") return PASS;
 
   const host = effectiveHost(i);
-  const isPublic = host === i.publicUrl.host;
+  // Treat as public if: exact match OR same hostname with default port for public URL's protocol.
+  // Handles proxy sending "vault.example.com:443" without X-Forwarded-Proto.
+  const isPublic = host === i.publicUrl.host ||
+    (host !== null &&
+      splitHost(host).hostname === splitHost(i.publicUrl.host).hostname &&
+      splitHost(host).port === DEFAULT_PORT[i.publicUrl.protocol]);
   const isLoopback = host !== null && LOOPBACK_HOSTNAMES.has(splitHost(host).hostname);
 
   if (!isPublic && !isLoopback && !i.directAccessAllowed) {
