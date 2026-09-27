@@ -76,9 +76,9 @@ message.
 
 ### Refusing to start
 
-- In the container, the gate (below) validates `PUBLIC_URL` before listening and exits non-zero
-  on failure.
-- In `next dev` / `next start` without the gate, `src/instrumentation.ts` validates it. This check
+- `src/instrumentation.ts` validates it and calls `process.exit(1)` on failure. In the container
+  the gate loads Next in the same process, so this exits the gate too; the gate itself does not
+  duplicate the parser (it is plain JS and cannot import the TypeScript module). This check
   sits **outside** the existing never-throw blocks, which exist so a failed migration cannot block
   startup — this one is meant to.
 - `next build` must NOT require the variable (CI builds images without it).
