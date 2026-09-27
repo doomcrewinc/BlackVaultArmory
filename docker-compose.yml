@@ -75,6 +75,15 @@ services:
       - DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:/app/data/vault.db?connection_limit=1}
       # Only needed to read legacy enc: serial numbers; new data is plain text.
       - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
+      # Required: the address people open BlackVault at, normally your reverse
+      # proxy's HTTPS URL. The app will not start without it.
+      - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-}
+      # Comma-separated IPs, CIDRs or host names of your reverse proxy.
+      - TRUSTED_PROXIES=${BLACKVAULT_TRUSTED_PROXIES:-}
+      # Break-glass: "true" serves http://<ip>:<port> whatever the setting says.
+      - ALLOW_DIRECT_ACCESS=${BLACKVAULT_ALLOW_DIRECT_ACCESS:-}
+      # One-time seed written by the installers; ignored once the setting exists.
+      - DIRECT_ACCESS_INITIAL=${BLACKVAULT_DIRECT_ACCESS_INITIAL:-}
     volumes:
       # /app/data holds vault.db on SQLite, server-side backups on both, and the
       # .migrated record the migration tool writes. Without this mount, backups

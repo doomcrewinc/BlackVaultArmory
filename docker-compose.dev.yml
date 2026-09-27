@@ -32,6 +32,8 @@ services:
       - NODE_ENV=production
       - DB_PROVIDER=postgres
       - DATABASE_URL=postgresql://blackvault:devpass@db:5432/blackvault
+      - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-http://localhost:3000}
+      - ALLOW_DIRECT_ACCESS=${BLACKVAULT_ALLOW_DIRECT_ACCESS:-true}
     volumes:
       - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads

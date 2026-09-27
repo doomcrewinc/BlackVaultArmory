@@ -59,6 +59,9 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
+# The TCP gate owns port 3000 and starts Next on 127.0.0.1:3001 in-process.
+COPY --from=builder /app/gate ./gate
+
 # Copy Prisma schemas and migrations (both providers) so we can run
 # migrate deploy at startup. node_modules/.prisma carries BOTH generated
 # clients: .prisma/client (Postgres) and .prisma/client-sqlite (SQLite).
@@ -95,4 +98,4 @@ case \"$p\" in \
   *) p=postgres ;; \
 esac; \
 export DB_PROVIDER=\"$p\"; \
-node node_modules/prisma/build/index.js migrate deploy --schema \"prisma/$p/schema.prisma\" && node server.js"]
+node node_modules/prisma/build/index.js migrate deploy --schema \"prisma/$p/schema.prisma\" && node gate/gate.mjs"]
