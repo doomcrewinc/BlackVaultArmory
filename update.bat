@@ -264,7 +264,6 @@ pause
 exit /b 1
 
 :env_write_failed
-if exist ".env.tmp" del ".env.tmp"
 echo ERROR: could not update .env. The previous .env is kept in .env.bak.
 pause
 exit /b 1
@@ -483,17 +482,29 @@ goto :eof
 
 :: :set_env_value KEY VAR - replace or append KEY=<value of VAR> in .env and
 :: keep the previous file as .env.bak. Mirrors set_env_value in
-:: scripts/public-url-prompts.sh. Every other line is copied byte for byte by
-:: findstr, and the value is never interpreted: it is passed by variable
-:: NAME and expanded late (CALL would re-expand a value passed directly).
-:: `type ... > .env` rewrites the existing file in place, so the ACL
-:: install.bat put on .env is kept (move would replace it with a new file).
+:: scripts/public-url-prompts.sh.
+::   * Every other line is kept byte for byte, including its line ending
+::     (the file is read and written as Latin-1, which round-trips any byte).
+::     findstr /v was tried first and cannot do this: it copies a last line
+::     that has no newline without adding one, so the appended KEY= line was
+::     glued onto it (seen in the Windows CI job).
+::   * A missing final newline is added before the new line, in the file's
+::     own style (CRLF if it has any CRLF, else LF).
+::   * The value is never interpreted: it is passed by variable NAME (CALL
+::     would re-expand a value passed directly) and reaches PowerShell through
+::     the environment, never through quoting.
+::   * WriteAllText truncates the existing .env rather than replacing it, so
+::     the ACL install.bat put on .env is kept.
 :: errorlevel 1 when .env could not be backed up or rewritten.
 :set_env_value
 copy /y ".env" ".env.bak" >nul
 if errorlevel 1 exit /b 1
-findstr /v /b /c:"%~1=" ".env" > ".env.tmp"
->> ".env.tmp" echo(%~1=!%~2!
-type ".env.tmp" > ".env" || exit /b 1
-del ".env.tmp"
+set "BV_KEY=%~1"
+set "BV_VALUE=!%~2!"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $e = [Text.Encoding]::GetEncoding(28591); $p = Join-Path (Get-Location) '.env'; $t = [IO.File]::ReadAllText($p, $e); $cr = [string][char]13; $lf = [string][char]10; $nl = $lf; if ($t.Length -eq 0 -or $t.Contains($cr + $lf)) { $nl = $cr + $lf }; $t = [regex]::Replace($t, '(?m)^' + [regex]::Escape($env:BV_KEY) + '=[^\n]*(\n|$)', ''); if ($t.Length -gt 0 -and -not $t.EndsWith($lf)) { $t += $nl }; [IO.File]::WriteAllText($p, $t + $env:BV_KEY + '=' + $env:BV_VALUE + $nl, $e)"
+set "_SEV_FAILED="
+if errorlevel 1 set "_SEV_FAILED=1"
+set "BV_KEY="
+set "BV_VALUE="
+if defined _SEV_FAILED exit /b 1
 exit /b 0

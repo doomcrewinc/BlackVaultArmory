@@ -126,7 +126,9 @@ function Invoke-Bat {
     [int]$TimeoutSeconds = 180
   )
   $answerFile = Join-Path $Dir "__answers.txt"
-  $lines = if ($NoPad) { $Answers } else { $Answers + @("", "", "", "", "") }
+  # @() because an `if` that yields an empty array yields $null, and
+  # StrictMode then refuses .Count on it.
+  $lines = @(if ($NoPad) { $Answers } else { $Answers + @("", "", "", "", "") })
   $text = if ($lines.Count -gt 0) { ($lines -join "`r`n") + "`r`n" } else { "" }
   [IO.File]::WriteAllText($answerFile, $text, [Text.Encoding]::ASCII)
   $logFile = Join-Path $Dir "__stub.log"
@@ -616,7 +618,14 @@ $kept = @(
   "BLACKVAULT_TRUSTED_PROXIES=10.0.0.1,172.28.0.0/16"
 )
 $original = ($kept[0..3] + @("BLACKVAULT_PUBLIC_URL=https://old.example.com") + $kept[4..5]) -join "`n"
-[IO.File]::WriteAllBytes((Join-Path $work ".env"), [Text.Encoding]::ASCII.GetBytes($original))
+$envPath = Join-Path $work ".env"
+[IO.File]::WriteAllBytes($envPath, [Text.Encoding]::ASCII.GetBytes($original))
+# Lock .env down the way install.bat's :restrict_env does, so the scenario can
+# prove the rewrite keeps that ACL instead of replacing the file.
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& icacls $envPath /grant:r "*${sid}:F" | Out-Null
+& icacls $envPath /inheritance:r | Out-Null
+$aclBefore = (Get-Acl $envPath).Sddl
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("n", "https://new.example.com:8443")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.Output -match "Public URL is: https://old\.example\.com") "showed the current URL (premise)"
@@ -629,6 +638,8 @@ Assert (([regex]::Matches($after, "(?m)^BLACKVAULT_PUBLIC_URL=")).Count -eq 1) "
 Assert ((Get-EnvValue $work "BLACKVAULT_TRUSTED_PROXIES") -eq "10.0.0.1,172.28.0.0/16") "the last original line was not joined to the new one"
 Assert ((Get-EnvValue $work "SOME_TOKEN") -eq "a&b/c:d|e") "a value holding & / : | survived"
 Assert ($after.StartsWith(($kept -join "`n"))) "every other line kept byte for byte, LF endings included"
+Assert ($after -eq (($kept -join "`n") + "`nBLACKVAULT_PUBLIC_URL=https://new.example.com:8443`n")) "exactly what update.sh would write: newline added to the last line, new key appended LF-terminated"
+Assert ((Get-Acl $envPath).Sddl -eq $aclBefore) "the restricted ACL on .env survived the rewrite"
 $bak = Join-Path $work ".env.bak"
 Assert ((Test-Path $bak) -and ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($bak)) -eq $original)) ".env.bak holds the original bytes"
 Assert ($r.Output -match "URL:\s+https://new\.example\.com:8443") "the summary shows the new URL"
