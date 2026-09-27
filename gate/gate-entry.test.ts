@@ -40,11 +40,12 @@ describe("gate.mjs startup", () => {
 
   it("records its public port as GATE_PORT before handing PORT=3001 to Next", async () => {
     const port = await freePort();
-    const { GATE_PORT: _g, ...base } = process.env;
+    const env0: NodeJS.ProcessEnv = { ...process.env, PORT: String(port), TRUSTED_PROXIES: "" };
+    delete env0.GATE_PORT;
     const r = spawnSync(process.execPath, [GATE], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...base, PORT: String(port), TRUSTED_PROXIES: "" },
+      env: env0,
       timeout: 15000,
     });
     const line = r.stdout.split("\n").find((l) => l.startsWith("ENV="));
