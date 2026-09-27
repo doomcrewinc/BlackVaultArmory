@@ -500,9 +500,9 @@ in-app switch for it yet (one arrives with user accounts); Settings → **Mobile
 `http://<your computer's IP>:<port>` — the Settings page detects your local IP for you.
 
 **With direct access off** (the default), every non-proxy connection is reset, so the QR
-code instead opens your **public URL** (`BLACKVAULT_PUBLIC_URL`) — the same address you'd
-use from anywhere. Put BlackVault behind a reverse proxy for it to work from your phone in
-this mode; see **Running behind a reverse proxy** below.
+code instead opens your **public URL** (`BLACKVAULT_PUBLIC_URL`). Put BlackVault behind a
+reverse proxy for it to work from your phone in this mode; see **Running behind a reverse
+proxy** below, including the warning about who should be able to reach that address.
 
 To enter a LAN address manually (direct access on): run `ipconfig` on Windows or `ip addr`
 on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
@@ -510,6 +510,11 @@ on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
 ---
 
 ## Running behind a reverse proxy
+
+> ⚠️ **A reverse proxy gives you HTTPS, not a login.** BlackVault has no authentication yet
+> — anyone who can reach the proxy's address can open your vault. Only make it reachable
+> from networks you trust (your home network or a VPN), or put an authenticating proxy /
+> IP allowlist in front of it. Do not expose it to the open internet. See [Notes](#notes).
 
 BlackVault requires a **public URL** — the one address people use to reach it, normally
 your reverse proxy's HTTPS address (e.g. `https://vault.example.com`). Set it as
