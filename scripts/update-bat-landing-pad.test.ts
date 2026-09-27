@@ -111,3 +111,52 @@ describe("update.bat landing pad", () => {
     }
   });
 });
+
+/**
+ * The second resume hazard: the update.bat shipped from e570bd8 (develop
+ * before the public-URL release, and what users have today) runs `git pull`
+ * as a TOP-LEVEL line, not inside an if ( ) block. The moment the pull
+ * replaces update.bat, cmd.exe resumes the NEW file at the byte just past
+ * that old `git pull` line: 7123 (LF checkout) or 7269 (CRLF checkout),
+ * computed from `git show e570bd8:update.bat`.
+ *
+ * That is only safe if the new file has its own `git pull` line ending at
+ * exactly the same byte, so the resume lands on the start of the line after
+ * it: the `if errorlevel 1 (` pull-failure check, which then flows into the
+ * public-URL prompts and the rebuild. Every byte added or removed between
+ * the pad and `git pull` moves the landing mid-line (the first cut of this
+ * release removed two lines, 58 bytes, and landed on "output above." inside
+ * the pull-failure block: cmd ran it, then `pause` and `exit /b 1`).
+ *
+ * If this fails: restore the byte count between the landing pad and the
+ * `git pull` line (the two-line byte pad above `git pull` in update.bat).
+ * Change both lines' lengths together: two lines are needed so that the LF
+ * and CRLF counts both come out right.
+ */
+const E570BD8_RESUME_OFFSETS = { LF: 7123, CRLF: 7269 } as const;
+
+describe("update.bat resume from the e570bd8 update.bat (top-level git pull)", () => {
+  const raw = readFileSync(UPDATE_BAT);
+  const lf = Buffer.from(raw.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+  const crlf = Buffer.from(lf.toString("latin1").replace(/\n/g, "\r\n"), "latin1");
+
+  const cases = [
+    ["LF", lf, "\n", E570BD8_RESUME_OFFSETS.LF],
+    ["CRLF", crlf, "\r\n", E570BD8_RESUME_OFFSETS.CRLF],
+  ] as const;
+
+  it.each(cases)("resumes %s at the start of the line right after `git pull`", (_n, buf, eol, resume) => {
+    const sep = Buffer.from(eol, "latin1");
+    const pullLine = Buffer.from(`git pull${eol}`, "latin1");
+    // The bytes just before the resume point are a whole `git pull` line...
+    expect(buf.subarray(resume - pullLine.length, resume).toString("latin1")).toBe(pullLine.toString("latin1"));
+    expect(buf.subarray(resume - pullLine.length - sep.length, resume - pullLine.length).equals(sep)).toBe(true);
+    // ...and what cmd.exe reads next is the pull-failure check, from its start.
+    expect(restOfLine(buf, resume, eol).toString("latin1")).toBe("if errorlevel 1 (");
+  });
+
+  it("has exactly one top-level `git pull` line", () => {
+    const lines = lf.toString("latin1").split("\n");
+    expect(lines.filter((l) => l === "git pull")).toHaveLength(1);
+  });
+});

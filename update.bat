@@ -137,6 +137,8 @@ echo.
 :preflight_done
 echo.
 
+:: Byte pad (these 2 lines)
+:: explained after git pull
 :: ── Pull latest code ──────────────────────────────────────────
 git rev-parse --git-dir >nul 2>&1
 if errorlevel 1 goto :rebuild
@@ -148,6 +150,14 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
+:: The two-line byte pad above `git pull` is for the e570bd8 update.bat
+:: (what develop shipped before this release). It runs `git pull` as a
+:: top-level line, so once the pull replaces this file cmd.exe resumes here
+:: at the byte just past its own `git pull` line: 7123 (LF checkout) or 7269
+:: (CRLF checkout). This file's `git pull` line must end at that same byte,
+:: so the resume lands on `if errorlevel 1 (` above and flows on into the
+:: prompts below. Keep the bytes between the landing pad and `git pull`
+:: unchanged; scripts/update-bat-landing-pad.test.ts checks both offsets.
 
 :: ── Rebuild and restart ───────────────────────────────────────
 :rebuild

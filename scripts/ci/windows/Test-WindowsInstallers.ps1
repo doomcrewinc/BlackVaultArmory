@@ -600,6 +600,60 @@ Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.
 
 Show-EvidenceIfFailed $r
 
+# -------------------------------------------------------------- scenario 10b
+Write-Scenario "update.bat - resume from the e570bd8 update.bat (top-level git pull) reaches the prompts and the rebuild"
+# The update.bat users have today (e570bd8, develop before this release) runs
+# `git pull` as a TOP-LEVEL line. When the pull replaces the file, cmd.exe
+# resumes the NEW file at the byte just past that old line - 7123 on an LF
+# checkout, 7269 on a CRLF one. The new file's own `git pull` line must end at
+# that same byte, so the resume lands on its `if errorlevel 1 (` and flows on.
+# A first cut of this release was 58 bytes short there and landed on
+# "output above." inside the pull-failure block: pause, exit /b 1, no rebuild.
+#
+# scripts/update-bat-landing-pad.test.ts pins the arithmetic. THIS proves
+# cmd.exe survives it. The .env here predates BLACKVAULT_PUBLIC_URL, so the
+# resumed run must also reach the new prompts: public URL, direct access
+# (Enter = keep it on), trusted proxies (Enter = none).
+$oldBat2 = Join-Path $Sandboxes "old-update-e570bd8.bat"
+& cmd.exe /c "git -C ""$RepoRoot"" show e570bd8:update.bat > ""$oldBat2"""
+if ((-not (Test-Path $oldBat2)) -or ((Get-Item $oldBat2).Length -lt 7000)) {
+  throw ("Could not extract e570bd8:update.bat. The Windows job needs the " +
+         "full history - set 'fetch-depth: 0' on its checkout step. If that " +
+         "commit is genuinely gone, update the SHA in this script.")
+}
+
+$origin = New-GitRemote "update-resume-e570bd8" $oldBat2
+$work = New-WorkingClone $origin "update-resume-e570bd8"
+Set-SqliteInstall $work "7011"
+Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
+
+$onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+$onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
+$headAfter = (& git -C $work rev-parse HEAD)
+
+# Premise first, as in scenario 10: the old script ran, and its pull really
+# replaced the file under it. Without these the rest proves nothing.
+Assert ($onDiskBefore -notmatch "Byte pad \(these 2 lines\)") "the script that started is the e570bd8 one (premise)"
+Assert ($r.Output -match "Pulling latest updates") "the old script reached its git pull"
+Assert ($headAfter -ne $headBefore) "git pull actually advanced HEAD (premise of this whole scenario)"
+Assert ($onDiskBefore -ne $onDiskAfter) "the pull really did replace update.bat mid-run"
+Assert ($onDiskAfter -match "Byte pad \(these 2 lines\)") "the new update.bat is the current one"
+# A bad landing runs a line fragment ("output above.") and then the
+# pull-failure block's pause / exit /b 1.
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error from a mid-line resume"
+Assert ($r.Output -notmatch "git pull failed") "did not fall into the pull-failure block"
+Assert ($r.Output -match "Public URL: the address people open BlackVault at") "the resumed run reached the public-URL prompt"
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com") "public URL written"
+Assert ((Get-EnvValue $work "BLACKVAULT_DIRECT_ACCESS_INITIAL") -eq "on") "asked about direct access; Enter kept it on"
+Assert ($r.StubLog -match "compose build --pull") "it reached the rebuild"
+Assert ($r.StubLog -match "compose up -d") "it reached the restart"
+Assert ($r.ExitCode -eq 0) "cmd.exe survived the swap and exited 0 (got $($r.ExitCode))"
+
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario P6
 Write-Scenario "update.bat - 'n' to still current takes a new URL; other lines untouched (LF, no final newline, & / :)"
 # Review focus: an .env edited by hand, here with LF endings, no newline after
