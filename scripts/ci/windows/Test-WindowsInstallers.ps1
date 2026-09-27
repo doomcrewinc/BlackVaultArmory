@@ -629,7 +629,8 @@ Assert (([regex]::Matches($after, "(?m)^BLACKVAULT_PUBLIC_URL=")).Count -eq 1) "
 Assert ((Get-EnvValue $work "BLACKVAULT_TRUSTED_PROXIES") -eq "10.0.0.1,172.28.0.0/16") "the last original line was not joined to the new one"
 Assert ((Get-EnvValue $work "SOME_TOKEN") -eq "a&b/c:d|e") "a value holding & / : | survived"
 Assert ($after.StartsWith(($kept -join "`n"))) "every other line kept byte for byte, LF endings included"
-Assert ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $work ".env.bak"))) -eq $original) ".env.bak holds the original bytes"
+$bak = Join-Path $work ".env.bak"
+Assert ((Test-Path $bak) -and ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($bak)) -eq $original)) ".env.bak holds the original bytes"
 Assert ($r.Output -match "URL:\s+https://new\.example\.com:8443") "the summary shows the new URL"
 Show-EvidenceIfFailed $r
 if ($script:Failures.Count -ne $script:ScenarioFailBase) {
