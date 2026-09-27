@@ -5,7 +5,7 @@ import dns from "node:dns/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildMatcher, parseTrustedProxies } from "./gate-core.mjs";
-import { createDirectAccessTracker, createGate } from "./gate-server.mjs";
+import { attachServerErrorHandler, createDirectAccessTracker, createGate } from "./gate-server.mjs";
 
 const GATE_PORT = Number(process.env.PORT) || 3000;
 const UPSTREAM_PORT = 3001;
@@ -69,6 +69,11 @@ setInterval(async () => {
     // Next still starting, or briefly unavailable: keep the current value.
   }
 }, POLL_MS).unref();
+
+// Accept failures under load (EMFILE/ENFILE) must not crash the container;
+// a failure to bind the public port at all (EADDRINUSE/EACCES) should fail
+// fast instead of running with no listener.
+attachServerErrorHandler(gate.server, { log: console });
 
 gate.server.listen(GATE_PORT, () => console.log(`[gate] listening on :${GATE_PORT}, upstream 127.0.0.1:${UPSTREAM_PORT}`));
 
