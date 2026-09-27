@@ -165,6 +165,7 @@ echo.
 :: errorlevel 1), so a plain retry loop would spin forever once stdin is
 :: exhausted. Three blank answers in a row abort instead: the same outcome
 :: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
+if not exist ".env" goto :public_settings_done
 call :read_env
 if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
 echo.
