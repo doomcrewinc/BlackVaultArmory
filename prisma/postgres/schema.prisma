@@ -472,6 +472,11 @@ model AppSettings {
   // IANA timezone, e.g. "America/Denver". null = unset.
   // Used to convert legacy date-only instants to the day their author meant.
   timezone                String?
+  // Whether http://<ip>:<port> (bypassing the reverse proxy) is served.
+  // null = never decided: the first boot seeds it from DIRECT_ACCESS_INITIAL
+  // (installers write it) and a fresh install lands on false. See
+  // docs/superpowers/specs/2026-09-26-public-url-and-direct-access-design.md.
+  allowDirectAccess       Boolean?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 }
