@@ -245,7 +245,8 @@ Guards are proven by injection: break each one, watch its named test fail, resto
 ## Release notes
 
 **Breaking:** `BLACKVAULT_PUBLIC_URL` is now required; the container will not start without it.
-Run `./update.sh` (or `update.bat`), which prompts for it. Existing installs keep direct access by
+For this update, run `git pull` first and then `./update.sh` (or `update.bat`), which prompts
+for it: the `update.sh` users already have keeps running its old copy after pulling. Existing installs keep direct access by
 default when upgraded through the update script.
 
 ## Acceptance criteria

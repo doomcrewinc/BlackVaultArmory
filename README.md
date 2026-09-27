@@ -262,6 +262,9 @@ Mac / Linux:
 ./update.sh
 ```
 
+Updating to the release that made `BLACKVAULT_PUBLIC_URL` required? Run `git pull` first, then
+the update script — see [Updating without losing data](#updating-without-losing-data).
+
 ---
 
 ## Troubleshooting
@@ -306,7 +309,9 @@ docker compose logs blackvault
 If it ends with `[startup] BLACKVAULT_PUBLIC_URL is not set...`, `.env` is missing the
 public URL that's now required (see **Running behind a reverse proxy** above). Run
 `./update.sh` (or double-click `update.bat` on Windows) — it will ask for it and add it to
-`.env`. Re-running `install.sh` / `install.bat` on an existing install won't help here: it
+`.env`. This is also what you see if your first update to this release ran your old
+`update.sh` without a `git pull` first: that update already pulled the new script, so running
+`./update.sh` again asks for the URL and brings BlackVault back. Re-running `install.sh` / `install.bat` on an existing install won't help here: it
 sees your existing `.env` and says "already configured" without prompting for anything.
 
 ---
@@ -644,18 +649,29 @@ On Linux, `data/postgres` is owned by the database container, so a plain `cp -r`
 
 ### Updating without losing data
 
-> ⚠️ **From this release, `BLACKVAULT_PUBLIC_URL` is required.** Run `./update.sh` (or
-> `update.bat`) — it asks for it. Updating any other way (e.g.
+> ⚠️ **From this release, `BLACKVAULT_PUBLIC_URL` is required.** For this one update, run
+> `git pull` first and then `./update.sh` (Windows: `git pull`, then `update.bat`) — the new
+> script asks for it. Pull first because the `update.sh` you already have predates the
+> question, and it keeps running its old self after pulling, so it would restart a container
+> that refuses to start. Updating any other way (e.g.
 > `git pull && docker compose up -d --build`) without adding it to `.env` leaves a
 > container that refuses to start.
 
 Your data folder is never touched during an update.
 
-**Windows:** Double-click `update.bat`
+**Windows:** Double-click `update.bat` (for the update to this release: run `git pull` in the
+BlackVault folder first, see above)
 
 **Mac / Linux:**
 
 ```bash
+./update.sh
+```
+
+For the update to this release only:
+
+```bash
+git pull
 ./update.sh
 ```
 
