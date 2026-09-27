@@ -28,6 +28,25 @@ function outcome(port: number, payload = "ping"): Promise<{ data?: string; error
   });
 }
 
+// Connects and writes NOTHING. This is deliberate: if the client writes
+// first (as `outcome` above does), a plain `destroy()` on a socket with
+// unread received data still makes the kernel send an RST, so ECONNRESET
+// shows up whether the gate called `destroy()` or `resetAndDestroy()` — the
+// two are indistinguishable and a destroy()-for-resetAndDestroy() regression
+// would not fail this test. With nothing written, there is no unread data:
+// `destroy()` produces a clean close (`{ closed: true }`), and only
+// `resetAndDestroy()` still forces ECONNRESET. Used for the rejection-path
+// tests, where the assertion must tell a reset apart from a plain close.
+function connectAndWait(port: number): Promise<{ error?: string; closed?: boolean }> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, "127.0.0.1");
+    socket.once("error", (e: NodeJS.ErrnoException) => resolve({ error: e.code }));
+    socket.once("close", (hadError) => {
+      if (!hadError) resolve({ closed: true });
+    });
+  });
+}
+
 const quiet = { warn() {}, error() {}, log() {} };
 
 describe("createGate", () => {
@@ -35,7 +54,7 @@ describe("createGate", () => {
     const upstreamPort = await echoUpstream();
     const gate = createGate({ upstreamPort, isTrusted: () => false, getDirectAccess: () => false, trustLoopback: false, log: quiet });
     closers.push(() => gate.server.close());
-    expect(await outcome(await listen(gate.server))).toEqual({ error: "ECONNRESET" });
+    expect(await connectAndWait(await listen(gate.server))).toEqual({ error: "ECONNRESET" });
   });
 
   it("pipes a trusted peer to upstream", async () => {
@@ -70,6 +89,14 @@ describe("createGate", () => {
     await new Promise((r) => socket.once("connect", r));
     socket.write("hello");
     await new Promise((r) => socket.once("data", r));
+    // No further writes after the echo: by the time `data` fires, the
+    // round trip has drained the gate-side socket's receive buffer (the
+    // gate piped the bytes through and got the echo back), so there is no
+    // unread data left when dropUntrusted() runs below. A plain `destroy()`
+    // there would close cleanly with no error and this test would hang/fail
+    // instead of a `resetAndDestroy()` producing ECONNRESET — verified with
+    // a standalone script (fix-round-1-injection-proof.mjs, scenario C):
+    // destroy() -> { closed: true }, resetAndDestroy() -> ECONNRESET, 3/3 runs.
 
     const closed = new Promise<string | undefined>((resolve) =>
       socket.once("error", (e: NodeJS.ErrnoException) => resolve(e.code)),
@@ -91,8 +118,8 @@ describe("createGate", () => {
     });
     closers.push(() => gate.server.close());
     const port = await listen(gate.server);
-    await outcome(port);
-    await outcome(port);
+    await connectAndWait(port);
+    await connectAndWait(port);
     expect(warnings).toEqual(["[gate] rejected 127.0.0.1 (not a trusted proxy; direct access off)"]);
   });
 });
