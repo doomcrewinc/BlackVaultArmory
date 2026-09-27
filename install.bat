@@ -174,7 +174,6 @@ goto :ask_public_url
 :ask_trusted_proxies
 call :prompt_trusted_proxies
 set "DIRECT_ACCESS_INITIAL="
-if defined TRUSTED_PROXIES goto :public_settings_done
 echo.
 echo No trusted proxy set. With direct access off, every connection to
 echo BlackVault would be reset until you configure one.
@@ -551,7 +550,6 @@ set "VPU_PORT=!VPU_REST:*:=!"
 if "!VPU_PORT!"=="!VPU_REST!" exit /b 0
 :: After the first colon: 1-5 digits and nothing else (a second colon fails).
 if not defined VPU_PORT exit /b 1
-if not "!VPU_PORT:~5!"=="" exit /b 1
 for /f "delims=0123456789" %%X in ("!VPU_PORT!") do exit /b 1
 exit /b 0
 
