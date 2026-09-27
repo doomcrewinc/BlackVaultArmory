@@ -106,27 +106,33 @@ fi
 
 # ── Public URL, trusted proxies, direct access ────────────────
 # BLACKVAULT_PUBLIC_URL is required from this release on: the container will
-# not start without it. Only touch .env when one exists — with none, the
-# "No .env file found" warning above already told the user to run
-# ./install.sh first, and set_env_value has no file to back up or edit.
-if [ -f ".env" ]; then
-  CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
-  NEW_URL=$(prompt_public_url "$CURRENT_URL")
-  [ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
+# not start without it. With no .env there is no public URL, so rebuilding
+# and restarting would take a running BlackVault down. Stop here instead,
+# before anything is rebuilt. update.bat stops at the same point.
+if [ ! -f ".env" ]; then
+  echo "ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not"
+  echo "       start without it. Run ./install.sh, or create .env with a line"
+  echo "       BLACKVAULT_PUBLIC_URL=https://vault.example.com and re-run ./update.sh."
+  echo "       Nothing was rebuilt or restarted."
+  exit 1
+fi
 
-  if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
-    echo ""
-    echo "This release can refuse connections that bypass your reverse proxy."
-    if [ "$(prompt_yes_no "Keep allowing direct access by IP (http://<ip>:<port>)?" y)" = "y" ]; then
-      set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL on
-    else
-      set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL off
-    fi
-  fi
+CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
+NEW_URL=$(prompt_public_url "$CURRENT_URL")
+[ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
 
-  if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
-    set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
+if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
+  echo ""
+  echo "This release can refuse connections that bypass your reverse proxy."
+  if [ "$(prompt_yes_no "Keep allowing direct access by IP (http://<ip>:<port>)?" y)" = "y" ]; then
+    set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL on
+  else
+    set_env_value .env BLACKVAULT_DIRECT_ACCESS_INITIAL off
   fi
+fi
+
+if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
+  set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
 fi
 
 # ── Rebuild and restart ───────────────────────────────────────

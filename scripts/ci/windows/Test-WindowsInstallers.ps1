@@ -650,18 +650,25 @@ if ($script:Failures.Count -ne $script:ScenarioFailBase) {
 }
 
 # ---------------------------------------------------------------- scenario P7
-Write-Scenario "update.bat - no .env: warns, asks nothing about the public URL, creates no .env"
-# Mirrors update.sh's `if [ -f .env ]` guard around the new block.
+Write-Scenario "update.bat - no .env: stops non-zero before the rebuild, asks nothing, creates no .env"
+# Mirrors update.sh's no-.env stop. With no .env there is no
+# BLACKVAULT_PUBLIC_URL and the container refuses to start, so rebuilding and
+# restarting would take a running BlackVault down. Valid answers are fed, so
+# the stop cannot be an accident of a prompt running out of input: only the
+# no-.env guard can stop this run before the rebuild.
 $origin = New-GitRemote "update-no-env" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-no-env"
-$r = Invoke-Bat -Dir $work -Script "update.bat"
-Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "No \.env file found") "the existing no-.env warning ran (premise)"
-Assert ($r.Output -notmatch "Public URL") "no public-URL prompt"
+Assert ($r.Output -match "No \.env file, so no BLACKVAULT_PUBLIC_URL") "says why it stopped"
+Assert ($r.Output -match "Run install\.bat") "says how to fix it"
+Assert ($r.Output -notmatch "Public URL:") "no public-URL prompt"
 Assert ($r.Output -notmatch "Keep allowing direct access") "no direct-access prompt"
 Assert ($r.Output -notmatch "Trusted proxies:") "no trusted-proxies prompt"
 Assert (-not (Test-Path (Join-Path $work ".env"))) "created no .env"
-Assert ($r.StubLog -match "compose up -d") "still rebuilt and restarted"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario P8

@@ -156,16 +156,16 @@ echo.
 :: Here, after the pull and before the rebuild, as in update.sh; the
 :: not-a-git-checkout path jumps to :rebuild, so it lands here too.
 :: BLACKVAULT_PUBLIC_URL is required from this release on: the container will
-:: not start without it. Only touch .env when one exists - with none, the
-:: "No .env file found" warning above already told the user to run
-:: install.bat first, and :set_env_value has no file to back up or edit.
+:: not start without it. With no .env there is no public URL, so rebuilding
+:: and restarting would take a running BlackVault down. Stop here instead,
+:: before anything is rebuilt, as update.sh does.
 ::
 :: End of input: the .sh prompt aborts when `read` hits EOF. `set /p` cannot
 :: tell EOF from an empty line (both leave the variable unset and set
 :: errorlevel 1), so a plain retry loop would spin forever once stdin is
 :: exhausted. Three blank answers in a row abort instead: the same outcome
 :: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
-if not exist ".env" goto :public_settings_done
+if not exist ".env" goto :no_env_file
 call :read_env
 if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
 echo.
@@ -256,6 +256,14 @@ echo   To check logs: %COMPOSE% logs -f
 echo.
 pause
 exit /b 0
+
+:no_env_file
+echo ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not
+echo        start without it. Run install.bat, or create .env with a line
+echo        BLACKVAULT_PUBLIC_URL=https://vault.example.com and re-run update.bat.
+echo        Nothing was rebuilt or restarted.
+pause
+exit /b 1
 
 :public_url_missing
 echo.

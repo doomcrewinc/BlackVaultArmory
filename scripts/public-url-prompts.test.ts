@@ -200,3 +200,80 @@ describe("install.sh end-to-end", () => {
     expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
   });
 });
+
+describe("update.sh end-to-end", () => {
+  let dir: string;
+  let bin: string;
+  let log: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "bv-update-"));
+    bin = fs.mkdtempSync(path.join(os.tmpdir(), "bv-update-bin-"));
+    log = path.join(bin, "docker.log");
+    // No .git in the copy, so update.sh skips its `git pull`.
+    fs.cpSync(path.join(__dirname, ".."), dir, {
+      recursive: true,
+      filter: (src) => {
+        if (src.includes(`${path.sep}node_modules`)) return false;
+        if (src.includes(`${path.sep}.git`)) return false;
+        if (src.includes(`${path.sep}.next`)) return false;
+        const base = path.basename(src);
+        if (base.startsWith(".env") && base !== ".env.example") return false;
+        if (base.startsWith(".blackvault.env")) return false;
+        return true;
+      },
+    });
+    // Stub `docker`: records every call, so a test can tell whether the
+    // rebuild and restart ran. `ps` prints "healthy" so the wait loop ends.
+    fs.writeFileSync(
+      path.join(bin, "docker"),
+      `#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = compose ]; then\n  if [ "$2" = version ]; then echo "2.29.7"; exit 0; fi\n  if [ "$2" = ps ]; then echo "Up (healthy)"; exit 0; fi\n  exit 0\nfi\nexit 99\n`,
+      { mode: 0o755 },
+    );
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  });
+
+  function runUpdate(stdin: string) {
+    const r = spawnSync("bash", ["./update.sh"], {
+      cwd: dir,
+      input: stdin,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      timeout: 30000,
+    });
+    const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+    return { code: r.status, out: r.stdout + r.stderr, calls };
+  }
+
+  it("prompts for a missing public URL, writes it, then rebuilds (premise for the no-.env case)", () => {
+    fs.writeFileSync(path.join(dir, ".env"), "BLACKVAULT_DB_PROVIDER=sqlite\n");
+    // public URL -> keep direct access (Enter) -> trusted proxies (blank)
+    const r = runUpdate("https://vault.example.com\n\n\n");
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toContain("BLACKVAULT_PUBLIC_URL=https://vault.example.com");
+    expect(r.calls).toContain("compose build --pull");
+    expect(r.calls).toContain("compose up -d");
+  });
+
+  // With no .env there can be no BLACKVAULT_PUBLIC_URL, and the container
+  // refuses to start without it: rebuilding and restarting would take a
+  // running instance down. Stop first, and say how to fix it.
+  it("with no .env: stops non-zero before the rebuild and says how to fix it", () => {
+    // Valid answers on stdin, so the stop cannot be an accident of a prompt
+    // hitting end of input: only the no-.env guard can stop this run.
+    const r = runUpdate("https://vault.example.com\n\n\n");
+    expect(r.code).not.toBe(0);
+    expect(r.code).not.toBeNull();
+    expect(r.out).toContain("BLACKVAULT_PUBLIC_URL");
+    expect(r.out).toContain("./install.sh");
+    expect(r.calls).not.toContain("compose build");
+    expect(r.calls).not.toContain("compose up");
+    // Stopped by the guard itself, not by a later prompt or .env write
+    // failing on the missing file: nothing was asked, nothing left behind.
+    expect(r.out).not.toContain("Public URL: the address people open");
+    expect(fs.readdirSync(dir).filter((f) => f.startsWith(".env") && f !== ".env.example")).toEqual([]);
+  });
+});
