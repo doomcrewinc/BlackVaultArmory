@@ -486,10 +486,12 @@ SQLite on Windows works the way it always has. Please report what you see in a
 ## Mobile Access (Same Network)
 
 You can open BlackVault on your phone as long as it's on the same Wi-Fi as your computer —
-**if direct access is on.** This is a stored setting, off by default from a fresh install,
-that `install.sh` / `install.bat` and `update.sh` / `update.bat` ask about. There's no
-in-app switch for it yet (one arrives with user accounts); Settings → **Mobile Access
-(Local Network)** always shows whether it's on or off and how to change it.
+**if direct access is on.** This is a stored setting, off by default from a fresh install.
+`install.sh` / `install.bat` ask about it on a fresh install, and `update.sh` / `update.bat`
+ask once, on the first update to this release; after that, re-running them does not change
+it. To force it **on**, set `BLACKVAULT_ALLOW_DIRECT_ACCESS=true` in `.env` and restart
+(`docker compose up -d`). An in-app switch — including turning it off — arrives with user
+accounts. Settings → **Mobile Access (Local Network)** always shows whether it's on or off.
 
 1. Open BlackVault in your browser and go to **Settings**
 2. Look at **Mobile Access (Local Network)** — it shows a QR code and, below it, whether

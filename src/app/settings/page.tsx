@@ -508,7 +508,7 @@ export default function SettingsPage() {
                 {directAccess.source === "env" ? "(forced by BLACKVAULT_ALLOW_DIRECT_ACCESS)" : "(setting)"}.{" "}
                 {directAccess.source === "env"
                   ? "Remove BLACKVAULT_ALLOW_DIRECT_ACCESS from .env and restart to use the setting."
-                  : "Change it by re-running ./update.sh (update.bat on Windows); an in-app switch arrives with user accounts."}
+                  : "To force it on, set BLACKVAULT_ALLOW_DIRECT_ACCESS=true in .env and restart (docker compose up -d). An in-app switch, including turning it off, arrives with user accounts."}
               </p>
             ) : null}
 
