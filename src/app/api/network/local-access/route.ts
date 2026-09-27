@@ -5,8 +5,12 @@ import { getPublicUrl } from "@/lib/server/public-url";
 
 export const runtime = "nodejs";
 
+// In the container the gate (gate/gate.mjs) owns the public port and sets
+// PORT=3001 for Next, which is container-internal and never published. It
+// records its own port as GATE_PORT first; without the gate (npm run dev,
+// next start) PORT is the app's own port.
 function getAppPort(): string {
-  return process.env.PORT || "3000";
+  return process.env.GATE_PORT || process.env.PORT || "3000";
 }
 
 export async function GET() {

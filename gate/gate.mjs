@@ -77,7 +77,10 @@ attachServerErrorHandler(gate.server, { log: console });
 
 gate.server.listen(GATE_PORT, () => console.log(`[gate] listening on :${GATE_PORT}, upstream 127.0.0.1:${UPSTREAM_PORT}`));
 
-// Next's standalone server reads PORT and HOSTNAME when it loads.
+// Next's standalone server reads PORT and HOSTNAME when it loads. PORT is
+// process-wide, so record the public port first: the app reports it in the
+// LAN URL (/api/network/local-access), where 3001 would be unreachable.
+process.env.GATE_PORT = String(GATE_PORT);
 process.env.PORT = String(UPSTREAM_PORT);
 process.env.HOSTNAME = "127.0.0.1";
 await import(pathToFileURL(path.resolve(process.cwd(), "server.js")).href);
