@@ -137,7 +137,7 @@ echo.
 :preflight_done
 echo.
 
-:: Byte pad (these 2 lines)
+:: Byte pad (these 2 line)
 :: explained after git pull
 :: ── Pull latest code ──────────────────────────────────────────
 git rev-parse --git-dir >nul 2>&1
@@ -175,7 +175,7 @@ echo.
 :: errorlevel 1), so a plain retry loop would spin forever once stdin is
 :: exhausted. Three blank answers in a row abort instead: the same outcome
 :: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
-if not exist ".env" goto :no_env_file
+if not exist ".env" goto :public_settings_done
 call :read_env
 if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
 echo.
