@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isSecureRequest } from "./request-gate";
 
 export const SESSION_COOKIE_NAME = "blackvault_session";
 
@@ -11,11 +12,13 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
  * without touching every caller.
  */
 
-export function getSessionCookieOptions() {
+export function getSessionCookieOptions(request: Request) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
+    // Per request: behind the HTTPS proxy this is true; over direct http://ip it
+    // must be false or the browser silently discards the cookie.
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: SESSION_MAX_AGE_SECONDS,
   };
@@ -25,11 +28,11 @@ export function createSessionCookieValue(appPassword: string) {
   return appPassword;
 }
 
-export function clearSessionCookie(response: NextResponse) {
+export function clearSessionCookie(response: NextResponse, request: Request) {
   response.cookies.set({
     name: SESSION_COOKIE_NAME,
     value: "",
-    ...getSessionCookieOptions(),
+    ...getSessionCookieOptions(request),
     maxAge: 0,
   });
 }
