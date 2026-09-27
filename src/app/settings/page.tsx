@@ -36,6 +36,8 @@ export default function SettingsPage() {
   const [isDocker, setIsDocker] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
+  const [publicUrl, setPublicUrl] = useState("");
+  const [directAccess, setDirectAccess] = useState<{ allowed: boolean; source: "env" | "setting" } | null>(null);
 
   const [backupStatus, setBackupStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [backupResult, setBackupResult] = useState<{ filename: string; savedToPath?: string; sizeMB: string } | null>(null);
@@ -102,6 +104,8 @@ export default function SettingsPage() {
         setLocalIp(data.ip ?? null);
         setLocalPort(data.port ?? "3000");
         setIsDocker(data.isDocker ?? false);
+        setPublicUrl(data.publicUrl ?? "");
+        setDirectAccess(data.directAccess ?? null);
       })
       .catch(() => {
         setLocalIp(null);
@@ -113,15 +117,18 @@ export default function SettingsPage() {
   const computedHost = manualHost || localIp || "";
   const finalLanUrl = computedHost ? `http://${computedHost}:${localPort}` : "";
 
+  const directAllowed = directAccess?.allowed ?? false;
+  const qrTarget = directAllowed ? finalLanUrl : publicUrl;
+
   useEffect(() => {
-    if (finalLanUrl) {
+    if (qrTarget) {
       import("qrcode").then((QRCode) => {
-        QRCode.toDataURL(finalLanUrl, { width: 160, margin: 2 }).then(setQrDataUrl).catch(() => {});
+        QRCode.toDataURL(qrTarget, { width: 160, margin: 2 }).then(setQrDataUrl).catch(() => {});
       });
     } else {
       setQrDataUrl("");
     }
-  }, [finalLanUrl]);
+  }, [qrTarget]);
   const lanStatusLabel = manualHost
     ? "Using your saved Mobile Access Host/IP"
     : localIp
@@ -495,63 +502,90 @@ export default function SettingsPage() {
           description="Set a trusted local address so phones and tablets on your network can reliably reach BlackVault."
         >
           <div className="space-y-4">
-            <FormField
-              label="Mobile Access Host/IP"
-              hint="Enter the local IP address or hostname your other devices should always use for this app."
-            >
-              <input
-                id="manualLanHost"
-                type="text"
-                value={manualLanHost}
-                onChange={(e) => setManualLanHost(e.target.value)}
-                className={INPUT_CLASS}
-                placeholder="192.168.1.74"
-              />
-              <p className="mt-2 text-xs text-vault-text-muted">Example: 192.168.1.74 (recommended: reserve this IP in your router)</p>
-            </FormField>
+            {directAccess ? (
+              <p className="text-xs text-vault-text-muted">
+                Direct access: {directAccess.allowed ? "On" : "Off"}{" "}
+                {directAccess.source === "env" ? "(forced by BLACKVAULT_ALLOW_DIRECT_ACCESS)" : "(setting)"}.{" "}
+                {directAccess.source === "env"
+                  ? "Remove BLACKVAULT_ALLOW_DIRECT_ACCESS from .env and restart to use the setting."
+                  : "Change it by re-running ./update.sh (update.bat on Windows); an in-app switch arrives with user accounts."}
+              </p>
+            ) : null}
 
-            {isDocker && !manualHost && (
+            {directAllowed ? (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
-                <p className="font-medium mb-1">Running in Docker — auto-detection unavailable</p>
-                <p className="text-xs text-amber-400/80">
-                  Enter your host machine&apos;s LAN IP above (e.g. <span className="font-mono">192.168.1.100</span>).
-                  Find it with <span className="font-mono">ipconfig</span> (Windows) or <span className="font-mono">ifconfig</span> / <span className="font-mono">ip a</span> (Mac/Linux).
-                </p>
-              </div>
-            )}
-
-            {finalLanUrl ? (
-              <div className="rounded-lg border border-vault-border bg-vault-bg p-3">
-                <p className="text-xs uppercase tracking-widest text-vault-text-faint">Mobile URL</p>
-                <p className="mt-1 break-all font-mono text-sm text-vault-text">{finalLanUrl}</p>
-                {lanStatusLabel ? <p className="mt-1 text-xs text-vault-text-muted">{lanStatusLabel}</p> : null}
-                {!manualHost && localIp ? (
-                  <p className="mt-1 text-xs text-vault-text-muted">
-                    Auto-detection is a fallback only. If this link does not work, enter and save your preferred local host/IP above.
-                  </p>
-                ) : null}
-                <p className="mt-1 text-xs text-vault-text-muted">
-                  Keep devices on the same local network and open this exact address in your mobile browser.
-                </p>
+                ⚠️ Direct access is on. Anyone on your network can reach BlackVault at{" "}
+                <span className="font-mono">{finalLanUrl || "http://<ip>:<port>"}</span> without HTTPS. Logins over
+                that address are sent unencrypted.
               </div>
             ) : (
-              <StatusMessage
-                tone="error"
-                message="No mobile access address is available yet. Enter your preferred local host/IP above to generate a trusted mobile URL."
-              />
+              <div className="rounded-lg border border-vault-border bg-vault-bg p-3">
+                <p className="text-xs uppercase tracking-widest text-vault-text-faint">BlackVault address</p>
+                <p className="mt-1 break-all font-mono text-sm text-vault-text">{publicUrl}</p>
+              </div>
             )}
 
-            {finalLanUrl ? (
-              <div className="flex flex-wrap gap-2">
-                <StandardButton
-                  type="button"
-                  variant="secondary"
-                  onClick={handleCopyLocalUrl}
-                  icon={<Copy className="h-4 w-4" />}
+            {directAllowed ? (
+              <>
+                <FormField
+                  label="Mobile Access Host/IP"
+                  hint="Enter the local IP address or hostname your other devices should always use for this app."
                 >
-                  {copySuccess ? "Copied!" : "Copy URL"}
-                </StandardButton>
-              </div>
+                  <input
+                    id="manualLanHost"
+                    type="text"
+                    value={manualLanHost}
+                    onChange={(e) => setManualLanHost(e.target.value)}
+                    className={INPUT_CLASS}
+                    placeholder="192.168.1.74"
+                  />
+                  <p className="mt-2 text-xs text-vault-text-muted">Example: 192.168.1.74 (recommended: reserve this IP in your router)</p>
+                </FormField>
+
+                {isDocker && !manualHost && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
+                    <p className="font-medium mb-1">Running in Docker — auto-detection unavailable</p>
+                    <p className="text-xs text-amber-400/80">
+                      Enter your host machine&apos;s LAN IP above (e.g. <span className="font-mono">192.168.1.100</span>).
+                      Find it with <span className="font-mono">ipconfig</span> (Windows) or <span className="font-mono">ifconfig</span> / <span className="font-mono">ip a</span> (Mac/Linux).
+                    </p>
+                  </div>
+                )}
+
+                {finalLanUrl ? (
+                  <div className="rounded-lg border border-vault-border bg-vault-bg p-3">
+                    <p className="text-xs uppercase tracking-widest text-vault-text-faint">Mobile URL</p>
+                    <p className="mt-1 break-all font-mono text-sm text-vault-text">{finalLanUrl}</p>
+                    {lanStatusLabel ? <p className="mt-1 text-xs text-vault-text-muted">{lanStatusLabel}</p> : null}
+                    {!manualHost && localIp ? (
+                      <p className="mt-1 text-xs text-vault-text-muted">
+                        Auto-detection is a fallback only. If this link does not work, enter and save your preferred local host/IP above.
+                      </p>
+                    ) : null}
+                    <p className="mt-1 text-xs text-vault-text-muted">
+                      Keep devices on the same local network and open this exact address in your mobile browser.
+                    </p>
+                  </div>
+                ) : (
+                  <StatusMessage
+                    tone="error"
+                    message="No mobile access address is available yet. Enter your preferred local host/IP above to generate a trusted mobile URL."
+                  />
+                )}
+
+                {finalLanUrl ? (
+                  <div className="flex flex-wrap gap-2">
+                    <StandardButton
+                      type="button"
+                      variant="secondary"
+                      onClick={handleCopyLocalUrl}
+                      icon={<Copy className="h-4 w-4" />}
+                    >
+                      {copySuccess ? "Copied!" : "Copy URL"}
+                    </StandardButton>
+                  </div>
+                ) : null}
+              </>
             ) : null}
 
             {qrDataUrl && (

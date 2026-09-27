@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { getLocalIp, isDockerEnvironment } from "@/lib/network/get-local-ip";
+import { getDirectAccessState } from "@/lib/server/direct-access";
+import { getPublicUrl } from "@/lib/server/public-url";
 
 export const runtime = "nodejs";
 
@@ -8,6 +10,9 @@ function getAppPort(): string {
 }
 
 export async function GET() {
+  const directAccess = await getDirectAccessState();
+  const publicUrl = getPublicUrl().origin;
+
   try {
     const ip = getLocalIp();
     const port = getAppPort();
@@ -22,6 +27,8 @@ export async function GET() {
         message: isDocker
           ? "Running in Docker — auto-detection unavailable"
           : "Unable to detect local network IP",
+        publicUrl,
+        directAccess,
       });
     }
 
@@ -31,6 +38,8 @@ export async function GET() {
       url: `http://${ip}:${port}`,
       isDocker,
       message: null,
+      publicUrl,
+      directAccess,
     });
   } catch (error) {
     console.error("GET /api/network/local-access error:", error);
@@ -40,6 +49,8 @@ export async function GET() {
       url: null,
       isDocker: false,
       message: "Unable to detect local network IP",
+      publicUrl,
+      directAccess,
     });
   }
 }

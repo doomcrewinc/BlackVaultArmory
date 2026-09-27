@@ -17,7 +17,7 @@ export function LanBanner() {
       .then((r) => r.json())
       .then((data) => {
         const lanUrl = data?.url as string | null;
-        if (lanUrl) {
+        if (lanUrl && data?.directAccess?.allowed === true) {
           setUrl(lanUrl);
           setDismissed(false);
         }
