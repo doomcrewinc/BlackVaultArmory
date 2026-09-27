@@ -48,7 +48,15 @@ prompt_public_url() {
   echo "Public URL: the address people open BlackVault at, normally your reverse" >&2
   echo "proxy's HTTPS address, e.g. https://vault.example.com" >&2
   while true; do
-    read -rp "Public URL: " url >&2 || url=""
+    # A failed `read` here means EOF (stdin closed), not "the user typed
+    # nothing" — that case sets $url to an empty string and lets the loop
+    # re-prompt below. Conflating the two ("|| url=\"\"") re-prompts forever
+    # once stdin is closed, which hangs any unattended run. Abort instead.
+    if ! read -rp "Public URL: " url >&2; then
+      echo "" >&2
+      echo "No input received; BLACKVAULT_PUBLIC_URL is required. Aborting." >&2
+      return 1
+    fi
     url="$(printf '%s' "$url" | tr -d '[:space:]')"
     if valid_public_url "$url"; then
       echo "$url"

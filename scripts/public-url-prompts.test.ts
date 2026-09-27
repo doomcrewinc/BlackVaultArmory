@@ -10,8 +10,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const LIB = path.join(__dirname, "public-url-prompts.sh");
 
-function bash(script: string, stdin = "", args: string[] = []) {
-  const r = spawnSync("bash", ["-c", `. "${LIB}"; ${script}`, "bash", ...args], { encoding: "utf8", input: stdin });
+// timeoutMs bounds every call: a prompt that spins forever on EOF must not
+// hang the suite. spawnSync kills the child and returns (status: null) once
+// the timeout elapses, so a hang shows up as a fast, clear test failure
+// instead of blocking the run.
+function bash(script: string, stdin = "", args: string[] = [], timeoutMs = 5000) {
+  const r = spawnSync("bash", ["-c", `. "${LIB}"; ${script}`, "bash", ...args], {
+    encoding: "utf8",
+    input: stdin,
+    timeout: timeoutMs,
+  });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
@@ -79,6 +87,30 @@ describe("prompt_public_url", () => {
       "https://new.example.com",
     );
   });
+
+  // Regression: read -rp ... || url="" conflated EOF (stdin closed, no more
+  // input) with "the user typed an empty/invalid answer", so the loop kept
+  // re-prompting forever. EOF must abort with a clear message instead.
+  it("aborts with a clear message on immediate EOF (no input at all)", () => {
+    const r = bash("prompt_public_url", "", [], 3000);
+    expect(r.code).not.toBe(0);
+    expect(r.code).not.toBeNull(); // null/undefined would mean spawnSync had to kill it (still hanging)
+    expect(r.err).toContain("No input received");
+    expect(r.err).toContain("BLACKVAULT_PUBLIC_URL");
+  });
+
+  it("aborts with a clear message when input ends right after an invalid answer", () => {
+    const r = bash("prompt_public_url", "nope\n", [], 3000);
+    expect(r.code).not.toBe(0);
+    expect(r.code).not.toBeNull();
+    expect(r.err).toContain("No input received");
+  });
+
+  it("keeps the current value when EOF hits the confirm prompt (prompt_yes_no's default)", () => {
+    const r = bash('prompt_public_url "$1"', "", ["https://cur.example.com"], 3000);
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("https://cur.example.com");
+  });
 });
 
 describe("prompt_yes_no", () => {
@@ -90,6 +122,14 @@ describe("prompt_yes_no", () => {
     ["maybe\nn\n", "y", "n"],
   ])("input %j default %s -> %s", (stdin, def, expected) => {
     expect(bash('prompt_yes_no "Q?" "$1"', stdin, [def]).out.trim()).toBe(expected);
+  });
+
+  // EOF-safety check (not a fix here): read's `|| answer=""` on EOF falls
+  // through to `${answer:-$default}`, which always matches y/yes or n/no on
+  // the first iteration, so this returns immediately and never loops.
+  it("returns the default on EOF without hanging", () => {
+    expect(bash('prompt_yes_no "Q?" "$1"', "", ["y"], 3000).out.trim()).toBe("y");
+    expect(bash('prompt_yes_no "Q?" "$1"', "", ["n"], 3000).out.trim()).toBe("n");
   });
 });
 
@@ -139,5 +179,24 @@ describe("install.sh end-to-end", () => {
     expect(env).toContain("BLACKVAULT_TRUSTED_PROXIES=");
     expect(env).toContain("BLACKVAULT_DIRECT_ACCESS_INITIAL=on");
     expect(r.status).toBe(0);
+  });
+
+  it("aborts and writes no .env when input ends at the public URL prompt", () => {
+    // data dir (Enter=default) -> port (Enter=default) -> EOF (no public URL,
+    // no more input at all).
+    const stdin = "\n\n";
+    const r = spawnSync("bash", ["./install.sh"], {
+      cwd: dir,
+      input: stdin,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      timeout: 10000,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("No input received");
+    // The script must abort before it ever writes .env — the URL prompt runs
+    // before the database prompt and the .env heredoc, so nothing partial
+    // (e.g. an empty BLACKVAULT_PUBLIC_URL=) should exist on disk.
+    expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
   });
 });
