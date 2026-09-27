@@ -91,6 +91,15 @@ The installer will ask three questions — press **Enter** to accept the default
 - Which port to use → press Enter
 - Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
 
+It will then ask for your **public URL** and **trusted proxies**. If you're just trying
+BlackVault on your own network with no reverse proxy yet, answer:
+- Public URL → `http://localhost:3000` (or `http://localhost:<your port>`)
+- Trusted proxies → press Enter to leave blank, then answer **yes** when asked to allow
+  direct access
+
+See **[Running behind a reverse proxy](#running-behind-a-reverse-proxy)** below if you're
+putting BlackVault behind nginx, Caddy, Traefik or similar.
+
 > ⚠️ PostgreSQL on Windows has not been tested yet. See
 > [Known issue: PostgreSQL on Windows](#known-issue-postgresql-on-windows-is-untested). If you
 > want the proven option on Windows, type `2` for SQLite.
@@ -143,6 +152,15 @@ The installer will ask three questions — press **Enter** to accept the default
 - Which port to use → press Enter
 - Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
 
+It will then ask for your **public URL** and **trusted proxies**. If you're just trying
+BlackVault on your own network with no reverse proxy yet, answer:
+- Public URL → `http://localhost:3000` (or `http://localhost:<your port>`)
+- Trusted proxies → press Enter to leave blank, then answer **yes** when asked to allow
+  direct access
+
+See **[Running behind a reverse proxy](#running-behind-a-reverse-proxy)** below if you're
+putting BlackVault behind nginx, Caddy, Traefik or similar.
+
 For PostgreSQL the installer generates a random database password and saves it in `.env`
 (it is never shown). **Keep `.env` safe** — your database cannot be opened without it.
 
@@ -188,6 +206,15 @@ The installer will ask three questions — press **Enter** to accept the default
 - Where to store your data → press Enter
 - Which port to use → press Enter
 - Which database to use → press Enter for **PostgreSQL** (recommended), or type `2` for SQLite
+
+It will then ask for your **public URL** and **trusted proxies**. If you're just trying
+BlackVault on your own network with no reverse proxy yet, answer:
+- Public URL → `http://localhost:3000` (or `http://localhost:<your port>`)
+- Trusted proxies → press Enter to leave blank, then answer **yes** when asked to allow
+  direct access
+
+See **[Running behind a reverse proxy](#running-behind-a-reverse-proxy)** below if you're
+putting BlackVault behind nginx, Caddy, Traefik or similar.
 
 For PostgreSQL the installer generates a random database password and saves it in `.env`
 (it is never shown). **Keep `.env` safe** — your database cannot be opened without it.
@@ -265,6 +292,33 @@ docker compose logs blackvault
 
 The container returns to `healthy` on its own within about 30 seconds of the database coming
 back — no restart needed.
+
+---
+
+### ❌ Container exits immediately / keeps restarting
+
+Check the log:
+
+```bash
+docker compose logs blackvault
+```
+
+If it ends with `[startup] BLACKVAULT_PUBLIC_URL is not set...`, `.env` is missing the
+public URL that's now required (see **Running behind a reverse proxy** above). Run
+`./update.sh` (or double-click `update.bat` on Windows) — it will ask for it and add it to
+`.env`. Re-running `install.sh` / `install.bat` on an existing install won't help here: it
+sees your existing `.env` and says "already configured" without prompting for anything.
+
+---
+
+### ❌ Connection reset / `curl: (56)`
+
+If BlackVault (or your reverse proxy talking to it) gets `curl: (56) Connection reset by
+peer` — or, through Docker Desktop / OrbStack's port forwarder, `curl: (52) Empty reply`
+— direct access is off and the address you're connecting from isn't in
+`BLACKVAULT_TRUSTED_PROXIES`. See **Trusted proxies** under
+**Running behind a reverse proxy** above for how to find the right address to add, or use
+the break-glass `BLACKVAULT_ALLOW_DIRECT_ACCESS=true` if you just need it working now.
 
 ### ❌ Error: "unable to open database file"
 
@@ -431,13 +485,96 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 ## Mobile Access (Same Network)
 
-You can open BlackVault on your phone as long as it's on the same Wi-Fi as your computer.
+You can open BlackVault on your phone as long as it's on the same Wi-Fi as your computer —
+**if direct access is on.** This is a stored setting, off by default from a fresh install,
+that `install.sh` / `install.bat` and `update.sh` / `update.bat` ask about. There's no
+in-app switch for it yet (one arrives with user accounts); Settings → **Mobile Access
+(Local Network)** always shows whether it's on or off and how to change it.
 
 1. Open BlackVault in your browser and go to **Settings**
-2. The Settings page will detect your local IP and display a QR code
+2. Look at **Mobile Access (Local Network)** — it shows a QR code and, below it, whether
+   direct access is on or off
 3. Scan the QR code with your phone
 
-To enter the address manually: run `ipconfig` on Windows or `ip addr` on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
+**With direct access on,** the QR code and the Mobile URL box open
+`http://<your computer's IP>:<port>` — the Settings page detects your local IP for you.
+
+**With direct access off** (the default), every non-proxy connection is reset, so the QR
+code instead opens your **public URL** (`BLACKVAULT_PUBLIC_URL`) — the same address you'd
+use from anywhere. Put BlackVault behind a reverse proxy for it to work from your phone in
+this mode; see **Running behind a reverse proxy** below.
+
+To enter a LAN address manually (direct access on): run `ipconfig` on Windows or `ip addr`
+on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
+
+---
+
+## Running behind a reverse proxy
+
+BlackVault requires a **public URL** — the one address people use to reach it, normally
+your reverse proxy's HTTPS address (e.g. `https://vault.example.com`). Set it as
+`BLACKVAULT_PUBLIC_URL` in `.env`; `install.sh` / `install.bat` and `update.sh` /
+`update.bat` prompt for it. Without it, the container logs
+`[startup] BLACKVAULT_PUBLIC_URL is not set...` and exits — it will not start.
+
+A request for the wrong host gets redirected to your public URL; a cross-origin write
+(a `POST`/`PUT`/`PATCH`/`DELETE` whose origin doesn't match) is rejected with 403.
+
+### Trusted proxies
+
+`BLACKVAULT_TRUSTED_PROXIES` is a comma-separated list of the addresses your reverse proxy
+connects **from** — IPs, CIDR ranges (`172.28.0.0/16`) or host names. With direct access
+off, a connection from anything else is **reset** (curl reports `(56) Connection reset by
+peer`; through Docker Desktop / OrbStack's port forwarder it may show `(52) Empty reply`)
+before BlackVault even looks at the request.
+
+**Finding the right value:** try to reach BlackVault through your proxy once, then check
+the container's log for the address it was rejected from:
+
+```bash
+docker compose logs blackvault | grep rejected
+```
+
+You'll see a line like `[gate] rejected 172.28.0.4 (not a trusted proxy; direct access
+off)` — that's the address to add to `BLACKVAULT_TRUSTED_PROXIES`.
+
+**A pitfall:** if your proxy runs outside Docker and dials the host's own IP and published
+port (rather than joining BlackVault's Docker network), BlackVault sees the connection
+arriving from the Docker bridge gateway, not your proxy's real address. Trusting that
+address trusts **every** container on the host, not just your proxy — run your proxy on
+the same Docker network as BlackVault instead, so its real container IP shows up in the
+rejected-connection log.
+
+**Docker Desktop / OrbStack:** the gate logs that peer addresses are unreliable there, so
+trusted-proxy matching may not tell your proxy apart from other clients. This is a logged
+warning only; it doesn't change behavior.
+
+A `BLACKVAULT_TRUSTED_PROXIES` entry with a `/0` prefix (e.g. `0.0.0.0/0`) trusts every
+address and logs a loud warning — it disables connection resets entirely. Don't use it
+outside of temporary debugging.
+
+### Break-glass: allow direct access anyway
+
+If your proxy isn't set up yet, or you're testing without one, add this to `.env` and
+restart:
+
+```
+BLACKVAULT_ALLOW_DIRECT_ACCESS=true
+```
+
+```bash
+docker compose up -d
+```
+
+This forces direct access on regardless of the stored setting. Settings → Mobile Access
+will say direct access is on and forced by `BLACKVAULT_ALLOW_DIRECT_ACCESS`; remove the
+line and restart to go back to the stored setting.
+
+### Upload size
+
+If file or image uploads fail behind your proxy but work at `http://localhost:<port>`,
+check your proxy's upload size limit (for nginx, `client_max_body_size`) — reverse
+proxies default to a much smaller limit than BlackVault's own.
 
 ---
 
@@ -499,6 +636,11 @@ On Linux, `data/postgres` is owned by the database container, so a plain `cp -r`
 ---
 
 ### Updating without losing data
+
+> ⚠️ **From this release, `BLACKVAULT_PUBLIC_URL` is required.** Run `./update.sh` (or
+> `update.bat`) — it asks for it. Updating any other way (e.g.
+> `git pull && docker compose up -d --build`) without adding it to `.env` leaves a
+> container that refuses to start.
 
 Your data folder is never touched during an update.
 
