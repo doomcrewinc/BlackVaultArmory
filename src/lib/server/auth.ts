@@ -1,50 +1,26 @@
+import { cache } from "react";
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { isSecureRequest } from "./request-gate";
-
-export const SESSION_COOKIE_NAME = "blackvault_session";
-
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
+import { SESSION_COOKIE, validateSession, type SessionUser } from "@/lib/auth/sessions";
 
 /**
- * V1 release mode:
- * the app behaves as always-unlocked in self-hosted environments.
- * These helpers remain in place so auth can be reintroduced later
- * without touching every caller.
+ * Who is signed in. Always re-validates the cookie against the database — it never trusts a
+ * header set by proxy.ts, so a request that somehow bypasses the proxy still cannot claim to
+ * be someone. Memoised per request.
  */
-
-export function getSessionCookieOptions(request: Request) {
-  return {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    // Per request: behind the HTTPS proxy this is true; over direct http://ip it
-    // must be false or the browser silently discards the cookie.
-    secure: isSecureRequest(request),
-    path: "/",
-    maxAge: SESSION_MAX_AGE_SECONDS,
-  };
-}
-
-export function createSessionCookieValue(appPassword: string) {
-  return appPassword;
-}
-
-export function clearSessionCookie(response: NextResponse, request: Request) {
-  response.cookies.set({
-    name: SESSION_COOKIE_NAME,
-    value: "",
-    ...getSessionCookieOptions(request),
-    maxAge: 0,
-  });
-}
-
-export async function isPasswordModeEnabled() {
-  return false;
-}
-
-export async function hasValidSessionCookie() {
-  return true;
-}
+export const getCurrentUser = cache(async (): Promise<(SessionUser & { sessionId: string }) | null> => {
+  const store = await cookies();
+  const result = await validateSession(store.get(SESSION_COOKIE)?.value);
+  return result ? { ...result.user, sessionId: result.sessionId } : null;
+});
 
 export async function requireAuth(): Promise<NextResponse | null> {
+  return (await getCurrentUser()) ? null : NextResponse.json({ error: "Authentication required" }, { status: 401 });
+}
+
+export async function requireAdmin(): Promise<NextResponse | null> {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  if (user.role !== "ADMIN") return NextResponse.json({ error: "Admins only" }, { status: 403 });
   return null;
 }

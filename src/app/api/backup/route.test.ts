@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKUP_MODELS } from "@/lib/backup/models";
 
+vi.mock("@/lib/server/auth", () => ({
+  requireAuth: async () => null,
+  requireAdmin: async () => null,
+  getCurrentUser: async () => ({ id: "u1", username: "admin", displayName: "Admin", role: "ADMIN", sessionId: "s1" }),
+}));
+
 const mocks = vi.hoisted(() => ({
   findManyCalls: [] as string[],
   inFlight: 0,

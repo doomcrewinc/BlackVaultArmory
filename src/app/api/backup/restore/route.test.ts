@@ -2,6 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 
+vi.mock("@/lib/server/auth", () => ({
+  requireAuth: async () => null,
+  requireAdmin: async () => null,
+  getCurrentUser: async () => ({ id: "u1", username: "admin", displayName: "Admin", role: "ADMIN", sessionId: "s1" }),
+}));
+
 type Call = {
   op: "deleteMany" | "createMany";
   delegate: string;
