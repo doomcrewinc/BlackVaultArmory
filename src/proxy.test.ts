@@ -16,6 +16,16 @@ vi.mock("@/lib/auth/sessions", async () => {
 });
 vi.mock("@/lib/auth/setup-state", () => ({ hasAnyUser: auth.hasAnyUser }));
 
+// decideAuth itself calls straight through to the real implementation by
+// default — only the "hostile mocked decision" test below overrides it —
+// so every other test in this file still exercises the real decision logic.
+const authGate = vi.hoisted(() => ({ decideAuth: vi.fn() }));
+vi.mock("@/lib/server/auth-gate", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/server/auth-gate")>("@/lib/server/auth-gate");
+  authGate.decideAuth.mockImplementation(actual.decideAuth);
+  return { isPublicPath: actual.isPublicPath, decideAuth: authGate.decideAuth };
+});
+
 import { proxy } from "./proxy";
 import { resetPublicUrlCacheForTests } from "@/lib/server/public-url";
 
@@ -72,6 +82,17 @@ describe("proxy", () => {
     state.allowed = true;
     const res = await proxy(req("http://10.10.10.3:3000/vault", { headers: { host: "10.10.10.3:3000" } }));
     expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  // Ordering pin (fix round 1, item 3): spec 1's host redirect must return
+  // before the auth stage ever runs — a LAN host that isn't yet allowed to
+  // talk to this app at all must never trigger a session lookup.
+  it("never calls validateSession when spec 1 redirects a LAN host to PUBLIC_URL", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const res = await proxy(req("http://10.10.10.3:3000/vault", { headers: { host: "10.10.10.3:3000" } }));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("https://vault.example.com/vault");
+    expect(auth.validateSession).not.toHaveBeenCalled();
   });
 });
 
@@ -154,5 +175,50 @@ describe("proxy — login enforcement", () => {
     expect(res.status).toBe(307);
     const location = res.headers.get("location") ?? "";
     expect(new URL(location).origin).toBe("https://vault.example.com");
+  });
+
+  // Injection proof scaffold (fix round 1, item 2): decideAuth is mocked here
+  // (not the real implementation) so a hostile "//evil.com" location can
+  // actually reach proxy.ts's guard — a real decideAuth call can never
+  // produce this, per the investigation in the original report, so without
+  // mocking here the guard is provably never exercised.
+  it("keeps a mocked hostile redirect Location on the request origin, never evil.com", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    authGate.decideAuth.mockReturnValueOnce({ kind: "redirect", location: "//evil.com" });
+    const res = await proxy(req("https://vault.example.com/vault", { headers: { host: "vault.example.com" } }));
+    expect(res.status).toBe(307);
+    const location = res.headers.get("location") ?? "";
+    expect(new URL(location).origin).toBe("https://vault.example.com");
+    expect(location).not.toContain("evil.com");
+  });
+
+  // Fix round 1, item 1 (proxy half): a valid session proves an account
+  // exists even if the cached hasAnyUser() is stubbornly reporting false
+  // (e.g. still inside its 5s no-cache window after a fresh install).
+  it("never redirects a signed-in user to /setup even when hasAnyUser() reports false", async () => {
+    auth.hasAnyUser.mockResolvedValue(false);
+    auth.validateSession.mockResolvedValue(loggedInAdmin);
+    const res = await proxy(req("https://vault.example.com/vault", { headers: { host: "vault.example.com" } }));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  // Fix round 1, item 5: behind the TLS reverse proxy, Next itself runs on
+  // plain HTTP — request.url is http://... even though the browser is on
+  // https://vault.example.com — so the redirect must be built from the
+  // public URL's origin, not request.url's.
+  it("builds the auth redirect from PUBLIC_URL's https origin when request.url is plain http behind the proxy", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const res = await proxy(
+      req("http://vault.example.com/vault", { headers: { host: "vault.example.com", "x-forwarded-proto": "https" } }),
+    );
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("https://vault.example.com/login?next=%2Fvault");
+  });
+
+  it("builds the auth redirect from the request's own origin for a loopback host", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const res = await proxy(req("http://localhost:3000/vault", { headers: { host: "localhost:3000" } }));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("http://localhost:3000/login?next=%2Fvault");
   });
 });

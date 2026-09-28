@@ -66,7 +66,7 @@ export function decideAuth(input: AuthInput): AuthDecision {
 
   // Rule 4: admin-only surfaces.
   const isAdminPage = pathname === "/admin" || pathname.startsWith("/admin/");
-  const isAdminApi = pathname.startsWith("/api/admin/");
+  const isAdminApi = pathname === "/api/admin" || pathname.startsWith("/api/admin/");
   if ((isAdminPage || isAdminApi) && user.role !== "ADMIN") {
     return isAdminApi ? { kind: "json", status: 403, error: "Admins only" } : { kind: "rewrite", pathname: "/admins-only" };
   }

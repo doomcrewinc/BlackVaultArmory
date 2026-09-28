@@ -9,7 +9,12 @@ export async function hasAnyUser(now: number = Date.now()): Promise<boolean> {
   if (now - checkedAt < 5_000) return false;
   checkedAt = now;
   try {
-    known = (await prisma.user.count()) > 0;
+    // Only ever SET known to true from a positive count — never assign it
+    // false. A concurrent markUsersExist() (another request's setup flow
+    // finishing while this count() is in flight) can otherwise be clobbered
+    // by this call's now-stale 0, flipping known back to false and trapping
+    // the brand-new admin in a `/` <-> `/setup` redirect loop for up to 5s.
+    if ((await prisma.user.count()) > 0) known = true;
   } catch (error) {
     console.error("[auth] user count failed:", error);
     return false;

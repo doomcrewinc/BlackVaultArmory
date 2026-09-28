@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getPublicUrl } from "@/lib/server/public-url";
 import { getDirectAccessState } from "@/lib/server/direct-access";
-import { decideRequest, trustsForwardedHeaders } from "@/lib/server/request-gate";
+import { decideRequest, effectiveHost, isPublicHost, trustsForwardedHeaders, type GateInput } from "@/lib/server/request-gate";
 import { decideAuth, isPublicPath } from "@/lib/server/auth-gate";
 import { SESSION_COOKIE, sessionCookie, validateSession } from "@/lib/auth/sessions";
 import { hasAnyUser } from "@/lib/auth/setup-state";
@@ -16,7 +16,7 @@ export async function proxy(request: NextRequest) {
   const { allowed } = await getDirectAccessState();
   const pathname = request.nextUrl.pathname;
   const search = request.nextUrl.search;
-  const decision = decideRequest({
+  const gateInput: GateInput = {
     method: request.method,
     pathname,
     search,
@@ -28,7 +28,8 @@ export async function proxy(request: NextRequest) {
     publicUrl: getPublicUrl(),
     directAccessAllowed: allowed,
     trustForwardedHeaders: trustsForwardedHeaders(),
-  });
+  };
+  const decision = decideRequest(gateInput);
 
   if (decision.kind === "redirect") return NextResponse.redirect(decision.location, 307);
   if (decision.kind === "forbidden") return NextResponse.json({ error: decision.reason }, { status: 403 });
@@ -37,16 +38,28 @@ export async function proxy(request: NextRequest) {
   const needsSession = !isPublicPath(pathname) || pathname === "/login" || pathname === "/setup";
   const rawSession = request.cookies.get(SESSION_COOKIE)?.value;
   const session = needsSession ? await validateSession(rawSession) : null;
-  const auth = decideAuth({ pathname, search, isApi, hasUsers: await hasAnyUser(), user: session?.user ?? null });
+  // A valid session proves an account exists, so a stale-cached hasAnyUser()
+  // (see setup-state.ts) can never send an already-signed-in user to /setup.
+  const hasUsers = session?.user ? true : await hasAnyUser();
+  const auth = decideAuth({ pathname, search, isApi, hasUsers, user: session?.user ?? null });
 
   if (auth.kind === "redirect") {
+    // The browser-facing origin is not always request.url's: behind the TLS
+    // reverse proxy, Next itself runs on plain HTTP, so request.url is
+    // http://... even though the browser is on https://vault.example.com.
+    // Use the public URL's origin when the request's effective host IS the
+    // public host (spec 1's own effectiveHost/isPublicHost logic — never
+    // duplicated here); otherwise this is a loopback/direct-access request
+    // and the request's own origin is correct.
+    const authOrigin = isPublicHost(effectiveHost(gateInput), gateInput.publicUrl)
+      ? gateInput.publicUrl.origin
+      : new URL(request.url).origin;
     // Defense in depth: decideAuth only ever hands back a path starting with
     // "/", but never trust that blindly when it flows through new URL() —
-    // if the resolved origin ever drifted off the request's own origin,
-    // bail to "/" instead of following it.
-    const target = new URL(auth.location, request.url);
-    const requestOrigin = new URL(request.url).origin;
-    return NextResponse.redirect(target.origin === requestOrigin ? target : new URL("/", request.url), 307);
+    // if the resolved origin ever drifted off the chosen origin above, bail
+    // to "/" instead of following it.
+    const target = new URL(auth.location, authOrigin);
+    return NextResponse.redirect(target.origin === authOrigin ? target : new URL("/", authOrigin), 307);
   }
   if (auth.kind === "json") return NextResponse.json({ error: auth.error }, { status: auth.status });
 

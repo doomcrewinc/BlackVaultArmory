@@ -55,24 +55,37 @@ function effectiveProtocol(i: GateInput): "http:" | "https:" {
   return i.requestProtocol;
 }
 
-/** Host as the browser addressed it, lowercased, default port dropped. */
-function effectiveHost(i: GateInput): string | null {
+/**
+ * Host as the browser addressed it, lowercased, default port dropped.
+ * Exported so proxy.ts can reuse this exact logic when it needs to know the
+ * browser-facing host for something other than decideRequest's own decision
+ * (see isPublicHost below) — never duplicate this parsing elsewhere.
+ */
+export function effectiveHost(i: GateInput): string | null {
   const raw = (i.trustForwardedHeaders ? firstValue(i.forwardedHost) : null) ?? firstValue(i.host);
   if (!raw) return null;
   const { hostname, port } = splitHost(raw);
   return port === null || port === DEFAULT_PORT[effectiveProtocol(i)] ? hostname : `${hostname}:${port}`;
 }
 
+/**
+ * Whether an effective host (see effectiveHost above) is the configured
+ * public URL's host: exact match, or same hostname with the default port for
+ * the public URL's protocol (handles a proxy sending "vault.example.com:443"
+ * without X-Forwarded-Proto).
+ */
+export function isPublicHost(host: string | null, publicUrl: PublicUrl): boolean {
+  return host === publicUrl.host ||
+    (host !== null &&
+      splitHost(host).hostname === splitHost(publicUrl.host).hostname &&
+      splitHost(host).port === DEFAULT_PORT[publicUrl.protocol]);
+}
+
 export function decideRequest(i: GateInput): GateDecision {
   if (i.pathname === "/api/health") return PASS;
 
   const host = effectiveHost(i);
-  // Treat as public if: exact match OR same hostname with default port for public URL's protocol.
-  // Handles proxy sending "vault.example.com:443" without X-Forwarded-Proto.
-  const isPublic = host === i.publicUrl.host ||
-    (host !== null &&
-      splitHost(host).hostname === splitHost(i.publicUrl.host).hostname &&
-      splitHost(host).port === DEFAULT_PORT[i.publicUrl.protocol]);
+  const isPublic = isPublicHost(host, i.publicUrl);
   const isLoopback = host !== null && LOOPBACK_HOSTNAMES.has(splitHost(host).hostname);
 
   if (!isPublic && !isLoopback && !i.directAccessAllowed) {

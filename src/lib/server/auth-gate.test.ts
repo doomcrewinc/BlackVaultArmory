@@ -86,6 +86,13 @@ const ROWS: [string, boolean, StateName, AuthDecision][] = [
   ["/api/admin/users", true, "logged out", { kind: "json", status: 401, error: "Authentication required" }],
   ["/api/admin/users", true, "USER", { kind: "json", status: 403, error: "Admins only" }],
   ["/api/admin/users", true, "ADMIN", PASS],
+
+  // "/api/admin" — exact path must be treated the same as "/api/admin/*"
+  // (mirrors "/admin" exact vs "/admin/*" for the page rule).
+  ["/api/admin", true, "no users", { kind: "json", status: 503, error: "Setup required" }],
+  ["/api/admin", true, "logged out", { kind: "json", status: 401, error: "Authentication required" }],
+  ["/api/admin", true, "USER", { kind: "json", status: 403, error: "Admins only" }],
+  ["/api/admin", true, "ADMIN", PASS],
 ];
 
 describe("decideAuth", () => {
@@ -93,8 +100,8 @@ describe("decideAuth", () => {
     expect(decideAuth(input(pathname, isApi, state))).toEqual(expected);
   });
 
-  it("has exactly 40 rows (10 paths x 4 states)", () => {
-    expect(ROWS.length).toBe(40);
+  it("has exactly 44 rows (11 paths x 4 states)", () => {
+    expect(ROWS.length).toBe(44);
   });
 });
 
