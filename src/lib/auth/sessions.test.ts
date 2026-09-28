@@ -1,11 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const m = vi.hoisted(() => ({ create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() }));
+const m = vi.hoisted(() => ({
+  create: vi.fn(),
+  findUnique: vi.fn(),
+  update: vi.fn(),
+  delete: vi.fn(),
+  deleteMany: vi.fn(),
+  isSecureRequest: vi.fn(),
+}));
 vi.mock("@/lib/prisma", () => ({
   prisma: { session: { create: m.create, findUnique: m.findUnique, update: m.update, delete: m.delete, deleteMany: m.deleteMany } },
 }));
+vi.mock("@/lib/server/request-gate", () => ({ isSecureRequest: m.isSecureRequest }));
 
-import { createSession, endUserSessions, SESSION_TTL_MS, validateSession } from "./sessions";
+import { clearedSessionCookie, createSession, endUserSessions, SESSION_COOKIE, SESSION_TTL_MS, sessionCookie, validateSession } from "./sessions";
 import { hashToken } from "./tokens";
 
 const now = new Date("2026-09-27T12:00:00Z");
@@ -61,11 +69,75 @@ describe("validateSession", () => {
     m.findUnique.mockRejectedValueOnce(new Error("SQLITE_BUSY"));
     expect(await validateSession("t", now)).toBeNull();
   });
+  it("rejects an unrecognised role", async () => {
+    m.findUnique.mockResolvedValueOnce({
+      id: "s1",
+      expiresAt: new Date(now.getTime() + 1000),
+      lastSeenAt: now,
+      user: { ...user, role: "OWNER" },
+    });
+    expect(await validateSession("t", now)).toBeNull();
+  });
 });
 
 describe("endUserSessions", () => {
   it("can keep the current session", async () => {
     await endUserSessions("u1", "s1");
     expect(m.deleteMany).toHaveBeenCalledWith({ where: { userId: "u1", NOT: { id: "s1" } } });
+  });
+});
+
+describe("sessionCookie", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("pins name, httpOnly, sameSite, path, secure and a maxAge in whole seconds", () => {
+    m.isSecureRequest.mockReturnValue(true);
+    const request = new Request("https://example.com/");
+    const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+    expect(sessionCookie("tok", expiresAt, request)).toEqual({
+      name: SESSION_COOKIE,
+      value: "tok",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true,
+      path: "/",
+      expires: expiresAt,
+      maxAge: 30 * 86_400,
+    });
+  });
+
+  it("secure follows isSecureRequest when false", () => {
+    m.isSecureRequest.mockReturnValue(false);
+    const request = new Request("http://example.com/");
+    expect(sessionCookie("tok", new Date(now.getTime() + 1000), request).secure).toBe(false);
+  });
+
+  it("never returns a negative maxAge for an already-expired expiresAt", () => {
+    m.isSecureRequest.mockReturnValue(true);
+    const request = new Request("https://example.com/");
+    expect(sessionCookie("tok", new Date(now.getTime() - 1000), request).maxAge).toBe(0);
+  });
+});
+
+describe("clearedSessionCookie", () => {
+  it("clears the cookie: empty value and maxAge 0, other attributes unchanged", () => {
+    m.isSecureRequest.mockReturnValue(true);
+    const request = new Request("https://example.com/");
+    expect(clearedSessionCookie(request)).toEqual({
+      name: SESSION_COOKIE,
+      value: "",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true,
+      path: "/",
+      expires: new Date(0),
+      maxAge: 0,
+    });
   });
 });

@@ -58,6 +58,9 @@ export async function endUserSessions(userId: string, exceptSessionId?: string) 
 }
 
 export function sessionCookie(token: string, expiresAt: Date, request: Request) {
+  // Whole seconds remaining until expiry, never negative — Max-Age is the
+  // browser-facing mirror of `expires` (spec: Global Constraints, cookie line).
+  const maxAge = Math.max(0, Math.round((expiresAt.getTime() - Date.now()) / 1000));
   return {
     name: SESSION_COOKIE,
     value: token,
@@ -66,6 +69,7 @@ export function sessionCookie(token: string, expiresAt: Date, request: Request) 
     secure: isSecureRequest(request),
     path: "/",
     expires: expiresAt,
+    maxAge,
   };
 }
 
