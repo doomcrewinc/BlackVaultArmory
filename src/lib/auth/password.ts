@@ -17,8 +17,22 @@ const CURRENT: Params = { N: 65536, r: 8, p: 1 };
 const KEY_LENGTH = 64;
 const SALT_BYTES = 16;
 
+// Scrypt parameter ceilings for stored hashes (DoS protection).
+// These are fixed independent of input and reject any hash with out-of-bound params.
+// N must be a power of two; r and p are simple ranges.
+const N_MIN = 2 ** 10; // 2^10 = 1024
+const N_MAX = 2 ** 20; // 2^20 = 1048576
+const R_MAX = 16;
+const P_MAX = 4;
+// Fixed maxmem cap to prevent resource exhaustion from tampered stored hashes.
+// 256 MiB is safe and sufficient for any legitimate scrypt use.
+const MAXMEM_CAP = 256 * 1024 * 1024;
+
 function scrypt(password: string, salt: Buffer, params: Params): Promise<Buffer> {
-  const options: ScryptOptions = { ...params, maxmem: 128 * params.N * params.r * 2 };
+  // Compute maxmem from params, capped at a fixed safe limit to prevent DoS from tampered hashes.
+  const computedMaxmem = 128 * params.N * params.r * 2;
+  const maxmem = Math.min(computedMaxmem, MAXMEM_CAP);
+  const options: ScryptOptions = { ...params, maxmem };
   return new Promise((resolve, reject) =>
     scryptCb(password.normalize("NFC"), salt, KEY_LENGTH, options, (err, key) => (err ? reject(err) : resolve(key))),
   );
@@ -43,6 +57,13 @@ function parse(stored: string): { params: Params; salt: Buffer; key: Buffer } | 
   const salt = Buffer.from(parts[4], "base64");
   const key = Buffer.from(parts[5], "base64");
   if (![N, r, p].every(Number.isSafeInteger) || salt.length === 0 || key.length !== KEY_LENGTH) return null;
+
+  // Validate parameters against fixed ceilings (DoS protection).
+  // N must be a power of two within [2^10, 2^20].
+  if (N < N_MIN || N > N_MAX || (N & (N - 1)) !== 0) return null;
+  if (r < 1 || r > R_MAX) return null;
+  if (p < 1 || p > P_MAX) return null;
+
   return { params: { N, r, p }, salt, key };
 }
 

@@ -39,4 +39,32 @@ describe("hashPassword / verifyPassword", () => {
   it("dummyVerify resolves", async () => {
     await expect(dummyVerify("anything at all")).resolves.toBeUndefined();
   });
+
+  it("rejects out-of-ceiling stored params quickly (DoS protection)", async () => {
+    // Valid base64 for 16-byte salt and 64-byte key (both all zeros)
+    const validSalt = Buffer.alloc(16).toString("base64");
+    const validKey = Buffer.alloc(64).toString("base64");
+
+    const testCases = [
+      // N not a power of two
+      `scrypt$1023$8$1$${validSalt}$${validKey}`,
+      // N = 2^21 (exceeds ceiling)
+      `scrypt$2097152$8$1$${validSalt}$${validKey}`,
+      // r = 17 (exceeds ceiling of 16)
+      `scrypt$16384$17$1$${validSalt}$${validKey}`,
+      // p = 5 (exceeds ceiling of 4)
+      `scrypt$16384$8$5$${validSalt}$${validKey}`,
+      // r = 8388608 (would cause DoS)
+      `scrypt$16384$8388608$1$${validSalt}$${validKey}`,
+    ];
+
+    for (const badHash of testCases) {
+      const start = performance.now();
+      const result = await verifyPassword("test password", badHash);
+      const elapsed = performance.now() - start;
+
+      expect(result).toEqual({ ok: false, needsRehash: false });
+      expect(elapsed).toBeLessThan(2000); // Must complete within 2 seconds
+    }
+  });
 });
