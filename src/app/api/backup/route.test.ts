@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKUP_MODELS } from "@/lib/backup/models";
 
-vi.mock("@/lib/server/auth", () => ({
-  requireAuth: async () => null,
-  requireAdmin: async () => null,
-  getCurrentUser: async () => ({ id: "u1", username: "admin", displayName: "Admin", role: "ADMIN", sessionId: "s1" }),
-}));
+// The real requireAdmin, driven by the session lookup: ADMIN by default, USER/null per test.
+const auth = vi.hoisted(() => ({ validateSession: vi.fn() }));
+const ADMIN_SESSION = { sessionId: "s1", user: { id: "u1", username: "admin", displayName: "Admin", role: "ADMIN" } };
+const USER_SESSION = { sessionId: "s2", user: { id: "u2", username: "jeff", displayName: "Jeff", role: "USER" } };
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
+vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: auth.validateSession }));
 
 const mocks = vi.hoisted(() => ({
   findManyCalls: [] as string[],
@@ -44,6 +45,23 @@ describe("POST /api/backup", () => {
     mocks.inFlight = 0;
     mocks.maxInFlight = 0;
     mocks.settingsFindUnique.mockResolvedValue({ includeUploadsInBackup: true, backupDestinationPath: null });
+    auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+  });
+
+  it("401 when signed out, nothing exported", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const response = await POST();
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Authentication required" });
+    expect(mocks.findManyCalls).toEqual([]);
+  });
+
+  it("403 Admins only for a USER, nothing exported", async () => {
+    auth.validateSession.mockResolvedValue(USER_SESSION);
+    const response = await POST();
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Admins only" });
+    expect(mocks.findManyCalls).toEqual([]);
   });
 
   it("exports every registered model, including the ones restore used to destroy", async () => {

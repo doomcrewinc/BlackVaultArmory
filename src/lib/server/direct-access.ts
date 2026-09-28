@@ -57,6 +57,14 @@ export async function getDirectAccessState(env: NodeJS.ProcessEnv = process.env)
   return { allowed: await readStoredDirectAccess(), source: "setting" };
 }
 
+/**
+ * Drop the cached setting so the next read goes to the database — called after the admin
+ * toggle writes it. Keeps lastKnown: it is only the fallback when that read fails.
+ */
+export function invalidateDirectAccessCache(): void {
+  cache = null;
+}
+
 export function resetDirectAccessCacheForTests(): void {
   cache = null;
   lastKnown = null;

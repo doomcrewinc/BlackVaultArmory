@@ -43,6 +43,7 @@ const ctx = vi.hoisted(() => {
 
 vi.mock("@/lib/server/auth", () => ({
   requireAuth: vi.fn().mockResolvedValue(null),
+  requireAdmin: vi.fn().mockResolvedValue(null),
 }));
 
 import { POST as createBackup } from "@/app/api/backup/route";

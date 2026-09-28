@@ -16,6 +16,7 @@ import {
   envForcesDirectAccess,
   getDirectAccessState,
   readStoredDirectAccess,
+  invalidateDirectAccessCache,
   resetDirectAccessCacheForTests,
   seedDirectAccessSetting,
 } from "./direct-access";
@@ -114,5 +115,22 @@ describe("getDirectAccessState", () => {
   it("otherwise reports the stored setting", async () => {
     mocks.findUnique.mockResolvedValue({ allowDirectAccess: false });
     expect(await getDirectAccessState({} as NodeJS.ProcessEnv)).toEqual({ allowed: false, source: "setting" });
+  });
+});
+
+describe("invalidateDirectAccessCache", () => {
+  it("forces the next read to the database", async () => {
+    mocks.findUnique.mockResolvedValueOnce({ allowDirectAccess: false }).mockResolvedValueOnce({ allowDirectAccess: true });
+    expect(await readStoredDirectAccess(1_000)).toBe(false);
+    expect(await readStoredDirectAccess(1_001)).toBe(false);
+    invalidateDirectAccessCache();
+    expect(await readStoredDirectAccess(1_002)).toBe(true);
+  });
+
+  it("keeps the last known value as the fallback when that read fails", async () => {
+    mocks.findUnique.mockResolvedValueOnce({ allowDirectAccess: true }).mockRejectedValueOnce(new Error("db down"));
+    expect(await readStoredDirectAccess(1_000)).toBe(true);
+    invalidateDirectAccessCache();
+    expect(await readStoredDirectAccess(1_001)).toBe(true);
   });
 });
