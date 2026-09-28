@@ -31,6 +31,7 @@ vi.mock("@/lib/auth/password", async () => {
 });
 
 import { POST } from "./route";
+import { loginThrottle } from "@/lib/auth/throttle";
 
 const PW = "correct horse battery";
 const saved = { ...process.env };
@@ -112,17 +113,26 @@ describe("POST /api/auth/login", () => {
     expect((await POST(req({ username: "ghost4", password: PW }))).status).toBe(429);
   });
 
-  it("with TRUSTED_PROXIES, failures across usernames throttle the first X-Forwarded-For address", async () => {
+  it("with TRUSTED_PROXIES, failures across usernames throttle the LAST X-Forwarded-For address", async () => {
     process.env.TRUSTED_PROXIES = "10.0.0.0/8";
-    const xff = { "x-forwarded-for": "203.0.113.5, 10.0.0.1" };
+    // The client controls everything before the last entry; rotating it must not help.
+    const xff = (i: number) => ({ "x-forwarded-for": `198.51.100.${i}, 203.0.113.5` });
     for (let i = 0; i < 5; i++) {
-      expect((await POST(req({ username: `spray5-${i}`, password: "wrong password here" }, xff))).status).toBe(401);
+      expect((await POST(req({ username: `spray5-${i}`, password: "wrong password here" }, xff(i)))).status).toBe(401);
     }
-    const res = await POST(req({ username: "spray5-new", password: "wrong password here" }, xff));
+    const res = await POST(req({ username: "spray5-new", password: "wrong password here" }, xff(99)));
     expect(res.status).toBe(429);
-    // A different client address is unaffected.
-    const other = await POST(req({ username: "spray5-new2", password: "wrong password here" }, { "x-forwarded-for": "203.0.113.6" }));
+    // A different proxy-observed address is unaffected.
+    const other = await POST(req({ username: "spray5-new2", password: "wrong password here" }, { "x-forwarded-for": "203.0.113.5, 203.0.113.6" }));
     expect(other.status).toBe(401);
+  });
+
+  it("keys the per-IP throttle on the last X-Forwarded-For value", async () => {
+    process.env.TRUSTED_PROXIES = "10.0.0.0/8";
+    const fail = vi.spyOn(loginThrottle, "fail");
+    await POST(req({ username: "xffkey11", password: "wrong password here" }, { "x-forwarded-for": "1.2.3.4, 10.0.0.9" }));
+    expect(fail.mock.calls.map((c) => c[0])).toEqual(["u:xffkey11", "ip:10.0.0.9"]);
+    fail.mockRestore();
   });
 
   it("without TRUSTED_PROXIES, X-Forwarded-For is ignored for throttling", async () => {

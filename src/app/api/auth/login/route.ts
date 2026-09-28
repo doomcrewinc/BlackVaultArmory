@@ -15,7 +15,11 @@ const LOGIN_FAILED = { error: "Invalid username or password" };
 function throttleKeys(request: NextRequest, username: string): string[] {
   const keys = [`u:${username}`];
   if (trustsForwardedHeaders()) {
-    const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    // The LAST X-Forwarded-For entry, not the first: a proxy that appends (nginx
+    // $proxy_add_x_forwarded_for, Traefik, Caddy) keeps whatever the client sent in front,
+    // so the first entry is attacker-chosen and could be rotated to dodge the throttle. The
+    // last entry is the address our single trusted proxy actually saw.
+    const ip = request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim();
     if (ip) keys.push(`ip:${ip}`);
   }
   return keys;
