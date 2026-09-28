@@ -28,8 +28,9 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // Ruling A1: conditional on whether someone is signed in, but no `user` prop
-  // to Sidebar/MobileHeader yet — that lands in Task 10. Auth pages (/login,
+  // Ruling A1: conditional on whether someone is signed in, and (Task 10) the
+  // signed-in user is passed down to Sidebar/MobileHeader for the account
+  // block, Log out and the admin-only "Users" link. Auth pages (/login,
   // /setup, /invite/*, /reset/*) render with no chrome at all: no Sidebar, no
   // MobileHeader, no GlobalSearch, no ThemeToggle.
   const user = await getCurrentUser();
@@ -52,9 +53,9 @@ export default async function RootLayout({
           <DatabaseStatusProvider>
             {user ? (
               <div className="flex min-h-svh">
-                <Sidebar />
+                <Sidebar user={user} />
                 <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
-                  <MobileHeader />
+                  <MobileHeader user={user} />
                   <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
                     <ErrorBoundary>{children}</ErrorBoundary>
                   </main>
