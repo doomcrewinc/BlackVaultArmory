@@ -22,9 +22,12 @@ export interface MigrationModel {
   delegate: string;
 }
 
-/** AppSettings first, then the backup registry, which is already parent-first. */
+/** AppSettings, then accounts (User before its children), then the backup registry, which is already parent-first. */
 export const MIGRATION_MODELS: readonly MigrationModel[] = [
   { model: "AppSettings", delegate: "appSettings" },
+  { model: "User", delegate: "user" },
+  { model: "Session", delegate: "session" },
+  { model: "AuthToken", delegate: "authToken" },
   ...BACKUP_MODELS.map(({ model, delegate }) => ({ model, delegate })),
 ];
 

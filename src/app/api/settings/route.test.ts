@@ -44,7 +44,6 @@ describe("/api/settings backup fields", () => {
       backupDestinationPath: "/srv/blackvault/backups",
       manualLanHost: "192.168.1.74",
       defaultCurrency: "USD",
-      appPassword: null,
       createdAt: new Date("2026-03-01T00:00:00.000Z"),
       updatedAt: new Date("2026-03-02T00:00:00.000Z"),
     });
@@ -71,7 +70,6 @@ describe("/api/settings backup fields", () => {
       backupDestinationPath: "/mnt/blackvault/backups",
       manualLanHost: null,
       defaultCurrency: "USD",
-      appPassword: null,
       createdAt: new Date("2026-03-01T00:00:00.000Z"),
       updatedAt: new Date("2026-03-02T00:00:00.000Z"),
     });
@@ -104,13 +102,12 @@ describe("/api/settings backup fields", () => {
     expect(json.autoBackupCadence).toBe("weekly");
   });
 
-  it("returns appPassword as null in responses for v1", async () => {
+  it("never writes appPassword — the field no longer exists on AppSettings", async () => {
     mocks.upsert.mockResolvedValue({
       id: "singleton",
       includeUploadsInBackup: false,
       autoBackupEnabled: true,
       autoBackupCadence: "daily",
-      appPassword: "existing-secret",
     });
 
     const request = new NextRequest("http://localhost/api/settings", {
@@ -134,7 +131,7 @@ describe("/api/settings backup fields", () => {
     expect(upsertArgs.update.autoBackupEnabled).toBe(true);
     expect(upsertArgs.update.autoBackupCadence).toBe("daily");
     expect("appPassword" in upsertArgs.update).toBe(false);
-    expect(json.appPassword).toBeNull();
+    expect("appPassword" in json).toBe(false);
   });
 
   it("rejects invalid cadence values", async () => {

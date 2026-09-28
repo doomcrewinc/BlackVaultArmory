@@ -69,10 +69,7 @@ export async function GET() {
       updatedAt: settings.updatedAt,
     };
 
-    return NextResponse.json({
-      ...v1Settings,
-      appPassword: null,
-    });
+    return NextResponse.json(v1Settings);
   } catch (error) {
     console.error("GET /api/settings error:", error);
     return NextResponse.json(
@@ -263,7 +260,6 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({
       ...v1Settings,
-      appPassword: null,
       dateMigration,
     });
   } catch (error) {
