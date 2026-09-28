@@ -4,9 +4,15 @@ import { getCurrentUser } from "@/lib/server/auth";
 import { listAdmins } from "@/lib/auth/admins";
 
 /**
- * proxy.ts rewrites here (with a 403 status) when a plain USER opens an admin-only page
- * (auth-gate.ts, Rule 4). Reached only for a signed-in user — decideAuth already requires
- * a session for any non-public path before the admin check runs.
+ * proxy.ts rewrites here when a plain USER opens an admin-only page (auth-gate.ts, Rule 4).
+ * Reached only for a signed-in user — decideAuth already requires a session for any
+ * non-public path before the admin check runs.
+ *
+ * Ruling A11: this page is served as HTTP 200, not 403. `NextResponse.rewrite()`'s `status`
+ * option (see src/proxy.ts) does not carry through to the client for a page rewrite — proven
+ * with curl: the response carries an `x-middleware-rewrite` header but the outer status is
+ * 200. Only the admin API (`/api/admin/*`) actually returns 403; this page's job is to show
+ * the right content to a plain USER who lands here, not to carry a particular status code.
  */
 export default async function AdminsOnlyPage() {
   const user = await getCurrentUser();

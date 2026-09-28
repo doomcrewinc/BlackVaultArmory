@@ -34,6 +34,9 @@ export default async function RootLayout({
   // /setup, /invite/*, /reset/*) render with no chrome at all: no Sidebar, no
   // MobileHeader, no GlobalSearch, no ThemeToggle.
   const user = await getCurrentUser();
+  // NavUser (Sidebar.tsx) is deliberately just { displayName, role } — id and
+  // sessionId never need to reach a client component, so they're never passed.
+  const navUser = user ? { displayName: user.displayName, role: user.role } : null;
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -53,9 +56,9 @@ export default async function RootLayout({
           <DatabaseStatusProvider>
             {user ? (
               <div className="flex min-h-svh">
-                <Sidebar user={user} />
+                <Sidebar user={navUser} />
                 <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
-                  <MobileHeader user={user} />
+                  <MobileHeader user={navUser} />
                   <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
                     <ErrorBoundary>{children}</ErrorBoundary>
                   </main>

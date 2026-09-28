@@ -72,7 +72,9 @@ export default function AccountPage() {
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [endingId, setEndingId] = useState<string | null>(null);
+  const [endSessionError, setEndSessionError] = useState<string | null>(null);
   const [loggingOutAll, setLoggingOutAll] = useState(false);
+  const [logoutAllError, setLogoutAllError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/account")
@@ -153,14 +155,20 @@ export default function AccountPage() {
 
   async function handleEndSession(id: string, isCurrent: boolean) {
     setEndingId(id);
+    setEndSessionError(null);
     try {
       const res = await fetch(`/api/account/sessions/${id}`, { method: "DELETE" });
-      if (!res.ok) return;
+      if (!res.ok) {
+        setEndSessionError("Could not end that session. Try again.");
+        return;
+      }
       if (isCurrent) {
         window.location.assign("/login");
         return;
       }
       setSessions((prev) => prev.filter((s) => s.id !== id));
+    } catch {
+      setEndSessionError("Could not end that session. Try again.");
     } finally {
       setEndingId(null);
     }
@@ -168,10 +176,21 @@ export default function AccountPage() {
 
   async function handleLogoutEverywhere() {
     setLoggingOutAll(true);
+    setLogoutAllError(null);
     try {
-      await fetch("/api/auth/logout?all=1", { method: "POST" });
+      const res = await fetch("/api/auth/logout?all=1", { method: "POST" });
+      // A 401 here means there were no sessions to end anyway — /login is still the
+      // right place to land. Anything else (a real server error, a network failure)
+      // is a genuine failure: stay put and say so.
+      if (res.ok || res.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      setLogoutAllError("Could not log out everywhere. Try again.");
+    } catch {
+      setLogoutAllError("Could not log out everywhere. Try again.");
     } finally {
-      window.location.assign("/login");
+      setLoggingOutAll(false);
     }
   }
 
@@ -243,6 +262,8 @@ export default function AccountPage() {
         }
       >
         {sessionsError && <StatusMessage tone="error" message={sessionsError} />}
+        {logoutAllError && <StatusMessage tone="error" message={logoutAllError} />}
+        {endSessionError && <StatusMessage tone="error" message={endSessionError} />}
         {sessionsLoading ? (
           <p className="text-sm text-vault-text-muted">Loading…</p>
         ) : (

@@ -52,4 +52,44 @@ describe("Sidebar — signed-in account block", () => {
     render(<Sidebar mobileOnly mobileOpen />);
     expect(screen.queryByRole("button", { name: /log out/i })).toBeNull();
   });
+
+  it("on a 500 from /api/auth/logout, shows an error and does NOT redirect", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+
+    render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() => expect(screen.getByText(/could not log out/i)).toBeTruthy());
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("a 401 from /api/auth/logout still redirects (already signed out)", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+
+    render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
+  });
+
+  it("on a network error from /api/auth/logout, shows an error and does NOT redirect", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+
+    render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() => expect(screen.getByText(/could not log out/i)).toBeTruthy());
+    expect(assign).not.toHaveBeenCalled();
+  });
 });

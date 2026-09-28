@@ -25,6 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { StatusMessage } from "@/components/shared/StatusMessage";
 import { useState, useEffect } from "react";
 import {
   groupHref,
@@ -263,12 +264,25 @@ export function Sidebar({
   }, [mobileOpen, onMobileClose]);
 
   const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   async function handleLogout() {
     setLoggingOut(true);
+    setLogoutError(null);
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      // 401 means there was nothing to log out of anyway — /login is still the right
+      // place to land. Anything else (a real server error, a network failure) is a
+      // genuine failure: stay put and say so, rather than redirecting to a page that
+      // can't explain what just went wrong.
+      if (res.ok || res.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      setLogoutError("Could not log out. Try again.");
+    } catch {
+      setLogoutError("Could not log out. Try again.");
     } finally {
-      window.location.assign("/login");
+      setLoggingOut(false);
     }
   }
 
@@ -544,6 +558,9 @@ export function Sidebar({
               <LogOut className="h-4 w-4 shrink-0" />
               {!collapsed && <span>{loggingOut ? "Logging out…" : "Log out"}</span>}
             </button>
+            {logoutError && !collapsed && (
+              <StatusMessage tone="error" message={logoutError} className="text-xs" />
+            )}
           </div>
         )}
         <button
