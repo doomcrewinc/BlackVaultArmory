@@ -32,6 +32,32 @@ describe("RedeemForm — invite", () => {
     await waitFor(() => expect(screen.getByText("That username is taken")).toBeTruthy());
   });
 
+  it("blocks submit when passwords differ, without calling the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RedeemForm kind="INVITE" token="tok123" />);
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: "jeff" } });
+    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: "Jeff" } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "correct-horse-battery" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "different-password-here" } });
+    fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+    await waitFor(() => expect(screen.getByText("Passwords do not match")).toBeTruthy());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks submit when password is under 12 characters, without calling the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RedeemForm kind="INVITE" token="tok123" />);
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: "jeff" } });
+    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: "Jeff" } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "short1" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "short1" } });
+    fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+    await waitFor(() => expect(screen.getByText("Password must be at least 12 characters")).toBeTruthy());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("posts token + username + displayName + password and navigates to the returned next", async () => {
     const assign = vi.fn();
     vi.stubGlobal("location", { ...window.location, assign });
@@ -57,6 +83,28 @@ describe("RedeemForm — reset", () => {
     expect(screen.queryByLabelText(/display name/i)).toBeNull();
     expect(screen.getByLabelText(/^password$/i)).toBeTruthy();
     expect(screen.getByLabelText(/confirm password/i)).toBeTruthy();
+  });
+
+  it("blocks submit when passwords differ, without calling the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RedeemForm kind="RESET" token="tok456" />);
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "correct-horse-battery" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "different-password-here" } });
+    fireEvent.click(screen.getByRole("button", { name: /reset password/i }));
+    await waitFor(() => expect(screen.getByText("Passwords do not match")).toBeTruthy());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks submit when password is under 12 characters, without calling the API", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RedeemForm kind="RESET" token="tok456" />);
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "short1" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "short1" } });
+    fireEvent.click(screen.getByRole("button", { name: /reset password/i }));
+    await waitFor(() => expect(screen.getByText("Password must be at least 12 characters")).toBeTruthy());
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("posts only token + password", async () => {

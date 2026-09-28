@@ -3,11 +3,9 @@
 import { useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { StandardButton } from "@/components/shared/StandardButton";
-
-const INPUT_CLASS =
-  "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
-const LABEL_CLASS = "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
-const PASSWORD_MIN = 12;
+import { INPUT_CLASS, LABEL_CLASS } from "./form-styles";
+import { PasswordFields } from "./PasswordFields";
+import { checkNewPassword } from "./checkNewPassword";
 
 /**
  * Redeems an INVITE (create account: username, display name, password) or a RESET (password
@@ -27,12 +25,9 @@ export function RedeemForm({ kind, token }: { kind: "INVITE" | "RESET"; token: s
     e.preventDefault();
     setError(null);
 
-    if (password.length < PASSWORD_MIN) {
-      setError(`Password must be at least ${PASSWORD_MIN} characters`);
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError("Passwords do not match");
+    const passwordError = checkNewPassword(password, confirmPassword);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 
@@ -100,36 +95,13 @@ export function RedeemForm({ kind, token }: { kind: "INVITE" | "RESET"; token: s
           </div>
         </>
       )}
-      <div>
-        <label htmlFor="redeem-password" className={LABEL_CLASS}>
-          Password
-        </label>
-        <input
-          id="redeem-password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          className={INPUT_CLASS}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-        />
-      </div>
-      <div>
-        <label htmlFor="redeem-confirm-password" className={LABEL_CLASS}>
-          Confirm password
-        </label>
-        <input
-          id="redeem-confirm-password"
-          name="confirmPassword"
-          type="password"
-          autoComplete="new-password"
-          className={INPUT_CLASS}
-          value={confirmPassword}
-          onChange={(e) => setConfirmPassword(e.target.value)}
-          required
-        />
-      </div>
+      <PasswordFields
+        idPrefix="redeem"
+        password={password}
+        confirmPassword={confirmPassword}
+        onPasswordChange={setPassword}
+        onConfirmPasswordChange={setConfirmPassword}
+      />
       <StandardButton
         type="submit"
         variant="primary"

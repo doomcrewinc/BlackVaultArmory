@@ -1,4 +1,5 @@
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
+import { PASSWORD_MIN } from "./password-policy";
 
 /**
  * Password hashing with node:crypto scrypt — no native dependency, which matters on the
@@ -7,7 +8,10 @@ import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } 
  *   scrypt$N$r$p$<salt base64>$<hash base64>
  */
 
-export const PASSWORD_MIN = 12;
+// Re-exported so existing importers of PASSWORD_MIN from this module keep working; the
+// value itself lives in password-policy.ts, which has no node:crypto import and is safe
+// for client components to import directly.
+export { PASSWORD_MIN };
 export const PASSWORD_MAX = 256;
 
 type Params = { N: number; r: number; p: number };

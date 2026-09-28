@@ -3,11 +3,9 @@
 import { useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { StandardButton } from "@/components/shared/StandardButton";
-
-const INPUT_CLASS =
-  "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
-const LABEL_CLASS = "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
-const PASSWORD_MIN = 12;
+import { INPUT_CLASS, LABEL_CLASS } from "./form-styles";
+import { PasswordFields } from "./PasswordFields";
+import { checkNewPassword } from "./checkNewPassword";
 
 /** Creates the first ADMIN with the one-time setup code printed at container startup. */
 export function SetupForm() {
@@ -23,12 +21,9 @@ export function SetupForm() {
     e.preventDefault();
     setError(null);
 
-    if (password.length < PASSWORD_MIN) {
-      setError(`Password must be at least ${PASSWORD_MIN} characters`);
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError("Passwords do not match");
+    const passwordError = checkNewPassword(password, confirmPassword);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 
@@ -106,36 +101,13 @@ export function SetupForm() {
           required
         />
       </div>
-      <div>
-        <label htmlFor="setup-password" className={LABEL_CLASS}>
-          Password
-        </label>
-        <input
-          id="setup-password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          className={INPUT_CLASS}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-        />
-      </div>
-      <div>
-        <label htmlFor="setup-confirm-password" className={LABEL_CLASS}>
-          Confirm password
-        </label>
-        <input
-          id="setup-confirm-password"
-          name="confirmPassword"
-          type="password"
-          autoComplete="new-password"
-          className={INPUT_CLASS}
-          value={confirmPassword}
-          onChange={(e) => setConfirmPassword(e.target.value)}
-          required
-        />
-      </div>
+      <PasswordFields
+        idPrefix="setup"
+        password={password}
+        confirmPassword={confirmPassword}
+        onPasswordChange={setPassword}
+        onConfirmPasswordChange={setConfirmPassword}
+      />
       <StandardButton type="submit" variant="primary" className="w-full" loading={loading} loadingLabel="Creating…">
         Create admin account
       </StandardButton>

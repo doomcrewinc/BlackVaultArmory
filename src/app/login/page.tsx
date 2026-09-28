@@ -2,8 +2,8 @@ import { AuthCard } from "@/components/auth/AuthCard";
 import { LoginForm } from "@/components/auth/LoginForm";
 
 /**
- * `next` arrives already percent-encoded by Next; it is read as-is and handed to the login API
- * unchanged (the server sanitises it with safeNextPath) — never decoded here.
+ * `next` is read from the query as-is and handed to the login API unchanged — the server
+ * sanitises it with safeNextPath. Never decoded here.
  */
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ next?: string }> }) {
   const { next } = await searchParams;
