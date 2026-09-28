@@ -4,8 +4,11 @@ vi.mock("./lib/date-migration", () => ({ runStartupDateMigration: vi.fn() }));
 vi.mock("./lib/db/split-brain-guard", () => ({ runSplitBrainGuard: vi.fn() }));
 const seed = vi.hoisted(() => vi.fn());
 vi.mock("./lib/server/direct-access", () => ({ seedDirectAccessSetting: seed }));
+const ensureSetupToken = vi.hoisted(() => vi.fn());
+vi.mock("./lib/auth/tokens", () => ({ ensureSetupToken }));
 
 import { register } from "./instrumentation";
+import { resetPublicUrlCacheForTests } from "./lib/server/public-url";
 
 const saved = { ...process.env };
 
@@ -14,6 +17,8 @@ beforeEach(() => {
   delete process.env.NEXT_PHASE;
   vi.spyOn(console, "error").mockImplementation(() => {});
   seed.mockReset();
+  ensureSetupToken.mockReset();
+  resetPublicUrlCacheForTests();
 });
 afterEach(() => {
   process.env = { ...saved };
@@ -51,5 +56,37 @@ describe("register", () => {
     await expect(register()).resolves.toBeUndefined();
     expect(seed).toHaveBeenCalledOnce();
     expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("prints the setup token line exactly when no user exists", async () => {
+    process.env.PUBLIC_URL = "https://vault.example.com";
+    ensureSetupToken.mockResolvedValue("ABCD-EFGH-JKMN-PQRS");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await register();
+    expect(log).toHaveBeenCalledWith(
+      "[auth] Setup token: ABCD-EFGH-JKMN-PQRS — create the first admin at https://vault.example.com/setup",
+    );
+  });
+
+  it("prints nothing when users already exist", async () => {
+    process.env.PUBLIC_URL = "https://vault.example.com";
+    ensureSetupToken.mockResolvedValue(null);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await register();
+    expect(ensureSetupToken).toHaveBeenCalledOnce();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("survives a setup-token failure", async () => {
+    process.env.PUBLIC_URL = "https://vault.example.com";
+    ensureSetupToken.mockRejectedValue(new Error("db down"));
+    await expect(register()).resolves.toBeUndefined();
+    expect(vi.mocked(console.error).mock.calls.some((c) => String(c[0]).startsWith("[auth]"))).toBe(true);
+  });
+
+  it("does not mint a setup token during next build", async () => {
+    process.env.NEXT_PHASE = "phase-production-build";
+    await register();
+    expect(ensureSetupToken).not.toHaveBeenCalled();
   });
 });
