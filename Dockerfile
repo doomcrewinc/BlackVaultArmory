@@ -62,6 +62,10 @@ COPY --from=builder /app/public ./public
 # The TCP gate owns port 3000 and starts Next on 127.0.0.1:3001 in-process.
 COPY --from=builder /app/gate ./gate
 
+# Recovery command (run via `docker exec`): prints a one-time password-reset
+# link, promoting the user to admin with --promote. Plain JS, no build step.
+COPY --from=builder /app/scripts/admin-reset-link.mjs ./scripts/admin-reset-link.mjs
+
 # Copy Prisma schemas and migrations (both providers) so we can run
 # migrate deploy at startup. node_modules/.prisma carries BOTH generated
 # clients: .prisma/client (Postgres) and .prisma/client-sqlite (SQLite).
