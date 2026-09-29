@@ -220,8 +220,8 @@ Guards are proven by injection.
 
 **Breaking:** BlackVault now requires an account. After updating, open `<PUBLIC_URL>/setup` and
 create the first admin using the setup token from `docker compose logs blackvault | grep "Setup
-token"`. Your inventory is unchanged. Other household members join by invite link from
-Settings → Users.
+token"`. Your inventory is unchanged. Other household members join by invite link from the
+**Users** page in the sidebar.
 
 ## Acceptance criteria
 
