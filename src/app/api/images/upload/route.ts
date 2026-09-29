@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
 
   try {
     // Rate limiting
-    const ip = getClientIp(request);
+    const ip = getClientIp(request) ?? "unknown";
     const rate = await enforceRateLimit({ key: `upload:images:${ip}`, windowMs: 60_000, maxAttempts: 20 });
     if (!rate.allowed) {
       return NextResponse.json(

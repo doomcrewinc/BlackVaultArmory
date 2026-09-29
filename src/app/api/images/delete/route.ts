@@ -22,7 +22,7 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth();
   if (auth) return auth;
 
-  const ip = getClientIp(request);
+  const ip = getClientIp(request) ?? "unknown";
   const rate = await enforceRateLimit({ key: `delete:images:${ip}`, windowMs: 60_000, maxAttempts: 20 });
   if (!rate.allowed) {
     return NextResponse.json(

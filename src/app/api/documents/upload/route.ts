@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
 
   try {
     // Rate limiting
-    const ip = getClientIp(request);
+    const ip = getClientIp(request) ?? "unknown";
     const rate = await enforceRateLimit({
       key: `upload:documents:${ip}`,
       windowMs: 60_000,
