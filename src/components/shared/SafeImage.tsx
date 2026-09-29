@@ -17,7 +17,17 @@ function sourceKey(src: SafeImageSource): string | null {
   return (src as { src?: string }).src ?? null;
 }
 
-export function SafeImage({ src, fallback, onError, alt, ...imageProps }: SafeImageProps) {
+/**
+ * Uploaded photos (`/uploads/...`) and API-served images are behind login. Loaded straight from
+ * the browser they always carry the session cookie; through `/_next/image` the server fetches
+ * them itself, and whether that internal fetch carries the cookie past proxy.ts is unproven.
+ * So local sources skip optimisation; remote URLs keep it.
+ */
+function isLocalSource(source: string): boolean {
+  return source.startsWith("/uploads/") || source.startsWith("/api/");
+}
+
+export function SafeImage({ src, fallback, onError, alt, unoptimized, ...imageProps }: SafeImageProps) {
   const [failedSource, setFailedSource] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const currentSource = sourceKey(src);
@@ -35,6 +45,7 @@ export function SafeImage({ src, fallback, onError, alt, ...imageProps }: SafeIm
         {...imageProps}
         src={src as ImageProps["src"]}
         alt={alt}
+        unoptimized={unoptimized || isLocalSource(currentSource)}
         onLoad={() => setLoaded(true)}
         onError={(event) => {
           setFailedSource(currentSource);
