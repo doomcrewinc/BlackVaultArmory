@@ -38,8 +38,14 @@ export async function validateSession(
     // Slide at most hourly so SQLite is not written on every request.
     if (now.getTime() - row.lastSeenAt.getTime() > SLIDE_EVERY_MS) {
       const slidTo = new Date(now.getTime() + SESSION_TTL_MS);
-      await prisma.session.update({ where: { id: row.id }, data: { lastSeenAt: now, expiresAt: slidTo } });
-      return { sessionId: row.id, user, slidTo };
+      try {
+        await prisma.session.update({ where: { id: row.id }, data: { lastSeenAt: now, expiresAt: slidTo } });
+        return { sessionId: row.id, user, slidTo };
+      } catch (error) {
+        // The session itself is valid; a failed extension (e.g. SQLITE_BUSY) must not sign the
+        // user out. No slidTo, so the cookie is not extended either — the next request retries.
+        console.error("[auth] session slide failed:", error);
+      }
     }
 
     return { sessionId: row.id, user };

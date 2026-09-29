@@ -65,6 +65,12 @@ describe("validateSession", () => {
     const result = await validateSession("t", now);
     expect(result?.slidTo).toBeUndefined();
   });
+  it("a failed slide write does not sign the user out: logs it, returns the session without slidTo", async () => {
+    m.findUnique.mockResolvedValueOnce({ id: "s1", expiresAt: new Date(now.getTime() + 1000), lastSeenAt: new Date(now.getTime() - 3_600_001), user });
+    m.update.mockRejectedValueOnce(new Error("SQLITE_BUSY"));
+    expect(await validateSession("t", now)).toEqual({ sessionId: "s1", user: { id: "u1", username: "jeff", displayName: "Jeff", role: "USER" } });
+    expect(console.error).toHaveBeenCalledWith("[auth] session slide failed:", expect.any(Error));
+  });
   it("returns null (never throws) when the DB fails", async () => {
     m.findUnique.mockRejectedValueOnce(new Error("SQLITE_BUSY"));
     expect(await validateSession("t", now)).toBeNull();
