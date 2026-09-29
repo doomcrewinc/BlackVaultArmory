@@ -158,7 +158,12 @@ All pages use the dark `vault-*` design tokens and work at 390 px.
   enforces it too).
 - **Admins-only page** — shield icon; heading "Restricted — admins only"; "You're signed in as
   **<displayName>**. This area is for administrators."; the display names of the current admins so
-  the user knows whom to ask; a button back to the Command Center. HTTP 403.
+  the user knows whom to ask; a button back to the Command Center.
+  **Amendment (ruling A11, verified in code — `src/app/admins-only/page.tsx`, `src/proxy.ts`):**
+  this page is served as HTTP 200, not 403. `NextResponse.rewrite()`'s `status` option does not
+  carry through to the client for a page rewrite — proven with curl: the response carries an
+  `x-middleware-rewrite` header but the outer status is 200. Only the admin API
+  (`/api/admin/*`) actually returns 403.
 - **Navigation** — signed-in user and Log out; admin links hidden for plain users (cosmetic only —
   the server enforces).
 - **Settings → Mobile Access** — the direct-access status becomes an admin-only **toggle**
@@ -227,8 +232,10 @@ Settings → Users.
 3. Logged out: pages → `/login?next=…`; API → 401. `next` never leads off-site.
 4. An invite link creates a `USER` (or the chosen role) with the invitee's own credentials; it
    works once and expires after 7 days.
-5. A plain user opening an admin page sees the Admins-only page (403) naming the admins; admin API
-   calls return 403.
+5. A plain user opening an admin page sees the Admins-only page naming the admins; admin API
+   calls return 403. **Amendment (ruling A11, verified in code):** the page itself is served as
+   HTTP 200 — Next does not carry a `NextResponse.rewrite()`'s `status` option through to the
+   client for a page rewrite. 403 is real only for the admin API.
 6. Disabling a user or resetting their password ends their sessions on the next request.
 7. The last active admin cannot be demoted or disabled.
 8. The recovery command prints a reset link that works.
