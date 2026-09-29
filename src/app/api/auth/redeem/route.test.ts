@@ -2,8 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { hashToken } from "@/lib/auth/tokens";
 
-type TokenRow = { kind: string; role: string | null; userId: string | null; usedAt: Date | null; expiresAt: Date | null };
-type UserRow = { id: string; username: string; displayName: string; role: string; passwordHash: string };
+type TokenRow = {
+  kind: string;
+  role: string | null;
+  userId: string | null;
+  createdById?: string | null;
+  usedAt: Date | null;
+  expiresAt: Date | null;
+};
+type UserRow = { id: string; username: string; displayName: string; role: string; passwordHash: string; disabledAt?: Date | null };
+type TokenWhere = { tokenHash: string; kind: string; createdBy?: { is: { role: string; disabledAt: null } } };
 
 /**
  * In-memory tables with a $transaction that ROLLS BACK on throw, like the real one — so
@@ -16,10 +24,21 @@ const m = vi.hoisted(() => {
   const clone = <T,>(map: Map<string, T>) => new Map([...map].map(([k, v]) => [k, { ...v }]));
   const db = {
     authToken: {
-      findUnique: vi.fn(async ({ where }: { where: { tokenHash: string } }) => tokens.get(where.tokenHash) ?? null),
-      updateMany: vi.fn(async ({ where, data }: { where: { tokenHash: string; kind: string }; data: { usedAt: Date } }) => {
+      findUnique: vi.fn(async ({ where }: { where: { tokenHash: string } }) => {
+        const row = tokens.get(where.tokenHash);
+        if (!row) return null;
+        const issuer = row.createdById ? users.get(row.createdById) : undefined;
+        return { ...row, createdBy: issuer ? { role: issuer.role, disabledAt: issuer.disabledAt ?? null } : null };
+      }),
+      updateMany: vi.fn(async ({ where, data }: { where: TokenWhere; data: { usedAt: Date } }) => {
         const row = tokens.get(where.tokenHash);
         if (!row || row.kind !== where.kind || row.usedAt || (row.expiresAt && row.expiresAt <= data.usedAt)) return { count: 0 };
+        if (where.createdBy) {
+          // Relation filter `createdBy: { is: { role, disabledAt: null } }`, as Prisma evaluates it.
+          const issuer = row.createdById ? users.get(row.createdById) : undefined;
+          const want = where.createdBy.is;
+          if (!issuer || issuer.role !== want.role || (issuer.disabledAt ?? null) !== want.disabledAt) return { count: 0 };
+        }
         row.usedAt = data.usedAt;
         return { count: 1 };
       }),
@@ -88,8 +107,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   m.tokens.clear();
   m.users.clear();
-  m.tokens.set(hashToken("inv-user"), { kind: "INVITE", role: "USER", userId: null, usedAt: null, expiresAt: FUTURE });
-  m.tokens.set(hashToken("inv-admin"), { kind: "INVITE", role: "ADMIN", userId: null, usedAt: null, expiresAt: FUTURE });
+  m.users.set("boss1", { id: "boss1", username: "boss1", displayName: "Boss", role: "ADMIN", passwordHash: "x", disabledAt: null });
+  const invite = { kind: "INVITE", userId: null, createdById: "boss1", usedAt: null, expiresAt: FUTURE };
+  m.tokens.set(hashToken("inv-user"), { ...invite, role: "USER" });
+  m.tokens.set(hashToken("inv-admin"), { ...invite, role: "ADMIN" });
   m.tokens.set(hashToken("reset-u1"), { kind: "RESET", role: null, userId: "u1", usedAt: null, expiresAt: FUTURE });
   m.tokens.set(hashToken("used"), { kind: "INVITE", role: "USER", userId: null, usedAt: new Date(), expiresAt: FUTURE });
   m.tokens.set(hashToken("SETUPCODE"), { kind: "SETUP", role: null, userId: null, usedAt: null, expiresAt: null });
@@ -143,6 +164,41 @@ describe("POST /api/auth/redeem — invite", () => {
   });
 });
 
+describe("POST /api/auth/redeem — the issuer must still be an active admin (ruling A13)", () => {
+  it.each([
+    ["disabled", { disabledAt: new Date() }],
+    ["demoted to USER", { role: "USER" }],
+  ])("404 when the issuer was %s — no account, invite not consumed", async (_label, change) => {
+    Object.assign(m.users.get("boss1")!, change);
+    const res = await POST(req({ token: "inv-admin", username: "jeff-again", displayName: "J", password: PW }));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(GONE);
+    expect(m.users.get("id-jeff-again")).toBeUndefined();
+    expect(tokenRow("inv-admin")?.usedAt).toBeNull();
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("404 when the invite has no issuer at all", async () => {
+    tokenRow("inv-user")!.createdById = null;
+    const res = await POST(req({ token: "inv-user", username: "orphan", displayName: "O", password: PW }));
+    expect(res.status).toBe(404);
+    expect(m.users.get("id-orphan")).toBeUndefined();
+  });
+
+  it("404 when the issuer is disabled between the peek and the transaction", async () => {
+    // Peek sees an active issuer; the transaction's own check is the one that must hold.
+    const peekFind = m.db.authToken.findUnique.getMockImplementation()!;
+    m.db.authToken.findUnique.mockImplementationOnce(async (args) => {
+      const peeked = await peekFind(args);
+      m.users.get("boss1")!.disabledAt = new Date();
+      return peeked;
+    });
+    const res = await POST(req({ token: "inv-user", username: "racer2", displayName: "R", password: PW }));
+    expect(res.status).toBe(404);
+    expect(m.users.get("id-racer2")).toBeUndefined();
+  });
+});
+
 describe("POST /api/auth/redeem — reset", () => {
   it("sets the new hash, deletes all the user's sessions, and signs them in", async () => {
     const res = await POST(req({ token: "reset-u1", password: PW }));
@@ -172,7 +228,7 @@ describe("POST /api/auth/redeem — dead links", () => {
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual(GONE);
     }
-    expect(m.users.size).toBe(1);
+    expect(m.users.size).toBe(2);
   });
 
   it("404 when the token is used between the peek and the transaction (lost race)", async () => {

@@ -63,26 +63,46 @@ function unexpired(now: Date) {
   return [{ expiresAt: null }, { expiresAt: { gt: now } }];
 }
 
+/**
+ * An invite is only as good as its issuer (ruling A13): it is redeemable only while the admin who
+ * minted it is still an active ADMIN. Otherwise a disabled or demoted admin could redeem their own
+ * outstanding ADMIN invite and come back as a new admin. changeRoleOrStatus also burns such links,
+ * but this check holds even for links it missed (e.g. rows written before that rule existed).
+ */
+const ISSUER_IS_ACTIVE_ADMIN = { is: { role: "ADMIN", disabledAt: null } } as const;
+
+function issuerIsActiveAdmin(issuer: { role: string; disabledAt: Date | null } | null | undefined): boolean {
+  return !!issuer && issuer.role === "ADMIN" && issuer.disabledAt === null;
+}
+
 export async function peekToken(raw: string, now: Date = new Date()) {
-  const row = await prisma.authToken.findUnique({ where: { tokenHash: hashToken(raw) } });
+  const row = await prisma.authToken.findUnique({
+    where: { tokenHash: hashToken(raw) },
+    include: { createdBy: { select: { role: true, disabledAt: true } } },
+  });
   if (!row || row.usedAt || (row.expiresAt && row.expiresAt <= now)) return null;
 
   // Narrow string values to known enums
   if (!AUTH_TOKEN_KINDS.includes(row.kind as AuthTokenKind)) return null;
   const kind = row.kind as AuthTokenKind;
+  // Same rule consumeToken enforces, so the invite page and /api/auth/redeem agree.
+  if (kind === "INVITE" && !issuerIsActiveAdmin(row.createdBy)) return null;
 
   const role = row.role ? (ROLES.includes(row.role as Role) ? (row.role as Role) : null) : null;
 
   return { kind, role, userId: row.userId ?? null };
 }
 
-/** Atomic single use: two concurrent redemptions cannot both see count 1. */
+/**
+ * Atomic single use: two concurrent redemptions cannot both see count 1. For an INVITE the
+ * issuer-is-an-active-admin check is part of the same conditional update, so it is decided inside
+ * the caller's transaction and a refused invite is left unused.
+ */
 export async function consumeToken(raw: string, kind: TokenKind, tx: Prisma.TransactionClient, now: Date = new Date()) {
   const tokenHash = hashToken(raw);
-  const { count } = await tx.authToken.updateMany({
-    where: { tokenHash, kind, usedAt: null, OR: unexpired(now) },
-    data: { usedAt: now },
-  });
+  const where: Prisma.AuthTokenWhereInput = { tokenHash, kind, usedAt: null, OR: unexpired(now) };
+  if (kind === "INVITE") where.createdBy = ISSUER_IS_ACTIVE_ADMIN;
+  const { count } = await tx.authToken.updateMany({ where, data: { usedAt: now } });
   if (count !== 1) return null;
   const row = await tx.authToken.findUnique({ where: { tokenHash } });
   const role = row?.role ? (ROLES.includes(row.role as Role) ? (row.role as Role) : null) : null;

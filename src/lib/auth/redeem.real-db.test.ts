@@ -27,6 +27,9 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { consumeToken, createInvite, hashToken } from "@/lib/auth/tokens";
 import { POST as redeem } from "@/app/api/auth/redeem/route";
+import { changeRoleOrStatus } from "@/lib/auth/admins";
+import InvitePage from "@/app/invite/[token]/page";
+import { LinkExpired } from "@/components/auth/LinkExpired";
 
 const PW = "correct horse battery";
 let pooled: PrismaClient;
@@ -114,5 +117,67 @@ describe("token redemption against real SQLite", () => {
     expect(retry.status).toBe(200);
     expect(await usedAt(token)).toBeInstanceOf(Date);
     expect((await prisma.user.findUnique({ where: { username: "jeff-2" } }))?.role).toBe("USER");
+  });
+  describe("an invite dies with its issuer's admin rights (ruling A13)", () => {
+    async function issuer(username: string) {
+      return prisma.user.create({ data: { username, displayName: username, passwordHash: "x", role: "ADMIN" } });
+    }
+    async function invitePageIsExpired(token: string) {
+      const jsx = (await InvitePage({ params: Promise.resolve({ token }) })) as { type: unknown };
+      return jsx.type === LinkExpired;
+    }
+
+    it("active issuer → the invite page shows the form and redemption works", async () => {
+      const jeff = await issuer("issuer-active");
+      const { token } = await createInvite({ role: "ADMIN", createdById: jeff.id });
+      expect(await invitePageIsExpired(token)).toBe(false);
+      const res = await redeem(redeemReq({ token, username: "via-active", displayName: "V", password: PW }));
+      expect(res.status).toBe(200);
+      expect((await prisma.user.findUnique({ where: { username: "via-active" } }))?.role).toBe("ADMIN");
+    });
+
+    it.each([
+      ["disabled", { disabledAt: new Date() }],
+      ["demoted to USER", { role: "USER" }],
+    ])("issuer %s (row changed directly) → page expired, redeem 404, no account, invite unused", async (label, data) => {
+      const jeff = await issuer(`issuer-${label.split(" ")[0]}`);
+      const { token } = await createInvite({ role: "ADMIN", createdById: jeff.id });
+      await prisma.user.update({ where: { id: jeff.id }, data });
+
+      expect(await invitePageIsExpired(token)).toBe(true);
+      const username = `back-${label.split(" ")[0]}`;
+      const res = await redeem(redeemReq({ token, username, displayName: "Jeff again", password: PW }));
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Link expired or already used" });
+      expect(await prisma.user.findUnique({ where: { username } })).toBeNull();
+      expect(await usedAt(token)).toBeNull();
+    });
+
+    it("consumeToken itself refuses an inactive issuer's invite inside the transaction (issuer disabled after the peek)", async () => {
+      const jeff = await issuer("issuer-consume");
+      const { token } = await createInvite({ role: "ADMIN", createdById: jeff.id });
+      await prisma.user.update({ where: { id: jeff.id }, data: { disabledAt: new Date() } });
+      expect(await prisma.$transaction((tx) => consumeToken(token, "INVITE", tx))).toBeNull();
+      expect(await usedAt(token)).toBeNull();
+      await prisma.user.update({ where: { id: jeff.id }, data: { disabledAt: null } });
+      expect(await prisma.$transaction((tx) => consumeToken(token, "INVITE", tx))).toEqual({ role: "ADMIN", userId: null });
+    });
+
+    it.each([
+      ["disabled", { disabled: true }],
+      ["demoted", { role: "USER" as const }],
+    ])("issuer %s through changeRoleOrStatus → their unused links are burned and the invite fails", async (label, change) => {
+      const jeff = await issuer(`issuer-crs-${label}`);
+      const { token } = await createInvite({ role: "ADMIN", createdById: jeff.id });
+      const other = await createInvite({ role: "USER", createdById: admin.id });
+      expect(await changeRoleOrStatus(jeff.id, change, admin.id)).toEqual({ ok: true });
+
+      expect(await usedAt(token)).toBeInstanceOf(Date);
+      expect(await usedAt(other.token)).toBeNull();
+      const username = `back-crs-${label}`;
+      const res = await redeem(redeemReq({ token, username, displayName: "Jeff again", password: PW }));
+      expect(res.status).toBe(404);
+      expect(await prisma.user.findUnique({ where: { username } })).toBeNull();
+    });
   });
 });

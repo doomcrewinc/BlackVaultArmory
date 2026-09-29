@@ -6,9 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * away if it throws. That makes "throw to roll back" observable.
  */
 type Row = { id: string; role: string; disabledAt: Date | null; displayName: string };
+type TokenRow = { id: string; createdById: string | null; usedAt: Date | null };
 
 const m = vi.hoisted(() => ({
   users: [] as Row[],
+  tokens: [] as TokenRow[],
   committed: 0,
   rolledBack: 0,
   txOptions: [] as unknown[],
@@ -33,6 +35,7 @@ vi.mock("@/lib/prisma", () => ({
         throw err;
       }
       const staged = m.users.map((u) => ({ ...u }));
+      const stagedTokens = m.tokens.map((t) => ({ ...t }));
       let updated = false;
       const tx = {
         user: {
@@ -47,10 +50,18 @@ vi.mock("@/lib/prisma", () => ({
           count: async ({ where }: { where: Record<string, unknown> }) =>
             m.countOverride ? m.countOverride(updated) : staged.filter((u) => matches(u, where)).length,
         },
+        authToken: {
+          updateMany: async ({ where, data }: { where: Record<string, unknown>; data: Partial<TokenRow> }) => {
+            const hit = stagedTokens.filter((t) => matches(t as unknown as Row, where));
+            hit.forEach((t) => Object.assign(t, data));
+            return { count: hit.length };
+          },
+        },
       };
       try {
         const result = await fn(tx);
         m.users = staged;
+        m.tokens = stagedTokens;
         m.committed += 1;
         return result;
       } catch (error) {
@@ -78,6 +89,7 @@ const row = (id: string) => m.users.find((u) => u.id === id)!;
 beforeEach(() => {
   vi.clearAllMocks();
   m.users = [];
+  m.tokens = [];
   m.committed = 0;
   m.rolledBack = 0;
   m.txOptions = [];
@@ -200,6 +212,47 @@ describe("changeRoleOrStatus — other rules", () => {
     expect(await changeRoleOrStatus("u", { disabled: false }, "a")).toEqual({ ok: true });
     expect(row("u").disabledAt).toBeNull();
     expect(m.endUserSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe("changeRoleOrStatus — an issuer's unused links die with their admin rights (ruling A13)", () => {
+  const unusedOf = (id: string) => m.tokens.filter((t) => t.createdById === id && t.usedAt === null).map((t) => t.id);
+
+  beforeEach(() => {
+    m.tokens = [
+      { id: "b-inv", createdById: "b", usedAt: null },
+      { id: "b-reset", createdById: "b", usedAt: null },
+      { id: "b-old", createdById: "b", usedAt: new Date("2026-01-01T00:00:00Z") },
+      { id: "a-inv", createdById: "a", usedAt: null },
+    ];
+  });
+
+  it("disabling an admin marks every unused link they issued as used", async () => {
+    m.users = [admin("a"), admin("b")];
+    expect(await changeRoleOrStatus("b", { disabled: true }, "a")).toEqual({ ok: true });
+    expect(unusedOf("b")).toEqual([]);
+    expect(m.tokens.find((t) => t.id === "b-old")?.usedAt).toEqual(new Date("2026-01-01T00:00:00Z"));
+    expect(unusedOf("a")).toEqual(["a-inv"]);
+  });
+
+  it("demoting an admin to USER marks every unused link they issued as used", async () => {
+    m.users = [admin("a"), admin("b")];
+    expect(await changeRoleOrStatus("b", { role: "USER" }, "a")).toEqual({ ok: true });
+    expect(unusedOf("b")).toEqual([]);
+    expect(unusedOf("a")).toEqual(["a-inv"]);
+  });
+
+  it("promoting or re-enabling leaves the links alone", async () => {
+    m.users = [admin("a"), { ...admin("b"), disabledAt: new Date() }];
+    expect(await changeRoleOrStatus("b", { disabled: false }, "a")).toEqual({ ok: true });
+    expect(await changeRoleOrStatus("b", { role: "ADMIN" }, "a")).toEqual({ ok: true });
+    expect(unusedOf("b")).toEqual(["b-inv", "b-reset"]);
+  });
+
+  it("a refused change (last admin) rolls the link revocation back too", async () => {
+    m.users = [admin("b"), user("u")];
+    expect(await changeRoleOrStatus("b", { disabled: true }, "b")).toEqual(LAST_ADMIN);
+    expect(unusedOf("b")).toEqual(["b-inv", "b-reset"]);
   });
 });
 

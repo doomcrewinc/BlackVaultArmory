@@ -76,6 +76,12 @@ export async function changeRoleOrStatus(
           if (change.disabled !== undefined) data.disabledAt = change.disabled ? (target.disabledAt ?? new Date()) : null;
           await tx.user.update({ where: { id: targetId }, data });
           if ((await tx.user.count({ where: ACTIVE_ADMIN })) === 0) throw new ChangeRefused(409, LAST_ADMIN_ERROR);
+          // Links outlive neither the issuer's account nor their admin rights (ruling A13): a
+          // disabled or demoted admin's unused invite/reset links are burned in this same
+          // transaction, so they commit or roll back together with the change itself.
+          if (change.disabled === true || change.role === "USER") {
+            await tx.authToken.updateMany({ where: { createdById: targetId, usedAt: null }, data: { usedAt: new Date() } });
+          }
         },
         { isolationLevel: "Serializable" },
       );

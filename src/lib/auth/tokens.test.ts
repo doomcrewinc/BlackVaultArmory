@@ -77,7 +77,24 @@ describe("consumeToken", () => {
     const now = new Date("2026-09-27T00:00:00Z");
     expect(await consumeToken("raw", "INVITE", tx as never, now)).toEqual({ role: "USER", userId: null });
     expect(tx.authToken.updateMany).toHaveBeenCalledWith({
-      where: { tokenHash: hashToken("raw"), kind: "INVITE", usedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      where: {
+        tokenHash: hashToken("raw"),
+        kind: "INVITE",
+        usedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        createdBy: { is: { role: "ADMIN", disabledAt: null } },
+      },
+      data: { usedAt: now },
+    });
+  });
+
+  it("only an INVITE requires its issuer to still be an active admin (ruling A13); RESET does not", async () => {
+    tx.authToken.updateMany.mockResolvedValue({ count: 1 });
+    tx.authToken.findUnique.mockResolvedValue({ role: null, userId: "u2" });
+    const now = new Date("2026-09-27T00:00:00Z");
+    await consumeToken("raw", "RESET", tx as never, now);
+    expect(tx.authToken.updateMany).toHaveBeenCalledWith({
+      where: { tokenHash: hashToken("raw"), kind: "RESET", usedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       data: { usedAt: now },
     });
   });
@@ -97,5 +114,20 @@ describe("peekToken", () => {
     expect(await peekToken("raw", now)).toBeNull();
     m.findUnique.mockResolvedValue({ kind: "RESET", role: null, userId: "u2", usedAt: null, expiresAt: new Date(now.getTime() + 1) });
     expect(await peekToken("raw", now)).toEqual({ kind: "RESET", role: null, userId: "u2" });
+  });
+
+  it("an INVITE peeks as dead unless its issuer is still an active admin (ruling A13)", async () => {
+    const now = new Date("2026-09-27T00:00:00Z");
+    const live = { kind: "INVITE", role: "ADMIN", userId: null, usedAt: null, expiresAt: new Date(now.getTime() + 1) };
+    m.findUnique.mockResolvedValue({ ...live, createdBy: { role: "ADMIN", disabledAt: null } });
+    expect(await peekToken("raw", now)).toEqual({ kind: "INVITE", role: "ADMIN", userId: null });
+    expect(m.findUnique).toHaveBeenCalledWith({
+      where: { tokenHash: hashToken("raw") },
+      include: { createdBy: { select: { role: true, disabledAt: true } } },
+    });
+    for (const createdBy of [{ role: "ADMIN", disabledAt: now }, { role: "USER", disabledAt: null }, null]) {
+      m.findUnique.mockResolvedValue({ ...live, createdBy });
+      expect(await peekToken("raw", now)).toBeNull();
+    }
   });
 });
