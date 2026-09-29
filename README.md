@@ -555,7 +555,7 @@ valid. Once an admin exists, `/setup` returns 404 and no more tokens are printed
 
 ### Inviting people
 
-Admins invite other household members from **Settings → Users** (`/admin/users`) →
+Admins invite other household members from **Users** in the sidebar (`/admin/users`) →
 **Invite someone**. You get a link and a QR code that work once and expire after 7 days. The
 person who opens it picks their own username and password — you never see or choose it for
 them. Pick their role when you create the invite:
@@ -569,7 +569,7 @@ current admins, so they know who to ask.
 
 ### Resetting a forgotten password
 
-An admin issues a one-time password reset link for anyone from **Settings → Users**, the
+An admin issues a one-time password reset link for anyone from **Users** in the sidebar, the
 same way as an invite. It expires after 24 hours.
 
 ### Your account
@@ -895,7 +895,7 @@ ignored.) The first lines say whether `.env` will be
 switched after the copy. It will be if the copy goes into this install's own database.
 
 **Step 8: Real run.** It copies everything and then verifies it. It must end with
-`VERIFIED: all 16 models match`, followed by `Wrote .../data/db/.migrated` and
+`VERIFIED: all 23 models match (<N> rows). The source SQLite database was not modified.`, followed by `Wrote .../data/db/.migrated` and
 `Switched /your/path/.env to PostgreSQL (backup: /your/path/.env.pre-migration):` and the new
 lines it wrote (the password is shown as `****`). If it reports a mismatch, the copy is rolled back,
 `.env` is left alone, and you are still on SQLite. Stop there, and open an issue.

@@ -1,7 +1,7 @@
 /**
  * One-way SQLite -> Postgres copy with proof that nothing was lost.
  *
- * The guarantee: after a successful run, every one of the 16 models has exactly
+ * The guarantee: after a successful run, every model in MIGRATION_MODELS has exactly
  * as many rows on the target as the source had, and every copied row is
  * field-for-field identical (DateTimes compared as exact ISO strings). Anything
  * else exits 1. The source is only ever read — there is no reverse path.
