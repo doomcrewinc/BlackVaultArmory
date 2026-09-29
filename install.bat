@@ -307,16 +307,26 @@ if errorlevel 1 goto :compose_failed
 
 echo.
 echo Waiting for health check...
-timeout /t 5 /nobreak >nul
-
+:: Polled for up to two minutes, as in install.sh. A first start runs the
+:: migrations (and on PostgreSQL waits for the database) and the app logs the
+:: first-time setup token while it starts, so once it is healthy
+:: :show_setup_token below finds the token in the log.
 :: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
-%COMPOSE% ps | findstr /i "healthy running" >nul
-if errorlevel 1 (
-  echo Container started - check logs with:
-  echo   %COMPOSE% logs -f
-) else (
-  echo BlackVault is running.
-)
+set "_HW=0"
+:health_wait
+%COMPOSE% ps --format "{{.Status}}" blackvault 2>nul | findstr /i "healthy" >nul
+if not errorlevel 1 goto :health_ok
+set /a _HW+=1
+if !_HW! GEQ 60 goto :health_timed_out
+timeout /t 2 /nobreak >nul
+goto :health_wait
+:health_timed_out
+echo Container started - check logs with:
+echo   %COMPOSE% logs -f
+goto :health_done
+:health_ok
+echo BlackVault is running.
+:health_done
 
 :: ── Summary ───────────────────────────────────────────────────
 echo.
@@ -332,6 +342,8 @@ echo.
 echo   To stop BlackVault:    %COMPOSE% down
 echo   To update BlackVault:  update.bat
 echo.
+:: ── First-time setup token (only while no admin account exists) ──
+call :show_setup_token PUBLIC_URL
 pause
 exit /b 0
 
@@ -585,4 +597,38 @@ set "TRUSTED_PROXIES="
 set /p "TRUSTED_PROXIES=Trusted proxies []: "
 if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES: =!"
 if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES:	=!"
+goto :eof
+
+:: :show_setup_token VAR - prints the first-time setup token from the
+:: container log in a boxed block, with the public URL held in VAR; prints
+:: nothing when the log has no token line (an admin already exists). Mirrors
+:: show_setup_token in scripts/setup-token.sh: change them together. The app
+:: prints a new token at every start while no admin exists, so the LAST
+:: matching line wins. Only the XXXX-XXXX-XXXX-XXXX code is taken from it; the
+:: text around it is ASCII, because the log line's em dash garbles in the
+:: console code page. Takes a variable NAME, like :valid_public_url.
+:show_setup_token
+set "_ST_URL=!%~1!"
+set "_ST_LINE="
+set "_ST_CODE="
+for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:"`) do set "_ST_LINE=%%L"
+if not defined _ST_LINE goto :eof
+:: Everything after "Setup token", then the first word after ": ".
+set "_ST_REST=!_ST_LINE:*Setup token=!"
+for /f "tokens=1 delims=: " %%T in ("!_ST_REST!") do set "_ST_CODE=%%T"
+if not defined _ST_CODE goto :eof
+:: Exactly XXXX-XXXX-XXXX-XXXX: 19 characters, dashes at 5, 10 and 15, and
+:: only capital letters and digits otherwise. eol is a character that cannot
+:: be left after the dashes are removed, so no value is skipped as a comment.
+if "!_ST_CODE:~18,1!"=="" goto :eof
+if not "!_ST_CODE:~19!"=="" goto :eof
+if not "!_ST_CODE:~4,1!!_ST_CODE:~9,1!!_ST_CODE:~14,1!"=="---" goto :eof
+set "_ST_ALNUM=!_ST_CODE:-=!"
+if "!_ST_ALNUM:~15,1!"=="" goto :eof
+for /f "eol=- delims=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" %%X in ("!_ST_ALNUM!") do goto :eof
+if defined _ST_URL if "!_ST_URL:~-1!"=="/" set "_ST_URL=!_ST_URL:~0,-1!"
+echo   ============================================================
+echo    First-time setup: open !_ST_URL!/setup
+echo    and enter the setup token: !_ST_CODE!
+echo   ============================================================
 goto :eof

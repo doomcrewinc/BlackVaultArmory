@@ -159,6 +159,56 @@ maps from the host-side `BLACKVAULT_PUBLIC_URL`, `BLACKVAULT_TRUSTED_PROXIES`,
 `BLACKVAULT_ALLOW_DIRECT_ACCESS` and `BLACKVAULT_DIRECT_ACCESS_INITIAL` in `.env` — same
 `BLACKVAULT_*`-prefix convention as the database vars above, for the same reason.
 
+## Authentication
+
+`src/lib/auth/*` are pure, DB-touching modules with no Next.js request/response types, so
+they're unit-tested directly:
+
+- `password.ts` — scrypt hash/verify (`hashPassword`, `verifyPassword`, and `dummyVerify` for
+  a timing-safe "no such user" path). `password-policy.ts` holds the client-safe `PASSWORD_MIN`
+  constant on its own, because `password.ts` imports `node:crypto` and must never end up in a
+  client bundle.
+- `tokens.ts` — INVITE/RESET/SETUP token create, hash and single-use redeem; `TOKEN_TTL_MS`
+  (`INVITE` 7 days, `RESET` 24 hours; `SETUP` has no expiry but only one unused token exists at
+  a time).
+- `sessions.ts` — DB-backed sessions: `SESSION_COOKIE`, `createSession`, `validateSession`,
+  `sessionCookie`, `endUserSessions`.
+- `admins.ts` — admin user management; the last active admin can never be demoted or disabled.
+- `setup-state.ts` — `hasAnyUser()`, cached forever once true (it can only go from false to
+  true).
+- `throttle.ts` — per-key login throttle (`createThrottle`): free failures, then exponential
+  backoff capped at 15 minutes, never a hard lockout.
+- `username.ts` — `normaliseUsername` (trim + lowercase) and username/display-name validation.
+- `next-path.ts` — `safeNextPath`, the post-login redirect sanitiser (rejects `//`, `/\`,
+  schemes, control characters).
+- `route-helpers.ts` — shared plumbing for the `/api/auth/*` routes.
+
+`src/lib/server/auth-gate.ts` exports `decideAuth`, the pure per-request policy function
+(public paths, setup-required, login-required, admin-only) — no I/O, table-tested against
+path kind × auth state. `src/proxy.ts` gathers the request's input and applies spec 1's
+host/origin gate (`decideRequest`) first, then `decideAuth`, so a request must pass the
+connection-level gate before authentication is even considered.
+
+`src/lib/server/auth.ts` exports `getCurrentUser()` (memoised per request with React
+`cache()`), `requireAuth()` and `requireAdmin()`. `getCurrentUser` always re-validates the
+session cookie against the database — it never trusts a header set by `proxy.ts`, so a
+request that somehow reaches a route handler without going through the proxy still can't
+claim to be someone.
+
+### Testing routes that require auth
+
+Route tests mock `@/lib/server/auth` the same way other route tests mock Prisma:
+
+```ts
+vi.mock("@/lib/server/auth", () => ({
+  requireAuth: vi.fn().mockResolvedValue(null),
+}));
+```
+
+(see `src/app/api/images/upload/route.test.ts`). `requireAuth`/`requireAdmin` return `null`
+to mean "authorized, keep going" and a `NextResponse` to mean "reject with this response" —
+mock the return value accordingly to simulate a signed-out or non-admin caller.
+
 ## Versioning
 
 CalVer `YYYY.M.D` plus a short sha, e.g. `2026.9.26-81f8b3a`.

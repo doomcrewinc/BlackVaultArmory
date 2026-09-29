@@ -115,6 +115,18 @@ export const DATE_ONLY_EXCLUDED_FIELDS = [
   "Kit.updatedAt",
   "KitItem.createdAt",
   "KitItem.updatedAt",
+  // Accounts (see prisma/schema.base.prisma, model User/Session/AuthToken):
+  // every one of these is a true instant that something compares or expires
+  // against — never a calendar day the user picked.
+  "User.createdAt",
+  "User.disabledAt",
+  "User.lastLoginAt",
+  "Session.createdAt",
+  "Session.lastSeenAt",
+  "Session.expiresAt",
+  "AuthToken.createdAt",
+  "AuthToken.expiresAt",
+  "AuthToken.usedAt",
 ] as const;
 
 export interface MigrationSummary {

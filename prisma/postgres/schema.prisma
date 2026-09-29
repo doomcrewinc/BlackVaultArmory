@@ -450,6 +450,63 @@ model DateNormalizationAudit {
   @@index([model, field])
 }
 
+// ─── ACCOUNTS ─────────────────────────────────────────────────
+// See docs/superpowers/specs/2026-09-27-accounts-design.md. Users are never
+// hard-deleted: the audit log (spec 2b) must still name a disabled user.
+//
+// Role and AuthTokenKind are "enums" in the design spec, but this schema is
+// text-substituted for both providers (see src/lib/db/schema-codegen.ts) and
+// SQLite has no native enum support, so — same convention as every other
+// enum-like column here (Firearm.type, Firearm.nfaClass, Accessory.type,
+// etc.) — they are String columns with the value set documented in a comment.
+// The matching TS unions live in src/lib/accounts.ts.
+
+model User {
+  id           String      @id @default(cuid())
+  username     String      @unique
+  displayName  String
+  passwordHash String
+  // Role: ADMIN | USER
+  role         String      @default("USER")
+  disabledAt   DateTime?
+  createdAt    DateTime    @default(now())
+  lastLoginAt  DateTime?
+  sessions     Session[]
+  resetTokens  AuthToken[] @relation("TokenUser")
+  issuedTokens AuthToken[] @relation("TokenIssuer")
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  userAgent  String?
+
+  @@index([userId])
+}
+
+model AuthToken {
+  id          String    @id @default(cuid())
+  // AuthTokenKind: INVITE | RESET | SETUP
+  kind        String
+  tokenHash   String    @unique
+  userId      String?
+  user        User?     @relation("TokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  // Role: ADMIN | USER — set only when kind = INVITE (the role granted on redemption).
+  role        String?
+  createdById String?
+  createdBy   User?     @relation("TokenIssuer", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  usedAt      DateTime?
+
+  @@index([kind, usedAt])
+}
+
 // ─── SETTINGS ─────────────────────────────────────────────────
 
 model AppSettings {
@@ -463,7 +520,6 @@ model AppSettings {
   backupDestinationPath   String?
   manualLanHost           String?
   defaultCurrency         String   @default("USD")
-  appPassword             String?
   defaultAmmoAlertThreshold Int?
   // Days ahead to warn that a supply is expiring. One fixed window would be
   // wrong for both milk and body armor, so it is a setting. null = use the

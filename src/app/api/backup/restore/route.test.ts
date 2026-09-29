@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 
+// The real requireAdmin, driven by the session lookup: ADMIN by default, USER/null per test.
+const auth = vi.hoisted(() => ({ validateSession: vi.fn() }));
+const ADMIN_SESSION = { sessionId: "s1", user: { id: "u1", username: "admin", displayName: "Admin", role: "ADMIN" } };
+const USER_SESSION = { sessionId: "s2", user: { id: "u2", username: "jeff", displayName: "Jeff", role: "USER" } };
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
+vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: auth.validateSession }));
+
 type Call = {
   op: "deleteMany" | "createMany";
   delegate: string;
@@ -91,6 +98,24 @@ describe("POST /api/backup/restore", () => {
       async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTx()),
     );
     mocks.runConfiguredDateMigration.mockResolvedValue(undefined);
+    auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+  });
+
+  it("401 when signed out, nothing touched", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Authentication required" });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("403 Admins only for a USER, nothing touched", async () => {
+    auth.validateSession.mockResolvedValue(USER_SESSION);
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Admins only" });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.calls).toEqual([]);
   });
 
   it("restores maintenance, battery, and date-audit rows from a v1.1 payload", async () => {

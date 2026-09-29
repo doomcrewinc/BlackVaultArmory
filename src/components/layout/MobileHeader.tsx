@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Shield, Menu, Search } from "lucide-react";
-import { Sidebar } from "./Sidebar";
+import { Sidebar, type NavUser } from "./Sidebar";
 
-export function MobileHeader() {
+export function MobileHeader({ user = null }: { user?: NavUser | null }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -69,6 +69,7 @@ export function MobileHeader() {
         mobileOnly
         mobileOpen={open}
         onMobileClose={handleClose}
+        user={user}
       />
     </>
   );

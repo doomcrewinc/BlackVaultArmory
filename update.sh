@@ -13,6 +13,8 @@ echo ""
 . ./scripts/compose-provider.sh
 # shellcheck source=scripts/public-url-prompts.sh
 . ./scripts/public-url-prompts.sh
+# shellcheck source=scripts/setup-token.sh
+. ./scripts/setup-token.sh
 
 # ── Docker Compose v2.20+ ─────────────────────────────────────
 # docker-compose.yml needs it. Exits before anything is touched (no .env
@@ -171,3 +173,8 @@ echo "  URL:      $(env_value BLACKVAULT_PUBLIC_URL)"
 echo ""
 echo "  To check logs: $COMPOSE logs -f"
 echo ""
+
+# ── First-time setup token ────────────────────────────────────
+# Printed only while no admin account exists (see scripts/setup-token.sh).
+# The health wait above means the app has started and logged it by now.
+show_setup_token "$(env_value BLACKVAULT_PUBLIC_URL)"

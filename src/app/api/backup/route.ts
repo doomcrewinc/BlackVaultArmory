@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/server/auth";
+import { requireAdmin } from "@/lib/server/auth";
 import { BACKUP_MODELS } from "@/lib/backup/models";
 import fs from "fs";
 import path from "path";
@@ -9,7 +9,7 @@ type ReadDelegate = { findMany: () => Promise<unknown[]> };
 const delegates = prisma as unknown as Record<string, ReadDelegate>;
 
 export async function POST() {
-  const auth = await requireAuth();
+  const auth = await requireAdmin();
   if (auth) return auth;
 
   try {

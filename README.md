@@ -472,6 +472,41 @@ Still stuck? Open a [GitHub issue](https://github.com/doomcrewinc/BlackVaultArmo
 
 ---
 
+### 🔑 I'm the only admin and I forgot my password
+
+Run this inside the container (see **[Users and sign-in](#users-and-sign-in)** below for
+details):
+
+```bash
+docker compose exec blackvault node scripts/admin-reset-link.mjs <username>
+```
+
+It prints a one-time password reset link, valid 24 hours. If that admin account was disabled
+or demoted, add `--promote` to also restore admin access:
+
+```bash
+docker compose exec blackvault node scripts/admin-reset-link.mjs <username> --promote
+```
+
+---
+
+### 🔑 Where is the setup token?
+
+```bash
+docker compose logs blackvault | grep "Setup token"
+```
+
+Windows:
+
+```cmd
+docker compose logs blackvault | findstr /c:"Setup token"
+```
+
+This only prints something while no admin account exists yet — once the first admin is
+created, `/setup` stops working and no more tokens are logged.
+
+---
+
 ### Known issue: PostgreSQL on Windows is untested
 
 The PostgreSQL database keeps its files in `data\postgres`, a folder on your Windows drive that
@@ -488,15 +523,100 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 ---
 
+## Users and sign-in
+
+BlackVault requires an account. The first time you open it — a fresh install, or right after
+updating to the release that added this — every page sends you to `/setup` to create the
+first admin.
+
+### Finding your setup token
+
+`install.sh` / `install.bat` and `update.sh` / `update.bat` print it automatically in a boxed
+block once the container is healthy. If you need it again, get it straight from the
+container log:
+
+```bash
+docker compose logs blackvault | grep "Setup token"
+```
+
+Windows:
+
+```cmd
+docker compose logs blackvault | findstr /c:"Setup token"
+```
+
+Then open `<your public URL>/setup` (e.g. `http://localhost:3000/setup`), enter the token,
+and choose a username and password — you're the first admin. A fresh token is printed every
+time BlackVault starts while no admin exists yet, so only the most recent line in the log is
+valid. Once an admin exists, `/setup` returns 404 and no more tokens are printed.
+
+> 💡 Re-running `install.sh` / `install.bat` on an existing install won't show you the token —
+> it sees your `.env` already exists and changes nothing. Use the log command above instead.
+
+### Inviting people
+
+Admins invite other household members from **Users** in the sidebar (`/admin/users`) →
+**Invite someone**. You get a link and a QR code that work once and expire after 7 days. The
+person who opens it picks their own username and password — you never see or choose it for
+them. Pick their role when you create the invite:
+
+- **Admin** — manages users, settings, backup/restore, and the Mobile Access switch below.
+- **User** — full access to the inventory (firearms, accessories, range sessions, exports),
+  but the admin-only areas are off limits.
+
+A plain user who opens an admin-only page sees a "Restricted — admins only" page naming the
+current admins, so they know who to ask.
+
+### Resetting a forgotten password
+
+An admin issues a one-time password reset link for anyone from **Users** in the sidebar, the
+same way as an invite. It expires after 24 hours.
+
+### Your account
+
+Every signed-in user has an **/account** page: change your display name and password, see
+your active sessions (device and last-seen time) with a button to end any of them, or log out
+everywhere at once.
+
+### Mobile Access is now an admin-only switch
+
+Settings → **Mobile Access (Local Network)** has an on/off switch for direct access, with a
+confirmation step either way and a plain-HTTP warning before turning it on. Only admins can
+change it; a plain user sees the same section read-only. See **Mobile Access (Same Network)**
+below for what direct access does.
+
+### Recovery: locked out as the only admin
+
+If the only admin forgets their password, or their account gets disabled or demoted somehow,
+run this inside the container:
+
+```bash
+docker compose exec blackvault node scripts/admin-reset-link.mjs <username>
+```
+
+It prints a one-time reset link, valid 24 hours. Add `--promote` to also make that user an
+active admin again (clearing any disabled state):
+
+```bash
+docker compose exec blackvault node scripts/admin-reset-link.mjs <username> --promote
+```
+
+Anyone who can run this already has shell on the Docker host, and therefore the database — it
+doesn't open up anything that wasn't already reachable.
+
+---
+
 ## Mobile Access (Same Network)
 
 You can open BlackVault on your phone as long as it's on the same Wi-Fi as your computer —
 **if direct access is on.** This is a stored setting, off by default from a fresh install.
 `install.sh` / `install.bat` ask about it on a fresh install, and `update.sh` / `update.bat`
 ask once, on the first update to this release; after that, re-running them does not change
-it. To force it **on**, set `BLACKVAULT_ALLOW_DIRECT_ACCESS=true` in `.env` and restart
-(`docker compose up -d`). An in-app switch — including turning it off — arrives with user
-accounts. Settings → **Mobile Access (Local Network)** always shows whether it's on or off.
+it. To force it **on** regardless of the stored setting, set `BLACKVAULT_ALLOW_DIRECT_ACCESS=true`
+in `.env` and restart (`docker compose up -d`). Admins can also turn it on or off from Settings
+→ **Mobile Access (Local Network)** (see **Users and sign-in** above) — the switch is locked
+when `BLACKVAULT_ALLOW_DIRECT_ACCESS` forces it on. Settings → **Mobile Access (Local
+Network)** always shows whether it's on or off.
 
 1. Open BlackVault in your browser and go to **Settings**
 2. Look at **Mobile Access (Local Network)** — it shows a QR code and, below it, whether
@@ -518,10 +638,11 @@ on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
 
 ## Running behind a reverse proxy
 
-> ⚠️ **A reverse proxy gives you HTTPS, not a login.** BlackVault has no authentication yet
-> — anyone who can reach the proxy's address can open your vault. Only make it reachable
-> from networks you trust (your home network or a VPN), or put an authenticating proxy /
-> IP allowlist in front of it. Do not expose it to the open internet. See [Notes](#notes).
+> ⚠️ **A reverse proxy gives you HTTPS, not a second login.** BlackVault has user accounts,
+> but no two-factor authentication — anyone who can reach the proxy's address can attempt to
+> sign in. Only make it reachable from networks you trust (your home network or a VPN), or
+> put an authenticating proxy / IP allowlist in front of it as well. Do not expose it to the
+> open internet. See [Notes](#notes).
 
 BlackVault requires a **public URL** — the one address people use to reach it, normally
 your reverse proxy's HTTPS address (e.g. `https://vault.example.com`). Set it as
@@ -618,6 +739,10 @@ You can change this by editing `DATA_DIR` in the `.env` file before first run.
 **Settings → Backup** and save a backup. It downloads a JSON file with every record. Keep it
 together with a copy of `data/uploads` (your images and documents) and `.env`.
 
+This backup does **not** include accounts (users, passwords, sessions or invite/reset links)
+— only inventory data. Restoring a backup never touches accounts either way, so restoring an
+old one can't lock anyone out or bring back a since-disabled user.
+
 **Copying the `data` folder:** only do this with BlackVault **stopped**. On PostgreSQL,
 copying `data/postgres` while the database is running can produce a copy that will not start.
 
@@ -656,6 +781,20 @@ On Linux, `data/postgres` is owned by the database container, so a plain `cp -r`
 > that refuses to start. Updating any other way (e.g.
 > `git pull && docker compose up -d --build`) without adding it to `.env` leaves a
 > container that refuses to start.
+
+> ⚠️ **BlackVault now requires an account.** After updating, every page redirects to
+> `/setup` until you create the first admin — see **[Users and sign-in](#users-and-sign-in)**
+> above. **For this one update**, the copy of `update.sh` / `update.bat` you already have
+> predates the step that prints the setup token, so it won't show it to you. Get it from the
+> log instead:
+> ```bash
+> docker compose logs blackvault | grep "Setup token"
+> ```
+> Windows: `docker compose logs blackvault | findstr /c:"Setup token"`. After this one update,
+> the new script prints it automatically at every future update or install. Re-running the
+> installer on an existing install won't show it either — it sees your `.env` already exists
+> and prompts for nothing; use the log command above. Your inventory data is unchanged; only
+> accounts are new.
 
 Your data folder is never touched during an update.
 
@@ -756,7 +895,7 @@ ignored.) The first lines say whether `.env` will be
 switched after the copy. It will be if the copy goes into this install's own database.
 
 **Step 8: Real run.** It copies everything and then verifies it. It must end with
-`VERIFIED: all 16 models match`, followed by `Wrote .../data/db/.migrated` and
+`VERIFIED: all 23 models match (<N> rows). The source SQLite database was not modified.`, followed by `Wrote .../data/db/.migrated` and
 `Switched /your/path/.env to PostgreSQL (backup: /your/path/.env.pre-migration):` and the new
 lines it wrote (the password is shown as `****`). If it reports a mismatch, the copy is rolled back,
 `.env` is left alone, and you are still on SQLite. Stop there, and open an issue.
@@ -830,7 +969,9 @@ docker compose up -d
 
 - All data is stored locally on your machine — nothing leaves your network
 - No cloud connection is required or used
-- There is no login or authentication in V1
+- BlackVault has real user accounts (admin-invited, no self-registration or email) but no
+  two-factor authentication — keep it off the open internet unless it's behind an
+  authenticating reverse proxy or a VPN (see [Running behind a reverse proxy](#running-behind-a-reverse-proxy))
 - Intended for private, local use only — do not expose it to the public internet
 
 ---

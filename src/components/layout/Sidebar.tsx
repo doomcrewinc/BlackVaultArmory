@@ -20,9 +20,12 @@ import {
   Library,
   Search,
   Backpack,
+  Users,
+  LogOut,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { StatusMessage } from "@/components/shared/StatusMessage";
 import { useState, useEffect } from "react";
 import {
   groupHref,
@@ -67,6 +70,13 @@ const RANGE_CHILD_ITEMS = [
 
 const BOTTOM_NAV_ITEMS = [
   {
+    label: "Users",
+    href: "/admin/users",
+    icon: Users,
+    description: "Manage accounts",
+    adminOnly: true,
+  },
+  {
     label: "Accessories",
     href: "/accessories",
     icon: Crosshair,
@@ -85,6 +95,18 @@ const BOTTOM_NAV_ITEMS = [
     description: "Configuration",
   },
 ] as const;
+
+/** The signed-in user, as much as Sidebar/MobileHeader need — never the full session. */
+export type NavUser = { displayName: string; role: "ADMIN" | "USER" };
+
+function initialsFor(displayName: string): string {
+  const parts = displayName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join("");
+}
 
 function NavGroup({
   label,
@@ -202,12 +224,14 @@ interface SidebarProps {
   mobileOnly?: boolean;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
+  user?: NavUser | null;
 }
 
 export function Sidebar({
   mobileOnly = false,
   mobileOpen = false,
   onMobileClose,
+  user = null,
 }: SidebarProps) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
@@ -238,6 +262,33 @@ export function Sidebar({
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
   }, [mobileOpen, onMobileClose]);
+
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  async function handleLogout() {
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      // 401 means there was nothing to log out of anyway — /login is still the right
+      // place to land. Anything else (a real server error, a network failure) is a
+      // genuine failure: stay put and say so, rather than redirecting to a page that
+      // can't explain what just went wrong.
+      if (res.ok || res.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      setLogoutError("Could not log out. Try again.");
+    } catch {
+      setLogoutError("Could not log out. Try again.");
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  const bottomNavItems = BOTTOM_NAV_ITEMS.filter(
+    (item) => !("adminOnly" in item && item.adminOnly) || user?.role === "ADMIN",
+  );
 
   const navContent = (
     <>
@@ -425,7 +476,7 @@ export function Sidebar({
         </div>
 
         <div className="pt-2 mt-2 border-t border-vault-border/70">
-          {BOTTOM_NAV_ITEMS.map((item) => {
+          {bottomNavItems.map((item) => {
             const Icon = item.icon;
             const isActive = pathname.startsWith(item.href);
             return (
@@ -470,6 +521,48 @@ export function Sidebar({
       </nav>
 
       <div className="px-2 pb-3 shrink-0 border-t border-vault-border pt-2 space-y-1.5">
+        {user && (
+          <div className="space-y-0.5">
+            <Link
+              href="/account"
+              onClick={() => onMobileClose?.()}
+              title={collapsed ? user.displayName : undefined}
+              className={cn(
+                "flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors hover:bg-vault-border",
+                collapsed && "justify-center",
+              )}
+            >
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-vault-border bg-vault-surface-2 text-[11px] font-semibold text-vault-text-muted">
+                {initialsFor(user.displayName)}
+              </span>
+              {!collapsed && (
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate font-medium text-vault-text">
+                    {user.displayName}
+                  </span>
+                  <span className="block truncate text-[11px] text-vault-text-faint">
+                    {user.role === "ADMIN" ? "Administrator" : "Member"}
+                  </span>
+                </span>
+              )}
+            </Link>
+            <button
+              onClick={handleLogout}
+              disabled={loggingOut}
+              title={collapsed ? "Log out" : undefined}
+              className={cn(
+                "flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-sm text-vault-text-faint transition-colors hover:bg-vault-border hover:text-vault-text disabled:opacity-60",
+                collapsed && "justify-center",
+              )}
+            >
+              <LogOut className="h-4 w-4 shrink-0" />
+              {!collapsed && <span>{loggingOut ? "Logging out…" : "Log out"}</span>}
+            </button>
+            {logoutError && !collapsed && (
+              <StatusMessage tone="error" message={logoutError} className="text-xs" />
+            )}
+          </div>
+        )}
         <button
           onClick={() => setCollapsed(!collapsed)}
           className="hidden md:flex w-full items-center justify-center gap-2 px-2.5 py-2 rounded-md text-vault-text-faint hover:text-vault-text-muted hover:bg-vault-border transition-colors"

@@ -98,5 +98,9 @@ export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.filter(
   ({ model }) => V1_0_MODEL_NAMES.has(model),
 ).map(({ key }) => key);
 
-/** AppSettings is excluded: restore must not clobber local LAN host, paths, keys, or timezone. */
-export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings"];
+/**
+ * AppSettings is excluded: restore must not clobber local LAN host, paths, keys, or timezone.
+ * User, Session and AuthToken are excluded: password hashes never leave the server in an
+ * export, and restoring an old backup must never delete today's accounts or lock anyone out.
+ */
+export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings", "User", "Session", "AuthToken"];

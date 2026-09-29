@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+vi.mock("@/lib/server/auth", () => ({
+  requireAuth: async () => null,
+  requireAdmin: async () => null,
+  getCurrentUser: async () => ({ id: "u1", username: "admin", displayName: "Admin", role: "ADMIN", sessionId: "s1" }),
+}));
+
 const mocks = vi.hoisted(() => ({
   findMany: vi.fn(),
   create: vi.fn(),

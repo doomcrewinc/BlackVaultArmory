@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/server/auth";
+import { requireAdmin } from "@/lib/server/auth";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 import {
@@ -123,7 +123,7 @@ function normalizeGearArmorGroups(rows: Record<string, unknown[]>): void {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth();
+  const auth = await requireAdmin();
   if (auth) return auth;
 
   let body: unknown;

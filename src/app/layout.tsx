@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { GlobalSearch } from "@/components/search/GlobalSearch";
 import { DatabaseStatusProvider } from "@/components/layout/DatabaseStatusProvider";
+import { getCurrentUser } from "@/lib/server/auth";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
@@ -22,11 +23,21 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Ruling A1: conditional on whether someone is signed in, and (Task 10) the
+  // signed-in user is passed down to Sidebar/MobileHeader for the account
+  // block, Log out and the admin-only "Users" link. Auth pages (/login,
+  // /setup, /invite/*, /reset/*) render with no chrome at all: no Sidebar, no
+  // MobileHeader, no GlobalSearch, no ThemeToggle.
+  const user = await getCurrentUser();
+  // NavUser (Sidebar.tsx) is deliberately just { displayName, role } — id and
+  // sessionId never need to reach a client component, so they're never passed.
+  const navUser = user ? { displayName: user.displayName, role: user.role } : null;
+
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -43,19 +54,25 @@ export default function RootLayout({
               marks it inert during a database outage — that is what makes the
               app read-only — and renders the notice outside it. */}
           <DatabaseStatusProvider>
-            <div className="flex min-h-svh">
-              <Sidebar />
-              <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
-                <MobileHeader />
-                <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
-                  <ErrorBoundary>{children}</ErrorBoundary>
-                </main>
+            {user ? (
+              <div className="flex min-h-svh">
+                <Sidebar user={navUser} />
+                <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
+                  <MobileHeader user={navUser} />
+                  <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
+                    <ErrorBoundary>{children}</ErrorBoundary>
+                  </main>
+                </div>
               </div>
-            </div>
-            <ThemeToggle />
-            <GlobalSearch />
+            ) : (
+              <main className="min-h-svh">
+                <ErrorBoundary>{children}</ErrorBoundary>
+              </main>
+            )}
+            {user && <ThemeToggle />}
           </DatabaseStatusProvider>
         </ThemeProvider>
+        {user && <GlobalSearch />}
       </body>
     </html>
   );

@@ -8,6 +8,13 @@ const mocks = vi.hoisted(() => ({
   runLegacyDateMigration: vi.fn(),
 }));
 
+// The real requireAdmin, driven by the session lookup: ADMIN by default, USER/null per test.
+const auth = vi.hoisted(() => ({ validateSession: vi.fn() }));
+const ADMIN_SESSION = { sessionId: "s1", user: { id: "u1", username: "admin", displayName: "Admin", role: "ADMIN" } };
+const USER_SESSION = { sessionId: "s2", user: { id: "u2", username: "jeff", displayName: "Jeff", role: "USER" } };
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
+vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: auth.validateSession }));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     appSettings: {
@@ -31,6 +38,33 @@ import { GET, PUT } from "./route";
 describe("/api/settings backup fields", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+  });
+
+  it("PUT: 401 when signed out, nothing written", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const response = await PUT(
+      new NextRequest("http://localhost/api/settings", { method: "PUT", body: JSON.stringify({ defaultCurrency: "EUR" }) }),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Authentication required" });
+    expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("PUT: 403 Admins only for a USER, nothing written", async () => {
+    auth.validateSession.mockResolvedValue(USER_SESSION);
+    const response = await PUT(
+      new NextRequest("http://localhost/api/settings", { method: "PUT", body: JSON.stringify({ defaultCurrency: "EUR" }) }),
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Admins only" });
+    expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("GET stays readable by a USER", async () => {
+    auth.validateSession.mockResolvedValue(USER_SESSION);
+    mocks.findUnique.mockResolvedValue({ id: "singleton", createdAt: new Date(), updatedAt: new Date() });
+    expect((await GET()).status).toBe(200);
   });
 
   it("returns persisted backup settings from GET", async () => {
@@ -44,7 +78,6 @@ describe("/api/settings backup fields", () => {
       backupDestinationPath: "/srv/blackvault/backups",
       manualLanHost: "192.168.1.74",
       defaultCurrency: "USD",
-      appPassword: null,
       createdAt: new Date("2026-03-01T00:00:00.000Z"),
       updatedAt: new Date("2026-03-02T00:00:00.000Z"),
     });
@@ -71,7 +104,6 @@ describe("/api/settings backup fields", () => {
       backupDestinationPath: "/mnt/blackvault/backups",
       manualLanHost: null,
       defaultCurrency: "USD",
-      appPassword: null,
       createdAt: new Date("2026-03-01T00:00:00.000Z"),
       updatedAt: new Date("2026-03-02T00:00:00.000Z"),
     });
@@ -104,13 +136,12 @@ describe("/api/settings backup fields", () => {
     expect(json.autoBackupCadence).toBe("weekly");
   });
 
-  it("returns appPassword as null in responses for v1", async () => {
+  it("never writes appPassword — the field no longer exists on AppSettings", async () => {
     mocks.upsert.mockResolvedValue({
       id: "singleton",
       includeUploadsInBackup: false,
       autoBackupEnabled: true,
       autoBackupCadence: "daily",
-      appPassword: "existing-secret",
     });
 
     const request = new NextRequest("http://localhost/api/settings", {
@@ -134,7 +165,7 @@ describe("/api/settings backup fields", () => {
     expect(upsertArgs.update.autoBackupEnabled).toBe(true);
     expect(upsertArgs.update.autoBackupCadence).toBe("daily");
     expect("appPassword" in upsertArgs.update).toBe(false);
-    expect(json.appPassword).toBeNull();
+    expect("appPassword" in json).toBe(false);
   });
 
   it("rejects invalid cadence values", async () => {

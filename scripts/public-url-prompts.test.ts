@@ -10,6 +10,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const LIB = path.join(__dirname, "public-url-prompts.sh");
 
+// `docker compose logs blackvault` output for the setup-token scenarios. The
+// app prints a new token at every start while no admin exists: the last one
+// is the valid one. scripts/setup-token.test.ts covers the helper itself.
+const TOKEN_LOG = [
+  "blackvault  | [auth] Setup token: ABCD-EFGH-JKMN-PQRS — create the first admin at https://vault.example.com/setup",
+  "blackvault  | [auth] Setup token: WXYZ-2345-6789-ABCD — create the first admin at https://vault.example.com/setup",
+  "blackvault  | ✓ Ready in 812ms",
+  "",
+].join("\n");
+const NO_TOKEN_LOG = "blackvault  | ✓ Ready in 812ms\n";
+
 // timeoutMs bounds every call: a prompt that spins forever on EOF must not
 // hang the suite. spawnSync kills the child and returns (status: null) once
 // the timeout elapses, so a hang shows up as a fast, clear test failure
@@ -152,9 +163,11 @@ describe("install.sh end-to-end", () => {
       },
     });
     // Stub `docker` so require_compose passes and $COMPOSE build/up are no-ops.
+    // `ps` prints "healthy" so the health wait ends; `logs` prints the file
+    // named by $BV_STUB_LOGS_FILE, if any. Every call is recorded.
     fs.writeFileSync(
       path.join(bin, "docker"),
-      `#!/bin/sh\nif [ "$1" = compose ]; then\n  if [ "$2" = version ]; then echo "2.29.7"; exit 0; fi\n  exit 0\nfi\nexit 99\n`,
+      `#!/bin/sh\necho "$*" >> "${bin}/docker.log"\nif [ "$1" = compose ]; then\n  if [ "$2" = version ]; then echo "2.29.7"; exit 0; fi\n  if [ "$2" = ps ]; then echo "Up (healthy)"; exit 0; fi\n  if [ "$2" = logs ] && [ -n "$BV_STUB_LOGS_FILE" ]; then cat "$BV_STUB_LOGS_FILE"; fi\n  exit 0\nfi\nexit 99\n`,
       { mode: 0o755 },
     );
   });
@@ -199,6 +212,39 @@ describe("install.sh end-to-end", () => {
     // (e.g. an empty BLACKVAULT_PUBLIC_URL=) should exist on disk.
     expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
   });
+
+  function runInstall(log: string) {
+    const logs = path.join(bin, "logs.txt");
+    fs.writeFileSync(logs, log);
+    const r = spawnSync("bash", ["./install.sh"], {
+      cwd: dir,
+      input: "\n\nhttps://vault.example.com/\n\ny\n2\n",
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, BV_STUB_LOGS_FILE: logs },
+      timeout: 30000,
+    });
+    const calls = fs.readFileSync(path.join(bin, "docker.log"), "utf8");
+    return { code: r.status, out: r.stdout + r.stderr, calls };
+  }
+
+  it("after the start, prints the last setup token from the log in a boxed block", () => {
+    const r = runInstall(TOKEN_LOG);
+    expect(r.code).toBe(0);
+    const up = r.calls.indexOf("compose up -d");
+    expect(up).toBeGreaterThanOrEqual(0);
+    expect(r.calls.indexOf("compose logs blackvault")).toBeGreaterThan(up);
+    expect(r.out).toContain("First-time setup: open https://vault.example.com/setup");
+    expect(r.out).toContain("and enter the setup token: WXYZ-2345-6789-ABCD");
+    expect(r.out).not.toContain("ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it("prints no setup block when the log has no token line", () => {
+    const r = runInstall(NO_TOKEN_LOG);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("compose logs blackvault");
+    expect(r.out).not.toContain("First-time setup");
+    expect(r.out).not.toContain("setup token");
+  });
 });
 
 describe("update.sh end-to-end", () => {
@@ -227,7 +273,7 @@ describe("update.sh end-to-end", () => {
     // rebuild and restart ran. `ps` prints "healthy" so the wait loop ends.
     fs.writeFileSync(
       path.join(bin, "docker"),
-      `#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = compose ]; then\n  if [ "$2" = version ]; then echo "2.29.7"; exit 0; fi\n  if [ "$2" = ps ]; then echo "Up (healthy)"; exit 0; fi\n  exit 0\nfi\nexit 99\n`,
+      `#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = compose ]; then\n  if [ "$2" = version ]; then echo "2.29.7"; exit 0; fi\n  if [ "$2" = ps ]; then echo "Up (healthy)"; exit 0; fi\n  if [ "$2" = logs ] && [ -n "$BV_STUB_LOGS_FILE" ]; then cat "$BV_STUB_LOGS_FILE"; fi\n  exit 0\nfi\nexit 99\n`,
       { mode: 0o755 },
     );
   });
@@ -236,12 +282,14 @@ describe("update.sh end-to-end", () => {
     fs.rmSync(bin, { recursive: true, force: true });
   });
 
-  function runUpdate(stdin: string) {
+  function runUpdate(stdin: string, stubLogs?: string) {
+    const logsFile = path.join(bin, "logs.txt");
+    if (stubLogs !== undefined) fs.writeFileSync(logsFile, stubLogs);
     const r = spawnSync("bash", ["./update.sh"], {
       cwd: dir,
       input: stdin,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, BV_STUB_LOGS_FILE: stubLogs === undefined ? "" : logsFile },
       timeout: 30000,
     });
     const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
@@ -275,5 +323,27 @@ describe("update.sh end-to-end", () => {
     // failing on the missing file: nothing was asked, nothing left behind.
     expect(r.out).not.toContain("Public URL: the address people open");
     expect(fs.readdirSync(dir).filter((f) => f.startsWith(".env") && f !== ".env.example")).toEqual([]);
+  });
+
+  it("after the restart, prints the last setup token from the log in a boxed block", () => {
+    fs.writeFileSync(path.join(dir, ".env"), "BLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\n");
+    // keep the URL (Enter) -> keep direct access (Enter) -> trusted proxies (blank)
+    const r = runUpdate("\n\n\n", TOKEN_LOG);
+    expect(r.code).toBe(0);
+    const up = r.calls.indexOf("compose up -d");
+    expect(up).toBeGreaterThanOrEqual(0);
+    expect(r.calls.indexOf("compose logs blackvault")).toBeGreaterThan(up);
+    expect(r.out).toContain("First-time setup: open https://vault.example.com/setup");
+    expect(r.out).toContain("and enter the setup token: WXYZ-2345-6789-ABCD");
+    expect(r.out).not.toContain("ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it("prints no setup block when the log has no token line (an admin exists)", () => {
+    fs.writeFileSync(path.join(dir, ".env"), "BLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\n");
+    const r = runUpdate("\n\n\n", NO_TOKEN_LOG);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("compose logs blackvault");
+    expect(r.out).not.toContain("First-time setup");
+    expect(r.out).not.toContain("setup token");
   });
 });
