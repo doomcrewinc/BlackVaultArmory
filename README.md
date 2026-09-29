@@ -474,7 +474,7 @@ Still stuck? Open a [GitHub issue](https://github.com/doomcrewinc/BlackVaultArmo
 
 ### 🔑 I'm the only admin and I forgot my password
 
-Run this inside the container (see **[Users and sign-in](#users-and-sign-in)** above for
+Run this inside the container (see **[Users and sign-in](#users-and-sign-in)** below for
 details):
 
 ```bash

@@ -41,7 +41,7 @@ this spec provides.
 | 8 | Username + password; no email/SMTP | user (confirmed assumption) |
 | 9 | Admin-only: user management, the direct-access toggle, settings writes, backup/restore | user (confirmed assumption) |
 | 10 | Users can do everything to inventory | user (confirmed assumption) |
-| 11 | Admin-only **pages** opened by a plain user render a dedicated "Admins only" page (HTTP 403) naming the admins | user |
+| 11 | Admin-only **pages** opened by a plain user render a dedicated "Admins only" page naming the admins (served as HTTP 200 — Next does not carry a rewrite's status to the client; only the admin API returns 403) | user |
 | 12 | Built in-repo (no auth library): `node:crypto` scrypt, own tables | approach A, user-approved |
 | 13 | Users are never hard-deleted — "delete" means disable (2b needs "Jeff" to outlive Jeff's account) | design |
 | 14 | Backups exclude auth tables; restore never touches them | design |
