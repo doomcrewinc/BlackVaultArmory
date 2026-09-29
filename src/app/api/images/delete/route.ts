@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/server/auth";
+import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { getClientIp } from "@/lib/server/client-ip";
 
@@ -22,8 +22,9 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth();
   if (auth) return auth;
 
-  const ip = getClientIp(request) ?? "unknown";
-  const rate = await enforceRateLimit({ key: `delete:images:${ip}`, windowMs: 60_000, maxAttempts: 20 });
+  const user = await getCurrentUser();
+  const rateLimitKey = user ? `u:${user.id}` : "unknown";
+  const rate = await enforceRateLimit({ key: `delete:images:${rateLimitKey}`, windowMs: 60_000, maxAttempts: 20 });
   if (!rate.allowed) {
     return NextResponse.json(
       { error: "Too many delete attempts. Please wait a minute." },
