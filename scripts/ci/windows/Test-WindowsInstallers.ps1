@@ -135,7 +135,7 @@ function Invoke-Bat {
   Remove-Item -Force $logFile -ErrorAction SilentlyContinue
 
   $saved = @{}
-  $vars = @{ "BV_STUB_LOG" = $logFile; "BV_STUB_COMPOSE_VERSION" = "2.30.1"; "BV_STUB_FAIL_ON" = $null }
+  $vars = @{ "BV_STUB_LOG" = $logFile; "BV_STUB_COMPOSE_VERSION" = "2.30.1"; "BV_STUB_FAIL_ON" = $null; "BV_STUB_LOGS_FILE" = $null }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   foreach ($k in $vars.Keys) {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -739,6 +739,117 @@ Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\.
 Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env"))) -eq $envBefore) ".env untouched"
 Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
 Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------- setup-token helpers
+# What `docker compose logs blackvault` prints while no admin exists: the app
+# logs a NEW token at every start, so only the last one is valid. Written as
+# UTF-8 without a BOM and with LF endings, as the real CLI prints it; the stub
+# replays the bytes unchanged. Mirrors the fixtures in
+# scripts/public-url-prompts.test.ts and scripts/setup-token.test.ts.
+$TokenLog = @(
+  "blackvault  | Prisma schema loaded from prisma/sqlite/schema.prisma",
+  "blackvault  | [auth] Setup token: ABCD-EFGH-JKMN-PQRS $([char]0x2014) create the first admin at https://vault.example.com/setup",
+  "blackvault  | [auth] Setup token: WXYZ-2345-6789-ABCD $([char]0x2014) create the first admin at https://vault.example.com/setup",
+  "blackvault  | Ready in 812ms"
+) -join "`n"
+$NoTokenLog = @(
+  "blackvault  | Prisma schema loaded from prisma/sqlite/schema.prisma",
+  "blackvault  | Ready in 812ms"
+) -join "`n"
+
+function New-StubLogs([string]$Dir, [string]$Text) {
+  $f = Join-Path $Dir "__docker-logs.txt"
+  [IO.File]::WriteAllText($f, $Text + "`n", (New-Object Text.UTF8Encoding $false))
+  return $f
+}
+
+# An existing install that needs no prompts but "Is this still current?".
+function Set-ConfiguredSqliteInstall([string]$Dir, [string]$Port) {
+  Set-SqliteInstall $Dir $Port
+  Add-Content -Path (Join-Path $Dir ".env") -Encoding Ascii -Value @(
+    "BLACKVAULT_PUBLIC_URL=https://vault.example.com/",
+    "BLACKVAULT_DIRECT_ACCESS_INITIAL=on",
+    "BLACKVAULT_TRUSTED_PROXIES="
+  )
+}
+
+# ---------------------------------------------------------------- scenario T1
+Write-Scenario "install.bat - after the start, prints the LAST setup token from the log in a boxed block"
+$d = New-Sandbox "t1"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com/", "", "", "2") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $d $TokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose up -d") "started the container (premise)"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log"
+Assert ($r.Output -match "BlackVault is running\.") "the health wait saw the container healthy"
+Assert ($r.Output -match "First-time setup: open https://vault\.example\.com/setup") "the block names <PUBLIC_URL>/setup (trailing slash dropped)"
+Assert ($r.Output -match "and enter the setup token: WXYZ-2345-6789-ABCD") "the block shows the newest token"
+Assert ($r.Output -notmatch "ABCD-EFGH-JKMN-PQRS") "an older token from an earlier start is not shown"
+Assert ($r.Output -match "(?m)^\s+=+\r?\n\s+First-time setup:.*\r?\n\s+and enter the setup token: .*\r?\n\s+=+\r?$") "the two lines are boxed by rules above and below"
+Assert ($r.Output.IndexOf("BlackVault is ready") -ge 0 -and $r.Output.IndexOf("First-time setup") -gt $r.Output.IndexOf("BlackVault is ready")) "the block comes after the summary"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T2
+Write-Scenario "install.bat - no token line in the log (an admin exists): nothing extra printed"
+$d = New-Sandbox "t2"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $d $NoTokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block"
+Assert ($r.Output -notmatch "setup token") "no token text at all"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T3
+Write-Scenario "update.bat - after the restart, prints the LAST setup token from the log in a boxed block"
+$origin = New-GitRemote "update-token" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-token"
+Set-ConfiguredSqliteInstall $work "7030"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $TokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose up -d") "restarted the container (premise)"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log"
+Assert ($r.Output -match "Status:\s+running") "the health wait saw the container healthy"
+Assert ($r.Output -match "First-time setup: open https://vault\.example\.com/setup") "the block names <PUBLIC_URL>/setup (trailing slash dropped)"
+Assert ($r.Output -match "and enter the setup token: WXYZ-2345-6789-ABCD") "the block shows the newest token"
+Assert ($r.Output -notmatch "ABCD-EFGH-JKMN-PQRS") "an older token from an earlier start is not shown"
+Assert ($r.Output.IndexOf("Update complete") -ge 0 -and $r.Output.IndexOf("First-time setup") -gt $r.Output.IndexOf("Update complete")) "the block comes after the summary"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T4
+Write-Scenario "update.bat - no token line in the log (an admin exists): nothing extra printed"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $NoTokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block"
+Assert ($r.Output -notmatch "setup token") "no token text at all"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T5
+Write-Scenario "update.bat - a malformed code on the last token line prints nothing"
+$bad = $TokenLog + "`nblackvault  | [auth] Setup token: WXYZ-2345-6789-ABC $([char]0x2014) create the first admin at https://vault.example.com/setup"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $bad) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block for a code that is not XXXX-XXXX-XXXX-XXXX"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T6
+Write-Scenario "injection: update.bat WITHOUT its :show_setup_token call prints no token (T3's assertions can fail)"
+# Proves T3 discriminates on real cmd.exe: the same run against a copy of
+# update.bat whose `call :show_setup_token` line is removed must NOT show the
+# token. If this ever shows it, T3 is passing for some other reason.
+$broken = Join-Path $Sandboxes "update-no-token-call.bat"
+$lines = [IO.File]::ReadAllText((Join-Path $RepoRoot "update.bat")) -split "`r`n"
+$kept = @($lines | Where-Object { $_ -ne "call :show_setup_token ENV_PUBLIC_URL" })
+Assert ($kept.Count -eq $lines.Count - 1) "exactly one call line was removed (premise)"
+[IO.File]::WriteAllText($broken, ($kept -join "`r`n"), (New-Object Text.UTF8Encoding $false))
+$origin = New-GitRemote "update-token-injected" $broken
+$work = New-WorkingClone $origin "update-token-injected"
+Set-ConfiguredSqliteInstall $work "7031"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $TokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -notmatch "compose logs blackvault") "never read the log"
+Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "no token shown without the call"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report

@@ -29,7 +29,7 @@ const FILES = {
   update: readFileSync(path.join(ROOT, "update.bat")).toString("latin1"),
 } as const;
 
-const SUBROUTINES = ["valid_public_url", "prompt_yes_no", "prompt_trusted_proxies"] as const;
+const SUBROUTINES = ["valid_public_url", "prompt_yes_no", "prompt_trusted_proxies", "show_setup_token"] as const;
 
 const TERMINATOR = /^(exit \/b \d+|goto :eof|goto :[A-Za-z_]+_again)$/i;
 

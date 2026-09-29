@@ -24,6 +24,8 @@ fi
 . ./scripts/compose-provider.sh
 # shellcheck source=scripts/public-url-prompts.sh
 . ./scripts/public-url-prompts.sh
+# shellcheck source=scripts/setup-token.sh
+. ./scripts/setup-token.sh
 
 # Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
 # is written when it is missing or older.
@@ -234,9 +236,19 @@ $COMPOSE up -d
 
 echo ""
 echo "Waiting for health check..."
-sleep 5
+# Polled as in update.sh. The app logs the first-time setup token while it
+# starts, and a first start (migrations, and on PostgreSQL the database) takes
+# longer than a fixed few seconds: once healthy, the token is in the log.
+HEALTHY=""
+for _ in $(seq 1 60); do
+  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
+    HEALTHY=1
+    break
+  fi
+  sleep 2
+done
 
-if $COMPOSE ps | grep -q "healthy\|running"; then
+if [ -n "$HEALTHY" ]; then
   echo "BlackVault is running."
 else
   echo "Container started — check logs with:"
@@ -259,3 +271,7 @@ echo ""
 echo "  To stop BlackVault:    $COMPOSE down"
 echo "  To update BlackVault:  ./update.sh"
 echo ""
+
+# ── First-time setup token ────────────────────────────────────
+# Printed only while no admin account exists (see scripts/setup-token.sh).
+show_setup_token "$PUBLIC_URL"

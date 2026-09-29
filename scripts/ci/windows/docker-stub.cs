@@ -31,6 +31,11 @@
 //                            Unset => the command FAILS, i.e. "no Compose v2".
 //   BV_STUB_FAIL_ON          a compose subcommand that should exit 1
 //                            (e.g. "build") to exercise the failure paths.
+//   BV_STUB_LOGS_FILE        `docker compose logs` prints this file's raw
+//                            bytes (UTF-8, as the real CLI does), standing in
+//                            for the container log the scripts read the
+//                            first-time setup token from. Unset => the generic
+//                            "[stub] ..." line, which holds no token.
 
 using System;
 using System.IO;
@@ -83,6 +88,22 @@ internal static class DockerStub
         {
             Console.Error.WriteLine("[stub] docker compose " + sub + ": failing on purpose (BV_STUB_FAIL_ON)");
             return 1;
+        }
+
+        if (string.Equals(sub, "logs", StringComparison.OrdinalIgnoreCase))
+        {
+            string logsFile = Environment.GetEnvironmentVariable("BV_STUB_LOGS_FILE");
+            if (!string.IsNullOrEmpty(logsFile))
+            {
+                // Raw bytes, not Console.Write: the console encoding would
+                // re-encode the em dash, and the real docker writes UTF-8.
+                byte[] bytes = File.ReadAllBytes(logsFile);
+                using (Stream stdout = Console.OpenStandardOutput())
+                {
+                    stdout.Write(bytes, 0, bytes.Length);
+                }
+                return 0;
+            }
         }
 
         // `joined` already begins with "compose", so this prints
