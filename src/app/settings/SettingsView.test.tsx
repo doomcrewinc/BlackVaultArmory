@@ -10,7 +10,10 @@ type DirectAccess = { allowed: boolean; source: "env" | "setting" };
  * Stubs the two loads the page makes plus the direct-access PUT, which echoes the requested
  * value the way the real route does.
  */
-function stubFetch(directAccess: DirectAccess) {
+function stubFetch(
+  directAccess: DirectAccess,
+  { publicUrl = "https://vault.example", trustedProxiesConfigured = true }: { publicUrl?: string; trustedProxiesConfigured?: boolean } = {},
+) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url === "/api/settings" && !init?.method) {
       return { ok: true, json: async () => ({ manualLanHost: "", timezone: "America/Denver" }) } as Response;
@@ -23,7 +26,8 @@ function stubFetch(directAccess: DirectAccess) {
           port: "3000",
           url: "http://10.0.0.5:3000",
           isDocker: false,
-          publicUrl: "https://vault.example",
+          publicUrl,
+          trustedProxiesConfigured,
           directAccess,
         }),
       } as Response;
@@ -98,13 +102,54 @@ describe("SettingsView — direct-access control", () => {
     expect(screen.getByRole("switch", { name: /direct access/i })).toHaveAttribute("aria-checked", "false");
   });
 
-  it("turning it off needs no confirmation", async () => {
-    const fetchMock = stubFetch({ allowed: true, source: "setting" });
+  it("turning it off first asks for confirmation — connected over another address, it says how to get back in", async () => {
+    // jsdom's origin is http://localhost:3000, not the public URL: this browser uses direct access.
+    const fetchMock = stubFetch({ allowed: true, source: "setting" }, { publicUrl: "https://vault.example" });
     await renderLoaded(true);
+
     fireEvent.click(screen.getByRole("switch", { name: /direct access/i }));
+    const confirm = screen.getByTestId("direct-access-confirm");
+    expect(confirm).toHaveTextContent("You're connected over this address. You'll lose access in a few seconds.");
+    expect(confirm).toHaveTextContent(
+      "To get back in, open https://vault.example, or set BLACKVAULT_ALLOW_DIRECT_ACCESS=true in .env and restart.",
+    );
+    expect(directAccessPuts(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /turn off direct access/i }));
     await waitFor(() => expect(directAccessPuts(fetchMock)).toHaveLength(1));
     expect(JSON.parse(String(directAccessPuts(fetchMock)[0][1]?.body))).toEqual({ allowDirectAccess: false });
     await waitFor(() => expect(screen.getByRole("switch", { name: /direct access/i })).toHaveAttribute("aria-checked", "false"));
+  });
+
+  it("turning it off from the public URL gets the shorter confirm", async () => {
+    const fetchMock = stubFetch({ allowed: true, source: "setting" }, { publicUrl: window.location.origin });
+    await renderLoaded(true);
+
+    fireEvent.click(screen.getByRole("switch", { name: /direct access/i }));
+    const confirm = screen.getByTestId("direct-access-confirm");
+    expect(confirm).toHaveTextContent("http://10.0.0.5:3000 will stop working");
+    expect(confirm).not.toHaveTextContent("You're connected over this address");
+    expect(directAccessPuts(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(directAccessPuts(fetchMock)).toHaveLength(0);
+    expect(screen.getByRole("switch", { name: /direct access/i })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("with no trusted proxy configured, the off-confirm warns there may be no other way in", async () => {
+    stubFetch({ allowed: true, source: "setting" }, { publicUrl: window.location.origin, trustedProxiesConfigured: false });
+    await renderLoaded(true);
+    fireEvent.click(screen.getByRole("switch", { name: /direct access/i }));
+    expect(screen.getByTestId("direct-access-confirm")).toHaveTextContent(
+      "No trusted proxy is configured, so there may be no way in except",
+    );
+  });
+
+  it("with a trusted proxy configured, the no-proxy warning is absent", async () => {
+    stubFetch({ allowed: true, source: "setting" }, { publicUrl: window.location.origin, trustedProxiesConfigured: true });
+    await renderLoaded(true);
+    fireEvent.click(screen.getByRole("switch", { name: /direct access/i }));
+    expect(screen.getByTestId("direct-access-confirm")).not.toHaveTextContent("No trusted proxy is configured");
   });
 
   it("when the environment forces it on, the toggle is locked with the reason", async () => {

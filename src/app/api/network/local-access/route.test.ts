@@ -7,7 +7,7 @@ vi.mock("@/lib/network/get-local-ip", () => ({ getLocalIp: () => "10.10.10.3", i
 import { GET } from "./route";
 import { resetPublicUrlCacheForTests } from "@/lib/server/public-url";
 
-const savedPort = { PORT: process.env.PORT, GATE_PORT: process.env.GATE_PORT };
+const savedPort = { PORT: process.env.PORT, GATE_PORT: process.env.GATE_PORT, TRUSTED_PROXIES: process.env.TRUSTED_PROXIES };
 
 beforeEach(() => {
   process.env.PUBLIC_URL = "https://vault.example.com";
@@ -54,5 +54,16 @@ describe("GET /api/network/local-access", () => {
   it("falls back to 3000 when neither is set", async () => {
     const body = await (await GET()).json();
     expect(body.port).toBe("3000");
+  });
+
+  it("reports trustedProxiesConfigured as a boolean only, never the list", async () => {
+    delete process.env.TRUSTED_PROXIES;
+    expect((await (await GET()).json()).trustedProxiesConfigured).toBe(false);
+    process.env.TRUSTED_PROXIES = "   ";
+    expect((await (await GET()).json()).trustedProxiesConfigured).toBe(false);
+    process.env.TRUSTED_PROXIES = "172.18.0.5";
+    const body = await (await GET()).json();
+    expect(body.trustedProxiesConfigured).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("172.18.0.5");
   });
 });

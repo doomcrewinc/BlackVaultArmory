@@ -48,6 +48,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
   const [copySuccess, setCopySuccess] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [publicUrl, setPublicUrl] = useState("");
+  const [trustedProxiesConfigured, setTrustedProxiesConfigured] = useState(false);
   const [directAccess, setDirectAccess] = useState<DirectAccessState | null>(null);
 
   const [backupStatus, setBackupStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -116,6 +117,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
         setLocalPort(data.port ?? "3000");
         setIsDocker(data.isDocker ?? false);
         setPublicUrl(data.publicUrl ?? "");
+        setTrustedProxiesConfigured(data.trustedProxiesConfigured === true);
         setDirectAccess(data.directAccess ?? null);
       })
       .catch(() => {
@@ -522,6 +524,8 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                 state={directAccess}
                 isAdmin={isAdmin}
                 lanUrl={finalLanUrl}
+                publicUrl={publicUrl}
+                trustedProxiesConfigured={trustedProxiesConfigured}
                 onChange={setDirectAccess}
               />
             ) : null}

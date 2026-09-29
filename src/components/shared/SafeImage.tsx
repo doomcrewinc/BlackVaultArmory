@@ -18,10 +18,13 @@ function sourceKey(src: SafeImageSource): string | null {
 }
 
 /**
- * Uploaded photos (`/uploads/...`) and API-served images are behind login. Loaded straight from
- * the browser they always carry the session cookie; through `/_next/image` the server fetches
- * them itself, and whether that internal fetch carries the cookie past proxy.ts is unproven.
- * So local sources skip optimisation; remote URLs keep it.
+ * Uploaded photos (`/uploads/...`) and API-served images are behind login, so local sources
+ * MUST skip `/_next/image` — do not re-enable optimisation for them. Verified in the real Docker
+ * image (Task 11): `/_next/image?url=/uploads/...` requested WITH a valid session cookie returns
+ * 400, and the server logs "The requested resource isn't a valid image for /uploads/... received
+ * null" — Next's internal fetch does not carry the user's cookie, so proxy.ts redirects it to
+ * /login. Loaded straight from the browser, the same URL returns 200. Remote URLs keep
+ * optimisation.
  */
 function isLocalSource(source: string): boolean {
   return source.startsWith("/uploads/") || source.startsWith("/api/");

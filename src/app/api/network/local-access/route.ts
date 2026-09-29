@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getLocalIp, isDockerEnvironment } from "@/lib/network/get-local-ip";
 import { getDirectAccessState } from "@/lib/server/direct-access";
 import { getPublicUrl } from "@/lib/server/public-url";
+import { trustsForwardedHeaders } from "@/lib/server/request-gate";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,9 @@ function getAppPort(): string {
 export async function GET() {
   const directAccess = await getDirectAccessState();
   const publicUrl = getPublicUrl().origin;
+  // Boolean only — the proxy list itself never leaves the server. Settings uses it to warn
+  // that turning direct access off may leave no way in but the public URL.
+  const trustedProxiesConfigured = trustsForwardedHeaders();
 
   try {
     const ip = getLocalIp();
@@ -33,6 +37,7 @@ export async function GET() {
           : "Unable to detect local network IP",
         publicUrl,
         directAccess,
+        trustedProxiesConfigured,
       });
     }
 
@@ -44,6 +49,7 @@ export async function GET() {
       message: null,
       publicUrl,
       directAccess,
+      trustedProxiesConfigured,
     });
   } catch (error) {
     console.error("GET /api/network/local-access error:", error);
@@ -55,6 +61,7 @@ export async function GET() {
       message: "Unable to detect local network IP",
       publicUrl,
       directAccess,
+      trustedProxiesConfigured,
     });
   }
 }

@@ -34,17 +34,31 @@ interface DirectAccessPanelProps {
   state: DirectAccessState;
   isAdmin: boolean;
   lanUrl: string;
+  /** Origin of PUBLIC_URL — where people get back in once direct access is off. */
+  publicUrl: string;
+  /** Whether TRUSTED_PROXIES is set. Without it, only loopback and direct access get through the gate. */
+  trustedProxiesConfigured: boolean;
   onChange: (next: DirectAccessState) => void;
 }
 
 /**
  * Direct access (serving http://<ip>:<port>) — an admin toggle backed by
- * `PUT /api/settings/direct-access`; a plain user sees the status only. Turning it on asks for
- * confirmation behind the plain-HTTP warning; turning it off does not. Locked when
- * BLACKVAULT_ALLOW_DIRECT_ACCESS forces it on (the route answers 409 then anyway).
+ * `PUT /api/settings/direct-access`; a plain user sees the status only. Both directions ask for
+ * confirmation: on, behind the plain-HTTP warning; off, because it can lock everyone out — an
+ * admin browsing over http://<ip>:<port> loses the connection within seconds, and without a
+ * trusted proxy (the README's no-proxy default) even the host's own localhost:3000 arrives from
+ * the Docker bridge gateway and is reset by the gate. Locked when BLACKVAULT_ALLOW_DIRECT_ACCESS
+ * forces it on (the route answers 409 then anyway).
  */
-export function DirectAccessPanel({ state, isAdmin, lanUrl, onChange }: DirectAccessPanelProps) {
-  const [confirming, setConfirming] = useState(false);
+export function DirectAccessPanel({
+  state,
+  isAdmin,
+  lanUrl,
+  publicUrl,
+  trustedProxiesConfigured,
+  onChange,
+}: DirectAccessPanelProps) {
+  const [confirming, setConfirming] = useState<"on" | "off" | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const forced = state.source === "env";
@@ -63,7 +77,7 @@ export function DirectAccessPanel({ state, isAdmin, lanUrl, onChange }: DirectAc
         setError(json.error ?? "Could not change direct access. Please try again.");
         return;
       }
-      setConfirming(false);
+      setConfirming(null);
       onChange({ allowed: json.allowed === true, source: json.source === "env" ? "env" : "setting" });
     } catch {
       setError("Could not change direct access. Please try again.");
@@ -75,11 +89,7 @@ export function DirectAccessPanel({ state, isAdmin, lanUrl, onChange }: DirectAc
   function handleToggle() {
     if (forced || saving) return;
     setError(null);
-    if (state.allowed) {
-      void save(false);
-    } else {
-      setConfirming(true);
-    }
+    setConfirming(state.allowed ? "off" : "on");
   }
 
   const statusText = `Direct access: ${state.allowed ? "On" : "Off"}`;
@@ -132,21 +142,25 @@ export function DirectAccessPanel({ state, isAdmin, lanUrl, onChange }: DirectAc
           data-testid="direct-access-confirm"
           className="flex flex-col gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400"
         >
-          <p className="font-medium">Turn on direct access?</p>
-          <p className="text-xs text-amber-400/90">
-            <PlainHttpWarningText url={lanUrl} />
-          </p>
+          <p className="font-medium">{confirming === "on" ? "Turn on direct access?" : "Turn off direct access?"}</p>
+          {confirming === "on" ? (
+            <p className="text-xs text-amber-400/90">
+              <PlainHttpWarningText url={lanUrl} />
+            </p>
+          ) : (
+            <TurnOffWarning lanUrl={lanUrl} publicUrl={publicUrl} trustedProxiesConfigured={trustedProxiesConfigured} />
+          )}
           <div className="flex flex-wrap gap-2">
             <StandardButton
               type="button"
               variant="danger"
-              onClick={() => void save(true)}
+              onClick={() => void save(confirming === "on")}
               loading={saving}
-              loadingLabel="Turning on…"
+              loadingLabel={confirming === "on" ? "Turning on…" : "Turning off…"}
             >
-              Turn on direct access
+              {confirming === "on" ? "Turn on direct access" : "Turn off direct access"}
             </StandardButton>
-            <StandardButton type="button" variant="secondary" onClick={() => setConfirming(false)} disabled={saving}>
+            <StandardButton type="button" variant="secondary" onClick={() => setConfirming(null)} disabled={saving}>
               Cancel
             </StandardButton>
           </div>
@@ -155,5 +169,54 @@ export function DirectAccessPanel({ state, isAdmin, lanUrl, onChange }: DirectAc
 
       {error && <StatusMessage tone="error" message={error} />}
     </div>
+  );
+}
+
+/** Is this browser on the public URL, or on some other address (direct http://<ip>:<port>)? */
+function onPublicOrigin(publicUrl: string): boolean {
+  try {
+    return window.location.origin === new URL(publicUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What turning direct access off does, and how to recover. Rendered only after a click, so
+ * reading `window.location` here never runs during server rendering.
+ */
+function TurnOffWarning({
+  lanUrl,
+  publicUrl,
+  trustedProxiesConfigured,
+}: {
+  lanUrl: string;
+  publicUrl: string;
+  trustedProxiesConfigured: boolean;
+}) {
+  const publicTarget = publicUrl || "the public URL";
+  return (
+    <>
+      {onPublicOrigin(publicUrl) ? (
+        <p className="text-xs text-amber-400/90">
+          Opening BlackVault at <span className="font-mono">{lanUrl || "http://<ip>:<port>"}</span> will stop working
+          within a few seconds. Phones and other devices will need{" "}
+          <span className="font-mono break-all">{publicTarget}</span> instead.
+        </p>
+      ) : (
+        <p className="text-xs text-amber-400/90">
+          You&apos;re connected over this address. You&apos;ll lose access in a few seconds. To get back in, open{" "}
+          <span className="font-mono break-all">{publicTarget}</span>, or set{" "}
+          <span className="font-mono">BLACKVAULT_ALLOW_DIRECT_ACCESS=true</span> in .env and restart.
+        </p>
+      )}
+      {!trustedProxiesConfigured && (
+        <p className="text-xs font-medium text-amber-400">
+          No trusted proxy is configured, so there may be no way in except{" "}
+          <span className="font-mono break-all">{publicTarget}</span> on this machine, or setting{" "}
+          <span className="font-mono">BLACKVAULT_ALLOW_DIRECT_ACCESS=true</span> in .env and restarting.
+        </p>
+      )}
+    </>
   );
 }
