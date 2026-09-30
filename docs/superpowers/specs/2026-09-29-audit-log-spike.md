@@ -144,7 +144,39 @@ A13-baseline NO extension, plain single op behind a 3s itx         ["ok","ok"]  
 ```
 PostgreSQL 17, `connection_limit=1` and `=5`: every A-row identical to SQLite (A1–A12 as expected, same
 counts, A10 notes `["good:2","single:5"]`), except A13 at pool 5 is `["ok","ok"]` (a free connection).
-Both vitest runs: `Tests 5 passed (5)`.
+Both vitest runs: `Tests 5 passed (5)`. Raw lines (row JSON in `v` trimmed to `...`):
+```
+PROBE[postgres limit=1] A A1 single create (expect 1/1) {"r":{"ok":true,"ms":9,"v":"{\"id\":\"cmund322v000daf617jpjv72x\",\"name\":\"a1\",..."},"after":{"ok":true,"ms":2,"v":"{\"supply\":1,\"audit\":1}"}}
+PROBE[postgres limit=1] A A2 single create, audit insert fails (expect err, 0/0) {"r":{"ok":false,"ms":8,"err":"P2010 Invalid `prisma.$executeRaw()` invocation: | Raw query failed. Code: `23502`. Message: `Failing row contains (6, Supply, create, null).`"},"after":{"ok":true,"ms":2,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A3 itx two creates commit (expect 2/2) {"r":{"ok":true,"ms":6},"after":{"ok":true,"ms":2,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=1] A A4 itx creates then throw (expect err, 0/0) {"r":{"ok":false,"ms":7,"err":" boom"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A5 itx using OUTER client by mistake then throw (expect err, 0/0, no deadlock) {"r":{"ok":false,"ms":2,"err":" boom"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A6 array form commit (expect 2/2) {"r":{"ok":true,"ms":7,"v":"[{\"id\":\"cmund324e000paf61p8iybm8m\",\"name\":\"a6a\",..."},"after":{"ok":true,"ms":2,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=1] A A7 array form, audit fails (expect err, 0/0) {"r":{"ok":false,"ms":4,"err":"P2010 Invalid `prisma.$executeRaw()` invocation: | Raw query failed. Code: `23502`. Message: `Failing row contains (14, Supply, create, null).`"},"after":{"ok":true,"ms":2,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A8 nested $transaction inside itx then throw (expect err, 0/0) {"r":{"ok":false,"ms":4,"err":" boom"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A9 update/upsert/updateMany/delete/deleteMany in itx (expect 1 supply, audit 1+5=6) {"r":{"ok":true,"ms":22},"after":{"ok":true,"ms":3,"v":"{\"supply\":1,\"audit\":6}"}}
+PROBE[postgres limit=1] A A10 concurrency: 5 single ops + tx(commit) + tx(throw) in parallel (expect supply 7, audit 7) {"r":{"ok":true,"ms":157,"v":"{\"statuses\":[\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"rejected\"],\"notes\":[\"good:2\",\"single:5\"]}"},"after":{"ok":true,"ms":2,"v":"{\"supply\":7,\"audit\":7}"}}
+PROBE[postgres limit=1] A A11 read inside itx via tx (hook pass-through) sees uncommitted row (expect 1) {"r":{"ok":false,"ms":7,"err":" count-inside=1"},"after":{"ok":true,"ms":2,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=1] A A12 30 parallel single creates (expect 30/30) {"r":{"ok":true,"ms":197,"v":"[]"},"after":{"ok":true,"ms":3,"v":"{\"supply\":30,\"audit\":30}"}}
+PROBE[postgres limit=1] A A13 itx holding 3s + concurrent single op (default maxWait 2s) {"r":{"ok":true,"ms":3019,"v":"[\"ok\",\"P2028 Transaction API error: Unable to start a transaction in the given time.\"]"},"after":{"ok":true,"ms":3,"v":"{\"supply\":1,\"audit\":1}"}}
+PROBE[postgres limit=1] A A13b same, auto-wrap with maxWait 10s (expect both ok) {"r":{"ok":true,"ms":3031,"v":"[\"ok\",\"ok\"]"},"after":{"ok":true,"ms":2,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=1] A A13-baseline NO extension: itx holding 3s + concurrent plain single op {"r":{"ok":true,"ms":3019,"v":"[\"ok\",\"ok\"]"},"after":{"ok":true,"ms":2,"v":"{\"supply\":2,\"audit\":0}"}}
+PROBE[postgres limit=5] A A1 single create (expect 1/1) {"r":{"ok":true,"ms":7,"v":"{\"id\":\"cmund3sjl000d678td3vlpd02\",\"name\":\"a1\",..."},"after":{"ok":true,"ms":2,"v":"{\"supply\":1,\"audit\":1}"}}
+PROBE[postgres limit=5] A A2 single create, audit insert fails (expect err, 0/0) {"r":{"ok":false,"ms":5,"err":"P2010 Invalid `prisma.$executeRaw()` invocation: | Raw query failed. Code: `23502`. Message: `Failing row contains (72, Supply, create, null).`"},"after":{"ok":true,"ms":2,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A3 itx two creates commit (expect 2/2) {"r":{"ok":true,"ms":10},"after":{"ok":true,"ms":3,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=5] A A4 itx creates then throw (expect err, 0/0) {"r":{"ok":false,"ms":8,"err":" boom"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A5 itx using OUTER client by mistake then throw (expect err, 0/0, no deadlock) {"r":{"ok":false,"ms":4,"err":" boom"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A6 array form commit (expect 2/2) {"r":{"ok":true,"ms":7,"v":"[{\"id\":\"cmund3sl7000p678tzmb5q8v6\",\"name\":\"a6a\",..."},"after":{"ok":true,"ms":1,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=5] A A7 array form, audit fails (expect err, 0/0) {"r":{"ok":false,"ms":4,"err":"P2010 Invalid `prisma.$executeRaw()` invocation: | Raw query failed. Code: `23502`. Message: `Failing row contains (80, Supply, create, null).`"},"after":{"ok":true,"ms":2,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A8 nested $transaction inside itx then throw (expect err, 0/0) {"r":{"ok":false,"ms":8,"err":" boom"},"after":{"ok":true,"ms":3,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A9 update/upsert/updateMany/delete/deleteMany in itx (expect 1 supply, audit 1+5=6) {"r":{"ok":true,"ms":33},"after":{"ok":true,"ms":2,"v":"{\"supply\":1,\"audit\":6}"}}
+PROBE[postgres limit=5] A A10 concurrency: 5 single ops + tx(commit) + tx(throw) in parallel (expect supply 7, audit 7) {"r":{"ok":true,"ms":64,"v":"{\"statuses\":[\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"fulfilled\",\"rejected\"],\"notes\":[\"good:2\",\"single:5\"]}"},"after":{"ok":true,"ms":3,"v":"{\"supply\":7,\"audit\":7}"}}
+PROBE[postgres limit=5] A A11 read inside itx via tx (hook pass-through) sees uncommitted row (expect 1) {"r":{"ok":false,"ms":4,"err":" count-inside=1"},"after":{"ok":true,"ms":1,"v":"{\"supply\":0,\"audit\":0}"}}
+PROBE[postgres limit=5] A A12 30 parallel single creates (expect 30/30) {"r":{"ok":true,"ms":31,"v":"[]"},"after":{"ok":true,"ms":1,"v":"{\"supply\":30,\"audit\":30}"}}
+PROBE[postgres limit=5] A A13 itx holding 3s + concurrent single op (default maxWait 2s) {"r":{"ok":true,"ms":3008,"v":"[\"ok\",\"ok\"]"},"after":{"ok":true,"ms":4,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=5] A A13b same, auto-wrap with maxWait 10s (expect both ok) {"r":{"ok":true,"ms":3117,"v":"[\"ok\",\"ok\"]"},"after":{"ok":true,"ms":3,"v":"{\"supply\":2,\"audit\":2}"}}
+PROBE[postgres limit=5] A A13-baseline NO extension: itx holding 3s + concurrent plain single op {"r":{"ok":true,"ms":3013,"v":"[\"ok\",\"ok\"]"},"after":{"ok":true,"ms":3,"v":"{\"supply\":2,\"audit\":0}"}}
+```
 
 **Verdict ✅** on both providers: the change and its audit row commit together and roll back together
 (including when the audit insert itself fails, A2/A7); no deadlock in any shape (single op, itx,
@@ -202,9 +234,9 @@ R10 no cookie      HTTP 401 (proxy) — the `anonymous` path is unreachable thro
 
 ### Mechanism
 **Candidate A.** Atomicity: every audited write runs on an interactive-transaction client held in an
-`AsyncLocalStorage` store; the audit row is written with that same client. Actor: resolved once per
-transaction (or per auto-wrapped single write) **before** the transaction opens, stored in the ALS store,
-never looked up inside a transaction.
+`AsyncLocalStorage` store; the audit row is written with that same client. Actor: resolved **once per
+request** (memoised, ruling B5), always **before** a transaction opens, stored in the ALS store, never
+looked up inside a transaction.
 
 ### Files and signatures (Task 4)
 
@@ -231,8 +263,15 @@ export async function resolveActor(): Promise<Actor>;
 - `ip`: `getClientIpFromHeaders(h)` — new export in `src/lib/server/client-ip.ts`
   (`(headers: Pick<Headers,"get">, env = process.env) => string | null`); `getClientIp(request)` delegates
   to it. Same trusted-proxy/last-XFF rule.
-- **Never called while a transaction is open.** Cost: one session lookup per audited transaction /
-  single write (R4: 1 ms), because `getCurrentUser` is not memoised in route handlers.
+- **Never called while a transaction is open.**
+- **Memoised once per request (controller ruling B5).** `getCurrentUser` is not memoised in route
+  handlers (R5 warm), so `resolveActor` memoises itself: a module-level
+  `WeakMap<object, Promise<Actor>>` keyed on the object returned by `await headers()` (store the
+  promise, so concurrent writes in one request share one lookup), or an equivalent ALS request store
+  seeded on first use. **Unverified:** that `await headers()` returns the same object for every call
+  within one request — Task 4 must prove the memo with a real-server test (count session lookups for a
+  request that makes several audited writes); if identity does not hold, use the ALS alternative.
+  `system` (no request) is not memoised — nothing to look up.
 
 `src/lib/audit/extension.ts`
 ```ts
@@ -245,9 +284,14 @@ export function withAudit<C extends PrismaClient>(base: C): C;   // returns the 
   2. If `outer?.tx`: callback form → `return arg(outer.tx)` (flatten nested, A8); array form → await each
      item in order and return the array.
   3. Else: `const actor = outer?.actor ?? await resolveActor();` (before the tx), then
-     `return rawTx(tx => auditStorage.run({ tx, actor, suppress: outer?.suppress }, async () => await run(tx)), { maxWait: 10_000, ...opts })`
+     `return rawTx(tx => auditStorage.run({ tx, actor, suppress: outer?.suppress }, async () => await run(tx)), { maxWait: 10_000, timeout: 10_000, ...opts })`
      where `run` is the callback, or for the array form `async () => { const out = []; for (const p of arg) out.push(await p); return out; }`.
      Caller's `opts` win (restore passes `timeout: 30000`).
+     **Note:** these defaults apply to *every* transaction through the app client, not only the
+     auto-wrapped single writes — existing callback transactions (redeem, setup, builds, firearms,
+     finalize, admins, date-migration) change from Prisma's `maxWait 2 s / timeout 5 s` to
+     `10 s / 10 s`. That is intended (A13/A13b), but it is a behaviour change: a stuck transaction now
+     holds the SQLite connection up to 10 s instead of 5 s.
 - **The exported client** = `new Proxy(ext, { get: (t, p) => p === "$transaction" ? wrappedTx : Reflect.get(t, p) })`.
 - **`$allOperations({ model, operation, args, query })`:**
   - not an audited model (global-constraints list) or not a write op → `return query(args)`.
@@ -268,6 +312,69 @@ unaffected.
 from the store if present, else `await resolveActor()` — which is safe only because no tx is open on
 that path.
 
+### Restore: suppression covers the whole handler
+
+`POST /api/backup/restore` does two things that write audited rows:
+1. the restore `$transaction` (`src/app/api/backup/restore/route.ts:150`), `deleteMany`/`createMany` on
+   every model;
+2. **after and outside** that transaction, `runConfiguredDateMigration("restore")` (same file, line
+   177), which normalises legacy date-only values with one `client.$transaction` per row
+   (`src/lib/date-migration.ts:226`, `updateMany` on audited models).
+
+Wrapping only (1) would still produce one UPDATE entry per normalised restored row, attributed to the
+admin, each paying its own transaction and actor lookup. **Decision:** the restore handler runs its
+body from the start of the restore transaction through the post-restore date migration inside one
+`runWithRowAuditSuppressed(async () => { … })`, then writes exactly **one** `RESTORE` event (actor,
+backup file name, per-model row counts). The suppress flag lives in the outer ALS store and the wrapped
+`$transaction` copies it into each tx store, so the per-row date-migration transactions are suppressed
+too. The startup date migration (`register()`) is **not** suppressed — its rows are logged as `system`.
+
+### Cascades, nested and explicit child writes (controller ruling B4)
+
+The query hook sees only **top-level** operations: one call per `prisma.x.op(...)`. Prisma does not call
+it for rows written through nested `create`/`connect`, and the database — not Prisma — removes rows
+with `onDelete: Cascade`. Therefore:
+- **Explicit child writes a route makes itself** (e.g. `accessory.deleteMany` or `buildSlot.updateMany`
+  before deleting the parent firearm) are top-level operations and are logged as their **own** entries.
+- **The parent DELETE snapshot's `_children`** counts only rows the database removes by
+  `onDelete: Cascade`. They are counted (`_count` on the `findUnique`, or a count query per cascading
+  relation) **before** the delete, inside the same transaction (`store.tx`), so the counts match what
+  the delete removes. Rows a route already deleted explicitly are then gone and are not double-counted.
+- **Nested `create` / `connect` children** are recorded inside the parent CREATE's `changes`, not as
+  separate entries (spec, "Operations" table).
+
+### Rules for code that uses the audited client
+
+1. **Never detach a write from a transaction callback.** A write started in the callback but not awaited
+   (fire-and-forget, or scheduled to run after commit) still carries the tx store; it re-dispatches on
+   a closed transaction → P2028. Await every write inside the callback; do post-commit work after
+   `$transaction` resolves.
+2. **Nested `$transaction` is flattened** into the open one (A8). The inner call's `opts` (timeout,
+   isolation level) are ignored, and an inner call whose error is caught by the outer callback does
+   **not** roll back only the inner writes — nothing is rolled back until the outer transaction fails.
+   No current call site nests transactions.
+3. **Inside a callback, use `tx` for reads and for writes on excluded models.** The hook re-dispatches
+   only audited writes; a read, or a write on an excluded model (User, Session, AuthToken, …), made
+   through the outer `prisma` still runs outside the transaction and blocks at `connection_limit=1`
+   (pre-existing behaviour).
+4. **Route tests that `vi.mock("@/lib/prisma")` bypass the extension entirely.** They cannot prove
+   anything about auditing; Task 4 needs real-DB tests (temp SQLite, pattern
+   `src/lib/auth/redeem.real-db.test.ts`) for the extension and for the routes below.
+
+### Task 4 must pin with a test
+- Single audited write outside a tx: change + audit commit; an audit-insert failure rolls the change back.
+- Interactive tx: commit together; a throw rolls back both; outer-client audited write inside the
+  callback joins the tx (no deadlock at `connection_limit=1`).
+- Array-form `$transaction`: converted, atomic.
+- Nested `$transaction` flattens (A8).
+- Actor: resolved before any tx; `system` outside a request (instrumentation/date migration); memoised
+  once per request (real server, count session lookups).
+- `maxWait`/`timeout` defaults: a single write queued behind a 3 s transaction succeeds (A13b).
+- **Restore:** a restore whose backup contains legacy date-only values (so the post-restore date
+  migration normalises rows) produces exactly one `RESTORE` event and **no** row-level entries.
+- Cascades: deleting a firearm with cascading children → one DELETE with `_children` counts; explicit
+  child `deleteMany` in the same route → its own entries.
+
 ### Unverified here (Task 4 must check)
 - TypeScript: the extended client's type vs `PrismaClient` / `Prisma.TransactionClient` annotations
   (e.g. `consumeToken(…, tx: Prisma.TransactionClient)` in `src/lib/auth/tokens.ts`). Not probed.
@@ -278,6 +385,9 @@ that path.
   behaviour; blocks at pool 1). The hook could re-dispatch reads the same way; not probed.
 
 ### Every current `prisma.$transaction` call site (`grep -rn '\$transaction' src scripts prisma`, non-test)
+
+Plus every script that constructs or imports a Prisma client (`grep -ln "lib/prisma\|@prisma/client" scripts/*`), and the
+post-restore date migration, which reaches line 226 from inside a request.
 
 | Site | Form | Works unchanged? |
 |---|---|---|
@@ -290,9 +400,13 @@ that path.
 | `src/app/api/builds/[id]/route.ts:126` | callback | ✅ (A3/A4/R7/R8) |
 | `src/app/api/firearms/[id]/route.ts:309` | callback | ✅ |
 | `src/app/api/range/sessions/[id]/finalize/route.ts:20` | callback | ✅ |
-| `src/app/api/backup/restore/route.ts:150` | callback, `{ timeout: 30000 }`, `deleteMany`/`createMany` on every model | ⚠️ works, but **must** be wrapped in `runWithRowAuditSuppressed` or every restored row is audited; then one `RESTORE` event |
+| `src/app/api/backup/restore/route.ts:150` | callback, `{ timeout: 30000 }`, `deleteMany`/`createMany` on every model | ⚠️ works, but **must** run inside `runWithRowAuditSuppressed` (together with line 177, next row) or every restored row is audited; then one `RESTORE` event |
+| `src/app/api/backup/restore/route.ts:177` → `src/lib/date-migration.ts:226` | `runConfiguredDateMigration("restore")`, after and outside the restore tx, one callback tx per normalised row | ⚠️ inside the restore request: **must** be inside the same `runWithRowAuditSuppressed` — otherwise one UPDATE per normalised row attributed to the admin |
 | `src/lib/auth/admins.ts:69` | callback, User/AuthToken (excluded) | ✅; add `recordEvent(tx, …)` |
-| `src/lib/date-migration.ts:226` | callback via `client = prisma as unknown as Client`, `updateMany` on audited models | ✅ runs in `register()` → actor `system` (R1) |
+| `src/lib/date-migration.ts:226` (startup) | callback via `client = prisma as unknown as Client`, `updateMany` on audited models, from `register()` | ✅ actor `system` (R1); logged, not suppressed |
+| `scripts/admin-reset-link.mjs:116` | constructs its own `PrismaClient` (no `$transaction`) | ✅ not the app client; unaffected (and not audited) |
+| `scripts/decrypt-serials.ts:2` | imports the **app** client (`../src/lib/prisma`), no `$transaction`; `firearm.update` per row | ⚠️ goes through the extension: each update becomes an auto-wrapped tx logged as `system` (serial redacted). Unverified: `headers()` throwing under plain ts-node (expected → `system`) |
+| `scripts/reset-db.ts:2` | imports the **app** client, no `$transaction`; `deleteMany` on every table | ⚠️ goes through the extension: would read and log every deleted row as `system`. Task 4 must decide (suppress, or leave logged) and say whether the script touches `AuditEvent` (global constraint: no code path deletes audit entries) |
 | `src/lib/db/sqlite-to-postgres.ts:205` | `target.$transaction` on the migrator's own client | ✅ not the app client; unaffected |
 | `src/lib/db/fake-db.ts:64` | in-memory fake for tests | ✅ unaffected |
 
