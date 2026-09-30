@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, Mock } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/server/auth", () => ({
@@ -37,7 +37,7 @@ describe("POST /api/images/upload", () => {
   beforeEach(async () => {
     const { getCurrentUser } = await import("@/lib/server/auth");
     vi.clearAllMocks();
-    (getCurrentUser as any).mockResolvedValue({
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
       id: "user-1",
       username: "testuser",
       displayName: "Test User",
@@ -78,14 +78,14 @@ describe("POST /api/images/upload", () => {
 
     // First user
     await POST(uploadRequest("gear"));
-    const firstCall = (enforceRateLimit as any).mock.calls[0][0];
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
     expect(firstCall.key).toBe("upload:images:u:user-1");
 
     vi.clearAllMocks();
 
     // Mock a different user
     const { getCurrentUser } = await import("@/lib/server/auth");
-    (getCurrentUser as any).mockResolvedValue({
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
       id: "user-2",
       username: "otheruser",
       displayName: "Other User",
@@ -95,7 +95,7 @@ describe("POST /api/images/upload", () => {
 
     // Second user
     await POST(uploadRequest("gear"));
-    const secondCall = (enforceRateLimit as any).mock.calls[0][0];
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
     expect(secondCall.key).toBe("upload:images:u:user-2");
 
     // Keys are different — separate buckets
@@ -108,12 +108,12 @@ describe("POST /api/images/upload", () => {
 
     // First upload
     await POST(uploadRequest("gear"));
-    const firstCall = (enforceRateLimit as any).mock.calls[0][0];
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
 
     vi.clearAllMocks();
 
     // Restore the mock after clearing
-    (getCurrentUser as any).mockResolvedValue({
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
       id: "user-1",
       username: "testuser",
       displayName: "Test User",
@@ -123,7 +123,7 @@ describe("POST /api/images/upload", () => {
 
     // Second upload (same user)
     await POST(uploadRequest("gear"));
-    const secondCall = (enforceRateLimit as any).mock.calls[0][0];
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
 
     // Both use the same user ID key
     expect(firstCall.key).toBe("upload:images:u:user-1");

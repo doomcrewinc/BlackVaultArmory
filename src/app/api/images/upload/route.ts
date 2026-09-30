@@ -3,7 +3,6 @@ import { promises as fs } from "fs";
 import path from "path";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { getClientIp } from "@/lib/server/client-ip";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { ALLOWED_IMAGE_EXTENSIONS, SUPPORTED_IMAGE_FORMATS_LABEL } from "@/lib/image-formats";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";

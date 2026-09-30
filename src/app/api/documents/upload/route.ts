@@ -5,7 +5,6 @@ import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { detectFileSignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { getClientIp } from "@/lib/server/client-ip";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { getCanonicalUploadsRoot } from "@/lib/upload-security";
 

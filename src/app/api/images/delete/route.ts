@@ -4,7 +4,6 @@ import path from "path";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { getClientIp } from "@/lib/server/client-ip";
 
 const ALLOWED_ENTITY_TYPES = ["firearm", "accessory"] as const;
 type AllowedEntityType = (typeof ALLOWED_ENTITY_TYPES)[number];
