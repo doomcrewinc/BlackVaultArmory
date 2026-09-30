@@ -82,6 +82,50 @@ describe("AdminAuditPage", () => {
     expect(replace.mock.calls[0][0]).toContain("action=deletes");
   });
 
+  // Final review P3: AuditFilters used to merge each change against its
+  // render-time `value` prop, which only catches up once the URL round-trip
+  // lands. Two changes before that dropped the earlier one. In this harness
+  // `replace` never changes the URL, so the prop never catches up at all:
+  // exactly the window a real user can hit.
+  describe("filter changes made before the URL catches up are all kept", () => {
+    it("(A) Action and Item type changed in the same tick → the last replace carries both", async () => {
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
+
+      fireEvent.change(screen.getByLabelText(/^action$/i), { target: { value: "deletes" } });
+      fireEvent.change(screen.getByLabelText(/^item type$/i), { target: { value: "Firearm" } });
+
+      await waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
+      const last = String(replace.mock.calls.at(-1)?.[0]);
+      expect(last).toContain("action=deletes");
+      expect(last).toContain("type=Firearm");
+    });
+
+    it("(B) search typed, then Action changed inside the debounce window → the debounced replace keeps the Action", async () => {
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
+
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText(/search/i), { target: { value: "glock" } });
+        fireEvent.change(screen.getByLabelText(/^action$/i), { target: { value: "deletes" } });
+        await vi.advanceTimersByTimeAsync(400);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const last = String(replace.mock.calls.at(-1)?.[0]);
+      expect(last).toContain("action=deletes");
+      expect(last).toContain("q=glock");
+    });
+  });
+
   it("builds the Export CSV link with the current filters", async () => {
     currentSearch = "type=Firearm&action=edits";
     const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));

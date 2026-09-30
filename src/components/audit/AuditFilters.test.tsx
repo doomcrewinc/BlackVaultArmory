@@ -30,7 +30,7 @@ describe("AuditFilters", () => {
     const onChange = vi.fn();
     render(<AuditFilters value={EMPTY_AUDIT_FILTERS} onChange={onChange} />);
     fireEvent.change(screen.getByLabelText(/action/i), { target: { value: "deletes" } });
-    expect(onChange).toHaveBeenCalledWith({ ...EMPTY_AUDIT_FILTERS, action: "deletes" });
+    expect(onChange).toHaveBeenCalledWith({ action: "deletes" });
   });
 
   it("calls onChange with the selected item type", async () => {
@@ -38,7 +38,7 @@ describe("AuditFilters", () => {
     const onChange = vi.fn();
     render(<AuditFilters value={EMPTY_AUDIT_FILTERS} onChange={onChange} />);
     fireEvent.change(screen.getByLabelText(/item type/i), { target: { value: "Firearm" } });
-    expect(onChange).toHaveBeenCalledWith({ ...EMPTY_AUDIT_FILTERS, type: "Firearm" });
+    expect(onChange).toHaveBeenCalledWith({ type: "Firearm" });
   });
 
   it("calls onChange with the date range", async () => {
@@ -46,9 +46,9 @@ describe("AuditFilters", () => {
     const onChange = vi.fn();
     render(<AuditFilters value={EMPTY_AUDIT_FILTERS} onChange={onChange} />);
     fireEvent.change(screen.getByLabelText(/^from$/i), { target: { value: "2026-01-01" } });
-    expect(onChange).toHaveBeenCalledWith({ ...EMPTY_AUDIT_FILTERS, from: "2026-01-01" });
+    expect(onChange).toHaveBeenCalledWith({ from: "2026-01-01" });
     fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: "2026-01-31" } });
-    expect(onChange).toHaveBeenCalledWith({ ...EMPTY_AUDIT_FILTERS, to: "2026-01-31" });
+    expect(onChange).toHaveBeenCalledWith({ to: "2026-01-31" });
   });
 
   it("debounces the name search before calling onChange", async () => {
@@ -59,7 +59,7 @@ describe("AuditFilters", () => {
     fireEvent.change(screen.getByLabelText(/search/i), { target: { value: "glock" } });
     expect(onChange).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(500);
-    expect(onChange).toHaveBeenCalledWith({ ...EMPTY_AUDIT_FILTERS, q: "glock" });
+    expect(onChange).toHaveBeenCalledWith({ q: "glock" });
   });
 
   it("offers exactly the action groups query.ts's ACTION_GROUPS defines, never a stale hardcoded copy", async () => {

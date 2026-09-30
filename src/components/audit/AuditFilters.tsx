@@ -66,7 +66,13 @@ export function AuditFilters({
   onChange,
 }: {
   value: AuditFiltersState;
-  onChange: (next: AuditFiltersState) => void;
+  /**
+   * Receives only the fields that changed. The PARENT merges them against its
+   * latest requested filters: merging here against the render-time `value`
+   * would drop an earlier change made before `value` caught up (two selects in
+   * one tick, or a select changed during the search debounce).
+   */
+  onChange: (patch: Partial<AuditFiltersState>) => void;
 }) {
   const [users, setUsers] = useState<AdminUserOption[]>([]);
   // The name search is the only debounced control — a select/date change is
@@ -111,7 +117,7 @@ export function AuditFilters({
   );
 
   function set(patch: Partial<AuditFiltersState>) {
-    onChange({ ...value, ...patch });
+    onChange(patch);
   }
 
   function handleSearchChange(next: string) {

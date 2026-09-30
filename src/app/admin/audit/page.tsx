@@ -105,6 +105,13 @@ function AdminAuditPageInner() {
   // filter's page onto the list, or clobbering `cursor` with a stale value.
   const requestIdRef = useRef(0);
 
+  // The latest filters REQUESTED, whether or not the URL has caught up yet.
+  // `filters` state only updates after router.replace changes the URL and the
+  // effect below runs, so merging a change against it would drop any earlier
+  // change still in flight (final review P3). The URL effect resets this to
+  // what the URL says, so back/forward still wins.
+  const latestFiltersRef = useRef<AuditFiltersState>(EMPTY_AUDIT_FILTERS);
+
   const fetchPage = useCallback(async (f: AuditFiltersState, afterCursor?: string) => {
     const requestId = ++requestIdRef.current;
     if (afterCursor) setLoadingMore(true);
@@ -141,11 +148,14 @@ function AdminAuditPageInner() {
   // through this effect — so there is exactly one fetch per URL, not two.
   useEffect(() => {
     const next = filtersFromParams(new URLSearchParams(searchParamsString));
+    latestFiltersRef.current = next;
     setFilters(next);
     void fetchPage(next);
   }, [searchParamsString, fetchPage]);
 
-  function handleFiltersChange(next: AuditFiltersState) {
+  function handleFiltersChange(patch: Partial<AuditFiltersState>) {
+    const next = { ...latestFiltersRef.current, ...patch };
+    latestFiltersRef.current = next;
     const qs = toQueryString(next);
     router.replace(qs ? `${pathname}?${qs}` : pathname);
   }
