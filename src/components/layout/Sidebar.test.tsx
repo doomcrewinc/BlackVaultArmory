@@ -31,6 +31,23 @@ describe("Sidebar — admin-only Users link", () => {
   });
 });
 
+describe("Sidebar — admin-only Audit log link", () => {
+  it("hides the Audit log link for a plain USER", () => {
+    render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);
+    expect(screen.queryByRole("link", { name: /audit log/i })).toBeNull();
+  });
+
+  it("shows the Audit log link for an ADMIN, next to Users", () => {
+    render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Ann", role: "ADMIN" }} />);
+    expect(screen.getByRole("link", { name: /audit log/i })).toHaveAttribute("href", "/admin/audit");
+  });
+
+  it("hides the Audit log link entirely when no user is signed in", () => {
+    render(<Sidebar mobileOnly mobileOpen />);
+    expect(screen.queryByRole("link", { name: /audit log/i })).toBeNull();
+  });
+});
+
 describe("Sidebar — signed-in account block", () => {
   it("shows the display name, links to /account, and a Log out control", async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));

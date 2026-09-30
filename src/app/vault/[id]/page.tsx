@@ -4,6 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { decryptField } from "@/lib/crypto";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import {
   NFA_CLASS_LABELS,
   MG_REGISTRY_LABELS,
@@ -136,6 +138,11 @@ export default async function FirearmDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // ADMIN-only — this is the ONLY guard: a USER's render tree never includes
+  // <ItemHistory>, so no request to the audit API is ever made on their
+  // behalf. The API is admin-gated too (requireAdmin), but that is defense
+  // in depth, not the reason this is safe.
+  const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getFirearm>>;
   try {
     result = await getFirearm(id);
@@ -561,6 +568,10 @@ export default async function FirearmDetailPage({
             }))}
           />
         </div>
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="Firearm" entityId={firearm.id} />
+        )}
       </div>
     </div>
   );

@@ -18,6 +18,8 @@ import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
 import { getItemAllocation } from "@/lib/kits/itemAllocation";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 // No `include: { documents }`: ItemDocumentPanel fetches its own list from
@@ -70,6 +72,9 @@ export default async function GearDetailPage({
 }) {
   const { id } = await params;
 
+  // ADMIN-only History section — the ONLY guard: a USER's JSX never
+  // includes <ItemHistory>, so no audit-API request is ever made for them.
+  const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getGearWithExpiry>>;
   try {
     result = await getGearWithExpiry(id);
@@ -276,6 +281,10 @@ export default async function GearDetailPage({
           entityId={gear.id}
           title="Gear Documents"
         />
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="Gear" entityId={gear.id} />
+        )}
       </div>
     </div>
   );

@@ -20,6 +20,8 @@ import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
 import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { DeleteSupplyButton } from "./DeleteSupplyButton";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 // Single-record read: today and the expiry window are resolved once from
@@ -76,6 +78,9 @@ export default async function SupplyDetailPage({
 }) {
   const { id } = await params;
 
+  // ADMIN-only History section — the ONLY guard: a USER's JSX never
+  // includes <ItemHistory>, so no audit-API request is ever made for them.
+  const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getSupplyWithExpiry>>;
   try {
     result = await getSupplyWithExpiry(id);
@@ -237,6 +242,10 @@ export default async function SupplyDetailPage({
               {supply.notes}
             </p>
           </div>
+        )}
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="Supply" entityId={supply.id} />
         )}
       </div>
     </div>

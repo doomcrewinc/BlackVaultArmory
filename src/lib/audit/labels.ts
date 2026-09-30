@@ -70,3 +70,28 @@ export function labelFor(model: string, row: Record<string, unknown>): string {
       return fallback(model, row);
   }
 }
+
+/**
+ * Splits a camelCase or PascalCase identifier into its words: "serialNumber"
+ * -> ["serial", "Number"], "AmmoStock" -> ["Ammo", "Stock"]. Used to humanize
+ * both field names (`fieldLabel`) and Prisma model names (`modelDisplayName`)
+ * for display in the audit log's one-line summaries — see summary.ts.
+ */
+function splitWords(identifier: string): string[] {
+  return identifier
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** A changed field's name for display: "serialNumber" -> "serial number". */
+export function fieldLabel(field: string): string {
+  return splitWords(field).join(" ").toLowerCase();
+}
+
+/** A Prisma model name for display: "AmmoStock" -> "ammo stock". */
+export function modelDisplayName(model: string): string {
+  return splitWords(model).join(" ").toLowerCase();
+}

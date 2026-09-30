@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { labelFor } from "./labels";
+import { fieldLabel, labelFor, modelDisplayName } from "./labels";
 
 describe("labelFor", () => {
   it("labels a Firearm as name (caliber)", () => {
@@ -50,5 +50,26 @@ describe("labelFor", () => {
 
   it("falls back for models with no label rule", () => {
     expect(labelFor("BuildSlot", { id: "bs1" })).toBe("BuildSlot bs1");
+  });
+});
+
+describe("fieldLabel", () => {
+  it("humanizes a camelCase field name, lowercased", () => {
+    expect(fieldLabel("serialNumber")).toBe("serial number");
+    expect(fieldLabel("purchasePrice")).toBe("purchase price");
+  });
+
+  it("leaves a single-word field lowercased", () => {
+    expect(fieldLabel("status")).toBe("status");
+    expect(fieldLabel("notes")).toBe("notes");
+  });
+});
+
+describe("modelDisplayName", () => {
+  it("humanizes a PascalCase model name, lowercased", () => {
+    expect(modelDisplayName("Firearm")).toBe("firearm");
+    expect(modelDisplayName("AmmoStock")).toBe("ammo stock");
+    expect(modelDisplayName("MaintenanceLog")).toBe("maintenance log");
+    expect(modelDisplayName("RangeSessionAmmoLink")).toBe("range session ammo link");
   });
 });
