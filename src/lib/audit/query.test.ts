@@ -120,13 +120,25 @@ describe("parseAuditFilters", () => {
 
   // Fix round 1, Important: out-of-range/invalid dates must be dropped, not
   // handed to Prisma, which throws (500) rather than returning zero rows.
-  it.each(["2026-02-31", "0000-00-00", "2026-09-29junk", "9999-99-99"])(
+  it.each(["2026-02-31", "2025-02-29", "0000-00-00", "2026-09-29junk", "9999-99-99"])(
     "drops the calendar-invalid/out-of-range date %j for from and to",
     (raw) => {
       expect(parseAuditFilters(new URLSearchParams({ from: raw }))).toEqual({});
       expect(parseAuditFilters(new URLSearchParams({ to: raw }))).toEqual({});
     },
   );
+
+  it("accepts Feb 29 in a leap year for from and to", () => {
+    expect(parseAuditFilters(new URLSearchParams({ from: "2024-02-29" })).from?.toISOString()).toBe("2024-02-29T00:00:00.000Z");
+    expect(parseAuditFilters(new URLSearchParams({ to: "2024-02-29" })).to?.toISOString()).toBe("2024-02-29T23:59:59.999Z");
+  });
+
+  it("keeps a leap-day cursor and drops one on Feb 29 of a common year", () => {
+    expect(parseAuditFilters(new URLSearchParams({ cursor: "2024-02-29T12:00:00.000Z_x" }))).toEqual({
+      cursor: "2024-02-29T12:00:00.000Z_x",
+    });
+    expect(parseAuditFilters(new URLSearchParams({ cursor: "2025-02-29T12:00:00.000Z_x" }))).toEqual({});
+  });
 
   it("accepts the year boundaries 1970 and 9999", () => {
     expect(parseAuditFilters(new URLSearchParams({ from: "1970-01-01" })).from?.toISOString()).toBe("1970-01-01T00:00:00.000Z");
