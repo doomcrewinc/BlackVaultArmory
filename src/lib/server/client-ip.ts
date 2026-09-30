@@ -7,8 +7,19 @@ import { trustsForwardedHeaders } from "./request-gate";
  * configured trusted proxies nothing in the headers can be trusted, so null.
  */
 export function getClientIp(request: Request, env: NodeJS.ProcessEnv = process.env): string | null {
+  return getClientIpFromHeaders(request.headers, env);
+}
+
+/**
+ * The same rule for a bare headers object — what `await headers()` from
+ * next/headers returns, where no Request is in hand (the audit log's actor).
+ */
+export function getClientIpFromHeaders(
+  headers: Pick<Headers, "get">,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
   if (!trustsForwardedHeaders(env)) return null;
-  const values = (request.headers.get("x-forwarded-for") ?? "")
+  const values = (headers.get("x-forwarded-for") ?? "")
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean);

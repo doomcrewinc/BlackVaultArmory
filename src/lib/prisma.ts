@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { resolveProvider } from "./db/provider";
+import { withAudit } from "./audit/extension";
 
 /**
  * Both Prisma clients ship in the image; this is the only place that chooses.
@@ -18,10 +19,17 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
 
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
 
-export const prisma =
+/**
+ * The app client records every write on an audited model in the audit log
+ * (src/lib/audit/extension.ts). Scripts and the migrator that construct their
+ * own PrismaClient are not audited.
+ */
+export const prisma: PrismaClient =
   globalForPrisma.prisma ??
-  new (loadPrismaClient())({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
+  withAudit(
+    new (loadPrismaClient())({
+      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+    }),
+  );
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
