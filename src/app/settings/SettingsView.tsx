@@ -273,7 +273,12 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
       }
       const res = await fetch("/api/backup/restore", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // For the RESTORE audit event only (spec §Restore). URI-encoded so any
+          // file name is a valid header value; the server treats it as untrusted.
+          "X-Backup-Filename": encodeURIComponent(pendingRestoreFile.name),
+        },
         body: JSON.stringify(parsed),
       });
       const json = await res.json();

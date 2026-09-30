@@ -227,6 +227,11 @@ describe("summarize — security events", () => {
     const e = event({ action: "RESTORE", changes: { counts: { Firearm: 3 } } });
     expect(summarize(e)).toBe("Restored the database from backup");
   });
+
+  it("RESTORE with the backup file name", () => {
+    const e = event({ action: "RESTORE", changes: { file: "blackvault-backup-2026-09-29.json", counts: { Firearm: 3 } } });
+    expect(summarize(e)).toBe("Restored the database from backup blackvault-backup-2026-09-29.json");
+  });
 });
 
 describe("summarize — exhaustiveness (Fix round 1, item 6)", () => {

@@ -193,3 +193,35 @@ describe("SettingsView — admin-only sections", () => {
     expect(screen.queryByText("Admins only")).toBeNull();
   });
 });
+
+describe("SettingsView — restore", () => {
+  // Spec §Restore: the RESTORE audit event names the backup file. The file
+  // name travels URI-encoded in X-Backup-Filename; the body is unchanged.
+  it("sends the chosen file's name, URI-encoded, in X-Backup-Filename", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const restoreCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup/restore" && init?.method === "POST") {
+          restoreCalls.push(init);
+          return { ok: true, json: async () => ({ success: true, counts: {} }) } as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    const backup = { meta: { version: "1.1" } };
+    const file = new File([JSON.stringify(backup)], "my backup (é).json", { type: "application/json" });
+    fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
+
+    await waitFor(() => expect(restoreCalls).toHaveLength(1));
+    const headers = restoreCalls[0].headers as Record<string, string>;
+    expect(headers["X-Backup-Filename"]).toBe(encodeURIComponent("my backup (é).json"));
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(String(restoreCalls[0].body))).toEqual(backup);
+  });
+});

@@ -66,10 +66,12 @@ function makeTx() {
   return tx;
 }
 
-function restoreRequest(body: unknown) {
+function restoreRequest(body: unknown, fileHeader?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (fileHeader !== undefined) headers["X-Backup-Filename"] = fileHeader;
   return new NextRequest("http://localhost/api/backup/restore", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -152,7 +154,59 @@ describe("POST /api/backup/restore", () => {
     const json = await response.json();
 
     expect(mocks.recordEvent).toHaveBeenCalledTimes(1);
-    expect(mocks.recordEvent).toHaveBeenCalledWith(null, { action: "RESTORE", changes: { counts: json.counts } });
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: "Backup restore",
+      changes: { counts: json.counts },
+    });
+  });
+
+  // Spec §Restore: the RESTORE event carries the backup file name. The client
+  // sends it URI-encoded in X-Backup-Filename; API callers (and older clients)
+  // send nothing, and the restore must work exactly as before for them.
+  it("records the backup file name from X-Backup-Filename (URI-decoded) as changes.file and the label", async () => {
+    const name = "blackvault-backup 2026-09-29 (é).json";
+    const response = await POST(restoreRequest(v11Payload(), encodeURIComponent(name)));
+    const json = await response.json();
+    expect(response.status).toBe(200);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: name,
+      changes: { file: name, counts: json.counts },
+    });
+  });
+
+  it.each([
+    ["a path keeps only its basename (POSIX)", encodeURIComponent("/home/jeff/backups/b.json"), "b.json"],
+    ["a path keeps only its basename (Windows)", encodeURIComponent("C:\\Users\\jeff\\b.json"), "b.json"],
+    ["control characters are stripped", encodeURIComponent("b\u0000a\r\nck\u007f\u009bup.json"), "backup.json"],
+    ["capped at 255 characters", encodeURIComponent("x".repeat(300)), "x".repeat(255)],
+  ])("sanitises the untrusted header: %s", async (_label, header, expected) => {
+    const response = await POST(restoreRequest(v11Payload(), header));
+    const json = await response.json();
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: expected,
+      changes: { file: expected, counts: json.counts },
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["only control characters", encodeURIComponent("\u0001\u0002")],
+    ["only a directory", encodeURIComponent("backups/")],
+    ["only whitespace", encodeURIComponent("   ")],
+    ["malformed URI encoding", "%E0%A4%A"],
+  ])("records no file name when nothing usable remains (%s), and the restore still succeeds", async (_label, header) => {
+    const response = await POST(restoreRequest(v11Payload(), header));
+    const json = await response.json();
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: "Backup restore",
+      changes: { counts: json.counts },
+    });
   });
 
   it("records no RESTORE event when the transaction fails", async () => {

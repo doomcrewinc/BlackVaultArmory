@@ -237,8 +237,10 @@ export function summarize(event: AuditEventDto): string {
       return `Created backup${file ? ` ${file}` : ""}`;
     }
 
-    case "RESTORE":
-      return "Restored the database from backup";
+    case "RESTORE": {
+      const file = isRecord(event.changes) ? asString(event.changes.file) : undefined;
+      return `Restored the database from backup${file ? ` ${file}` : ""}`;
+    }
 
     default:
       // A future action added to actions.ts without a branch here — never
