@@ -77,4 +77,46 @@ describe("AuditRow", () => {
     render(<AuditRow event={event} />);
     expect(screen.getByText("—")).toBeTruthy();
   });
+
+  it("shows the time of day, not just the date (Fix round 1, item 1a)", () => {
+    render(<AuditRow event={BASE} />);
+    expect(screen.getByText(/\d{1,2}:\d{2}\s*(AM|PM)/i)).toBeTruthy();
+  });
+
+  it("shows 'redacted', not 'changed', for a redacted field in a CREATE/DELETE snapshot (Fix round 1, item 7)", () => {
+    const event: AuditEventDto = {
+      ...BASE,
+      action: "CREATE",
+      changes: { serialNumber: REDACTED, name: "Glock 19" },
+    };
+    render(<AuditRow event={event} />);
+    fireEvent.click(screen.getByRole("button", { name: /view/i }));
+    expect(screen.getByText("redacted", { selector: ".italic" })).toBeTruthy();
+    expect(screen.queryByText("changed", { selector: ".italic" })).toBeNull();
+  });
+
+  it("still shows 'changed', not 'redacted', for a redacted field in an UPDATE diff", () => {
+    const event: AuditEventDto = { ...BASE, changes: { serialNumber: [REDACTED, REDACTED] } };
+    render(<AuditRow event={event} />);
+    fireEvent.click(screen.getByRole("button", { name: /view/i }));
+    expect(screen.getByText("changed", { selector: ".italic" })).toBeTruthy();
+    expect(screen.queryByText("redacted", { selector: ".italic" })).toBeNull();
+  });
+
+  it("renders a date-only field as a bare calendar day, and a timestamp field as local date + time, not raw ISO", () => {
+    const event: AuditEventDto = {
+      ...BASE,
+      entityType: "Firearm",
+      changes: {
+        acquisitionDate: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"],
+        createdAt: "2026-09-30T02:32:04.000Z",
+      },
+    };
+    render(<AuditRow event={event} />);
+    fireEvent.click(screen.getByRole("button", { name: /view/i }));
+    expect(screen.queryByText(/2026-09-01T00:00:00/)).toBeNull();
+    expect(screen.queryByText(/2026-09-30T02:32:04/)).toBeNull();
+    expect(screen.getByText("Sep 1, 2026")).toBeTruthy();
+    expect(screen.getByText(/Sep 29, 2026, 8:32\s*PM/)).toBeTruthy();
+  });
 });

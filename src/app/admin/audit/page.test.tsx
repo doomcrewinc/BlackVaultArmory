@@ -124,4 +124,98 @@ describe("AdminAuditPage", () => {
     render(<AdminAuditPage />);
     await waitFor(() => expect(screen.getByText(/failed to load/i)).toBeTruthy());
   });
+
+  // Fix round 1, item 3: the viewer's LOCAL day, not UTC's. TZ is pinned to
+  // America/Denver (UTC-6 in September) by vitest.config.ts.
+  describe("date filter — local day, not UTC day", () => {
+    it("sends the viewer's local end-of-day instant for `to`, not the bare UTC day", async () => {
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
+
+      fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: "2026-09-29" } });
+
+      await waitFor(() => expect(replace).toHaveBeenCalled());
+      const url = decodeURIComponent(replace.mock.calls[0][0]);
+      expect(url).toContain("to=2026-09-30T05:59:59.999Z");
+      expect(url).not.toContain("to=2026-09-29&");
+      expect(url.endsWith("to=2026-09-29")).toBe(false);
+    });
+
+    it("sends the viewer's local midnight instant for `from`", async () => {
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
+
+      fireEvent.change(screen.getByLabelText(/^from$/i), { target: { value: "2026-09-29" } });
+
+      await waitFor(() => expect(replace).toHaveBeenCalled());
+      expect(decodeURIComponent(replace.mock.calls[0][0])).toContain("from=2026-09-29T06:00:00.000Z");
+    });
+
+    it("round-trips a full ISO instant already in the URL back to the viewer's local day for the date input", async () => {
+      currentSearch = "to=2026-09-30T05:59:59.999Z";
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(screen.getByLabelText(/^to$/i)).toHaveValue("2026-09-29"));
+    });
+
+    it("the Export CSV link carries the same local-day instant as the fetch, not a bare day", async () => {
+      currentSearch = "to=2026-09-30T05:59:59.999Z";
+      const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<AdminAuditPage />);
+      await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
+
+      const exportHref = decodeURIComponent(screen.getByRole("link", { name: /export/i }).getAttribute("href") ?? "");
+      expect(exportHref).toContain("to=2026-09-30T05:59:59.999Z");
+    });
+  });
+
+  // Fix round 1, item 8: a Load More still in flight when the filters change
+  // must not append the OLD filter's page, or overwrite `cursor` with a
+  // stale value, once the NEW filter's fetch has already landed.
+  it("drops a stale Load More response that resolves after the filters have already changed", async () => {
+    let resolveStaleLoadMore!: (value: unknown) => void;
+    const staleLoadMore = new Promise((resolve) => {
+      resolveStaleLoadMore = resolve;
+    });
+
+    let call = 0;
+    const fetchMock = auditFetchMock((url) => {
+      call += 1;
+      if (call === 1) return jsonOk({ events: [event("e1", "Glock 19")], nextCursor: "c1" }); // initial page
+      if (call === 2) return staleLoadMore; // Load more — held open
+      if (url.includes("type=Firearm")) return jsonOk({ events: [event("e3", "AR-15")], nextCursor: null }); // the filter change
+      return jsonOk({ events: [], nextCursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(<AdminAuditPage />);
+    await waitFor(() => expect(screen.getByText("Glock 19")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i })); // call #2, stalls
+    await waitFor(() => expect(call).toBe(2));
+
+    // Simulate the URL having changed (a filter change navigated) and the
+    // component re-reading the new searchParams — this fires call #3.
+    currentSearch = "type=Firearm";
+    rerender(<AdminAuditPage />);
+    await waitFor(() => expect(screen.getByText("AR-15")).toBeTruthy());
+
+    // NOW the stale Load More resolves. It must be a no-op.
+    resolveStaleLoadMore(jsonOk({ events: [event("e2", "STALE-SHOULD-NOT-APPEAR")], nextCursor: null }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByText("AR-15")).toBeTruthy();
+    expect(screen.queryByText("STALE-SHOULD-NOT-APPEAR")).toBeNull();
+    expect(screen.queryByText("Glock 19")).toBeNull(); // call #3 replaced the list; it did not append
+  });
 });

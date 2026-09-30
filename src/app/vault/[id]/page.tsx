@@ -138,10 +138,11 @@ export default async function FirearmDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  // ADMIN-only — this is the ONLY guard: a USER's render tree never includes
-  // <ItemHistory>, so no request to the audit API is ever made on their
-  // behalf. The API is admin-gated too (requireAdmin), but that is defense
-  // in depth, not the reason this is safe.
+  // ADMIN-only — this is the PAGE-LEVEL guard: a USER's render tree never
+  // includes <ItemHistory>, so no request to the audit API is ever made on
+  // their behalf. The item-history API route also runs requireAdmin, so
+  // this is not the only guard overall — defense in depth — but it is what
+  // keeps a USER from ever mounting <ItemHistory> in the first place.
   const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getFirearm>>;
   try {

@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { containsInsensitive } from "../db/text-search";
+import { redactStoredChanges } from "./redact";
 import type { AuditAction } from "./actions";
 
 /**
@@ -184,10 +185,19 @@ export function parseAuditFilters(searchParams: URLSearchParams): AuditFilters {
   const type = searchParams.get("type")?.trim();
   if (type && !hasNulByte(type)) filters.type = type;
 
-  const from = parseUtcDayStart(searchParams.get("from"));
+  // Fix round 1: the browser now sends the VIEWER'S local day as a full ISO
+  // instant (local midnight for `from`, local 23:59:59.999 for `to` —
+  // AuditFilters.tsx / page.tsx's toQueryString), because a bare UTC day
+  // silently used UTC's calendar boundary instead of the viewer's and
+  // dropped evening events. A bare `YYYY-MM-DD` is still accepted for
+  // back-compat (a bookmarked link, or a caller that never had a browser
+  // timezone to convert with) and keeps its old UTC-day meaning.
+  const fromRaw = searchParams.get("from");
+  const from = (fromRaw && parseStrictIsoUtc(fromRaw.trim())) || parseUtcDayStart(fromRaw);
   if (from) filters.from = from;
 
-  const to = parseUtcDayEnd(searchParams.get("to"));
+  const toRaw = searchParams.get("to");
+  const to = (toRaw && parseStrictIsoUtc(toRaw.trim())) || parseUtcDayEnd(toRaw);
   if (to) filters.to = to;
 
   const q = searchParams.get("q")?.trim();
@@ -216,7 +226,13 @@ function toDto(event: RawEvent): AuditEventDto {
   let changes: unknown = null;
   if (event.changes) {
     try {
-      changes = JSON.parse(event.changes);
+      // redact.ts's contract covers the READ path too ("never render one,
+      // even one that predates this rule") — the write path already redacts
+      // every sensitive field, but this DTO mapper does not trust that: a
+      // row from before this rule existed, or written outside the audited
+      // client, must still never leak a sensitive value through the API or
+      // CSV export, both of which read `AuditEventDto.changes`.
+      changes = redactStoredChanges(JSON.parse(event.changes));
     } catch {
       changes = null;
     }

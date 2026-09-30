@@ -3,7 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuditActionGroup } from "@/lib/audit/query";
 import { AUDITED_MODELS } from "@/lib/audit/registry";
-import { modelDisplayName } from "@/lib/audit/labels";
+import { modelFilterLabel } from "@/lib/audit/labels";
+
+// AUDITED_MODELS (registry.ts) plus "User": security events (LOGIN,
+// ROLE_CHANGED, USER_DISABLED, …) carry entityType "User", but User is
+// explicitly EXCLUDED from AUDITED_MODELS (its own CREATE/UPDATE/DELETE are
+// never audited — only the named security actions are). Without this, the
+// item-type filter had no way to select "everything about a user account".
+const ITEM_TYPE_OPTIONS: readonly string[] = [...AUDITED_MODELS, "User"];
 
 // The five group keys, NOT imported as a value from src/lib/audit/query.ts
 // (only its AuditActionGroup TYPE is imported above): that module's ACTION_GROUPS
@@ -149,9 +156,9 @@ export function AuditFilters({
         </label>
         <select id="audit-filter-type" value={value.type} onChange={(e) => set({ type: e.target.value })} className={inputClass}>
           <option value="">All types</option>
-          {AUDITED_MODELS.map((model) => (
+          {ITEM_TYPE_OPTIONS.map((model) => (
             <option key={model} value={model}>
-              {modelDisplayName(model)}
+              {modelFilterLabel(model)}
             </option>
           ))}
         </select>

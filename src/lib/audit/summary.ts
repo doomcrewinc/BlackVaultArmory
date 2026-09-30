@@ -1,6 +1,8 @@
 import type { AuditEventDto } from "./query";
-import { REDACTED } from "./redact";
+import { REDACTED, isRedactedField } from "./redact";
 import { fieldLabel, modelDisplayName } from "./labels";
+import { formatDateOnly, formatDateTime } from "../date";
+import { DATE_ONLY_FIELDS } from "../date-only-fields";
 
 /**
  * `summarize(event)` — the one-line description shown in the audit list and
@@ -34,10 +36,45 @@ function actorDisplayName(actorName: string): string {
   return match ? match[1] : actorName;
 }
 
-/** A raw before/after/create/delete field value as display text — exported for AuditRow's detail panel. */
-export function displayValue(value: unknown): string {
+/**
+ * True when `entityType.field` is one of the app's date-only columns —
+ * DATE_ONLY_FIELDS (src/lib/date-migration.ts), the same DMMF-guarded
+ * registry the date-normalisation migration uses, so this list can never
+ * drift from the schema without failing that module's own test. Field name
+ * alone is ambiguous ("date" is date-only on MaintenanceLog and nothing
+ * else; "changedAt" is date-only on BatteryChangeLog but a true instant
+ * elsewhere), so classification is always model-scoped.
+ */
+function isDateOnlyField(entityType: string | null, field: string): boolean {
+  if (!entityType) return false;
+  return DATE_ONLY_FIELDS.some((f) => f.model === entityType && f.field === field);
+}
+
+/** The exact shape `Date#toISOString()` / `JSON.stringify(date)` produces — what a DateTime column becomes after `changes` round-trips through JSON. Anything else (a plain string like "Active", a number, a bare YYYY-MM-DD typed by a human) is left as-is. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+function looksLikeIsoInstant(value: unknown): value is string {
+  return typeof value === "string" && ISO_INSTANT.test(value);
+}
+
+/**
+ * A raw before/after/create/delete field value as display text — exported
+ * for AuditRow's detail panel. An ISO-instant-shaped string renders through
+ * date.ts (formatDateOnly for a date-only field, formatDateTime otherwise —
+ * never the raw `…T00:00:00.000Z` text, per date.ts's own contract). An
+ * object (RESTORE's `counts`) renders as compact JSON instead of
+ * `[object Object]`.
+ */
+export function displayValue(value: unknown, dateOnly = false): string {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (looksLikeIsoInstant(value)) return dateOnly ? formatDateOnly(value) : formatDateTime(value);
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
   return String(value);
 }
 
@@ -57,29 +94,40 @@ function joinWithAnd(parts: string[]): string {
  * `childEntries`) are not field entries and are skipped.
  */
 export type AuditDetailEntry =
-  | { field: string; label: string; kind: "diff"; redacted: boolean; before: unknown; after: unknown }
-  | { field: string; label: string; kind: "value"; redacted: boolean; value: unknown };
+  | { field: string; label: string; kind: "diff"; redacted: boolean; dateOnly: boolean; before: unknown; after: unknown }
+  | { field: string; label: string; kind: "value"; redacted: boolean; dateOnly: boolean; value: unknown };
 
-export function detailEntries(changes: unknown): AuditDetailEntry[] {
+/**
+ * `entityType` (the Prisma model this event's row belongs to) drives two
+ * things per field: whether it is a date-only column (`isDateOnlyField`) and
+ * — belt and suspenders alongside query.ts's own read-path redaction
+ * (`redactStoredChanges`) — whether its NAME alone marks it sensitive
+ * (`isRedactedField`), so a value is never shown in clear even if some
+ * future path reaches this function without going through the DTO mapper.
+ */
+export function detailEntries(changes: unknown, entityType: string | null = null): AuditDetailEntry[] {
   if (!isRecord(changes)) return [];
   const entries: AuditDetailEntry[] = [];
   for (const [field, value] of Object.entries(changes)) {
     if (field === "_nested" || field === "_children") continue;
+    const dateOnly = isDateOnlyField(entityType, field);
     if (Array.isArray(value) && value.length === 2) {
       const [before, after] = value;
-      entries.push({ field, label: fieldLabel(field), kind: "diff", redacted: before === REDACTED || after === REDACTED, before, after });
+      const redacted = isRedactedField(field) || before === REDACTED || after === REDACTED;
+      entries.push({ field, label: fieldLabel(field), kind: "diff", redacted, dateOnly, before, after });
     } else {
-      entries.push({ field, label: fieldLabel(field), kind: "value", redacted: value === REDACTED, value });
+      const redacted = isRedactedField(field) || value === REDACTED;
+      entries.push({ field, label: fieldLabel(field), kind: "value", redacted, dateOnly, value });
     }
   }
   return entries;
 }
 
 /** One fragment per `detailEntries` diff row: "status Active → Sold", or "serial number changed" when redacted. */
-function changeFragments(changes: unknown): string[] {
-  return detailEntries(changes)
+function changeFragments(changes: unknown, entityType: string | null): string[] {
+  return detailEntries(changes, entityType)
     .filter((e): e is Extract<AuditDetailEntry, { kind: "diff" }> => e.kind === "diff")
-    .map((e) => (e.redacted ? `${e.label} changed` : `${e.label} ${displayValue(e.before)} → ${displayValue(e.after)}`));
+    .map((e) => (e.redacted ? `${e.label} changed` : `${e.label} ${displayValue(e.before, e.dateOnly)} → ${displayValue(e.after, e.dateOnly)}`));
 }
 
 /**
@@ -125,7 +173,7 @@ export function summarize(event: AuditEventDto): string {
       return `Created ${kind} ${quoted(event.entityLabel)}`;
 
     case "UPDATE": {
-      const fragments = changeFragments(event.changes);
+      const fragments = changeFragments(event.changes, event.entityType);
       return fragments.length
         ? `Changed ${quoted(event.entityLabel)}: ${fragments.join(", ")}`
         : `Changed ${quoted(event.entityLabel)}`;

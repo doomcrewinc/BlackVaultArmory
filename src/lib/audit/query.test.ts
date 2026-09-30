@@ -9,6 +9,7 @@ vi.mock("../db/text-search", async (importOriginal) => {
 });
 
 import { containsInsensitive } from "../db/text-search";
+import { REDACTED } from "./redact";
 import { AUDIT_ACTIONS } from "./actions";
 import { ACTION_GROUPS, hasNulByte, listAuditEvents, parseAuditFilters } from "./query";
 
@@ -77,6 +78,39 @@ describe("parseAuditFilters", () => {
   it("parses to as the inclusive UTC day end (23:59:59.999)", () => {
     const filters = parseAuditFilters(new URLSearchParams({ to: "2026-03-05" }));
     expect(filters.to?.toISOString()).toBe("2026-03-05T23:59:59.999Z");
+  });
+
+  // Fix round 1, Important: the UI now sends the VIEWER'S local day as a full
+  // ISO instant (local 00:00:00.000 for `from`, local 23:59:59.999 for
+  // `to`), not a bare UTC day — a bare day silently used UTC's calendar day
+  // instead of the viewer's, dropping evening events. `from`/`to` must
+  // accept both: a full instant (new URLs) and bare YYYY-MM-DD (back-compat
+  // / a bookmarked link).
+  it("accepts a full ISO instant for `from`, not only a bare UTC day", () => {
+    const filters = parseAuditFilters(new URLSearchParams({ from: "2026-09-29T06:00:00.000Z" }));
+    expect(filters.from?.toISOString()).toBe("2026-09-29T06:00:00.000Z");
+  });
+
+  it("accepts a full ISO instant for `to`, not only a bare UTC day", () => {
+    // A UTC-6 viewer's local Sep 29 ends at 05:59:59.999Z the following day —
+    // the exact instant the UI now sends instead of the bare "2026-09-29"
+    // that used to mean the UTC day and silently excluded an event stored
+    // later the same local evening.
+    const filters = parseAuditFilters(new URLSearchParams({ to: "2026-09-30T05:59:59.999Z" }));
+    expect(filters.to?.toISOString()).toBe("2026-09-30T05:59:59.999Z");
+  });
+
+  it("the UTC-6 scenario: an event at 02:30Z the next day falls inside the viewer's local-day `to` instant, but would have been excluded by the old bare-UTC-day reading", () => {
+    const eventAt = new Date("2026-09-30T02:30:00.000Z").getTime();
+    const localDayEnd = parseAuditFilters(new URLSearchParams({ to: "2026-09-30T05:59:59.999Z" })).to!;
+    const bareUtcDayEnd = parseAuditFilters(new URLSearchParams({ to: "2026-09-29" })).to!; // old behaviour
+    expect(eventAt).toBeLessThanOrEqual(localDayEnd.getTime());
+    expect(eventAt).toBeGreaterThan(bareUtcDayEnd.getTime());
+  });
+
+  it("still rejects a malformed or extended-year `from`/`to` instant instead of throwing", () => {
+    expect(parseAuditFilters(new URLSearchParams({ from: "+275760-09-13T00:00:00.000Z" }))).toEqual({});
+    expect(parseAuditFilters(new URLSearchParams({ to: "not-an-instant" }))).toEqual({});
   });
 
   it("drops malformed from/to instead of throwing", () => {
@@ -324,6 +358,22 @@ describe("listAuditEvents", () => {
         changes: { name: ["a", "b"] },
       },
     ]);
+  });
+
+  // Fix round 1, Important: the write path already redacts every sensitive
+  // field, but the read path must not TRUST that — a row from before this
+  // rule existed, or written outside the audited client, could carry a raw
+  // value under a sensitive field name. toDto must redact on the way out too.
+  it("redacts a raw sensitive value on a stored row, even though the write path is supposed to have already", async () => {
+    m.findMany.mockResolvedValue([row({ changes: '{"serialNumber":"REAL-SERIAL-123","name":"Glock 19"}' })]);
+    const { events } = await listAuditEvents({});
+    expect(events[0].changes).toEqual({ serialNumber: REDACTED, name: "Glock 19" });
+  });
+
+  it("redacts both sides of a raw UPDATE-shaped diff pair on a stored row, keeping the diff shape", async () => {
+    m.findMany.mockResolvedValue([row({ changes: '{"serialNumber":["OLD-123","NEW-456"]}' })]);
+    const { events } = await listAuditEvents({});
+    expect(events[0].changes).toEqual({ serialNumber: [REDACTED, REDACTED] });
   });
 
   it("changes is null when missing", async () => {

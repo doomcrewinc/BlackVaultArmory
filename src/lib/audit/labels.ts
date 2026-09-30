@@ -66,6 +66,12 @@ export function labelFor(model: string, row: Record<string, unknown>): string {
       if (location) return location;
       return fallback(model, row);
     }
+    case "AppSettings":
+      // The app has exactly one settings row (id "singleton"); "AppSettings
+      // singleton" (the fallback) is technically correct and reads like an
+      // error message. The label is stored at write time, so this only
+      // changes new rows — existing rows keep the old text, which is fine.
+      return "Settings";
     default:
       return fallback(model, row);
   }
@@ -94,4 +100,16 @@ export function fieldLabel(field: string): string {
 /** A Prisma model name for display: "AmmoStock" -> "ammo stock". */
 export function modelDisplayName(model: string): string {
   return splitWords(model).join(" ").toLowerCase();
+}
+
+/**
+ * A Prisma model name Title Cased, for a dropdown OPTION rather than
+ * mid-sentence prose: "AmmoStock" -> "Ammo Stock". `modelDisplayName`
+ * (lowercase) is for summarize()'s sentences ("Deleted firearm …"); this is
+ * for the item-type filter, whose options read like a list of nouns.
+ */
+export function modelFilterLabel(model: string): string {
+  return splitWords(model)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
 }

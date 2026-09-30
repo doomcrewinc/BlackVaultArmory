@@ -2,21 +2,27 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { formatTimestamp } from "@/lib/date";
+import { formatDateTime } from "@/lib/date";
 import { summarize, detailEntries, childEntries, displayValue } from "@/lib/audit/summary";
 import type { AuditEventDto } from "@/lib/audit/query";
 import { cn } from "@/lib/utils";
 
 /**
  * One row of the audit log: when / who / action / item / one-line summary,
- * expandable to every changed field's before/after (redacted fields show
- * only "changed", never a value — redact.ts). Used by both `/admin/audit`
+ * expandable to every changed field's before/after. A redacted field shows
+ * only the word "redacted" (a CREATE/DELETE snapshot) or "changed" (an
+ * UPDATE diff) — never a value, per redact.ts. Used by both `/admin/audit`
  * (AuditList) and each item detail page's History section (ItemHistory).
  * docs/superpowers/specs/2026-09-29-audit-log-design.md, "UI".
+ *
+ * `formatDateTime`, not `formatTimestamp`: this only ever mounts client-side
+ * (both callers fetch in a `useEffect`, never server-rendered), so there is
+ * no hydration mismatch to worry about from rendering "now"-relative or
+ * locale-dependent text here.
  */
 export function AuditRow({ event }: { event: AuditEventDto }) {
   const [expanded, setExpanded] = useState(false);
-  const fields = detailEntries(event.changes);
+  const fields = detailEntries(event.changes, event.entityType);
   const children = childEntries(event.changes);
   const hasDetail = fields.length > 0 || children.length > 0;
 
@@ -25,7 +31,7 @@ export function AuditRow({ event }: { event: AuditEventDto }) {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2 text-xs text-vault-text-faint">
-            <span>{formatTimestamp(event.at)}</span>
+            <span>{formatDateTime(event.at)}</span>
             <span aria-hidden>·</span>
             <span className="text-vault-text-muted">{event.actorName}</span>
             <span
@@ -57,14 +63,18 @@ export function AuditRow({ event }: { event: AuditEventDto }) {
             <div key={entry.field} className="flex flex-wrap items-baseline gap-x-2 text-xs">
               <span className="w-32 shrink-0 text-vault-text-faint">{entry.label}</span>
               {entry.redacted ? (
-                <span className="text-vault-text-muted italic">changed</span>
+                // A snapshot field (CREATE/DELETE) never "changed" — nothing
+                // changed, the row was just created or removed — so it reads
+                // "redacted" there; an UPDATE diff reads "changed", since
+                // that's what actually happened to a value it can't show.
+                <span className="text-vault-text-muted italic">{entry.kind === "diff" ? "changed" : "redacted"}</span>
               ) : entry.kind === "diff" ? (
                 <span className="text-vault-text-muted">
-                  {displayValue(entry.before)} <span className="text-vault-text-faint">→</span>{" "}
-                  <span className="text-vault-text">{displayValue(entry.after)}</span>
+                  {displayValue(entry.before, entry.dateOnly)} <span className="text-vault-text-faint">→</span>{" "}
+                  <span className="text-vault-text">{displayValue(entry.after, entry.dateOnly)}</span>
                 </span>
               ) : (
-                <span className="text-vault-text-muted">{displayValue(entry.value)}</span>
+                <span className="text-vault-text-muted">{displayValue(entry.value, entry.dateOnly)}</span>
               )}
             </div>
           ))}

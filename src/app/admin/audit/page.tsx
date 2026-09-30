@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Download } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -22,30 +22,68 @@ import type { AuditEventDto } from "@/lib/audit/query";
  * docs/superpowers/specs/2026-09-29-audit-log-design.md, "UI".
  */
 
+const LOCAL_DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_INSTANT_PREFIX = /^\d{4}-\d{2}-\d{2}T/;
+
+/** A `YYYY-MM-DD` from `<input type=date>` (the VIEWER's local calendar day) as that day's local midnight, in UTC ISO. `null` for anything not shaped like a bare day (already an instant, or empty). */
+function localDayStartIso(dateStr: string): string | null {
+  const m = LOCAL_DAY.exec(dateStr);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0).toISOString();
+}
+
+/** Same day, local 23:59:59.999 — the inclusive end of the viewer's local day, in UTC ISO. */
+function localDayEndIso(dateStr: string): string | null {
+  const m = LOCAL_DAY.exec(dateStr);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999).toISOString();
+}
+
+/** The reverse of the two functions above: a full ISO instant back to the VIEWER's local calendar day, for the `<input type=date>` control. A bare `YYYY-MM-DD` (an old bookmarked link) passes through unchanged. */
+function isoInstantToLocalDay(value: string): string {
+  if (!ISO_INSTANT_PREFIX.test(value)) return value;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function filtersFromParams(params: URLSearchParams): AuditFiltersState {
   return {
     user: params.get("user") ?? "",
     action: params.get("action") ?? "",
     type: params.get("type") ?? "",
-    from: params.get("from") ?? "",
-    to: params.get("to") ?? "",
+    from: isoInstantToLocalDay(params.get("from") ?? ""),
+    to: isoInstantToLocalDay(params.get("to") ?? ""),
     q: params.get("q") ?? "",
   };
 }
 
+/**
+ * `filters.from`/`filters.to` are the VIEWER's local calendar day
+ * (`<input type=date>`'s native shape); the API and the CSV export read the
+ * viewer's local day, not UTC's — so this sends the full local-midnight /
+ * local-end-of-day ISO instant, never the bare day string. Both the list
+ * fetch and the Export CSV link go through this one function, so they can
+ * never disagree about what "the current filters" means.
+ */
 function toQueryString(filters: AuditFiltersState, cursor?: string): string {
   const params = new URLSearchParams();
   if (filters.user) params.set("user", filters.user);
   if (filters.action) params.set("action", filters.action);
   if (filters.type) params.set("type", filters.type);
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
+  const fromIso = filters.from ? localDayStartIso(filters.from) : null;
+  if (fromIso) params.set("from", fromIso);
+  const toIso = filters.to ? localDayEndIso(filters.to) : null;
+  if (toIso) params.set("to", toIso);
   if (filters.q) params.set("q", filters.q);
   if (cursor) params.set("cursor", cursor);
   return params.toString();
 }
 
-export default function AdminAuditPage() {
+function AdminAuditPageInner() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -59,27 +97,40 @@ export default function AdminAuditPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Every call to fetchPage claims the next id and only applies its own
+  // result if nothing newer has started by the time it resolves. Guards
+  // against a Load More still in flight when the filters change (the
+  // URL-driven effect below starts a fresh, higher-numbered request) — the
+  // stale one's response is silently dropped instead of appending the WRONG
+  // filter's page onto the list, or clobbering `cursor` with a stale value.
+  const requestIdRef = useRef(0);
+
   const fetchPage = useCallback(async (f: AuditFiltersState, afterCursor?: string) => {
+    const requestId = ++requestIdRef.current;
     if (afterCursor) setLoadingMore(true);
     else setLoading(true);
     setError(null);
     try {
       const qs = toQueryString(f, afterCursor);
       const res = await fetch(`/api/admin/audit${qs ? `?${qs}` : ""}`);
+      if (requestIdRef.current !== requestId) return; // superseded while in flight
       if (!res.ok) {
         setError("Failed to load audit events.");
         return;
       }
       const data = await res.json().catch(() => ({}));
+      if (requestIdRef.current !== requestId) return; // superseded while parsing
       const page: AuditEventDto[] = Array.isArray(data.events) ? data.events : [];
       setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
       setCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
       setHasMore(Boolean(data.nextCursor));
     } catch {
-      setError("Failed to load audit events.");
+      if (requestIdRef.current === requestId) setError("Failed to load audit events.");
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
+      if (requestIdRef.current === requestId) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
@@ -135,5 +186,18 @@ export default function AdminAuditPage() {
         )}
       </SectionCard>
     </div>
+  );
+}
+
+// useSearchParams() opts the page out of static rendering unless wrapped in
+// Suspense (Next's requirement — a bare call throws during prerendering
+// otherwise). The root layout's getCurrentUser() already forces every route
+// dynamic, so this boundary is unlikely to ever actually suspend, but the
+// requirement is enforced at build time regardless of that.
+export default function AdminAuditPage() {
+  return (
+    <Suspense fallback={<LoadingState label="Loading audit events…" />}>
+      <AdminAuditPageInner />
+    </Suspense>
   );
 }

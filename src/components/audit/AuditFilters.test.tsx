@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { AuditFilters, EMPTY_AUDIT_FILTERS, type AuditFiltersState } from "./AuditFilters";
 import { ACTION_GROUPS } from "@/lib/audit/query";
 
@@ -70,6 +70,15 @@ describe("AuditFilters", () => {
       .map((o) => (o as HTMLOptionElement).value)
       .filter(Boolean);
     expect(values.sort()).toEqual(Object.keys(ACTION_GROUPS).sort());
+  });
+
+  it("includes User (security events) in the item-type filter, Title Cased like the other options (Fix round 1, item 10)", async () => {
+    stubUsersFetch();
+    render(<AuditFilters value={EMPTY_AUDIT_FILTERS} onChange={() => {}} />);
+    const typeSelect = screen.getByLabelText(/item type/i);
+    expect(within(typeSelect).getByRole("option", { name: "User" })).toBeTruthy();
+    expect(within(typeSelect).getByRole("option", { name: "Ammo Stock" })).toBeTruthy();
+    expect(within(typeSelect).queryByRole("option", { name: "ammo stock" })).toBeNull();
   });
 
   it("reflects the current value back into each control", () => {

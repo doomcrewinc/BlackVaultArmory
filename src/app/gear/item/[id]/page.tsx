@@ -72,8 +72,10 @@ export default async function GearDetailPage({
 }) {
   const { id } = await params;
 
-  // ADMIN-only History section — the ONLY guard: a USER's JSX never
-  // includes <ItemHistory>, so no audit-API request is ever made for them.
+  // ADMIN-only History section — this is the PAGE-LEVEL guard: a USER's
+  // JSX never includes <ItemHistory>, so no audit-API request is ever made
+  // for them. The item-history API route also runs requireAdmin (defense
+  // in depth), so this is not the only guard overall.
   const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getGearWithExpiry>>;
   try {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { hostTimeZone } from "@/test/host-timezone";
 import {
   formatDateOnly,
+  formatDateTime,
   formatTimestamp,
   InvalidDateError,
   toDateOnlyUTC,
@@ -152,6 +153,31 @@ describe("formatTimestamp", () => {
 
   it("renders a dash for null", () => {
     expect(formatTimestamp(null)).toBe("—");
+  });
+});
+
+describe("formatDateTime", () => {
+  it("renders the local date AND time of day, unlike formatTimestamp", () => {
+    const instant = "2026-09-30T02:32:04.000Z";
+    const rendered = formatDateTime(instant, "UTC");
+    expect(rendered).toContain("Sep 30");
+    expect(rendered).toMatch(/2:32\s*AM/);
+  });
+
+  it("renders in the supplied timezone, crossing a day boundary", () => {
+    const instant = "2026-09-20T02:00:00.000Z";
+    // UTC-11: 02:00Z on the 20th is 15:00 on the 19th.
+    expect(formatDateTime(instant, "Pacific/Pago_Pago")).toContain("Sep 19");
+    // UTC+13: 02:00Z on the 20th is 15:00 on the 20th.
+    expect(formatDateTime(instant, "Pacific/Auckland")).toContain("Sep 20");
+  });
+
+  it("renders a dash for null", () => {
+    expect(formatDateTime(null)).toBe("—");
+  });
+
+  it("does not change formatTimestamp's own output (date-only, unaffected by this addition)", () => {
+    expect(formatTimestamp("2026-09-30T02:32:04.000Z", "UTC")).toBe("Sep 30, 2026");
   });
 });
 

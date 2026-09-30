@@ -133,6 +133,31 @@ export function formatTimestamp(
 }
 
 /**
+ * Render an instant in the viewer's local timezone, WITH the time of day —
+ * `formatTimestamp` (above) is date-only despite its name (it has 7 other
+ * callers depending on that, so it is not changed here); this is the one to
+ * reach for wherever two events on the same calendar day must still be
+ * tellable apart, e.g. the audit log. `timeZone` exists for tests;
+ * production callers omit it.
+ */
+export function formatDateTime(
+  value: Date | string | null | undefined,
+  timeZone?: string
+): string {
+  if (!value) return DASH;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return DASH;
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
+}
+
+/**
  * A date-only value as YYYY-MM-DD, for MACHINE-readable output: CSV and JSON
  * exports, API payloads. Empty string for null so CSV cells stay blank.
  *

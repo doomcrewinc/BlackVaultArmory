@@ -61,20 +61,29 @@ export function ItemHistory({ entityType, entityId }: { entityType: string; enti
     void load();
   }, [load]);
 
+  // A failed INITIAL load has nothing to show but the error. A failed LOAD
+  // MORE must not throw away what already loaded — the list stays, and the
+  // error appears alongside it, so the admin doesn't lose the page they were
+  // already reading over one retry-able network blip.
+  const initialLoadFailed = error !== null && events.length === 0;
+
   return (
     <SectionCard title="History" description="Every change recorded for this item.">
       {loading ? (
         <LoadingState label="Loading history…" />
-      ) : error ? (
+      ) : initialLoadFailed ? (
         <StatusMessage tone="error" message={error} />
       ) : (
-        <AuditList
-          events={events}
-          hasMore={hasMore}
-          loading={loadingMore}
-          onLoadMore={cursor ? () => load(cursor) : undefined}
-          emptyMessage="No history recorded for this item."
-        />
+        <>
+          <AuditList
+            events={events}
+            hasMore={hasMore}
+            loading={loadingMore}
+            onLoadMore={cursor ? () => load(cursor) : undefined}
+            emptyMessage="No history recorded for this item."
+          />
+          {error && <StatusMessage tone="error" message={error} className="mx-4 mb-4" />}
+        </>
       )}
     </SectionCard>
   );

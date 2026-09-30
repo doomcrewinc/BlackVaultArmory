@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fieldLabel, labelFor, modelDisplayName } from "./labels";
+import { fieldLabel, labelFor, modelDisplayName, modelFilterLabel } from "./labels";
 
 describe("labelFor", () => {
   it("labels a Firearm as name (caliber)", () => {
@@ -51,6 +51,10 @@ describe("labelFor", () => {
   it("falls back for models with no label rule", () => {
     expect(labelFor("BuildSlot", { id: "bs1" })).toBe("BuildSlot bs1");
   });
+
+  it("labels AppSettings as Settings, not the bare 'AppSettings singleton' fallback", () => {
+    expect(labelFor("AppSettings", { id: "singleton" })).toBe("Settings");
+  });
 });
 
 describe("fieldLabel", () => {
@@ -71,5 +75,17 @@ describe("modelDisplayName", () => {
     expect(modelDisplayName("AmmoStock")).toBe("ammo stock");
     expect(modelDisplayName("MaintenanceLog")).toBe("maintenance log");
     expect(modelDisplayName("RangeSessionAmmoLink")).toBe("range session ammo link");
+  });
+});
+
+describe("modelFilterLabel", () => {
+  it("humanizes a PascalCase model name, Title Cased — for a dropdown option, not mid-sentence prose", () => {
+    expect(modelFilterLabel("Firearm")).toBe("Firearm");
+    expect(modelFilterLabel("AmmoStock")).toBe("Ammo Stock");
+    expect(modelFilterLabel("RangeSessionAmmoLink")).toBe("Range Session Ammo Link");
+  });
+
+  it("Title Cases User too, for the item-type filter's security-events option", () => {
+    expect(modelFilterLabel("User")).toBe("User");
   });
 });

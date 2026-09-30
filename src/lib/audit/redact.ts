@@ -24,6 +24,45 @@ export function redactRecord(row: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Redacts a STORED `AuditEvent.changes` value on its way OUT to the UI/CSV —
+ * the read-path half of the contract this file's header describes ("never
+ * render one, even one that predates this rule"). Every writer today already
+ * redacts (extension.ts's recordCreate/recordUpdate/recordDelete, and
+ * diffRecords above), so this is defense in depth: a row written before this
+ * rule existed, or by something outside the audited client, must still never
+ * leak a sensitive value here.
+ *
+ * Shape-aware: a sensitive field's value can be a bare value (a CREATE/DELETE
+ * snapshot field) or a `[before, after]` pair (an UPDATE diff) — a pair is
+ * redacted ELEMENT-WISE, to `[REDACTED, REDACTED]`, never collapsed into a
+ * single value, so the UI can still tell a diff apart from a snapshot field
+ * after redaction. Non-sensitive keys are walked recursively (nested writes),
+ * so a sensitive field nested inside `_nested` is still caught; `_children`
+ * (DELETE's cascade counts) holds model names as keys, none of which can
+ * match `isRedactedField`, so it passes through unchanged.
+ */
+export function redactStoredChanges(changes: unknown): unknown {
+  if (!isPlainObject(changes)) return changes;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(changes)) {
+    if (isRedactedField(key)) {
+      out[key] = Array.isArray(value) && value.length === 2 ? [REDACTED, REDACTED] : REDACTED;
+    } else if (isPlainObject(value)) {
+      out[key] = redactStoredChanges(value);
+    } else if (Array.isArray(value)) {
+      out[key] = value.map((v) => (isPlainObject(v) ? redactStoredChanges(v) : v));
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 /** True for two values that are the same for audit-diff purposes. */
 function sameValue(a: unknown, b: unknown): boolean {
   if (a === b) return true;

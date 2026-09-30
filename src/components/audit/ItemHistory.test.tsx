@@ -78,4 +78,22 @@ describe("ItemHistory", () => {
     render(<ItemHistory entityType="Firearm" entityId="f1" />);
     await waitFor(() => expect(screen.getByText(/failed to load/i)).toBeTruthy());
   });
+
+  // Fix round 1, item 9: a failed Load More must not throw away what already
+  // loaded successfully.
+  it("a failed Load more keeps the already-loaded events visible and shows the error inline, not in place of the list", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ events: [makeEvent("e1", "Glock 19")], nextCursor: "c1" }) })
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ItemHistory entityType="Firearm" entityId="f1" />);
+    await waitFor(() => expect(screen.getByText("Glock 19")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() => expect(screen.getByText(/failed to load/i)).toBeTruthy());
+    expect(screen.getByText("Glock 19")).toBeTruthy();
+  });
 });

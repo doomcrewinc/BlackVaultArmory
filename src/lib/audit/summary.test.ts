@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { summarize } from "./summary";
+import { summarize, displayValue, detailEntries } from "./summary";
 import { REDACTED } from "./redact";
+import { AUDIT_ACTIONS } from "./actions";
 import type { AuditEventDto } from "./query";
 
 /**
@@ -225,6 +226,99 @@ describe("summarize — security events", () => {
   it("RESTORE", () => {
     const e = event({ action: "RESTORE", changes: { counts: { Firearm: 3 } } });
     expect(summarize(e)).toBe("Restored the database from backup");
+  });
+});
+
+describe("summarize — exhaustiveness (Fix round 1, item 6)", () => {
+  // The `default` branch silently handles any action with no dedicated case,
+  // producing "<ACTION> — <who>[ — "label"]" — this iterates every real
+  // action and asserts none of them fall through to it.
+  it.each(AUDIT_ACTIONS)("action %s produces a real summary, not the default fallback shape", (action) => {
+    const e = event({ action, entityType: "Firearm", entityLabel: "Glock 19" });
+    expect(summarize(e)).not.toMatch(/^[A-Z_]+ — /);
+  });
+});
+
+describe("summarize — dates render formatted, not raw ISO (Fix round 1, item 2)", () => {
+  it("a date-only field's before/after render as a calendar day", () => {
+    const e = event({
+      action: "UPDATE",
+      entityType: "Firearm",
+      entityLabel: "Glock 19",
+      changes: { acquisitionDate: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"] },
+    });
+    expect(summarize(e)).toBe('Changed "Glock 19": acquisition date Sep 1, 2026 → Sep 2, 2026');
+  });
+
+  it("a non-date-only timestamp field's before/after render as local date + time, not raw ISO", () => {
+    // TZ is pinned to America/Denver (UTC-6 in September) by vitest.config.ts.
+    const e = event({
+      action: "UPDATE",
+      entityType: "AppSettings",
+      entityLabel: "Settings",
+      changes: { cachedAt: ["2026-09-29T20:00:00.000Z", "2026-09-30T02:32:04.000Z"] },
+    });
+    const text = summarize(e);
+    expect(text).not.toContain("2026-09-30T02:32:04.000Z");
+    expect(text).toContain("8:32 PM");
+  });
+});
+
+describe("displayValue (Fix round 1, item 2)", () => {
+  it("renders a non-date-only ISO instant as local date + time", () => {
+    expect(displayValue("2026-09-30T02:32:04.000Z")).toBe("Sep 29, 2026, 8:32 PM");
+  });
+
+  it("renders a date-only ISO instant as a bare calendar day", () => {
+    expect(displayValue("2026-09-30T00:00:00.000Z", true)).toBe("Sep 30, 2026");
+  });
+
+  it("renders an object as compact JSON, not [object Object] (RESTORE's `counts`)", () => {
+    expect(displayValue({ Firearm: 3, Accessory: 1 })).toBe(JSON.stringify({ Firearm: 3, Accessory: 1 }));
+  });
+
+  it("still renders a dash for null/empty and Yes/No for booleans", () => {
+    expect(displayValue(null)).toBe("—");
+    expect(displayValue("")).toBe("—");
+    expect(displayValue(true)).toBe("Yes");
+    expect(displayValue(false)).toBe("No");
+  });
+
+  it("leaves an ordinary non-date string untouched", () => {
+    expect(displayValue("Active")).toBe("Active");
+  });
+});
+
+describe("detailEntries — date-kind and redaction awareness (Fix round 1, item 2 and item 1's redaction fix)", () => {
+  it("flags a field the app's DATE_ONLY_FIELDS registry lists for this model", () => {
+    const entries = detailEntries(
+      { acquisitionDate: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"] },
+      "Firearm",
+    );
+    expect(entries[0].dateOnly).toBe(true);
+  });
+
+  it("does not flag the same field name as date-only for a model where it isn't registered", () => {
+    const entries = detailEntries({ date: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"] }, "Firearm");
+    expect(entries[0].dateOnly).toBe(false);
+  });
+
+  it("classification is model-scoped: MaintenanceLog.date IS date-only", () => {
+    const entries = detailEntries({ date: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"] }, "MaintenanceLog");
+    expect(entries[0].dateOnly).toBe(true);
+  });
+
+  it("flags a sensitive field name as redacted even when the stored value is not literally the REDACTED sentinel (defense in depth for a row the read-path redaction in query.ts somehow missed)", () => {
+    const entries = detailEntries({ serialNumber: "RAW-VALUE-THAT-SLIPPED-THROUGH" }, "Firearm");
+    expect(entries[0].redacted).toBe(true);
+  });
+
+  it("RESTORE's `counts` becomes a value entry whose displayValue is compact JSON", () => {
+    const entries = detailEntries({ counts: { Firearm: 3, Accessory: 1 } }, null);
+    expect(entries[0].kind).toBe("value");
+    expect(displayValue(entries[0].kind === "value" ? entries[0].value : undefined)).toBe(
+      '{"Firearm":3,"Accessory":1}',
+    );
   });
 });
 
