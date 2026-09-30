@@ -21,6 +21,7 @@ import { SLOTS_BY_FIREARM_TYPE, SUGGESTED_SLOTS_BY_FIREARM_TYPE, SLOT_TYPE_LABEL
 import { SLOT_ICONS } from "@/lib/configurator/slot-icons";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import ImagePicker from "@/components/shared/ImagePicker";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 
 function getSlotLabel(slotType: string) {
   if (slotType.startsWith(CUSTOM_SLOT_PREFIX)) {
@@ -1052,6 +1053,26 @@ export default function BuildConfiguratorPage() {
   // Modal state
   const [browserSlot, setBrowserSlot] = useState<string | null>(null);
 
+  // ADMIN-only History section. This page is a client component with no
+  // server-rendered auth check available to it, unlike the server-component
+  // item detail pages — so the admin check itself has to happen client-side
+  // too, via the same /api/account endpoint the admin Users page already
+  // uses. <ItemHistory> is only mounted once this resolves true, so a USER's
+  // browser never requests the audit API either.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/account")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled) setIsAdmin(data.role === "ADMIN");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const fetchBuild = useCallback(async () => {
     if (!firearmId || !buildId) {
       setError("Invalid build route.");
@@ -1315,6 +1336,12 @@ export default function BuildConfiguratorPage() {
           />
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="border-t border-vault-border p-4">
+          <ItemHistory entityType="Build" entityId={build.id} />
+        </div>
+      )}
 
       {/* Accessory Browser Modal */}
       {browserSlot && (

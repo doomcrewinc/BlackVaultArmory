@@ -5,11 +5,24 @@ const m = vi.hoisted(() => ({
   validateSession: vi.fn(),
   upsert: vi.fn(),
   findUnique: vi.fn(),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
 vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: m.validateSession }));
 vi.mock("@/lib/prisma", () => ({ prisma: { appSettings: { upsert: m.upsert, findUnique: m.findUnique } } }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { readStoredDirectAccess, resetDirectAccessCacheForTests } from "@/lib/server/direct-access";
 import { PUT } from "./route";
@@ -32,6 +45,7 @@ beforeEach(() => {
   m.upsert.mockImplementation(async ({ update }: { update: { allowDirectAccess: boolean } }) => ({
     allowDirectAccess: update.allowDirectAccess,
   }));
+  m.findUnique.mockResolvedValue({ allowDirectAccess: false });
 });
 
 describe("PUT /api/settings/direct-access", () => {
@@ -71,7 +85,7 @@ describe("PUT /api/settings/direct-access", () => {
     },
   );
 
-  it("stores the setting and returns the new state", async () => {
+  it("stores the setting, returns the new state, and records DIRECT_ACCESS_CHANGED", async () => {
     m.validateSession.mockResolvedValue(ADMIN);
     const res = await PUT(put({ allowDirectAccess: true }));
     expect(res.status).toBe(200);
@@ -81,17 +95,42 @@ describe("PUT /api/settings/direct-access", () => {
       create: { id: "singleton", allowDirectAccess: true },
       update: { allowDirectAccess: true },
     });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "DIRECT_ACCESS_CHANGED",
+      entityType: "AppSettings",
+      entityId: "singleton",
+      entityLabel: "Settings",
+      changes: { from: false, to: true },
+    });
+  });
+
+  it("no row yet (null from) is treated as false", async () => {
+    m.validateSession.mockResolvedValue(ADMIN);
+    m.findUnique.mockResolvedValue(null);
+    await PUT(put({ allowDirectAccess: true }));
+    expect(m.recordEvent).toHaveBeenCalledWith(null, expect.objectContaining({ changes: { from: false, to: true } }));
+  });
+
+  it("setting it to the value it already has records no event", async () => {
+    m.validateSession.mockResolvedValue(ADMIN);
+    m.findUnique.mockResolvedValue({ allowDirectAccess: true });
+    const res = await PUT(put({ allowDirectAccess: true }));
+    expect(res.status).toBe(200);
+    expect(m.recordEvent).not.toHaveBeenCalled();
   });
 
   it("invalidates the direct-access cache so the next read sees the change immediately", async () => {
     m.validateSession.mockResolvedValue(ADMIN);
-    m.findUnique.mockResolvedValueOnce({ allowDirectAccess: false });
+    m.findUnique.mockReset();
+    m.findUnique.mockResolvedValueOnce({ allowDirectAccess: false }); // readStoredDirectAccess seed
     expect(await readStoredDirectAccess()).toBe(false); // now cached for 5 s
-    m.findUnique.mockResolvedValueOnce({ allowDirectAccess: true });
-    expect(await readStoredDirectAccess()).toBe(false); // still the cached value
+    expect(await readStoredDirectAccess()).toBe(false); // still the cached value, no extra call
 
+    m.findUnique.mockResolvedValueOnce({ allowDirectAccess: false }); // PUT's own "from" read
     expect((await PUT(put({ allowDirectAccess: true }))).status).toBe(200);
+
+    m.findUnique.mockResolvedValueOnce({ allowDirectAccess: true }); // cache was invalidated
     expect(await readStoredDirectAccess()).toBe(true);
-    expect(m.findUnique).toHaveBeenCalledTimes(2);
+    expect(m.findUnique).toHaveBeenCalledTimes(3);
   });
 });

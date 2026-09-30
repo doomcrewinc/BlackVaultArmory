@@ -5,8 +5,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { detectFileSignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { getClientIp } from "@/lib/server/client-ip";
-import { requireAuth } from "@/lib/server/auth";
+import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { getCanonicalUploadsRoot } from "@/lib/upload-security";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
@@ -22,10 +21,11 @@ export async function POST(request: NextRequest) {
   if (auth) return auth;
 
   try {
-    // Rate limiting
-    const ip = getClientIp(request);
+    // Rate limiting — by user ID, fallback to "unknown" if getCurrentUser fails
+    const user = await getCurrentUser();
+    const rateLimitKey = user ? `u:${user.id}` : "unknown";
     const rate = await enforceRateLimit({
-      key: `upload:documents:${ip}`,
+      key: `upload:documents:${rateLimitKey}`,
       windowMs: 60_000,
       maxAttempts: 20,
     });

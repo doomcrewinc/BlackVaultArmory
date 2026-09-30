@@ -462,18 +462,19 @@ model DateNormalizationAudit {
 // The matching TS unions live in src/lib/accounts.ts.
 
 model User {
-  id           String      @id @default(cuid())
-  username     String      @unique
+  id           String       @id @default(cuid())
+  username     String       @unique
   displayName  String
   passwordHash String
   // Role: ADMIN | USER
-  role         String      @default("USER")
+  role         String       @default("USER")
   disabledAt   DateTime?
-  createdAt    DateTime    @default(now())
+  createdAt    DateTime     @default(now())
   lastLoginAt  DateTime?
   sessions     Session[]
-  resetTokens  AuthToken[] @relation("TokenUser")
-  issuedTokens AuthToken[] @relation("TokenIssuer")
+  resetTokens  AuthToken[]  @relation("TokenUser")
+  issuedTokens AuthToken[]  @relation("TokenIssuer")
+  auditEvents  AuditEvent[]
 }
 
 model Session {
@@ -555,6 +556,29 @@ model Kit {
   updatedAt DateTime  @updatedAt
 
   @@index([category])
+}
+
+// ─── AUDIT LOG ────────────────────────────────────────────────
+// Append-only. See docs/superpowers/specs/2026-09-29-audit-log-design.md.
+model AuditEvent {
+  id          String   @id @default(cuid())
+  at          DateTime @default(now())
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  actorName   String
+  actorIp     String?
+  // Type: AuditAction (src/lib/audit/actions.ts)
+  action      String
+  entityType  String?
+  entityId    String?
+  entityLabel String?
+  // JSON text
+  changes     String?
+
+  @@index([at])
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([action])
 }
 
 model KitItem {

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { decryptField } from "@/lib/crypto";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import {
   NFA_CLASS_LABELS,
   MG_REGISTRY_LABELS,
@@ -136,6 +138,12 @@ export default async function FirearmDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // ADMIN-only — this is the PAGE-LEVEL guard: a USER's render tree never
+  // includes <ItemHistory>, so no request to the audit API is ever made on
+  // their behalf. The item-history API route also runs requireAdmin, so
+  // this is not the only guard overall — defense in depth — but it is what
+  // keeps a USER from ever mounting <ItemHistory> in the first place.
+  const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getFirearm>>;
   try {
     result = await getFirearm(id);
@@ -561,6 +569,10 @@ export default async function FirearmDetailPage({
             }))}
           />
         </div>
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="Firearm" entityId={firearm.id} />
+        )}
       </div>
     </div>
   );

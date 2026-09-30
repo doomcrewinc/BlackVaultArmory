@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, Mock } from "vitest";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
@@ -9,6 +9,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/server/auth", () => ({
   requireAuth: vi.fn().mockResolvedValue(null),
+  getCurrentUser: vi.fn().mockResolvedValue({
+    id: "user-1",
+    username: "testuser",
+    displayName: "Test User",
+    role: "USER",
+    sessionId: "session-1",
+  }),
 }));
 
 vi.mock("@/lib/rate-limit", () => ({
@@ -49,8 +56,16 @@ function uploadRequest(fields: Record<string, string>, bytes = PDF_BYTES) {
 // This is the endpoint DocumentUploader actually posts to (its gearId branch
 // is at DocumentUploader.tsx:117); POST /api/documents (JSON) has no UI caller.
 describe("POST /api/documents/upload", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { getCurrentUser } = await import("@/lib/server/auth");
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-1",
+      username: "testuser",
+      displayName: "Test User",
+      role: "USER",
+      sessionId: "session-1",
+    });
     mocks.create.mockResolvedValue({ id: "doc-1" });
     mocks.mkdir.mockResolvedValue(undefined);
     mocks.writeFile.mockResolvedValue(undefined);
@@ -113,5 +128,62 @@ describe("POST /api/documents/upload", () => {
     expect(response.status).toBe(400);
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("rate limits by user ID: two different users have separate buckets", async () => {
+    const { enforceRateLimit } = await import("@/lib/rate-limit");
+
+    // First user
+    await POST(uploadRequest({ name: "Doc 1" }));
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+    expect(firstCall.key).toBe("upload:documents:u:user-1");
+
+    vi.clearAllMocks();
+
+    // Mock a different user
+    const { getCurrentUser } = await import("@/lib/server/auth");
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-2",
+      username: "otheruser",
+      displayName: "Other User",
+      role: "USER",
+      sessionId: "session-2",
+    });
+
+    // Second user
+    await POST(uploadRequest({ name: "Doc 2" }));
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+    expect(secondCall.key).toBe("upload:documents:u:user-2");
+
+    // Keys are different — separate buckets
+    expect(firstCall.key).not.toBe(secondCall.key);
+  });
+
+  it("rate limits by user ID: same user uploading twice uses the same bucket", async () => {
+    const { enforceRateLimit } = await import("@/lib/rate-limit");
+    const { getCurrentUser } = await import("@/lib/server/auth");
+
+    // First upload
+    await POST(uploadRequest({ name: "Doc 1" }));
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+
+    vi.clearAllMocks();
+
+    // Restore the mock after clearing
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-1",
+      username: "testuser",
+      displayName: "Test User",
+      role: "USER",
+      sessionId: "session-1",
+    });
+
+    // Second upload (same user)
+    await POST(uploadRequest({ name: "Doc 2" }));
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+
+    // Both use the same user ID key
+    expect(firstCall.key).toBe("upload:documents:u:user-1");
+    expect(secondCall.key).toBe("upload:documents:u:user-1");
   });
 });

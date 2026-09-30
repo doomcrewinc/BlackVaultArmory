@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/server/auth";
+import { withoutRowAudit } from "@/lib/audit/context";
+import { recordEventBestEffort } from "@/lib/audit/events";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 import {
@@ -122,6 +124,36 @@ function normalizeGearArmorGroups(rows: Record<string, unknown[]>): void {
   });
 }
 
+/** Longest file name recorded, in characters (code points). Typical filesystem limit. */
+const MAX_BACKUP_FILENAME = 255;
+
+/**
+ * The backup file name for the RESTORE event (spec §Restore), from the
+ * client-supplied `X-Backup-Filename` header. The header is UNTRUSTED: it is
+ * URI-decoded (malformed → ignored), reduced to its basename (a client could
+ * send a full path), stripped of C0/C1 control characters (no CR/LF or
+ * terminal escapes in the log or the CSV), trimmed and capped at 255
+ * characters. `undefined` when the header is absent (API callers, older
+ * clients) or nothing usable remains; the restore itself never depends on it.
+ */
+function backupFileName(request: NextRequest): string | undefined {
+  const raw = request.headers.get("x-backup-filename");
+  if (raw === null) return undefined;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return undefined;
+  }
+  // C0/C1 controls, plus Unicode format and line/paragraph separators
+  // (e.g. U+202E right-to-left override) that would make the name display
+  // misleadingly in the log and the CSV.
+  const cleaned = decoded.replace(/[\u0000-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/gu, "");
+  const base = cleaned.split(/[\\/]/).pop() ?? "";
+  const capped = Array.from(base.trim()).slice(0, MAX_BACKUP_FILENAME).join("").trim();
+  return capped === "" ? undefined : capped;
+}
+
 export async function POST(request: NextRequest) {
   const auth = await requireAdmin();
   if (auth) return auth;
@@ -146,41 +178,64 @@ export async function POST(request: NextRequest) {
   normalizeNfaGroups(rows);
   normalizeGearArmorGroups(rows);
 
-  try {
-    await prisma.$transaction(
-      async (tx) => {
-        const delegates = tx as unknown as Record<string, WriteDelegate>;
-        // Sequential throughout — SQLite connection_limit=1 deadlocks on Promise.all.
-        // Delete children before parents (registry reversed), then insert parent-first.
-        // AppSettings is not in the registry, so it is never touched — preserves LAN/path config.
-        for (const { delegate } of [...BACKUP_MODELS].reverse()) {
-          await delegates[delegate].deleteMany();
-        }
-        for (const { delegate, key } of BACKUP_MODELS) {
-          if (rows[key].length) await delegates[delegate].createMany({ data: rows[key] });
-        }
-      },
-      { timeout: 30000 }
-    );
-  } catch (error) {
-    console.error("POST /api/backup/restore error:", error);
+  // Row-level auditing is off for the whole restore — the replace AND the
+  // post-restore date migration — or every restored row (and every normalised
+  // legacy date) would be logged as the admin's own edit. The restore is
+  // recorded as one RESTORE event instead (spike, "Restore: suppression covers
+  // the whole handler").
+  const restored = await withoutRowAudit(async () => {
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          const delegates = tx as unknown as Record<string, WriteDelegate>;
+          // Sequential throughout — SQLite connection_limit=1 deadlocks on Promise.all.
+          // Delete children before parents (registry reversed), then insert parent-first.
+          // AppSettings is not in the registry, so it is never touched — preserves LAN/path config.
+          for (const { delegate } of [...BACKUP_MODELS].reverse()) {
+            await delegates[delegate].deleteMany();
+          }
+          for (const { delegate, key } of BACKUP_MODELS) {
+            if (rows[key].length) await delegates[delegate].createMany({ data: rows[key] });
+          }
+        },
+        { timeout: 30000 }
+      );
+    } catch (error) {
+      console.error("POST /api/backup/restore error:", error);
+      return false;
+    }
+
+    // A pre-upgrade backup brings legacy date-only values back; normalize them now
+    // rather than at the next restart. The restore has already succeeded, so a
+    // migration failure is only logged and never changes the response.
+    try {
+      await runConfiguredDateMigration("restore");
+    } catch (error) {
+      console.error("[date-migration] failed after restore:", error);
+    }
+    return true;
+  });
+
+  if (!restored) {
     return NextResponse.json(
       { error: "Restore failed. Your data has not been modified." },
       { status: 500 }
     );
   }
 
-  // A pre-upgrade backup brings legacy date-only values back; normalize them now
-  // rather than at the next restart. The restore has already succeeded, so a
-  // migration failure is only logged and never changes the response.
-  try {
-    await runConfiguredDateMigration("restore");
-  } catch (error) {
-    console.error("[date-migration] failed after restore:", error);
-  }
+  const counts = Object.fromEntries(BACKUP_MODELS.map(({ key }) => [key, rows[key].length]));
+  // Written OUTSIDE withoutRowAudit — restore replaces every row and normalises
+  // legacy dates under suppression (or every row would get its own entry
+  // attributed to the admin); this single event, recorded afterward, IS logged.
+  const file = backupFileName(request);
+  await recordEventBestEffort(null, {
+    action: "RESTORE",
+    entityLabel: file ?? "Backup restore",
+    changes: file ? { file, counts } : { counts },
+  });
 
   return NextResponse.json({
     success: true,
-    counts: Object.fromEntries(BACKUP_MODELS.map(({ key }) => [key, rows[key].length])),
+    counts,
   });
 }

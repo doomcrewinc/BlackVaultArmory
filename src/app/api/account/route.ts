@@ -7,6 +7,7 @@ import { endUserSessions } from "@/lib/auth/sessions";
 import { hashPassword, validatePassword, verifyPassword } from "@/lib/auth/password";
 import { validateDisplayName } from "@/lib/auth/username";
 import { INVALID_REQUEST, readJsonObject } from "@/lib/auth/route-helpers";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 const AUTH_REQUIRED = { error: "Authentication required" };
 const WRONG_PASSWORD = { error: "Current password is incorrect" };
@@ -57,6 +58,14 @@ export async function PATCH(request: NextRequest) {
     data,
     select: { id: true, username: true, displayName: true, role: true },
   });
-  if (data.passwordHash) await endUserSessions(me.id, me.sessionId);
+  if (data.passwordHash) {
+    await recordEventBestEffort(null, {
+      action: "PASSWORD_CHANGED",
+      entityType: "User",
+      entityId: updated.id,
+      entityLabel: `${updated.displayName} (@${updated.username})`,
+    });
+    await endUserSessions(me.id, me.sessionId);
+  }
   return NextResponse.json(updated);
 }

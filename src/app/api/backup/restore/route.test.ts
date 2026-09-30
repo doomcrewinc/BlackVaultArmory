@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     upsert: vi.fn(),
     update: vi.fn(),
   },
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -33,6 +34,17 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/lib/date-migration", () => ({
   runConfiguredDateMigration: mocks.runConfiguredDateMigration,
+}));
+
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: mocks.recordEvent,
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await mocks.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
 }));
 
 import { POST } from "./route";
@@ -54,10 +66,12 @@ function makeTx() {
   return tx;
 }
 
-function restoreRequest(body: unknown) {
+function restoreRequest(body: unknown, fileHeader?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (fileHeader !== undefined) headers["X-Backup-Filename"] = fileHeader;
   return new NextRequest("http://localhost/api/backup/restore", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -99,6 +113,7 @@ describe("POST /api/backup/restore", () => {
     );
     mocks.runConfiguredDateMigration.mockResolvedValue(undefined);
     auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+    mocks.recordEvent.mockClear();
   });
 
   it("401 when signed out, nothing touched", async () => {
@@ -132,6 +147,92 @@ describe("POST /api/backup/restore", () => {
       { id: "dateNormalizationAudits-1" },
     ]);
     for (const { key } of BACKUP_MODELS) expect(json.counts[key], key).toBe(1);
+  });
+
+  it("records exactly one RESTORE event with per-model counts", async () => {
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(mocks.recordEvent).toHaveBeenCalledTimes(1);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: "Backup restore",
+      changes: { counts: json.counts },
+    });
+  });
+
+  // Spec §Restore: the RESTORE event carries the backup file name. The client
+  // sends it URI-encoded in X-Backup-Filename; API callers (and older clients)
+  // send nothing, and the restore must work exactly as before for them.
+  it("records the backup file name from X-Backup-Filename (URI-decoded) as changes.file and the label", async () => {
+    const name = "blackvault-backup 2026-09-29 (é).json";
+    const response = await POST(restoreRequest(v11Payload(), encodeURIComponent(name)));
+    const json = await response.json();
+    expect(response.status).toBe(200);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: name,
+      changes: { file: name, counts: json.counts },
+    });
+  });
+
+  it.each([
+    ["a path keeps only its basename (POSIX)", encodeURIComponent("/home/jeff/backups/b.json"), "b.json"],
+    ["a path keeps only its basename (Windows)", encodeURIComponent("C:\\Users\\jeff\\b.json"), "b.json"],
+    ["control characters are stripped", encodeURIComponent("b\u0000a\r\nck\u007f\u009bup.json"), "backup.json"],
+    ["capped at 255 characters", encodeURIComponent("x".repeat(300)), "x".repeat(255)],
+    [
+      "Unicode format and separator characters are stripped",
+      encodeURIComponent("b\u202egnp\u200b\u2028\u2029.exe"),
+      "bgnp.exe",
+    ],
+  ])("sanitises the untrusted header: %s", async (_label, header, expected) => {
+    const response = await POST(restoreRequest(v11Payload(), header));
+    const json = await response.json();
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: expected,
+      changes: { file: expected, counts: json.counts },
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["only control characters", encodeURIComponent("\u0001\u0002")],
+    ["only a directory", encodeURIComponent("backups/")],
+    ["only whitespace", encodeURIComponent("   ")],
+    ["malformed URI encoding", "%E0%A4%A"],
+  ])("records no file name when nothing usable remains (%s), and the restore still succeeds", async (_label, header) => {
+    const response = await POST(restoreRequest(v11Payload(), header));
+    const json = await response.json();
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: "Backup restore",
+      changes: { counts: json.counts },
+    });
+  });
+
+  it("records no RESTORE event when the transaction fails", async () => {
+    mocks.transaction.mockRejectedValue(new Error("tx boom"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await POST(restoreRequest(v11Payload()));
+    expect(mocks.recordEvent).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("still returns success when the RESTORE event insert itself throws (best-effort, outside the tx)", async () => {
+    mocks.recordEvent.mockRejectedValueOnce(new Error("audit insert boom"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    // The failure was logged, not swallowed silently.
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("RESTORE"), expect.any(Error));
+    spy.mockRestore();
   });
 
   it("restores a v1.1 payload that omits gear, leaving other tables intact", async () => {

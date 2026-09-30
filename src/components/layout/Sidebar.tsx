@@ -22,6 +22,7 @@ import {
   Backpack,
   Users,
   LogOut,
+  ScrollText,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -74,6 +75,13 @@ const BOTTOM_NAV_ITEMS = [
     href: "/admin/users",
     icon: Users,
     description: "Manage accounts",
+    adminOnly: true,
+  },
+  {
+    label: "Audit log",
+    href: "/admin/audit",
+    icon: ScrollText,
+    description: "Change history",
     adminOnly: true,
   },
   {

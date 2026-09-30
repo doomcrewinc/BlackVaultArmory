@@ -102,5 +102,8 @@ export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.filter(
  * AppSettings is excluded: restore must not clobber local LAN host, paths, keys, or timezone.
  * User, Session and AuthToken are excluded: password hashes never leave the server in an
  * export, and restoring an old backup must never delete today's accounts or lock anyone out.
+ * AuditEvent is excluded: it is append-only history, not restorable inventory state — a
+ * restore must never delete or overwrite what already happened, and a backup export is not
+ * the audit log's own export path.
  */
-export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings", "User", "Session", "AuthToken"];
+export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings", "User", "Session", "AuthToken", "AuditEvent"];

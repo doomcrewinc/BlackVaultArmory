@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, Mock } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/server/auth", () => ({
   requireAuth: vi.fn().mockResolvedValue(null),
+  getCurrentUser: vi.fn().mockResolvedValue({
+    id: "user-1",
+    username: "testuser",
+    displayName: "Test User",
+    role: "USER",
+    sessionId: "session-1",
+  }),
 }));
 
 vi.mock("@/lib/rate-limit", () => ({
@@ -27,6 +34,18 @@ function uploadRequest(entityType: string) {
 }
 
 describe("POST /api/images/upload", () => {
+  beforeEach(async () => {
+    const { getCurrentUser } = await import("@/lib/server/auth");
+    vi.clearAllMocks();
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-1",
+      username: "testuser",
+      displayName: "Test User",
+      role: "USER",
+      sessionId: "session-1",
+    });
+  });
+
   it("accepts gear as an entity type", async () => {
     const response = await POST(uploadRequest("gear"));
     const json = await response.json();
@@ -52,5 +71,62 @@ describe("POST /api/images/upload", () => {
 
     expect(response.status).toBe(400);
     expect(json.error).toContain("Invalid entityType");
+  });
+
+  it("rate limits by user ID: two different users have separate buckets", async () => {
+    const { enforceRateLimit } = await import("@/lib/rate-limit");
+
+    // First user
+    await POST(uploadRequest("gear"));
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+    expect(firstCall.key).toBe("upload:images:u:user-1");
+
+    vi.clearAllMocks();
+
+    // Mock a different user
+    const { getCurrentUser } = await import("@/lib/server/auth");
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-2",
+      username: "otheruser",
+      displayName: "Other User",
+      role: "USER",
+      sessionId: "session-2",
+    });
+
+    // Second user
+    await POST(uploadRequest("gear"));
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+    expect(secondCall.key).toBe("upload:images:u:user-2");
+
+    // Keys are different — separate buckets
+    expect(firstCall.key).not.toBe(secondCall.key);
+  });
+
+  it("rate limits by user ID: same user uploading twice uses the same bucket", async () => {
+    const { enforceRateLimit } = await import("@/lib/rate-limit");
+    const { getCurrentUser } = await import("@/lib/server/auth");
+
+    // First upload
+    await POST(uploadRequest("gear"));
+    const firstCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+
+    vi.clearAllMocks();
+
+    // Restore the mock after clearing
+    (getCurrentUser as unknown as Mock).mockResolvedValue({
+      id: "user-1",
+      username: "testuser",
+      displayName: "Test User",
+      role: "USER",
+      sessionId: "session-1",
+    });
+
+    // Second upload (same user)
+    await POST(uploadRequest("gear"));
+    const secondCall = (enforceRateLimit as unknown as Mock).mock.calls[0][0];
+
+    // Both use the same user ID key
+    expect(firstCall.key).toBe("upload:images:u:user-1");
+    expect(secondCall.key).toBe("upload:images:u:user-1");
   });
 });

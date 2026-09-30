@@ -271,9 +271,19 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
         setRestoreError("The selected file is not valid JSON. Please select a .json backup file.");
         return;
       }
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      // For the RESTORE audit event only (spec §Restore). URI-encoded so any
+      // file name is a valid header value; the server treats it as untrusted.
+      // A name that cannot be encoded (lone surrogate) is simply not sent —
+      // the restore must never depend on it.
+      try {
+        headers["X-Backup-Filename"] = encodeURIComponent(pendingRestoreFile.name);
+      } catch {
+        // omit the header
+      }
       const res = await fetch("/api/backup/restore", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(parsed),
       });
       const json = await res.json();

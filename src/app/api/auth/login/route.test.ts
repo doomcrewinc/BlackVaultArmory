@@ -16,6 +16,7 @@ const m = vi.hoisted(() => {
     verifyPassword: vi.fn(async (pw: string, stored: string) => ({ ok: stored === `h(${pw})`, needsRehash: false })),
     dummyVerify: vi.fn(async () => {}),
     hashPassword: vi.fn(async (pw: string) => `h2(${pw})`),
+    recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
   };
 });
 
@@ -29,6 +30,18 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, verifyPassword: m.verifyPassword, dummyVerify: m.dummyVerify, hashPassword: m.hashPassword };
 });
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { POST } from "./route";
 import { loginThrottle } from "@/lib/auth/throttle";
@@ -80,6 +93,40 @@ describe("POST /api/auth/login", () => {
     expect(wrong.headers.get("set-cookie")).toBeNull();
     // Unknown user still spends a scrypt so it is not faster to reject.
     expect(m.dummyVerify).toHaveBeenCalledOnce();
+    // A LOGIN_FAILED event for the unknown username too, with no actor.
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: "nobody1" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: "known1" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
+  });
+
+  it("caps the recorded username at 64 characters", async () => {
+    const long = "a".repeat(100);
+    await POST(req({ username: long, password: "wrong password here" }));
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: "a".repeat(64) },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
+  });
+
+  it("a valid session cookie on the request does not become the LOGIN_FAILED actor", async () => {
+    addUser("known-cookie");
+    const res = await POST(
+      req({ username: "known-cookie", password: "wrong password here" }, { cookie: "bv_session=some-other-users-token" }),
+    );
+    expect(res.status).toBe(401);
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: "known-cookie" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
   });
 
   it("a disabled user with the right password gets the same 401 body and no session", async () => {
@@ -150,6 +197,13 @@ describe("POST /api/auth/login", () => {
     const cookie = ok.headers.get("set-cookie") ?? "";
     expect(cookie).toContain("bv_session=");
     expect(cookie).toContain("HttpOnly");
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN",
+      entityType: "User",
+      entityId: "id-jeff7",
+      entityLabel: "jeff7 (@jeff7)",
+      actorOverride: { actorId: "id-jeff7", actorName: "jeff7 (@jeff7)" },
+    });
     expect(m.sessionCreate).toHaveBeenCalledOnce();
     expect(m.sessionCreate.mock.calls[0][0].data.userId).toBe("id-jeff7");
     expect(m.update).toHaveBeenCalledWith(

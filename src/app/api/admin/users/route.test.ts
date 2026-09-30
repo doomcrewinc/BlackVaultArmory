@@ -5,12 +5,25 @@ const m = vi.hoisted(() => ({
   validateSession: vi.fn(),
   findMany: vi.fn(),
   createInvite: vi.fn(),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
 vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: m.validateSession }));
 vi.mock("@/lib/prisma", () => ({ prisma: { user: { findMany: m.findMany } } }));
 vi.mock("@/lib/auth/tokens", () => ({ createInvite: m.createInvite }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { resetPublicUrlCacheForTests } from "@/lib/server/public-url";
 import { GET, POST } from "./route";
@@ -104,12 +117,14 @@ describe("POST /api/admin/users (invite)", () => {
       expiresAt: EXPIRES.toISOString(),
     });
     expect(m.createInvite).toHaveBeenCalledWith({ role: "USER", createdById: "a1" });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", entityLabel: "Invite (USER)", changes: { role: "USER" } });
   });
 
   it("accepts role ADMIN", async () => {
     m.validateSession.mockResolvedValue(ADMIN);
     expect((await POST(post({ role: "ADMIN" }))).status).toBe(200);
     expect(m.createInvite).toHaveBeenCalledWith({ role: "ADMIN", createdById: "a1" });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", entityLabel: "Invite (ADMIN)", changes: { role: "ADMIN" } });
   });
 
   it.each([[{ role: "OWNER" }], [{ role: "admin" }], [{ role: 1 }], [{ role: null }], ["not json"], [[1]]])(

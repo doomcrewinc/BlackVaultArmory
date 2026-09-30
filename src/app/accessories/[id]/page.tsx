@@ -11,6 +11,7 @@ import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
 import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
 import type { ItemAllocation } from "@/lib/kits/itemAllocation";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import {
   ArrowLeft,
   Shield,
@@ -131,6 +132,27 @@ export default function AccessoryDetailPage() {
   const [accessory, setAccessory] = useState<Accessory | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // ADMIN-only History section. This page is a client component (fetches
+  // its own data from /api/accessories/:id) with no server-rendered auth
+  // check available to it, unlike the server-component item detail pages —
+  // so the admin check itself has to happen client-side too, via the same
+  // /api/account endpoint the admin Users page already uses. <ItemHistory>
+  // is only mounted once this resolves true, so a USER's browser never
+  // requests the audit API either.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/account")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled) setIsAdmin(data.role === "ADMIN");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Log rounds form
   const [logOpen, setLogOpen] = useState(false);
@@ -816,6 +838,8 @@ export default function AccessoryDetailPage() {
             </div>
           </div>
         )}
+
+        {isAdmin && <ItemHistory entityType="Accessory" entityId={accessory.id} />}
       </div>
     </div>
   );

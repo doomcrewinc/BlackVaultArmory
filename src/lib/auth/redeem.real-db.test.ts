@@ -118,6 +118,33 @@ describe("token redemption against real SQLite", () => {
     expect(await usedAt(token)).toBeInstanceOf(Date);
     expect((await prisma.user.findUnique({ where: { username: "jeff-2" } }))?.role).toBe("USER");
   });
+
+  it("a redeem that rolls back (duplicate username) writes no INVITE_REDEEMED row; a retry does", async () => {
+    await prisma.user.create({ data: { username: "rollback-collide", displayName: "X", passwordHash: "x", role: "USER" } });
+    const { token } = await createInvite({ role: "USER", createdById: admin.id });
+    const before = await prisma.auditEvent.count();
+
+    const dup = await redeem(redeemReq({ token, username: "rollback-collide", displayName: "Other", password: PW }));
+    expect(dup.status).toBe(409);
+    expect(await usedAt(token)).toBeNull();
+    // The INVITE_REDEEMED write happens inside the same transaction as tx.user.create
+    // (redeem.ts:57), which P2002 rolled back — proves it rolled back with everything else.
+    // Count (not findFirst) because earlier tests in this suite already wrote their own
+    // INVITE_REDEEMED rows for other usernames.
+    expect(await prisma.auditEvent.count()).toBe(before);
+    expect(
+      await prisma.auditEvent.findFirst({ where: { action: "INVITE_REDEEMED", actorName: { contains: "rollback-collide" } } }),
+    ).toBeNull();
+
+    // Not vacuous: a successful redemption of the same invite DOES write one row.
+    const retry = await redeem(redeemReq({ token, username: "rollback-collide-2", displayName: "Other", password: PW }));
+    expect(retry.status).toBe(200);
+    expect(await prisma.auditEvent.count()).toBe(before + 1);
+    const event = await prisma.auditEvent.findFirst({
+      where: { action: "INVITE_REDEEMED", actorName: { contains: "rollback-collide" } },
+    });
+    expect(event).toMatchObject({ action: "INVITE_REDEEMED", entityType: "User", actorName: "Other (@rollback-collide-2)" });
+  });
   describe("an invite dies with its issuer's admin rights (ruling A13)", () => {
     async function issuer(username: string) {
       return prisma.user.create({ data: { username, displayName: username, passwordHash: "x", role: "ADMIN" } });

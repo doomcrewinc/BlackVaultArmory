@@ -10,6 +10,8 @@ import { getKitDetail, type KitDetail } from "./getKitDetail";
 import { KitContents } from "./KitContents";
 import { AddKitItem } from "./AddKitItem";
 import { DeleteKitButton } from "./DeleteKitButton";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 
 /**
  * `/kits/[id]` — the ONE kit detail page. Both list paths link here:
@@ -61,6 +63,11 @@ export default async function KitDetailPage({
 }) {
   const { id } = await params;
 
+  // ADMIN-only History section — this is the PAGE-LEVEL guard: a USER's
+  // JSX never includes <ItemHistory>, so no audit-API request is ever made
+  // for them. The item-history API route also runs requireAdmin (defense
+  // in depth), so this is not the only guard overall.
+  const currentUser = await getCurrentUser();
   let detail: KitDetail | null;
   try {
     detail = await getKitDetail(id);
@@ -198,6 +205,10 @@ export default async function KitDetailPage({
               {kit.notes}
             </p>
           </div>
+        )}
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="Kit" entityId={kit.id} />
         )}
       </div>
     </div>

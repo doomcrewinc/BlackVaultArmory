@@ -10,6 +10,8 @@ import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
 import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { AmmoTransactionList } from "@/components/ammo/AmmoTransactionList";
 import { DeleteAmmoButton } from "./DeleteAmmoButton";
+import { getCurrentUser } from "@/lib/server/auth";
+import { ItemHistory } from "@/components/audit/ItemHistory";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
 /**
@@ -84,6 +86,11 @@ export default async function AmmoDetailPage({
 }) {
   const { id } = await params;
 
+  // ADMIN-only History section — this is the PAGE-LEVEL guard: a USER's
+  // JSX never includes <ItemHistory>, so no audit-API request is ever made
+  // for them. The item-history API route also runs requireAdmin (defense
+  // in depth), so this is not the only guard overall.
+  const currentUser = await getCurrentUser();
   let result: Awaited<ReturnType<typeof getAmmoDetail>>;
   try {
     result = await getAmmoDetail(id);
@@ -257,6 +264,10 @@ export default async function AmmoDetailPage({
         )}
 
         <AmmoTransactionList transactions={transactions} />
+
+        {currentUser?.role === "ADMIN" && (
+          <ItemHistory entityType="AmmoStock" entityId={stock.id} />
+        )}
       </div>
     </div>
   );

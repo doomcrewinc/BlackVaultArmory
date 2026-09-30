@@ -3,8 +3,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { getClientIp } from "@/lib/server/client-ip";
-import { requireAuth } from "@/lib/server/auth";
+import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { ALLOWED_IMAGE_EXTENSIONS, SUPPORTED_IMAGE_FORMATS_LABEL } from "@/lib/image-formats";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";
 
@@ -41,9 +40,10 @@ export async function POST(request: NextRequest) {
   if (auth) return auth;
 
   try {
-    // Rate limiting
-    const ip = getClientIp(request);
-    const rate = await enforceRateLimit({ key: `upload:images:${ip}`, windowMs: 60_000, maxAttempts: 20 });
+    // Rate limiting — by user ID, fallback to "unknown" if getCurrentUser fails
+    const user = await getCurrentUser();
+    const rateLimitKey = user ? `u:${user.id}` : "unknown";
+    const rate = await enforceRateLimit({ key: `upload:images:${rateLimitKey}`, windowMs: 60_000, maxAttempts: 20 });
     if (!rate.allowed) {
       return NextResponse.json(
         { error: "Too many upload attempts. Please wait a minute." },

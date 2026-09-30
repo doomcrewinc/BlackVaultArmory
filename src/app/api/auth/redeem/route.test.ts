@@ -86,6 +86,8 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, hashPassword: vi.fn(async (pw: string) => `h(${pw})`) };
 });
+const recordEvent = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@/lib/audit/events", () => ({ recordEvent }));
 
 import { POST } from "./route";
 
@@ -129,6 +131,14 @@ describe("POST /api/auth/redeem — invite", () => {
     expect(cookie).toContain("bv_session=");
     expect(cookie).toContain("HttpOnly");
     expect(m.db.session.create.mock.calls[0][0].data.userId).toBe("id-newguy");
+    expect(recordEvent).toHaveBeenCalledWith(m.db, {
+      action: "INVITE_REDEEMED",
+      entityType: "User",
+      entityId: "id-newguy",
+      entityLabel: "New Guy (@newguy)",
+      changes: { role: "USER" },
+      actorOverride: { actorId: "id-newguy", actorName: "New Guy (@newguy)" },
+    });
   });
 
   it("grants the role chosen on the invite", async () => {
@@ -211,6 +221,13 @@ describe("POST /api/auth/redeem — reset", () => {
     // The new session is created AFTER the wipe, so it survives.
     const wipeOrder = m.db.session.deleteMany.mock.invocationCallOrder.at(-1)!;
     expect(m.db.session.create.mock.invocationCallOrder[0]).toBeGreaterThan(wipeOrder);
+    expect(recordEvent).toHaveBeenCalledWith(m.db, {
+      action: "PASSWORD_CHANGED",
+      entityType: "User",
+      entityId: "u1",
+      entityLabel: "Jeff (@jeff)",
+      actorOverride: { actorId: "u1", actorName: "Jeff (@jeff)" },
+    });
   });
 
   it("400 for a too-short password, without consuming the link", async () => {

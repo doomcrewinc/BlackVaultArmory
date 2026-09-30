@@ -133,6 +133,22 @@ async function main() {
       if (parsed.promote) {
         await tx.user.update({ where: { id: user.id }, data: { role: "ADMIN", disabledAt: null } });
       }
+      // RESET_LINK_ISSUED, on the same transaction so it commits with the token.
+      // Mirrors src/lib/audit/record.ts's writeAuditEvent shape (same column names,
+      // same action string) since this plain-JS script cannot import that TS module.
+      // No token or URL — only who the link is for.
+      await tx.auditEvent.create({
+        data: {
+          actorId: null,
+          actorName: "system (recovery CLI)",
+          actorIp: null,
+          action: "RESET_LINK_ISSUED",
+          entityType: "User",
+          entityId: user.id,
+          entityLabel: `${user.displayName} (@${user.username})`,
+          changes: null,
+        },
+      });
     });
 
     console.log(`Reset link for ${username} (valid 24 hours): ${origin}/reset/${token}`);

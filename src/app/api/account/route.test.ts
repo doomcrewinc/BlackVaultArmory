@@ -8,6 +8,7 @@ const m = vi.hoisted(() => ({
   update: vi.fn(),
   verifyPassword: vi.fn(),
   hashPassword: vi.fn(async () => "scrypt$new"),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
@@ -21,6 +22,18 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, verifyPassword: m.verifyPassword, hashPassword: m.hashPassword };
 });
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { GET, PATCH } from "./route";
 
@@ -121,6 +134,19 @@ describe("PATCH /api/account", () => {
     expect(m.hashPassword).toHaveBeenCalledWith(NEW_PW);
     expect(m.update).toHaveBeenCalledWith(expect.objectContaining({ data: { passwordHash: "scrypt$new" } }));
     expect(m.endUserSessions).toHaveBeenCalledWith("u1", "s2");
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "PASSWORD_CHANGED",
+      entityType: "User",
+      entityId: "u1",
+      entityLabel: "Jeff (@jeff)",
+    });
+  });
+
+  it("changing only the display name records no PASSWORD_CHANGED event", async () => {
+    m.validateSession.mockResolvedValue(USER);
+    const res = await PATCH(patch({ displayName: "Jeffrey" }));
+    expect(res.status).toBe(200);
+    expect(m.recordEvent).not.toHaveBeenCalled();
   });
 
   it.each([[{}], [{ displayName: 5 }], [{ newPassword: 5, currentPassword: "x" }], ["{bad"]])(
