@@ -127,6 +127,10 @@ export const DATE_ONLY_EXCLUDED_FIELDS = [
   "AuthToken.createdAt",
   "AuthToken.expiresAt",
   "AuthToken.usedAt",
+  // The audit log's own timestamp: the moment the event happened, read for
+  // ordering ("most recent activity") and never presented as a calendar day
+  // the user chose.
+  "AuditEvent.at",
 ] as const;
 
 export interface MigrationSummary {

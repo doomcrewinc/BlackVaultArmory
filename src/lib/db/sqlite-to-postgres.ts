@@ -22,12 +22,17 @@ export interface MigrationModel {
   delegate: string;
 }
 
-/** AppSettings, then accounts (User before its children), then the backup registry, which is already parent-first. */
+/**
+ * AppSettings, then accounts (User before its children), then AuditEvent (it
+ * points at User via actorId), then the backup registry, which is already
+ * parent-first.
+ */
 export const MIGRATION_MODELS: readonly MigrationModel[] = [
   { model: "AppSettings", delegate: "appSettings" },
   { model: "User", delegate: "user" },
   { model: "Session", delegate: "session" },
   { model: "AuthToken", delegate: "authToken" },
+  { model: "AuditEvent", delegate: "auditEvent" },
   ...BACKUP_MODELS.map(({ model, delegate }) => ({ model, delegate })),
 ];
 

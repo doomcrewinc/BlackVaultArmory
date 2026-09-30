@@ -20,8 +20,8 @@ describe("BACKUP_MODELS registry", () => {
     expect(registered).toEqual(inSchema);
   });
 
-  it("excludes AppSettings and the three auth models", () => {
-    expect([...BACKUP_EXCLUDED_MODELS].sort()).toEqual(["AppSettings", "AuthToken", "Session", "User"]);
+  it("excludes AppSettings, the three auth models, and AuditEvent", () => {
+    expect([...BACKUP_EXCLUDED_MODELS].sort()).toEqual(["AppSettings", "AuditEvent", "AuthToken", "Session", "User"]);
   });
 
   it("includes the models the hand-maintained lists dropped", () => {
