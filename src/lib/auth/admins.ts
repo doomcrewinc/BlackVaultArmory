@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ROLES, type Role } from "@/lib/accounts";
 import { endUserSessions } from "@/lib/auth/sessions";
+import { recordEvent } from "@/lib/audit/events";
 
 /** Admin user management. The last active admin can never be demoted or disabled. */
 
@@ -71,10 +72,34 @@ export async function changeRoleOrStatus(
           const data: { role?: Role; disabledAt?: Date | null } = {};
           const target = await tx.user.findUnique({ where: { id: targetId } });
           if (!target) throw new ChangeRefused(404, "User not found");
+          // Snapshot before the update — not just for the audit `from`, but because a target
+          // fetched through a client that returns the SAME row object on every call (as this
+          // one is, in tests) would otherwise reflect the update once tx.user.update mutates it.
+          const previousRole = target.role;
+          const previousDisabledAt = target.disabledAt;
           if (change.role !== undefined) data.role = change.role;
           // Re-disabling keeps the original timestamp.
-          if (change.disabled !== undefined) data.disabledAt = change.disabled ? (target.disabledAt ?? new Date()) : null;
+          if (change.disabled !== undefined) data.disabledAt = change.disabled ? (previousDisabledAt ?? new Date()) : null;
           await tx.user.update({ where: { id: targetId }, data });
+
+          const label = `${target.displayName} (@${target.username})`;
+          if (change.role !== undefined && change.role !== previousRole) {
+            await recordEvent(tx, {
+              action: "ROLE_CHANGED",
+              entityType: "User",
+              entityId: targetId,
+              entityLabel: label,
+              changes: { from: previousRole, to: change.role },
+            });
+          }
+          // Only a real transition is logged (Review Focus #3's rule, applied to security
+          // events too) — re-disabling an already-disabled user is a no-op.
+          if (change.disabled === true && previousDisabledAt === null) {
+            await recordEvent(tx, { action: "USER_DISABLED", entityType: "User", entityId: targetId, entityLabel: label });
+          } else if (change.disabled === false && previousDisabledAt !== null) {
+            await recordEvent(tx, { action: "USER_ENABLED", entityType: "User", entityId: targetId, entityLabel: label });
+          }
+
           if ((await tx.user.count({ where: ACTIVE_ADMIN })) === 0) throw new ChangeRefused(409, LAST_ADMIN_ERROR);
           // Links outlive neither the issuer's account nor their admin rights (ruling A13): a
           // disabled or demoted admin's unused invite/reset links are burned in this same

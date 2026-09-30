@@ -13,7 +13,10 @@ const mocks = vi.hoisted(() => ({
   inFlight: 0,
   maxInFlight: 0,
   settingsFindUnique: vi.fn(),
+  recordEvent: vi.fn(async () => {}),
 }));
+
+vi.mock("@/lib/audit/events", () => ({ recordEvent: mocks.recordEvent }));
 
 vi.mock("@/lib/prisma", async () => {
   const { BACKUP_MODELS: models } = await vi.importActual<typeof import("@/lib/backup/models")>(
@@ -46,6 +49,7 @@ describe("POST /api/backup", () => {
     mocks.maxInFlight = 0;
     mocks.settingsFindUnique.mockResolvedValue({ includeUploadsInBackup: true, backupDestinationPath: null });
     auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+    mocks.recordEvent.mockClear();
   });
 
   it("401 when signed out, nothing exported", async () => {
@@ -84,6 +88,19 @@ describe("POST /api/backup", () => {
     expect(json.meta.version).toBe("1.1");
     expect(Object.keys(json.meta.counts).sort()).toEqual(BACKUP_MODELS.map((m) => m.key).sort());
     for (const { key } of BACKUP_MODELS) expect(json.meta.counts[key]).toBe(1);
+  });
+
+  it("records a BACKUP_CREATED event naming the file", async () => {
+    const json = await (await POST()).json();
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, { action: "BACKUP_CREATED", changes: { file: json.filename } });
+  });
+
+  it("records no event when signed out or not an admin", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    await POST();
+    auth.validateSession.mockResolvedValue(USER_SESSION);
+    await POST();
+    expect(mocks.recordEvent).not.toHaveBeenCalled();
   });
 
   it("queries sequentially, never concurrently (SQLite connection_limit=1)", async () => {

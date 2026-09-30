@@ -8,6 +8,7 @@ import { safeNextPath } from "@/lib/auth/next-path";
 import { normaliseUsername } from "@/lib/auth/username";
 import { trustsForwardedHeaders } from "@/lib/server/request-gate";
 import { INVALID_REQUEST, readJsonObject, signInResponse } from "@/lib/auth/route-helpers";
+import { recordEvent } from "@/lib/audit/events";
 
 // One body for unknown user, wrong password and disabled account — never tell them apart.
 const LOGIN_FAILED = { error: "Invalid username or password" };
@@ -42,8 +43,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const fail = () => {
+  // Every failure path (unknown user, wrong password, disabled account, an over-long
+  // password) goes through here, so the extra write costs the same regardless of which
+  // one it was — it must never become a signal that distinguishes them.
+  const fail = async () => {
     keys.forEach((k) => loginThrottle.fail(k));
+    await recordEvent(null, { action: "LOGIN_FAILED", changes: { username: username.slice(0, 64) } });
     return NextResponse.json(LOGIN_FAILED, { status: 401 });
   };
 
@@ -67,6 +72,17 @@ export async function POST(request: NextRequest) {
   await prisma.user.update({
     where: { id: user.id },
     data: { lastLoginAt: new Date(), ...(needsRehash ? { passwordHash: await hashPassword(password) } : {}) },
+  });
+  const actorName = `${user.displayName} (@${user.username})`;
+  // The session cookie is not set yet (signInResponse creates it below), so
+  // resolveActor() would see no cookie and report anonymous — override with the
+  // user who just proved their password.
+  await recordEvent(null, {
+    action: "LOGIN",
+    entityType: "User",
+    entityId: user.id,
+    entityLabel: actorName,
+    actorOverride: { actorId: user.id, actorName },
   });
   const next = safeNextPath(typeof body.next === "string" ? body.next : null);
   return signInResponse(request, user.id, { next });

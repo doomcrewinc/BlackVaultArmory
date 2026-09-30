@@ -8,6 +8,7 @@ const m = vi.hoisted(() => ({
   update: vi.fn(),
   verifyPassword: vi.fn(),
   hashPassword: vi.fn(async () => "scrypt$new"),
+  recordEvent: vi.fn(async () => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
@@ -21,6 +22,7 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, verifyPassword: m.verifyPassword, hashPassword: m.hashPassword };
 });
+vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
 
 import { GET, PATCH } from "./route";
 
@@ -121,6 +123,19 @@ describe("PATCH /api/account", () => {
     expect(m.hashPassword).toHaveBeenCalledWith(NEW_PW);
     expect(m.update).toHaveBeenCalledWith(expect.objectContaining({ data: { passwordHash: "scrypt$new" } }));
     expect(m.endUserSessions).toHaveBeenCalledWith("u1", "s2");
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "PASSWORD_CHANGED",
+      entityType: "User",
+      entityId: "u1",
+      entityLabel: "Jeff (@jeff)",
+    });
+  });
+
+  it("changing only the display name records no PASSWORD_CHANGED event", async () => {
+    m.validateSession.mockResolvedValue(USER);
+    const res = await PATCH(patch({ displayName: "Jeffrey" }));
+    expect(res.status).toBe(200);
+    expect(m.recordEvent).not.toHaveBeenCalled();
   });
 
   it.each([[{}], [{ displayName: 5 }], [{ newPassword: 5, currentPassword: "x" }], ["{bad"]])(

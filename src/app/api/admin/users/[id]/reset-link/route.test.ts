@@ -6,6 +6,7 @@ const m = vi.hoisted(() => ({
   endUserSessions: vi.fn(async () => {}),
   findUnique: vi.fn(),
   createResetLink: vi.fn(),
+  recordEvent: vi.fn(async () => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
@@ -16,6 +17,7 @@ vi.mock("@/lib/auth/sessions", () => ({
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: { user: { findUnique: m.findUnique } } }));
 vi.mock("@/lib/auth/tokens", () => ({ createResetLink: m.createResetLink }));
+vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
 
 import { resetPublicUrlCacheForTests } from "@/lib/server/public-url";
 import { POST } from "./route";
@@ -36,7 +38,7 @@ beforeEach(() => {
   process.env.PUBLIC_URL = "https://vault.example.com";
   resetPublicUrlCacheForTests();
   m.createResetLink.mockResolvedValue({ token: "RST", expiresAt: EXPIRES });
-  m.findUnique.mockResolvedValue({ id: "u1" });
+  m.findUnique.mockResolvedValue({ id: "u1", username: "jeff", displayName: "Jeff" });
 });
 
 describe("POST /api/admin/users/[id]/reset-link", () => {
@@ -64,6 +66,7 @@ describe("POST /api/admin/users/[id]/reset-link", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "User not found" });
     expect(m.createResetLink).not.toHaveBeenCalled();
+    expect(m.recordEvent).not.toHaveBeenCalled();
   });
 
   it("returns the public reset URL and ends all of the user's sessions", async () => {
@@ -76,12 +79,24 @@ describe("POST /api/admin/users/[id]/reset-link", () => {
     });
     expect(m.createResetLink).toHaveBeenCalledWith({ userId: "u1", createdById: "a1" });
     expect(m.endUserSessions).toHaveBeenCalledWith("u1");
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESET_LINK_ISSUED",
+      entityType: "User",
+      entityId: "u1",
+      entityLabel: "Jeff (@jeff)",
+    });
   });
 
   it("a reset link for yourself keeps your current session", async () => {
     m.validateSession.mockResolvedValue(ADMIN);
-    m.findUnique.mockResolvedValue({ id: "a1" });
+    m.findUnique.mockResolvedValue({ id: "a1", username: "admin", displayName: "Admin" });
     expect((await POST(...post("a1"))).status).toBe(200);
     expect(m.endUserSessions).toHaveBeenCalledWith("a1", "s1");
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESET_LINK_ISSUED",
+      entityType: "User",
+      entityId: "a1",
+      entityLabel: "Admin (@admin)",
+    });
   });
 });

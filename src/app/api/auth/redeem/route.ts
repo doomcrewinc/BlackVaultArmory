@@ -7,6 +7,7 @@ import { consumeToken, peekToken } from "@/lib/auth/tokens";
 import { loginThrottle } from "@/lib/auth/throttle";
 import { normaliseUsername, validateDisplayName, validateUsername } from "@/lib/auth/username";
 import { INVALID_REQUEST, isUniqueViolation, readJsonObject, signInResponse } from "@/lib/auth/route-helpers";
+import { recordEvent } from "@/lib/audit/events";
 
 const GONE = { error: "Link expired or already used" };
 const gone = () => NextResponse.json(GONE, { status: 404 });
@@ -51,6 +52,16 @@ async function redeemInvite(request: NextRequest, token: string, body: Record<st
       const user = await tx.user.create({
         data: { username, displayName, passwordHash, role: consumed.role ?? "USER", lastLoginAt: now },
       });
+      // No session cookie exists yet — the new account itself is the actor.
+      const actorName = `${user.displayName} (@${user.username})`;
+      await recordEvent(tx, {
+        action: "INVITE_REDEEMED",
+        entityType: "User",
+        entityId: user.id,
+        entityLabel: actorName,
+        changes: { role: user.role },
+        actorOverride: { actorId: user.id, actorName },
+      });
       return user.id;
     });
   } catch (error) {
@@ -77,6 +88,16 @@ async function redeemReset(request: NextRequest, token: string, body: Record<str
       data: { passwordHash, lastLoginAt: now },
     });
     await tx.session.deleteMany({ where: { userId: consumed.userId } });
+    // Reached via a single-use link, not a signed-in session — the account
+    // whose password just changed is the actor.
+    const actorName = `${updated.displayName} (@${updated.username})`;
+    await recordEvent(tx, {
+      action: "PASSWORD_CHANGED",
+      entityType: "User",
+      entityId: updated.id,
+      entityLabel: actorName,
+      actorOverride: { actorId: updated.id, actorName },
+    });
     return updated;
   });
   if (!user) return gone();

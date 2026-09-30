@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, clearedSessionCookie, endSession, endUserSessions, validateSession } from "@/lib/auth/sessions";
+import { recordEvent } from "@/lib/audit/events";
 
 /**
  * End the current session (or, with `?all=1`, every session of the signed-in user) and clear
@@ -11,8 +12,20 @@ import { SESSION_COOKIE, clearedSessionCookie, endSession, endUserSessions, vali
 export async function POST(request: NextRequest) {
   const current = await validateSession(request.cookies.get(SESSION_COOKIE)?.value);
   if (current) {
-    if (request.nextUrl.searchParams.get("all") === "1") await endUserSessions(current.user.id);
+    const all = request.nextUrl.searchParams.get("all") === "1";
+    if (all) await endUserSessions(current.user.id);
     else await endSession(current.sessionId);
+    // actorOverride: by now the session row this event is about may already be gone,
+    // so resolveActor()'s lookup could no longer find it — name the user explicitly.
+    const actorName = `${current.user.displayName} (@${current.user.username})`;
+    await recordEvent(null, {
+      action: "LOGOUT",
+      entityType: "User",
+      entityId: current.user.id,
+      entityLabel: actorName,
+      actorOverride: { actorId: current.user.id, actorName },
+      ...(all ? { changes: { allSessions: true } } : {}),
+    });
   }
   const response = NextResponse.json({ ok: true });
   response.cookies.set(clearedSessionCookie(request));

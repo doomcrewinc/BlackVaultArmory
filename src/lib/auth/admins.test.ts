@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * callback works on a staged copy, which is committed only if the callback returns and thrown
  * away if it throws. That makes "throw to roll back" observable.
  */
-type Row = { id: string; role: string; disabledAt: Date | null; displayName: string };
+type Row = { id: string; role: string; disabledAt: Date | null; displayName: string; username: string };
 type TokenRow = { id: string; createdById: string | null; usedAt: Date | null };
 
 const m = vi.hoisted(() => ({
@@ -18,6 +18,7 @@ const m = vi.hoisted(() => ({
   failFirstWith: null as null | { code: string },
   endUserSessions: vi.fn(async () => {}),
   findMany: vi.fn(),
+  recordEvent: vi.fn(async () => {}),
 }));
 
 function matches(row: Row, where: Record<string, unknown>) {
@@ -73,18 +74,24 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 vi.mock("@/lib/auth/sessions", () => ({ endUserSessions: m.endUserSessions }));
+vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
 
 import { changeRoleOrStatus, listAdmins } from "./admins";
 
 const LAST_ADMIN = { ok: false, status: 409, error: "At least one active admin is required" };
 
 function admin(id: string, disabledAt: Date | null = null): Row {
-  return { id, role: "ADMIN", disabledAt, displayName: id };
+  return { id, role: "ADMIN", disabledAt, displayName: id, username: id };
 }
 function user(id: string): Row {
-  return { id, role: "USER", disabledAt: null, displayName: id };
+  return { id, role: "USER", disabledAt: null, displayName: id, username: id };
 }
 const row = (id: string) => m.users.find((u) => u.id === id)!;
+
+/** The tx object recordEvent should have been called with: the tx from the callback the test drove. */
+function txArg() {
+  return expect.objectContaining({ user: expect.anything() });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -124,6 +131,13 @@ describe("changeRoleOrStatus — last active admin (Review Focus #5)", () => {
     expect(await changeRoleOrStatus("b", { role: "USER" }, "a")).toEqual({ ok: true });
     expect(row("b").role).toBe("USER");
     expect(m.committed).toBe(1);
+    expect(m.recordEvent).toHaveBeenCalledWith(txArg(), {
+      action: "ROLE_CHANGED",
+      entityType: "User",
+      entityId: "b",
+      entityLabel: "b (@b)",
+      changes: { from: "ADMIN", to: "USER" },
+    });
   });
 
   it("re-counts AFTER the change inside the transaction: count 0 after the update → 409 + rollback", async () => {
@@ -134,6 +148,9 @@ describe("changeRoleOrStatus — last active admin (Review Focus #5)", () => {
     expect(await changeRoleOrStatus("b", { role: "USER" }, "a")).toEqual(LAST_ADMIN);
     expect(row("b").role).toBe("ADMIN");
     expect(m.rolledBack).toBe(1);
+    // recordEvent was called inside the rolled-back transaction — the injection
+    // test below proves this actually matters, against the real DB.
+    expect(m.recordEvent).toHaveBeenCalled();
   });
 
   it("the second of two sequential demotions is refused", async () => {
@@ -191,6 +208,13 @@ describe("changeRoleOrStatus — other rules", () => {
     m.users = [admin("a"), user("u")];
     expect(await changeRoleOrStatus("u", { role: "ADMIN" }, "a")).toEqual({ ok: true });
     expect(row("u").role).toBe("ADMIN");
+    expect(m.recordEvent).toHaveBeenCalledWith(txArg(), {
+      action: "ROLE_CHANGED",
+      entityType: "User",
+      entityId: "u",
+      entityLabel: "u (@u)",
+      changes: { from: "USER", to: "ADMIN" },
+    });
   });
 
   it("disabling a user sets disabledAt and ends all of their sessions", async () => {
@@ -198,13 +222,21 @@ describe("changeRoleOrStatus — other rules", () => {
     expect(await changeRoleOrStatus("u", { disabled: true }, "a")).toEqual({ ok: true });
     expect(row("u").disabledAt).toBeInstanceOf(Date);
     expect(m.endUserSessions).toHaveBeenCalledWith("u");
+    expect(m.recordEvent).toHaveBeenCalledWith(txArg(), {
+      action: "USER_DISABLED",
+      entityType: "User",
+      entityId: "u",
+      entityLabel: "u (@u)",
+    });
+    expect(m.recordEvent).not.toHaveBeenCalledWith(txArg(), expect.objectContaining({ action: "ROLE_CHANGED" }));
   });
 
-  it("disabling an already-disabled user keeps the original disabledAt", async () => {
+  it("disabling an already-disabled user keeps the original disabledAt and records no event", async () => {
     const when = new Date("2026-01-01T00:00:00Z");
     m.users = [admin("a"), { ...user("u"), disabledAt: when }];
     await changeRoleOrStatus("u", { disabled: true }, "a");
     expect(row("u").disabledAt).toEqual(when);
+    expect(m.recordEvent).not.toHaveBeenCalled();
   });
 
   it("re-enabling clears disabledAt and does not end sessions", async () => {
@@ -212,6 +244,23 @@ describe("changeRoleOrStatus — other rules", () => {
     expect(await changeRoleOrStatus("u", { disabled: false }, "a")).toEqual({ ok: true });
     expect(row("u").disabledAt).toBeNull();
     expect(m.endUserSessions).not.toHaveBeenCalled();
+    expect(m.recordEvent).toHaveBeenCalledWith(txArg(), {
+      action: "USER_ENABLED",
+      entityType: "User",
+      entityId: "u",
+      entityLabel: "u (@u)",
+    });
+  });
+
+  it("changing role and disabled state together records both events", async () => {
+    m.users = [admin("a"), user("u")];
+    expect(await changeRoleOrStatus("u", { role: "ADMIN", disabled: true }, "a")).toEqual({ ok: true });
+    expect(m.recordEvent).toHaveBeenCalledWith(
+      txArg(),
+      expect.objectContaining({ action: "ROLE_CHANGED", changes: { from: "USER", to: "ADMIN" } }),
+    );
+    expect(m.recordEvent).toHaveBeenCalledWith(txArg(), expect.objectContaining({ action: "USER_DISABLED" }));
+    expect(m.recordEvent).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -63,6 +63,9 @@ import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS } from "@/lib/backup/models";
 import { DELETE as deleteFirearmRoute } from "@/app/api/firearms/[id]/route";
 import { POST as restoreRoute } from "@/app/api/backup/restore/route";
+import { POST as loginRoute } from "@/app/api/auth/login/route";
+import { hashPassword } from "@/lib/auth/password";
+import { changeRoleOrStatus } from "@/lib/auth/admins";
 
 type Event = Awaited<ReturnType<typeof prisma.auditEvent.findMany>>[number];
 
@@ -540,7 +543,7 @@ describe(`audit capture against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
 
   // ─── Restore (last: it replaces every inventory table) ─────────
 
-  it("restore, including its post-restore date migration, produces zero row-level entries", async () => {
+  it("restore, including its post-restore date migration, produces zero row-level entries and exactly one RESTORE event", async () => {
     const body: Record<string, unknown> = { meta: { version: "1.0" } };
     for (const { key } of BACKUP_MODELS) body[key] = [];
     body.firearms = [
@@ -572,8 +575,101 @@ describe(`audit capture against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     const restored = await prisma.firearm.findUnique({ where: { id: "restored-1" } });
     // Proves the date migration really ran inside the request (and so really was suppressed).
     expect(restored!.acquisitionDate.getTime() % 86_400_000).toBe(0);
-    expect(await newEventsSince(before)).toEqual([]);
-    // Restore never touched the audit history itself.
-    expect((await eventIds()).size).toBe(before.size);
+    const events = await newEventsSince(before);
+    // Exactly one RESTORE event (Task 5) — no per-row entries from the replace or the
+    // post-restore date migration, both of which ran under withoutRowAudit.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ action: "RESTORE", actorName: "system" });
+    expect(JSON.parse(events[0].changes ?? "null")).toMatchObject({ counts: { firearms: 1 } });
   }, 30_000);
+
+  // ─── Security events (Task 5) ──────────────────────────────────
+
+  it("login: success writes one LOGIN event naming the user; a wrong password and an unknown username each write LOGIN_FAILED with no actor", async () => {
+    const pw = "correct horse battery staple";
+    const passwordHash = await hashPassword(pw);
+    const bob = await prisma.user.create({
+      data: { username: "bob-login", displayName: "Bob Login", passwordHash, role: "USER" },
+    });
+
+    req.current = new Headers();
+    const ok = await eventsFrom(() =>
+      loginRoute(
+        new NextRequest("http://localhost/api/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: "bob-login", password: pw }),
+        }),
+      ),
+    );
+    expect(ok).toHaveLength(1);
+    expect(ok[0]).toMatchObject({
+      action: "LOGIN",
+      entityType: "User",
+      entityId: bob.id,
+      actorId: bob.id,
+      actorName: "Bob Login (@bob-login)",
+    });
+
+    req.current = new Headers();
+    const wrong = await eventsFrom(() =>
+      loginRoute(
+        new NextRequest("http://localhost/api/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: "bob-login", password: "not the password" }),
+        }),
+      ),
+    );
+    expect(wrong).toHaveLength(1);
+    expect(wrong[0]).toMatchObject({ action: "LOGIN_FAILED", actorId: null, actorName: "anonymous" });
+    expect(changesOf(wrong[0])).toEqual({ username: "bob-login" });
+
+    req.current = new Headers();
+    const unknown = await eventsFrom(() =>
+      loginRoute(
+        new NextRequest("http://localhost/api/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: "nobody-at-all", password: pw }),
+        }),
+      ),
+    );
+    expect(unknown).toHaveLength(1);
+    expect(unknown[0]).toMatchObject({ action: "LOGIN_FAILED", actorId: null, actorName: "anonymous" });
+    expect(changesOf(unknown[0])).toEqual({ username: "nobody-at-all" });
+  }, 20_000);
+
+  it("role change: one ROLE_CHANGED attributed to the acting admin; refused (last admin) rolls it back", async () => {
+    const admin1 = await prisma.user.create({
+      data: { username: "admin-one", displayName: "Admin One", passwordHash: "x", role: "ADMIN" },
+    });
+    const target = await prisma.user.create({
+      data: { username: "target-one", displayName: "Target One", passwordHash: "x", role: "USER" },
+    });
+
+    req.current = new Headers();
+    req.user = { id: admin1.id, username: "admin-one", displayName: "Admin One", role: "ADMIN", sessionId: "s" };
+
+    const events = await eventsFrom(() => changeRoleOrStatus(target.id, { role: "ADMIN" }, admin1.id));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      action: "ROLE_CHANGED",
+      entityType: "User",
+      entityId: target.id,
+      actorId: admin1.id,
+      actorName: "Admin One (@admin-one)",
+    });
+    expect(changesOf(events[0])).toEqual({ from: "USER", to: "ADMIN" });
+
+    // Last-admin refusal: demoting the sole active admin rolls the update AND the
+    // audit row back together (Review Focus #1, applied to a security event).
+    await prisma.user.updateMany({ where: { role: "ADMIN" }, data: { disabledAt: new Date() } });
+    await prisma.user.update({ where: { id: admin1.id }, data: { disabledAt: null } });
+    const before = await eventIds();
+    const result = await within(5_000, changeRoleOrStatus(admin1.id, { role: "USER" }, admin1.id));
+    expect(result).toEqual({ ok: false, status: 409, error: "At least one active admin is required" });
+    expect(await newEventsSince(before)).toEqual([]);
+    expect((await prisma.user.findUnique({ where: { id: admin1.id } }))!.role).toBe("ADMIN");
+  }, 20_000);
 });

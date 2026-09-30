@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     upsert: vi.fn(),
     update: vi.fn(),
   },
+  recordEvent: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -34,6 +35,8 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/lib/date-migration", () => ({
   runConfiguredDateMigration: mocks.runConfiguredDateMigration,
 }));
+
+vi.mock("@/lib/audit/events", () => ({ recordEvent: mocks.recordEvent }));
 
 import { POST } from "./route";
 
@@ -99,6 +102,7 @@ describe("POST /api/backup/restore", () => {
     );
     mocks.runConfiguredDateMigration.mockResolvedValue(undefined);
     auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+    mocks.recordEvent.mockClear();
   });
 
   it("401 when signed out, nothing touched", async () => {
@@ -132,6 +136,22 @@ describe("POST /api/backup/restore", () => {
       { id: "dateNormalizationAudits-1" },
     ]);
     for (const { key } of BACKUP_MODELS) expect(json.counts[key], key).toBe(1);
+  });
+
+  it("records exactly one RESTORE event with per-model counts", async () => {
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(mocks.recordEvent).toHaveBeenCalledTimes(1);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, { action: "RESTORE", changes: { counts: json.counts } });
+  });
+
+  it("records no RESTORE event when the transaction fails", async () => {
+    mocks.transaction.mockRejectedValue(new Error("tx boom"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await POST(restoreRequest(v11Payload()));
+    expect(mocks.recordEvent).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it("restores a v1.1 payload that omits gear, leaving other tables intact", async () => {
