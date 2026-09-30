@@ -6,7 +6,11 @@ import { SESSION_COOKIE, validateSession, type SessionUser } from "@/lib/auth/se
 /**
  * Who is signed in. Always re-validates the cookie against the database — it never trusts a
  * header set by proxy.ts, so a request that somehow bypasses the proxy still cannot claim to
- * be someone. Memoised per request.
+ * be someone. Wrapped in React `cache()`, which dedupes calls within a single server-component
+ * render — but does nothing in a route handler, since a route handler is not a render: there,
+ * every call re-validates the session against the database. (See `src/lib/audit/actor.ts`'s own
+ * per-request memo, added because of this — a request that makes several audited writes would
+ * otherwise repeat the session lookup once per write.)
  */
 export const getCurrentUser = cache(async (): Promise<(SessionUser & { sessionId: string }) | null> => {
   const store = await cookies();

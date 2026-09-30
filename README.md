@@ -578,6 +578,25 @@ Every signed-in user has an **/account** page: change your display name and pass
 your active sessions (device and last-seen time) with a button to end any of them, or log out
 everywhere at once.
 
+### Audit log
+
+Every create, edit and delete of inventory (firearms, accessories, ammo, gear, supplies, kits,
+builds, documents, maintenance and battery logs, range sessions, drills, round-count logs) and
+app settings, plus security events (sign-ins, invites, role changes, enable/disable, password
+resets, the direct-access toggle, backups, restores), is recorded permanently — admin only, from
+**Audit log** in the sidebar (`/admin/audit`, next to **Users**) or the **History** section on
+any item's own detail page. Filter by user, action, item type and date, search by item name, and
+export the current filter as CSV.
+
+Entries are kept forever: nothing in the app can edit or delete one, not even an admin, and
+disabling or renaming a user afterward does not change what an existing entry says they did.
+Serial numbers, password hashes, token hashes and API keys are never stored in an entry — an
+entry shows "[redacted]" instead.
+
+The audit log is **not** included in a backup, and restoring one leaves existing entries
+untouched — a restore adds a single new entry (who restored it and how many rows per table)
+rather than one entry per restored row.
+
 ### Mobile Access is now an admin-only switch
 
 Settings → **Mobile Access (Local Network)** has an on/off switch for direct access, with a

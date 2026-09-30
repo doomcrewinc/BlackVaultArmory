@@ -189,11 +189,12 @@ path kind × auth state. `src/proxy.ts` gathers the request's input and applies 
 host/origin gate (`decideRequest`) first, then `decideAuth`, so a request must pass the
 connection-level gate before authentication is even considered.
 
-`src/lib/server/auth.ts` exports `getCurrentUser()` (memoised per request with React
-`cache()`), `requireAuth()` and `requireAdmin()`. `getCurrentUser` always re-validates the
-session cookie against the database — it never trusts a header set by `proxy.ts`, so a
-request that somehow reaches a route handler without going through the proxy still can't
-claim to be someone.
+`src/lib/server/auth.ts` exports `getCurrentUser()` (wrapped in React `cache()`, which dedupes
+calls within a single server-component render — but does nothing in a route handler, where every
+call re-validates the session; see **Audit log** below for the per-request memo this motivated),
+`requireAuth()` and `requireAdmin()`. `getCurrentUser` always re-validates the session cookie
+against the database — it never trusts a header set by `proxy.ts`, so a request that somehow
+reaches a route handler without going through the proxy still can't claim to be someone.
 
 ### Testing routes that require auth
 
@@ -208,6 +209,37 @@ vi.mock("@/lib/server/auth", () => ({
 (see `src/app/api/images/upload/route.test.ts`). `requireAuth`/`requireAdmin` return `null`
 to mean "authorized, keep going" and a `NextResponse` to mean "reject with this response" —
 mock the return value accordingly to simulate a signed-out or non-admin caller.
+
+## Audit log
+
+`src/lib/audit/registry.ts` holds the single list of models the audit log records
+(`AUDITED_MODELS`) and the ones it deliberately does not, each with a reason
+(`AUDIT_EXCLUDED_MODELS`). A schema model that lands in neither list fails `registry.test.ts` —
+the same shape of guard `src/lib/backup/models.ts` uses for the backup registry, so a new model
+can never go silently unaudited.
+
+Capture is automatic: `src/lib/audit/extension.ts` wraps the Prisma client and records every
+create/update/delete/upsert on an audited model in the same transaction as the change, with the
+acting user resolved *before* the transaction opens — resolving it from inside one would need the
+database connection the transaction is already holding, which deadlocks on SQLite's
+`connection_limit=1`. No route calls the extension directly.
+
+- `withoutRowAudit(fn)` (`src/lib/audit/context.ts`) turns off automatic row auditing for
+  everything `fn` does, including any transaction it opens. Restore uses it — it replaces every
+  row and logs one `RESTORE` event afterward instead of one entry per row — and so does
+  `scripts/reset-db.ts`.
+- `recordEvent(client, { action, entityType?, entityId?, entityLabel?, changes? })`
+  (`src/lib/audit/events.ts`) is the explicit call for security events the extension can't infer
+  from a row write: logins/logouts, invites, role changes, enable/disable, reset links, password
+  changes, the direct-access toggle, backups and restores. Pass the open transaction client to
+  commit or roll the event back with the change it belongs to; `recordEventBestEffort` is the
+  same call but never throws, for call sites whose main work already committed outside a
+  transaction (an audit-write failure there must not turn an already-successful action into a
+  500).
+
+`src/lib/server/client-ip.ts` trusts only the **last** `X-Forwarded-For` value, and only when
+`trustsForwardedHeaders()` is true (i.e. `TRUSTED_PROXIES` is set) — never the first value, which
+is client-controlled, and never anything at all when no proxy is trusted.
 
 ## Versioning
 
