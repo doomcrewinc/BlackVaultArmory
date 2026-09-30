@@ -7,7 +7,7 @@ import { getCurrentUser, requireAdmin } from "@/lib/server/auth";
 import { getPublicUrl } from "@/lib/server/public-url";
 import { createInvite } from "@/lib/auth/tokens";
 import { INVALID_REQUEST, readJsonObject } from "@/lib/auth/route-helpers";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 /** Every user, for the admin Users page. Never the password hash. */
 export async function GET() {
@@ -34,6 +34,6 @@ export async function POST(request: NextRequest) {
 
   const { token, expiresAt } = await createInvite({ role: role as Role, createdById: actor.id });
   // Never the token or the invite URL — only the role it grants.
-  await recordEvent(null, { action: "INVITE_CREATED", changes: { role } });
+  await recordEventBestEffort(null, { action: "INVITE_CREATED", changes: { role } });
   return NextResponse.json({ url: `${getPublicUrl().origin}/invite/${token}`, expiresAt });
 }

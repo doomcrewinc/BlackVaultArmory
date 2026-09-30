@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/server/auth";
 import { envForcesDirectAccess, invalidateDirectAccessCache } from "@/lib/server/direct-access";
 import { INVALID_REQUEST, readJsonObject } from "@/lib/auth/route-helpers";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 /**
  * Admin toggle for serving http://<ip>:<port> directly. Refused while the environment forces it
@@ -33,7 +33,7 @@ export async function PUT(request: NextRequest) {
   });
   invalidateDirectAccessCache();
   if (from !== allowDirectAccess) {
-    await recordEvent(null, {
+    await recordEventBestEffort(null, {
       action: "DIRECT_ACCESS_CHANGED",
       entityType: "AppSettings",
       entityId: "singleton",

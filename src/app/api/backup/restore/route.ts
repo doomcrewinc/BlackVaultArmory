@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/server/auth";
 import { withoutRowAudit } from "@/lib/audit/context";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
 import {
@@ -197,7 +197,7 @@ export async function POST(request: NextRequest) {
   // Written OUTSIDE withoutRowAudit — restore replaces every row and normalises
   // legacy dates under suppression (or every row would get its own entry
   // attributed to the admin); this single event, recorded afterward, IS logged.
-  await recordEvent(null, { action: "RESTORE", changes: { counts } });
+  await recordEventBestEffort(null, { action: "RESTORE", changes: { counts } });
 
   return NextResponse.json({
     success: true,

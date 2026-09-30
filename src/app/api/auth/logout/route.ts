@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, clearedSessionCookie, endSession, endUserSessions, validateSession } from "@/lib/auth/sessions";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 /**
  * End the current session (or, with `?all=1`, every session of the signed-in user) and clear
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     // actorOverride: by now the session row this event is about may already be gone,
     // so resolveActor()'s lookup could no longer find it — name the user explicitly.
     const actorName = `${current.user.displayName} (@${current.user.username})`;
-    await recordEvent(null, {
+    await recordEventBestEffort(null, {
       action: "LOGOUT",
       entityType: "User",
       entityId: current.user.id,

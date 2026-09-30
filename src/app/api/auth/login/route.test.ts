@@ -16,7 +16,7 @@ const m = vi.hoisted(() => {
     verifyPassword: vi.fn(async (pw: string, stored: string) => ({ ok: stored === `h(${pw})`, needsRehash: false })),
     dummyVerify: vi.fn(async () => {}),
     hashPassword: vi.fn(async (pw: string) => `h2(${pw})`),
-    recordEvent: vi.fn(async () => {}),
+    recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
   };
 });
 
@@ -30,7 +30,18 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, verifyPassword: m.verifyPassword, dummyVerify: m.dummyVerify, hashPassword: m.hashPassword };
 });
-vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { POST } from "./route";
 import { loginThrottle } from "@/lib/auth/throttle";
@@ -86,10 +97,12 @@ describe("POST /api/auth/login", () => {
     expect(m.recordEvent).toHaveBeenCalledWith(null, {
       action: "LOGIN_FAILED",
       changes: { username: "nobody1" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
     });
     expect(m.recordEvent).toHaveBeenCalledWith(null, {
       action: "LOGIN_FAILED",
       changes: { username: "known1" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
     });
   });
 
@@ -99,6 +112,20 @@ describe("POST /api/auth/login", () => {
     expect(m.recordEvent).toHaveBeenCalledWith(null, {
       action: "LOGIN_FAILED",
       changes: { username: "a".repeat(64) },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
+  });
+
+  it("a valid session cookie on the request does not become the LOGIN_FAILED actor", async () => {
+    addUser("known-cookie");
+    const res = await POST(
+      req({ username: "known-cookie", password: "wrong password here" }, { cookie: "bv_session=some-other-users-token" }),
+    );
+    expect(res.status).toBe(401);
+    expect(m.recordEvent).toHaveBeenCalledWith(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: "known-cookie" },
+      actorOverride: { actorId: null, actorName: "anonymous" },
     });
   });
 

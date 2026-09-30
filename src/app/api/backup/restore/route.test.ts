@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
     upsert: vi.fn(),
     update: vi.fn(),
   },
-  recordEvent: vi.fn(async () => {}),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -36,7 +36,16 @@ vi.mock("@/lib/date-migration", () => ({
   runConfiguredDateMigration: mocks.runConfiguredDateMigration,
 }));
 
-vi.mock("@/lib/audit/events", () => ({ recordEvent: mocks.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: mocks.recordEvent,
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await mocks.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { POST } from "./route";
 
@@ -151,6 +160,19 @@ describe("POST /api/backup/restore", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     await POST(restoreRequest(v11Payload()));
     expect(mocks.recordEvent).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("still returns success when the RESTORE event insert itself throws (best-effort, outside the tx)", async () => {
+    mocks.recordEvent.mockRejectedValueOnce(new Error("audit insert boom"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    // The failure was logged, not swallowed silently.
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("RESTORE"), expect.any(Error));
     spy.mockRestore();
   });
 

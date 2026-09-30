@@ -13,10 +13,19 @@ const mocks = vi.hoisted(() => ({
   inFlight: 0,
   maxInFlight: 0,
   settingsFindUnique: vi.fn(),
-  recordEvent: vi.fn(async () => {}),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
-vi.mock("@/lib/audit/events", () => ({ recordEvent: mocks.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: mocks.recordEvent,
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await mocks.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 vi.mock("@/lib/prisma", async () => {
   const { BACKUP_MODELS: models } = await vi.importActual<typeof import("@/lib/backup/models")>(

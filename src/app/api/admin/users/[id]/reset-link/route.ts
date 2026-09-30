@@ -6,7 +6,7 @@ import { getCurrentUser, requireAdmin } from "@/lib/server/auth";
 import { getPublicUrl } from "@/lib/server/public-url";
 import { createResetLink } from "@/lib/auth/tokens";
 import { endUserSessions } from "@/lib/auth/sessions";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 /**
  * Issue a single-use password reset link for a user and end their sessions immediately. For a
@@ -26,7 +26,7 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
   if (target.id === actor.id) await endUserSessions(target.id, actor.sessionId);
   else await endUserSessions(target.id);
   // Never the token or the reset URL.
-  await recordEvent(null, {
+  await recordEventBestEffort(null, {
     action: "RESET_LINK_ISSUED",
     entityType: "User",
     entityId: target.id,

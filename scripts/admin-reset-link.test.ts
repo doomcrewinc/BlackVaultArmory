@@ -83,6 +83,23 @@ describe("scripts/admin-reset-link.mjs against real SQLite", () => {
     const ttlMs = (row!.expiresAt as Date).getTime() - before.getTime();
     expect(ttlMs).toBeGreaterThan(23.9 * 60 * 60 * 1000);
     expect(ttlMs).toBeLessThan(24.1 * 60 * 60 * 1000);
+
+    // One RESET_LINK_ISSUED row, on the same transaction as the token, naming the
+    // recovery CLI as actor — never the token or the printed URL.
+    const events = await prisma.auditEvent.findMany({ where: { entityId: user?.id, action: "RESET_LINK_ISSUED" } });
+    expect(events).toHaveLength(1);
+    const [event] = events;
+    expect(event).toMatchObject({
+      actorId: null,
+      actorName: "system (recovery CLI)",
+      actorIp: null,
+      action: "RESET_LINK_ISSUED",
+      entityType: "User",
+      entityId: user?.id,
+      entityLabel: "Jeff (@jeff)",
+    });
+    expect(event.changes ?? "").not.toContain(token);
+    expect(event.changes ?? "").not.toContain("reset/");
   });
 
   it("username normalisation: trims and lowercases like normaliseUsername, matching the stored record", () => {
@@ -104,15 +121,21 @@ describe("scripts/admin-reset-link.mjs against real SQLite", () => {
     const user = await prisma.user.findUnique({ where: { username: "grounded" } });
     expect(user?.role).toBe("ADMIN");
     expect(user?.disabledAt).toBeNull();
+
+    const events = await prisma.auditEvent.findMany({ where: { entityId: user?.id, action: "RESET_LINK_ISSUED" } });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorName: "system (recovery CLI)", entityLabel: "Grounded (@grounded)" });
   });
 
-  it("unknown user: exit 1 with a clear message, no DB writes", async () => {
-    const before = await prisma.authToken.count();
+  it("unknown user: exit 1 with a clear message, no DB writes (including no audit event)", async () => {
+    const beforeTokens = await prisma.authToken.count();
+    const beforeEvents = await prisma.auditEvent.count();
     const result = runScript(["nobody-here"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('No user named "nobody-here"');
     expect(result.stdout).toBe("");
-    expect(await prisma.authToken.count()).toBe(before);
+    expect(await prisma.authToken.count()).toBe(beforeTokens);
+    expect(await prisma.auditEvent.count()).toBe(beforeEvents);
   });
 
   it("no args: exit 2 with usage", () => {

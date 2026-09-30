@@ -5,13 +5,24 @@ const m = vi.hoisted(() => ({
   validateSession: vi.fn(),
   upsert: vi.fn(),
   findUnique: vi.fn(),
-  recordEvent: vi.fn(async () => {}),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
 vi.mock("@/lib/auth/sessions", () => ({ SESSION_COOKIE: "bv_session", validateSession: m.validateSession }));
 vi.mock("@/lib/prisma", () => ({ prisma: { appSettings: { upsert: m.upsert, findUnique: m.findUnique } } }));
-vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { readStoredDirectAccess, resetDirectAccessCacheForTests } from "@/lib/server/direct-access";
 import { PUT } from "./route";

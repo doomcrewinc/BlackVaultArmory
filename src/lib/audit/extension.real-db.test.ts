@@ -640,6 +640,28 @@ describe(`audit capture against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(changesOf(unknown[0])).toEqual({ username: "nobody-at-all" });
   }, 20_000);
 
+  it("login: a request that already carries a valid session for another account still records LOGIN_FAILED as anonymous, not that account (fix round 1, Important #2)", async () => {
+    const other = await prisma.user.create({
+      data: { username: "other-signed-in", displayName: "Other Signed In", passwordHash: "x", role: "USER" },
+    });
+    req.current = new Headers();
+    // A signed-in request (getCurrentUser() would resolve this account) POSTing bad
+    // credentials for a DIFFERENT username must not attribute the failure to it.
+    req.user = { id: other.id, username: "other-signed-in", displayName: "Other Signed In", role: "USER", sessionId: "s" };
+    const events = await eventsFrom(() =>
+      loginRoute(
+        new NextRequest("http://localhost/api/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: "bv_session=some-valid-looking-token" },
+          body: JSON.stringify({ username: "some-other-user", password: "wrong password here" }),
+        }),
+      ),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ action: "LOGIN_FAILED", actorId: null, actorName: "anonymous" });
+    expect(changesOf(events[0])).toEqual({ username: "some-other-user" });
+  }, 20_000);
+
   it("role change: one ROLE_CHANGED attributed to the acting admin; refused (last admin) rolls it back", async () => {
     const admin1 = await prisma.user.create({
       data: { username: "admin-one", displayName: "Admin One", passwordHash: "x", role: "ADMIN" },

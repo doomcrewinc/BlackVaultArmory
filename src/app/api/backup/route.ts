@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/server/auth";
 import { BACKUP_MODELS } from "@/lib/backup/models";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 import fs from "fs";
 import path from "path";
 
@@ -51,7 +51,7 @@ export async function POST() {
       }
     }
 
-    await recordEvent(null, { action: "BACKUP_CREATED", changes: { file: filename } });
+    await recordEventBestEffort(null, { action: "BACKUP_CREATED", changes: { file: filename } });
 
     return NextResponse.json({
       success: true,

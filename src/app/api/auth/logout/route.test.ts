@@ -5,7 +5,7 @@ const m = vi.hoisted(() => ({
   validateSession: vi.fn(),
   endSession: vi.fn(async () => {}),
   endUserSessions: vi.fn(async () => {}),
-  recordEvent: vi.fn(async () => {}),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
@@ -13,7 +13,18 @@ vi.mock("@/lib/auth/sessions", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/sessions")>("@/lib/auth/sessions");
   return { ...actual, validateSession: m.validateSession, endSession: m.endSession, endUserSessions: m.endUserSessions };
 });
-vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { POST } from "./route";
 

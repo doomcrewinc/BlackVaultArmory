@@ -8,7 +8,7 @@ const m = vi.hoisted(() => ({
   update: vi.fn(),
   verifyPassword: vi.fn(),
   hashPassword: vi.fn(async () => "scrypt$new"),
-  recordEvent: vi.fn(async () => {}),
+  recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => ({ value: "t" }) }) }));
@@ -22,7 +22,18 @@ vi.mock("@/lib/auth/password", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth/password")>("@/lib/auth/password");
   return { ...actual, verifyPassword: m.verifyPassword, hashPassword: m.hashPassword };
 });
-vi.mock("@/lib/audit/events", () => ({ recordEvent: m.recordEvent }));
+vi.mock("@/lib/audit/events", () => ({
+  recordEvent: m.recordEvent,
+  // Mirrors the real recordEventBestEffort: swallow + log, but still call the same
+  // spy other assertions check, so a test can prove the route survives a failure.
+  recordEventBestEffort: async (client: unknown, e: { action: string }) => {
+    try {
+      await m.recordEvent(client, e);
+    } catch (err) {
+      console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, err);
+    }
+  },
+}));
 
 import { GET, PATCH } from "./route";
 

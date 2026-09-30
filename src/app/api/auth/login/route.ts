@@ -8,7 +8,7 @@ import { safeNextPath } from "@/lib/auth/next-path";
 import { normaliseUsername } from "@/lib/auth/username";
 import { trustsForwardedHeaders } from "@/lib/server/request-gate";
 import { INVALID_REQUEST, readJsonObject, signInResponse } from "@/lib/auth/route-helpers";
-import { recordEvent } from "@/lib/audit/events";
+import { recordEventBestEffort } from "@/lib/audit/events";
 
 // One body for unknown user, wrong password and disabled account — never tell them apart.
 const LOGIN_FAILED = { error: "Invalid username or password" };
@@ -48,7 +48,16 @@ export async function POST(request: NextRequest) {
   // one it was — it must never become a signal that distinguishes them.
   const fail = async () => {
     keys.forEach((k) => loginThrottle.fail(k));
-    await recordEvent(null, { action: "LOGIN_FAILED", changes: { username: username.slice(0, 64) } });
+    // actorOverride, not the default resolveActor(): a request that already carries a
+    // valid session cookie (re-logging in, or signed in as one account and POSTing
+    // credentials for another) would otherwise have getCurrentUser() attribute this
+    // failed attempt to whoever that cookie belongs to. A LOGIN_FAILED always means no
+    // actor, regardless of what the request's own cookie says.
+    await recordEventBestEffort(null, {
+      action: "LOGIN_FAILED",
+      changes: { username: username.slice(0, 64) },
+      actorOverride: { actorId: null, actorName: "anonymous" },
+    });
     return NextResponse.json(LOGIN_FAILED, { status: 401 });
   };
 
@@ -77,7 +86,7 @@ export async function POST(request: NextRequest) {
   // The session cookie is not set yet (signInResponse creates it below), so
   // resolveActor() would see no cookie and report anonymous — override with the
   // user who just proved their password.
-  await recordEvent(null, {
+  await recordEventBestEffort(null, {
     action: "LOGIN",
     entityType: "User",
     entityId: user.id,

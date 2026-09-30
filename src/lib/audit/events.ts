@@ -72,9 +72,34 @@ async function actorFor(
  * transaction, INVITE_REDEEMED inside redeem's). `null` uses the current
  * transaction from the audit store if one is open, else writes directly
  * through the app client — a single insert, atomic on its own.
+ *
+ * Guard: the audit STORE tracking an open transaction (`store.tx`) with no
+ * already-resolved actor and no `actorOverride` — the case when that
+ * transaction was opened under row-audit suppression (e.g. `withoutRowAudit`),
+ * which skips `resolveActor()` when it opens the transaction (see
+ * `extension.ts`'s wrapped `$transaction`) — throws rather than calling
+ * `resolveActor()` here: that call needs the database connection the open
+ * transaction is holding, which deadlocks on SQLite `connection_limit=1`
+ * (spike R5). No current call site hits this; it exists so a future one
+ * fails loudly instead of hanging.
+ *
+ * Deliberately keyed on `store.tx`, NOT on whether `client` was passed: a
+ * caller can legitimately pass an explicit transaction client that was never
+ * opened through the audited app client at all (e.g. a test driving
+ * `changeRoleOrStatus` against a raw, unaudited `PrismaClient` to isolate
+ * database concurrency — `admins.real-db.test.ts`). There is no ALS store in
+ * that case, `resolveActor()`'s session lookup runs on the AUDITED singleton's
+ * own connection pool (a different client entirely), and nothing deadlocks.
  */
 export async function recordEvent(client: TxOrClient | null, e: RecordEventInput): Promise<void> {
   const store = auditStorage.getStore();
+  if (store?.tx && !e.actorOverride && !store.actor) {
+    throw new Error(
+      `recordEvent(${e.action}): an open transaction (row audit suppressed) has no resolved actor and no ` +
+        `actorOverride was given. resolveActor() cannot run inside an open transaction (it would deadlock on ` +
+        `SQLite connection_limit=1); pass actorOverride explicitly instead.`,
+    );
+  }
   const writer = client ?? store?.tx ?? prisma;
   const actor = await actorFor(e.actorOverride, store?.actor);
   await writeAuditEvent(writer, {
@@ -85,4 +110,26 @@ export async function recordEvent(client: TxOrClient | null, e: RecordEventInput
     entityLabel: e.entityLabel ?? null,
     changes: e.changes === undefined ? undefined : redactDeep(e.changes),
   });
+}
+
+/**
+ * Same as {@link recordEvent}, but never throws: for call sites where the
+ * request's main work has already committed outside a transaction (restore,
+ * backup, reset-link issuance, login/logout, invite creation, the
+ * self-service password change, the direct-access toggle) — an audit-write
+ * failure there must not turn an already-successful action into a 500. Logs
+ * and swallows the error instead.
+ *
+ * Events written INSIDE a transaction (redeem's INVITE_REDEEMED/
+ * PASSWORD_CHANGED, changeRoleOrStatus's ROLE_CHANGED/USER_DISABLED/
+ * USER_ENABLED) do NOT use this — they must stay atomic with the change they
+ * describe, so a failing insert there should still roll the whole
+ * transaction back.
+ */
+export async function recordEventBestEffort(client: TxOrClient | null, e: RecordEventInput): Promise<void> {
+  try {
+    await recordEvent(client, e);
+  } catch (error) {
+    console.error(`[audit] failed to record ${e.action} (request otherwise succeeded):`, error);
+  }
 }
