@@ -251,22 +251,22 @@ describe("summarize — dates render formatted, not raw ISO (Fix round 1, item 2
   });
 
   it("a non-date-only timestamp field's before/after render as local date + time, not raw ISO", () => {
-    // TZ is pinned to America/Denver (UTC-6 in September) by vitest.config.ts.
+    const after = new Date(2026, 8, 29, 20, 32, 4).toISOString(); // local 8:32 PM, any zone
     const e = event({
       action: "UPDATE",
       entityType: "AppSettings",
       entityLabel: "Settings",
-      changes: { cachedAt: ["2026-09-29T20:00:00.000Z", "2026-09-30T02:32:04.000Z"] },
+      changes: { cachedAt: ["2026-09-29T20:00:00.000Z", after] },
     });
     const text = summarize(e);
-    expect(text).not.toContain("2026-09-30T02:32:04.000Z");
+    expect(text).not.toContain(after);
     expect(text).toContain("8:32 PM");
   });
 });
 
 describe("displayValue (Fix round 1, item 2)", () => {
   it("renders a non-date-only ISO instant as local date + time", () => {
-    expect(displayValue("2026-09-30T02:32:04.000Z")).toBe("Sep 29, 2026, 8:32 PM");
+    expect(displayValue(new Date(2026, 8, 29, 20, 32, 4).toISOString())).toBe("Sep 29, 2026, 8:32 PM");
   });
 
   it("renders a date-only ISO instant as a bare calendar day", () => {

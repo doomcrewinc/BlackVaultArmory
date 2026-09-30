@@ -109,13 +109,14 @@ describe("AuditRow", () => {
       entityType: "Firearm",
       changes: {
         acquisitionDate: ["2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z"],
-        createdAt: "2026-09-30T02:32:04.000Z",
+        // Local 8:32 PM on Sep 29 in whatever zone the run uses.
+        createdAt: new Date(2026, 8, 29, 20, 32, 4).toISOString(),
       },
     };
     render(<AuditRow event={event} />);
     fireEvent.click(screen.getByRole("button", { name: /view/i }));
     expect(screen.queryByText(/2026-09-01T00:00:00/)).toBeNull();
-    expect(screen.queryByText(/2026-09-30T02:32:04/)).toBeNull();
+    expect(screen.queryByText(/T\d{2}:\d{2}:\d{2}\.\d{3}Z/)).toBeNull();
     expect(screen.getByText("Sep 1, 2026")).toBeTruthy();
     expect(screen.getByText(/Sep 29, 2026, 8:32\s*PM/)).toBeTruthy();
   });

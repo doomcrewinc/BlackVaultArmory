@@ -125,9 +125,13 @@ describe("AdminAuditPage", () => {
     await waitFor(() => expect(screen.getByText(/failed to load/i)).toBeTruthy());
   });
 
-  // Fix round 1, item 3: the viewer's LOCAL day, not UTC's. TZ is pinned to
-  // America/Denver (UTC-6 in September) by vitest.config.ts.
+  // Fix round 1, item 3: the viewer's LOCAL day, not UTC's.
   describe("date filter — local day, not UTC day", () => {
+    // Built from LOCAL components, so the expected instant is right in any
+    // zone (the CI matrix runs Denver and Auckland) without re-implementing
+    // the page's conversion.
+    const LOCAL_START_0929 = new Date(2026, 8, 29, 0, 0, 0, 0).toISOString();
+    const LOCAL_END_0929 = new Date(2026, 8, 29, 23, 59, 59, 999).toISOString();
     it("sends the viewer's local end-of-day instant for `to`, not the bare UTC day", async () => {
       const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
       vi.stubGlobal("fetch", fetchMock);
@@ -139,7 +143,7 @@ describe("AdminAuditPage", () => {
 
       await waitFor(() => expect(replace).toHaveBeenCalled());
       const url = decodeURIComponent(replace.mock.calls[0][0]);
-      expect(url).toContain("to=2026-09-30T05:59:59.999Z");
+      expect(url).toContain(`to=${LOCAL_END_0929}`);
       expect(url).not.toContain("to=2026-09-29&");
       expect(url.endsWith("to=2026-09-29")).toBe(false);
     });
@@ -154,11 +158,11 @@ describe("AdminAuditPage", () => {
       fireEvent.change(screen.getByLabelText(/^from$/i), { target: { value: "2026-09-29" } });
 
       await waitFor(() => expect(replace).toHaveBeenCalled());
-      expect(decodeURIComponent(replace.mock.calls[0][0])).toContain("from=2026-09-29T06:00:00.000Z");
+      expect(decodeURIComponent(replace.mock.calls[0][0])).toContain(`from=${LOCAL_START_0929}`);
     });
 
     it("round-trips a full ISO instant already in the URL back to the viewer's local day for the date input", async () => {
-      currentSearch = "to=2026-09-30T05:59:59.999Z";
+      currentSearch = `to=${LOCAL_END_0929}`;
       const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
       vi.stubGlobal("fetch", fetchMock);
 
@@ -167,7 +171,7 @@ describe("AdminAuditPage", () => {
     });
 
     it("the Export CSV link carries the same local-day instant as the fetch, not a bare day", async () => {
-      currentSearch = "to=2026-09-30T05:59:59.999Z";
+      currentSearch = `to=${LOCAL_END_0929}`;
       const fetchMock = auditFetchMock(() => jsonOk({ events: [], nextCursor: null }));
       vi.stubGlobal("fetch", fetchMock);
 
@@ -175,7 +179,7 @@ describe("AdminAuditPage", () => {
       await waitFor(() => expect(fetchMock.mock.calls.some((c) => isAuditListCall(String(c[0])))).toBe(true));
 
       const exportHref = decodeURIComponent(screen.getByRole("link", { name: /export/i }).getAttribute("href") ?? "");
-      expect(exportHref).toContain("to=2026-09-30T05:59:59.999Z");
+      expect(exportHref).toContain(`to=${LOCAL_END_0929}`);
     });
   });
 
