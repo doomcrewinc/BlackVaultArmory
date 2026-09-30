@@ -145,7 +145,6 @@ function backupFileName(request: NextRequest): string | undefined {
   } catch {
     return undefined;
   }
-  // eslint-disable-next-line no-control-regex -- stripping control characters is the point
   const cleaned = decoded.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
   const base = cleaned.split(/[\\/]/).pop() ?? "";
   const capped = Array.from(base.trim()).slice(0, MAX_BACKUP_FILENAME).join("").trim();
