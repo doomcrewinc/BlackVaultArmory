@@ -181,6 +181,11 @@ describe("POST /api/backup/restore", () => {
     ["a path keeps only its basename (Windows)", encodeURIComponent("C:\\Users\\jeff\\b.json"), "b.json"],
     ["control characters are stripped", encodeURIComponent("b\u0000a\r\nck\u007f\u009bup.json"), "backup.json"],
     ["capped at 255 characters", encodeURIComponent("x".repeat(300)), "x".repeat(255)],
+    [
+      "Unicode format and separator characters are stripped",
+      encodeURIComponent("b\u202egnp\u200b\u2028\u2029.exe"),
+      "bgnp.exe",
+    ],
   ])("sanitises the untrusted header: %s", async (_label, header, expected) => {
     const response = await POST(restoreRequest(v11Payload(), header));
     const json = await response.json();

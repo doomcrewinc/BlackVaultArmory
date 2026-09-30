@@ -145,7 +145,10 @@ function backupFileName(request: NextRequest): string | undefined {
   } catch {
     return undefined;
   }
-  const cleaned = decoded.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  // C0/C1 controls, plus Unicode format and line/paragraph separators
+  // (e.g. U+202E right-to-left override) that would make the name display
+  // misleadingly in the log and the CSV.
+  const cleaned = decoded.replace(/[\u0000-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/gu, "");
   const base = cleaned.split(/[\\/]/).pop() ?? "";
   const capped = Array.from(base.trim()).slice(0, MAX_BACKUP_FILENAME).join("").trim();
   return capped === "" ? undefined : capped;
