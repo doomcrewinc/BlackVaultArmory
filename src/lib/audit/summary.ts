@@ -38,7 +38,7 @@ function actorDisplayName(actorName: string): string {
 
 /**
  * True when `entityType.field` is one of the app's date-only columns —
- * DATE_ONLY_FIELDS (src/lib/date-migration.ts), the same DMMF-guarded
+ * DATE_ONLY_FIELDS (src/lib/date-only-fields.ts), the same DMMF-guarded
  * registry the date-normalisation migration uses, so this list can never
  * drift from the schema without failing that module's own test. Field name
  * alone is ambiguous ("date" is date-only on MaintenanceLog and nothing

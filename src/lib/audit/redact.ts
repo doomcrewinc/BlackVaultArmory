@@ -46,6 +46,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * (DELETE's cascade counts) holds model names as keys, none of which can
  * match `isRedactedField`, so it passes through unchanged.
  */
+// The pair test below is shape-only (any 2-element array reads as a diff pair).
+// Intentional: no redacted field is array-typed in the schema, so a sensitive
+// field's snapshot value is never a genuine 2-element array today. If one ever
+// is, it would still be fully redacted — it would merely render as a
+// "REDACTED → REDACTED" diff instead of a single REDACTED value.
 export function redactStoredChanges(changes: unknown): unknown {
   if (!isPlainObject(changes)) return changes;
   const out: Record<string, unknown> = {};

@@ -9,12 +9,21 @@
  *
  * Most of the suite is zone-portable and runs unchanged in both legs.
  *
- * CRITICALLY, THAT INCLUDES EVERY ZONE-SENSITIVE FUNCTION IN THE APP.
- * todayLocalISO (src/lib/date.ts) is the only production function that reads
- * the host zone at all — everything else uses Date.UTC or passes an explicit
- * timeZone to Intl, so it is zone-invariant by construction. All of
- * todayLocalISO's tests, and all of toDateOnlyUTC's (including the unpadded
- * "2026-9-20" case the second leg exists to catch), run UNGATED in both legs.
+ * CRITICALLY, THAT INCLUDES EVERY ZONE-SENSITIVE FUNCTION IN THE APP. The
+ * production code that reads the host zone is:
+ *   - todayLocalISO (src/lib/date.ts);
+ *   - formatDateTime (src/lib/date.ts), browser-local by the time-handling
+ *     policy (app time = browser local), used by the audit log's rows and
+ *     summaries;
+ *   - the /admin/audit page's local-day helpers (localDayStartIso,
+ *     localDayEndIso, isoInstantToLocalDay in src/app/admin/audit/page.tsx).
+ * Everything else uses Date.UTC or passes an explicit timeZone to Intl, so it
+ * is zone-invariant by construction. All of todayLocalISO's tests, all of
+ * toDateOnlyUTC's (including the unpadded "2026-9-20" case the second leg
+ * exists to catch), and the audit tests for formatDateTime and the local-day
+ * helpers run UNGATED in both legs: the audit ones are zone-portable by
+ * construction, building the instant from LOCAL components
+ * (`new Date(2026, 8, 29, 20, 32, 4)`) and asserting the literal local text.
  * If that ever stops being true, the second leg degenerates into re-running
  * ~900 zone-invariant tests and this whole matrix becomes theatre.
  *

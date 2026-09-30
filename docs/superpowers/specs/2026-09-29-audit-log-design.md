@@ -119,7 +119,7 @@ second client), then writes one `RESTORE` event: actor, backup file name, per-mo
 ### Security events
 
 `recordEvent(tx | null, { action, entityType?, entityId?, entityLabel?, changes? })`, called in:
-login (success and failure — failure records the typed username trimmed and capped at 64 characters,
+login (success and failure — failure records the typed username trimmed and lower-cased, and capped at 64 characters,
 no actor), logout, invite created / redeemed, role changed, disabled / enabled, reset link issued,
 password changed (self or via reset), direct-access toggled, backup created, restore.
 

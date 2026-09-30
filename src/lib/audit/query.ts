@@ -54,9 +54,17 @@ export interface AuditFilters {
   action?: AuditActionGroup;
   /** entityType, exact match. */
   type?: string;
-  /** Inclusive start of the UTC day. */
+  /**
+   * Inclusive start instant. The UI sends the viewer's LOCAL midnight as a
+   * full ISO instant; a bare `YYYY-MM-DD` (back-compat: old links, API
+   * callers) means the start of that UTC day.
+   */
   from?: Date;
-  /** Inclusive end of the UTC day (23:59:59.999). */
+  /**
+   * Inclusive end instant. The UI sends the viewer's LOCAL 23:59:59.999 as a
+   * full ISO instant; a bare `YYYY-MM-DD` (back-compat) means the end of that
+   * UTC day (23:59:59.999Z).
+   */
   to?: Date;
   /** Matches entityLabel, case-insensitive on both providers. */
   q?: string;
