@@ -34,6 +34,6 @@ export async function POST(request: NextRequest) {
 
   const { token, expiresAt } = await createInvite({ role: role as Role, createdById: actor.id });
   // Never the token or the invite URL — only the role it grants.
-  await recordEventBestEffort(null, { action: "INVITE_CREATED", changes: { role } });
+  await recordEventBestEffort(null, { action: "INVITE_CREATED", entityLabel: `Invite (${role})`, changes: { role } });
   return NextResponse.json({ url: `${getPublicUrl().origin}/invite/${token}`, expiresAt });
 }

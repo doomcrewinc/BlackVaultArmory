@@ -37,6 +37,7 @@ export async function PUT(request: NextRequest) {
       action: "DIRECT_ACCESS_CHANGED",
       entityType: "AppSettings",
       entityId: "singleton",
+      entityLabel: "Settings",
       changes: { from, to: allowDirectAccess },
     });
   }

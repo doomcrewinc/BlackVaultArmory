@@ -99,6 +99,7 @@ describe("PUT /api/settings/direct-access", () => {
       action: "DIRECT_ACCESS_CHANGED",
       entityType: "AppSettings",
       entityId: "singleton",
+      entityLabel: "Settings",
       changes: { from: false, to: true },
     });
   });

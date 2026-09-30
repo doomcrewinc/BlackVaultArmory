@@ -117,14 +117,14 @@ describe("POST /api/admin/users (invite)", () => {
       expiresAt: EXPIRES.toISOString(),
     });
     expect(m.createInvite).toHaveBeenCalledWith({ role: "USER", createdById: "a1" });
-    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", changes: { role: "USER" } });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", entityLabel: "Invite (USER)", changes: { role: "USER" } });
   });
 
   it("accepts role ADMIN", async () => {
     m.validateSession.mockResolvedValue(ADMIN);
     expect((await POST(post({ role: "ADMIN" }))).status).toBe(200);
     expect(m.createInvite).toHaveBeenCalledWith({ role: "ADMIN", createdById: "a1" });
-    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", changes: { role: "ADMIN" } });
+    expect(m.recordEvent).toHaveBeenCalledWith(null, { action: "INVITE_CREATED", entityLabel: "Invite (ADMIN)", changes: { role: "ADMIN" } });
   });
 
   it.each([[{ role: "OWNER" }], [{ role: "admin" }], [{ role: 1 }], [{ role: null }], ["not json"], [[1]]])(

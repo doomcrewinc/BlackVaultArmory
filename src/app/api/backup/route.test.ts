@@ -101,7 +101,11 @@ describe("POST /api/backup", () => {
 
   it("records a BACKUP_CREATED event naming the file", async () => {
     const json = await (await POST()).json();
-    expect(mocks.recordEvent).toHaveBeenCalledWith(null, { action: "BACKUP_CREATED", changes: { file: json.filename } });
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "BACKUP_CREATED",
+      entityLabel: json.filename,
+      changes: { file: json.filename },
+    });
   });
 
   it("records no event when signed out or not an admin", async () => {

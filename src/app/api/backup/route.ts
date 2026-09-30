@@ -51,7 +51,7 @@ export async function POST() {
       }
     }
 
-    await recordEventBestEffort(null, { action: "BACKUP_CREATED", changes: { file: filename } });
+    await recordEventBestEffort(null, { action: "BACKUP_CREATED", entityLabel: filename, changes: { file: filename } });
 
     return NextResponse.json({
       success: true,
