@@ -5,11 +5,18 @@ const state = vi.hoisted(() => ({
   user: null as { id: string; username: string; displayName: string } | null,
   lookups: 0,
   fail: false,
+  headersError: null as Error | null,
 }));
 
 vi.mock("next/headers", async (importActual) => {
   const actual = await importActual<typeof import("next/headers")>();
-  return { ...actual, headers: async () => state.headers ?? actual.headers() };
+  return {
+    ...actual,
+    headers: async () => {
+      if (state.headersError) throw state.headersError;
+      return state.headers ?? actual.headers();
+    },
+  };
 });
 vi.mock("@/lib/server/auth", () => ({
   getCurrentUser: vi.fn(async () => {
@@ -27,6 +34,7 @@ describe("resolveActor", () => {
     state.user = null;
     state.lookups = 0;
     state.fail = false;
+    state.headersError = null;
     delete process.env.TRUSTED_PROXIES;
   });
 
@@ -63,5 +71,36 @@ describe("resolveActor", () => {
     state.headers = new Headers();
     await resolveActor();
     expect(state.lookups).toBe(2);
+  });
+
+  it("an unexpected headers() failure → system AND logged (never silent)", async () => {
+    state.headersError = new Error("`headers` was called inside unstable_cache");
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await resolveActor()).toEqual({ kind: "system", actorId: null, actorName: "system", actorIp: null });
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining("could not read request headers"),
+        state.headersError,
+      );
+      expect(state.lookups).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("Next's outside-a-request error (E251 code, or only the message) → system, not logged", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      state.headersError = Object.defineProperty(new Error("renumbered"), "__NEXT_ERROR_CODE", { value: "E251" });
+      expect(await resolveActor()).toMatchObject({ kind: "system" });
+      state.headersError = new Error("`headers` was called outside a request scope. Read more: ...");
+      expect(await resolveActor()).toMatchObject({ kind: "system" });
+      // And the real module's own throw (no mock error at all).
+      state.headersError = null;
+      expect(await resolveActor()).toMatchObject({ kind: "system" });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

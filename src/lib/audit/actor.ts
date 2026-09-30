@@ -5,7 +5,11 @@ import { SYSTEM_ACTOR, type AuditActor } from "./context";
  * Who is making the current change.
  *
  * - Outside any request (startup jobs, the migrator, scripts, tests) Next's
- *   `headers()` throws "called outside a request scope" → `system`.
+ *   `headers()` throws "called outside a request scope" (code E251) → `system`,
+ *   silently. Any OTHER failure to read the headers (a module-resolution
+ *   error, `headers()` called inside `after()` or `unstable_cache`, ...) also
+ *   records `system`, but is logged with console.error so a misattributed row
+ *   is never silent.
  * - In a request with a signed-in user → that user, name snapshotted now.
  * - In a request with no user → `anonymous` (the proxy requires sign-in, so
  *   this signals a bug rather than a normal path).
@@ -26,13 +30,58 @@ import { SYSTEM_ACTOR, type AuditActor } from "./context";
  */
 const perRequest = new WeakMap<object, Promise<AuditActor>>();
 
-type HeaderBag = Pick<Headers, "get">;
+export type HeaderBag = Pick<Headers, "get">;
 
-async function requestHeaders(): Promise<HeaderBag | null> {
+// Each module is imported once and the promise shared. Concurrent `import()`s
+// of one module from one importer race inside vitest 2's module mocker: the
+// second can be handed the REAL module instead of the `vi.mock` one (shared
+// per-importer callstack, execute.js requestWithMock), which made the suite
+// flake with `system` actors. In production the import resolves from the
+// bundle either way; caching is harmless there. A rejected import is not
+// cached, so one failure does not poison every later call.
+let nextHeadersModule: Promise<typeof import("next/headers")> | undefined;
+let authModule: Promise<typeof import("../server/auth")> | undefined;
+
+function loadNextHeaders(): Promise<typeof import("next/headers")> {
+  nextHeadersModule ??= import("next/headers").catch((error: unknown) => {
+    nextHeadersModule = undefined;
+    throw error;
+  });
+  return nextHeadersModule;
+}
+
+function loadAuth(): Promise<typeof import("../server/auth")> {
+  authModule ??= import("../server/auth").catch((error: unknown) => {
+    authModule = undefined;
+    throw error;
+  });
+  return authModule;
+}
+
+/**
+ * Next's "`headers` was called outside a request scope" — the expected, silent
+ * path (startup jobs, scripts, tests). Matched on the error code AND the
+ * message, so a Next upgrade that renumbers codes degrades to logging, never
+ * to silence in the other direction.
+ */
+function isOutsideRequest(error: unknown): boolean {
+  const e = error as { __NEXT_ERROR_CODE?: unknown; message?: unknown } | null;
+  return e?.__NEXT_ERROR_CODE === "E251" || /outside a request scope/.test(String(e?.message ?? ""));
+}
+
+/**
+ * The current request's headers, or null outside a request. Never throws.
+ * Unexpected failures are logged (see the module comment). Shared with
+ * events.ts's header-only IP lookup.
+ */
+export async function requestHeaders(): Promise<HeaderBag | null> {
   try {
-    const { headers } = await import("next/headers");
+    const { headers } = await loadNextHeaders();
     return await headers();
-  } catch {
+  } catch (error) {
+    if (!isOutsideRequest(error)) {
+      console.error("[audit] could not read request headers; recording as system:", error);
+    }
     return null;
   }
 }
@@ -40,7 +89,7 @@ async function requestHeaders(): Promise<HeaderBag | null> {
 async function lookUp(h: HeaderBag): Promise<AuditActor> {
   const actorIp = getClientIpFromHeaders(h);
   try {
-    const { getCurrentUser } = await import("../server/auth");
+    const { getCurrentUser } = await loadAuth();
     const user = await getCurrentUser();
     if (user) {
       return { kind: "user", actorId: user.id, actorName: `${user.displayName} (@${user.username})`, actorIp };

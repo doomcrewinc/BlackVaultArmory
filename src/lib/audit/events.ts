@@ -1,6 +1,6 @@
 import type { AuditAction } from "./actions";
 import { auditStorage, type AuditActor } from "./context";
-import { resolveActor } from "./actor";
+import { requestHeaders, resolveActor } from "./actor";
 import { getClientIpFromHeaders } from "../server/client-ip";
 import { redactDeep, writeAuditEvent, type AuditWriter } from "./record";
 import { prisma } from "../prisma";
@@ -40,12 +40,8 @@ export type RecordEventInput = {
 
 /** Header-only IP lookup: safe to call inside an open transaction (unlike resolveActor's session lookup). */
 async function ipFromHeaders(): Promise<string | null> {
-  try {
-    const { headers } = await import("next/headers");
-    return getClientIpFromHeaders(await headers());
-  } catch {
-    return null;
-  }
+  const h = await requestHeaders();
+  return h ? getClientIpFromHeaders(h) : null;
 }
 
 async function actorFor(
