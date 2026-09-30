@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { containsInsensitive } from "../db/text-search";
-import { AUDIT_ACTIONS, type AuditAction } from "./actions";
+import type { AuditAction } from "./actions";
 
 /**
  * The read side of the audit log: filter parsing, cursor-paged listing, and
@@ -11,22 +11,29 @@ import { AUDIT_ACTIONS, type AuditAction } from "./actions";
 
 export type AuditActionGroup = "creates" | "edits" | "deletes" | "signins" | "security";
 
-// Derived from AUDIT_ACTIONS (src/lib/audit/actions.ts), not from literal
-// strings: each group is typed against AuditAction, so a renamed or removed
-// action fails typecheck here instead of silently dropping out of every
-// group, and `security` is *every remaining action*, computed by filtering
-// the others out of the full list rather than spelled out by hand.
+// Every group is an explicit list, typed against AuditAction so a renamed or
+// removed action fails typecheck here. `security` is spelled out too, not
+// computed as "everything else": the partition test below
+// (`covers every AUDIT_ACTIONS entry exactly once`) unions all five groups
+// and compares that to AUDIT_ACTIONS — with an explicit `security` list, a
+// new action added to actions.ts and left unplaced fails that test instead
+// of silently, and invisibly, landing in Security.
 const CREATE_ACTIONS: readonly AuditAction[] = ["CREATE"];
 const EDIT_ACTIONS: readonly AuditAction[] = ["UPDATE"];
 const DELETE_ACTIONS: readonly AuditAction[] = ["DELETE"];
 const SIGNIN_ACTIONS: readonly AuditAction[] = ["LOGIN", "LOGIN_FAILED", "LOGOUT"];
-const SECURITY_ACTIONS: readonly AuditAction[] = AUDIT_ACTIONS.filter(
-  (action) =>
-    !CREATE_ACTIONS.includes(action) &&
-    !EDIT_ACTIONS.includes(action) &&
-    !DELETE_ACTIONS.includes(action) &&
-    !SIGNIN_ACTIONS.includes(action),
-);
+const SECURITY_ACTIONS: readonly AuditAction[] = [
+  "INVITE_CREATED",
+  "INVITE_REDEEMED",
+  "ROLE_CHANGED",
+  "USER_DISABLED",
+  "USER_ENABLED",
+  "RESET_LINK_ISSUED",
+  "PASSWORD_CHANGED",
+  "DIRECT_ACCESS_CHANGED",
+  "BACKUP_CREATED",
+  "RESTORE",
+];
 
 export const ACTION_GROUPS: Readonly<Record<AuditActionGroup, readonly AuditAction[]>> = {
   creates: CREATE_ACTIONS,
@@ -75,14 +82,34 @@ export interface AuditEventDto {
   changes: unknown | null;
 }
 
-/** Accepts `YYYY-MM-DD` or any string `Date` can parse; the date part is read in UTC either way. */
+const MIN_YEAR = 1970;
+const MAX_YEAR = 9999;
+
+/** True if `value` contains a NUL byte. Postgres rejects one outright (22021, invalid byte sequence for UTF8), and no stored field can legitimately contain one either, so it always means "reject this value", never "pass it through". */
+export function hasNulByte(value: string): boolean {
+  return value.includes("\u0000");
+}
+
+const DAY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Strictly `YYYY-MM-DD`, year 1970–9999, with no calendar rollover: the
+ * whole string must match (no trailing text, e.g. `2026-09-29junk`), the
+ * year must be in range (`0000-00-00` is out of range on both counts), and
+ * `Date.UTC` must echo back the same year/month/day (`2026-02-31` would
+ * otherwise silently become 2026-03-03).
+ */
 function parseUtcDayStart(raw: string | null): Date | undefined {
   if (!raw) return undefined;
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw.trim());
+  const match = DAY_PATTERN.exec(raw.trim());
   if (!match) return undefined;
-  const [, year, month, day] = match;
-  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 0, 0, 0, 0));
-  return Number.isNaN(date.getTime()) ? undefined : date;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < MIN_YEAR || year > MAX_YEAR || month < 1 || month > 12) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined;
+  return date;
 }
 
 function parseUtcDayEnd(raw: string | null): Date | undefined {
@@ -95,13 +122,45 @@ interface ParsedCursor {
   id: string;
 }
 
-/** `"<at ISO>_<id>"` → `{ at, id }`, or null if malformed — never throws. */
+const ISO_UTC_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/;
+
+/**
+ * Strictly the shape `Date#toISOString()` produces for a 4-digit year — the
+ * shape every cursor this module issues actually has. `new Date(string)`
+ * also accepts the extended-year ISO forms (`+275760-...`, `-271821-...`,
+ * the representable extremes of the `Date` type), which Prisma cannot bind
+ * and would otherwise surface as an uncaught 500; this rejects those, any
+ * year outside 1970–9999, and any calendar-invalid value, the same way
+ * `parseUtcDayStart` does for a bare date.
+ */
+function parseStrictIsoUtc(raw: string): Date | undefined {
+  const match = ISO_UTC_PATTERN.exec(raw);
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second, millis] = match.slice(1).map(Number);
+  if (year < MIN_YEAR || year > MAX_YEAR || month < 1 || month > 12) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second, millis));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour ||
+    date.getUTCMinutes() !== minute ||
+    date.getUTCSeconds() !== second ||
+    date.getUTCMilliseconds() !== millis
+  ) {
+    return undefined;
+  }
+  return date;
+}
+
+/** `"<at ISO>_<id>"` → `{ at, id }`, or null if malformed, out of range, or carrying a NUL byte — never throws. */
 function parseCursor(raw: string): ParsedCursor | null {
   const separator = raw.lastIndexOf("_");
   if (separator <= 0 || separator === raw.length - 1) return null;
-  const at = new Date(raw.slice(0, separator));
   const id = raw.slice(separator + 1);
-  return Number.isNaN(at.getTime()) ? null : { at, id };
+  if (hasNulByte(id)) return null;
+  const at = parseStrictIsoUtc(raw.slice(0, separator));
+  return at ? { at, id } : null;
 }
 
 function encodeCursor(at: Date, id: string): string {
@@ -117,13 +176,13 @@ export function parseAuditFilters(searchParams: URLSearchParams): AuditFilters {
   const filters: AuditFilters = {};
 
   const user = searchParams.get("user")?.trim();
-  if (user) filters.user = user;
+  if (user && !hasNulByte(user)) filters.user = user;
 
   const action = searchParams.get("action")?.trim();
   if (action && isActionGroup(action)) filters.action = action;
 
   const type = searchParams.get("type")?.trim();
-  if (type) filters.type = type;
+  if (type && !hasNulByte(type)) filters.type = type;
 
   const from = parseUtcDayStart(searchParams.get("from"));
   if (from) filters.from = from;
@@ -132,7 +191,7 @@ export function parseAuditFilters(searchParams: URLSearchParams): AuditFilters {
   if (to) filters.to = to;
 
   const q = searchParams.get("q")?.trim();
-  if (q) filters.q = q;
+  if (q && !hasNulByte(q)) filters.q = q;
 
   const cursor = searchParams.get("cursor")?.trim();
   if (cursor && parseCursor(cursor)) filters.cursor = cursor;

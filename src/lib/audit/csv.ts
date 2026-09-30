@@ -22,7 +22,15 @@ export function csvCell(value: unknown): string {
 
 const HEADERS = ["at", "actor", "ip", "action", "type", "item", "changes"] as const;
 
-/** `at,actor,ip,action,type,item,changes` — `changes` is the compact JSON string. */
+/** UTF-8 BOM: without it, Excel guesses the file's encoding as the system codepage and mangles any non-ASCII label (e.g. "ÜBER"). */
+const BOM = "﻿";
+
+/**
+ * `at,actor,ip,action,type,item,changes` — `changes` is the compact JSON
+ * string. RFC 4180 row separator (CRLF) and a leading BOM, both for Excel's
+ * benefit; a minimal parser (this module's own tests, or any other CSV
+ * reader) only needs `\r?\n` and can ignore or strip the BOM.
+ */
 export function toCsv(events: AuditEventDto[]): string {
   const lines = [HEADERS.join(",")];
   for (const event of events) {
@@ -38,5 +46,5 @@ export function toCsv(events: AuditEventDto[]): string {
       ].join(","),
     );
   }
-  return lines.join("\n");
+  return BOM + lines.join("\r\n");
 }

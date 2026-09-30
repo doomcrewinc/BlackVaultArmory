@@ -8,10 +8,11 @@ const m = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/server/auth", () => ({ requireAdmin: m.requireAdmin }));
-vi.mock("@/lib/audit/query", () => ({
-  parseAuditFilters: m.parseAuditFilters,
-  listAuditEvents: m.listAuditEvents,
-}));
+// Keeps the real hasNulByte: it's exercised for real below, not stubbed.
+vi.mock("@/lib/audit/query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/audit/query")>();
+  return { ...actual, parseAuditFilters: m.parseAuditFilters, listAuditEvents: m.listAuditEvents };
+});
 
 import { GET } from "./route";
 
@@ -62,5 +63,25 @@ describe("GET /api/admin/audit/item/:type/:id", () => {
     await GET(new NextRequest("http://localhost/api/admin/audit/item/Firearm/f1?type=Accessory"), context("Firearm", "f1"));
 
     expect(m.listAuditEvents).toHaveBeenCalledWith({ type: "Firearm", entityId: "f1" });
+  });
+
+  // Fix round 1, Minor: a NUL byte in either path param would otherwise
+  // reach Prisma/Postgres as-is and error 22021 (500). An empty result,
+  // not a 500.
+  it("returns an empty result, not a 500, for a NUL byte in the path type or id", async () => {
+    m.requireAdmin.mockResolvedValue(null);
+
+    const resType = await GET(
+      new NextRequest("http://localhost/api/admin/audit/item/x/f1"),
+      context("Fire\u0000arm", "f1"),
+    );
+    expect(resType.status).toBe(200);
+    expect(await resType.json()).toEqual({ events: [], nextCursor: null });
+
+    const resId = await GET(new NextRequest("http://localhost/api/admin/audit/item/Firearm/x"), context("Firearm", "f\u00001"));
+    expect(resId.status).toBe(200);
+    expect(await resId.json()).toEqual({ events: [], nextCursor: null });
+
+    expect(m.listAuditEvents).not.toHaveBeenCalled();
   });
 });

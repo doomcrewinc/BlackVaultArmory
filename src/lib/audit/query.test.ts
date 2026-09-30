@@ -10,7 +10,7 @@ vi.mock("../db/text-search", async (importOriginal) => {
 
 import { containsInsensitive } from "../db/text-search";
 import { AUDIT_ACTIONS } from "./actions";
-import { ACTION_GROUPS, listAuditEvents, parseAuditFilters } from "./query";
+import { ACTION_GROUPS, hasNulByte, listAuditEvents, parseAuditFilters } from "./query";
 
 type RawRow = {
   id: string;
@@ -84,6 +84,25 @@ describe("parseAuditFilters", () => {
     expect(parseAuditFilters(new URLSearchParams({ from: "not-a-date", to: "also-bad" }))).toEqual({});
   });
 
+  // Fix round 1, Important: out-of-range/invalid dates must be dropped, not
+  // handed to Prisma, which throws (500) rather than returning zero rows.
+  it.each(["2026-02-31", "0000-00-00", "2026-09-29junk", "9999-99-99"])(
+    "drops the calendar-invalid/out-of-range date %j for from and to",
+    (raw) => {
+      expect(parseAuditFilters(new URLSearchParams({ from: raw }))).toEqual({});
+      expect(parseAuditFilters(new URLSearchParams({ to: raw }))).toEqual({});
+    },
+  );
+
+  it("accepts the year boundaries 1970 and 9999", () => {
+    expect(parseAuditFilters(new URLSearchParams({ from: "1970-01-01" })).from?.toISOString()).toBe("1970-01-01T00:00:00.000Z");
+    expect(parseAuditFilters(new URLSearchParams({ from: "9999-12-31" })).from?.toISOString()).toBe("9999-12-31T00:00:00.000Z");
+  });
+
+  it("drops a year just outside 1970-9999", () => {
+    expect(parseAuditFilters(new URLSearchParams({ from: "1969-12-31" }))).toEqual({});
+  });
+
   it("keeps a well-formed cursor", () => {
     const cursor = "2026-03-05T00:00:00.000Z_abc123";
     expect(parseAuditFilters(new URLSearchParams({ cursor }))).toEqual({ cursor });
@@ -93,6 +112,34 @@ describe("parseAuditFilters", () => {
     expect(parseAuditFilters(new URLSearchParams({ cursor: "not-a-date_abc" }))).toEqual({});
     expect(parseAuditFilters(new URLSearchParams({ cursor: "2026-03-05T00:00:00.000Z_" }))).toEqual({});
     expect(parseAuditFilters(new URLSearchParams({ cursor: "no-separator-here" }))).toEqual({});
+  });
+
+  // Fix round 1, Important, reviewer's exact inputs: `new Date()` accepts
+  // extended-year ISO strings, which used to pass the old isNaN-only check
+  // and then make Prisma throw (500) on both providers.
+  it.each(["+275760-09-13T00:00:00.000Z_x", "-271821-04-20T00:00:00.000Z_x"])(
+    "drops the extended-year cursor %j instead of letting it reach Prisma",
+    (cursor) => {
+      expect(parseAuditFilters(new URLSearchParams({ cursor }))).toEqual({});
+    },
+  );
+
+  it("drops a cursor whose calendar part is invalid or carries trailing junk", () => {
+    expect(parseAuditFilters(new URLSearchParams({ cursor: "2026-02-31T00:00:00.000Z_x" }))).toEqual({});
+    expect(parseAuditFilters(new URLSearchParams({ cursor: "2026-09-29T00:00:00.000Zjunk_x" }))).toEqual({});
+  });
+
+  // Fix round 1, Minor: a NUL byte in user/type/q reaches Postgres as-is and
+  // errors 22021 (invalid byte sequence for UTF8) — a 500, not zero rows.
+  it("drops a NUL byte in user, type, or q instead of throwing", () => {
+    expect(parseAuditFilters(new URLSearchParams({ user: "\u0000" }))).toEqual({});
+    expect(parseAuditFilters(new URLSearchParams({ type: "\u0000" }))).toEqual({});
+    expect(parseAuditFilters(new URLSearchParams({ q: "\u0000" }))).toEqual({});
+    expect(parseAuditFilters(new URLSearchParams({ user: "u\u00001" }))).toEqual({});
+  });
+
+  it("drops a cursor whose id carries a NUL byte", () => {
+    expect(parseAuditFilters(new URLSearchParams({ cursor: "2026-03-05T00:00:00.000Z_ab\u0000c" }))).toEqual({});
   });
 
   it("combines every filter at once", () => {
@@ -113,6 +160,17 @@ describe("parseAuditFilters", () => {
     expect(filters.to?.toISOString()).toBe("2026-03-31T23:59:59.999Z");
     expect(filters.q).toBe("glock");
     expect(filters.cursor).toBe("2026-03-05T00:00:00.000Z_abc");
+  });
+});
+
+describe("hasNulByte", () => {
+  it("is true only when the string contains a NUL byte, wherever it sits", () => {
+    expect(hasNulByte("\u0000")).toBe(true);
+    expect(hasNulByte("ab\u0000cd")).toBe(true);
+    expect(hasNulByte("\u0000ab")).toBe(true);
+    expect(hasNulByte("ab\u0000")).toBe(true);
+    expect(hasNulByte("")).toBe(false);
+    expect(hasNulByte("plain")).toBe(false);
   });
 });
 
@@ -219,6 +277,20 @@ describe("listAuditEvents", () => {
 
   it("a malformed cursor is silently ignored (no OR clause, no throw)", async () => {
     await expect(listAuditEvents({ cursor: "garbage" })).resolves.toBeDefined();
+    expect(m.findMany.mock.calls[0][0].where).toEqual({});
+  });
+
+  it("an extended-year cursor (reviewer's exact inputs) is silently ignored, not passed to Prisma", async () => {
+    await listAuditEvents({ cursor: "+275760-09-13T00:00:00.000Z_x" });
+    expect(m.findMany.mock.calls[0][0].where).toEqual({});
+
+    m.findMany.mockClear();
+    await listAuditEvents({ cursor: "-271821-04-20T00:00:00.000Z_x" });
+    expect(m.findMany.mock.calls[0][0].where).toEqual({});
+  });
+
+  it("a cursor whose id carries a NUL byte is silently ignored, not passed to Prisma", async () => {
+    await listAuditEvents({ cursor: "2026-03-05T00:00:00.000Z_ab\u0000c" });
     expect(m.findMany.mock.calls[0][0].where).toEqual({});
   });
 

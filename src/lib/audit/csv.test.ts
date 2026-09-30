@@ -52,7 +52,86 @@ describe("csvCell", () => {
   });
 });
 
+const BOM = "﻿";
+
+/** A minimal RFC 4180 parser for the round-trip test: BOM-strip, then split rows on CRLF and cells on top-level commas. */
+function parseCsv(csv: string): string[][] {
+  const body = csv.startsWith(BOM) ? csv.slice(BOM.length) : csv;
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (inQuotes) {
+      if (c === '"' && body[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (c === '"') {
+        inQuotes = false;
+      } else {
+        cell += c;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (c === "\r" && body[i + 1] === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      i++;
+    } else {
+      cell += c;
+    }
+  }
+  row.push(cell);
+  rows.push(row);
+  return rows;
+}
+
 describe("toCsv", () => {
+  it("starts with a UTF-8 BOM", () => {
+    expect(toCsv([])).toMatch(/^﻿/);
+  });
+
+  it("separates rows with CRLF", () => {
+    const events: AuditEventDto[] = [
+      {
+        id: "e1",
+        at: "2026-03-05T00:00:00.000Z",
+        actorId: "u1",
+        actorName: "Alice A (@alice)",
+        actorIp: "10.0.0.1",
+        action: "UPDATE",
+        entityType: "Firearm",
+        entityId: "f1",
+        entityLabel: "Glock 19 (9mm)",
+        changes: null,
+      },
+      {
+        id: "e2",
+        at: "2026-03-06T00:00:00.000Z",
+        actorId: "u1",
+        actorName: "Alice A (@alice)",
+        actorIp: "10.0.0.1",
+        action: "UPDATE",
+        entityType: "Firearm",
+        entityId: "f1",
+        entityLabel: "Glock 19 (9mm)",
+        changes: null,
+      },
+    ];
+    const csv = toCsv(events);
+    expect(csv).toContain("\r\n");
+    // No lone \n: every line break is part of a \r\n pair.
+    expect(csv.replace(/\r\n/g, "")).not.toContain("\n");
+  });
+
   it("emits the header row and one data row, changes as compact JSON", () => {
     const events: AuditEventDto[] = [
       {
@@ -69,10 +148,11 @@ describe("toCsv", () => {
       },
     ];
     expect(toCsv(events)).toBe(
-      [
-        "at,actor,ip,action,type,item,changes",
-        '2026-03-05T00:00:00.000Z,Alice A (@alice),10.0.0.1,UPDATE,Firearm,Glock 19 (9mm),"{""name"":[""a"",""b""]}"',
-      ].join("\n"),
+      BOM +
+        [
+          "at,actor,ip,action,type,item,changes",
+          '2026-03-05T00:00:00.000Z,Alice A (@alice),10.0.0.1,UPDATE,Firearm,Glock 19 (9mm),"{""name"":[""a"",""b""]}"',
+        ].join("\r\n"),
     );
   });
 
@@ -91,7 +171,9 @@ describe("toCsv", () => {
         changes: null,
       },
     ];
-    expect(toCsv(events)).toBe(["at,actor,ip,action,type,item,changes", "2026-03-05T00:00:00.000Z,system,,CREATE,,,"].join("\n"));
+    expect(toCsv(events)).toBe(
+      BOM + ["at,actor,ip,action,type,item,changes", "2026-03-05T00:00:00.000Z,system,,CREATE,,,"].join("\r\n"),
+    );
   });
 
   it("guards an item label containing =HYPERLINK(...) — Review Focus #4", () => {
@@ -113,6 +195,30 @@ describe("toCsv", () => {
   });
 
   it("emits only the header row for no events", () => {
-    expect(toCsv([])).toBe("at,actor,ip,action,type,item,changes");
+    expect(toCsv([])).toBe(BOM + "at,actor,ip,action,type,item,changes");
+  });
+
+  it("round-trips a row with a comma, a quote and an embedded formula guard through a minimal RFC 4180 + BOM/CRLF parser", () => {
+    const events: AuditEventDto[] = [
+      {
+        id: "e1",
+        at: "2026-03-05T00:00:00.000Z",
+        actorId: "u1",
+        actorName: 'O"Brien, Al',
+        actorIp: "10.0.0.1",
+        action: "DELETE",
+        entityType: "Firearm",
+        entityId: "f1",
+        entityLabel: '=HYPERLINK("http://evil")',
+        changes: { note: "line1\nline2" },
+      },
+    ];
+    const rows = parseCsv(toCsv(events));
+    expect(rows[0]).toEqual(["at", "actor", "ip", "action", "type", "item", "changes"]);
+    expect(rows[1][1]).toBe('O"Brien, Al');
+    // The parser only strips RFC 4180 quoting, not the formula-guard prefix
+    // — that assertion belongs to csvCell's own exact-string tests above.
+    expect(rows[1][5]).toBe('\'=HYPERLINK("http://evil")');
+    expect(JSON.parse(rows[1][6])).toEqual({ note: "line1\nline2" });
   });
 });

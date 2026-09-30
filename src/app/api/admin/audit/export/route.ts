@@ -18,8 +18,13 @@ export async function GET(request: NextRequest) {
   if (denied) return denied;
 
   const filters = parseAuditFilters(request.nextUrl.searchParams);
+  // The export is "everything matching the filters", always from the newest
+  // row — not "everything after wherever a forwarded list-page cursor
+  // happens to stop". `cursor` below is only ever this loop's own page
+  // token.
+  delete filters.cursor;
   const events: AuditEventDto[] = [];
-  let cursor = filters.cursor;
+  let cursor: string | undefined;
   for (;;) {
     const page = await listAuditEvents({ ...filters, cursor }, BATCH_SIZE);
     events.push(...page.events);

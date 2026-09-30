@@ -80,14 +80,14 @@ describe("GET /api/admin/audit/export", () => {
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="blackvault-audit-\d{4}-\d{2}-\d{2}\.csv"$/);
   });
 
-  it("starts from a cursor already present in the query string", async () => {
+  it("ignores a cursor already present in the query string and always starts from the newest row", async () => {
     m.requireAdmin.mockResolvedValue(null);
-    m.parseAuditFilters.mockReturnValue({ cursor: "existing" });
+    m.parseAuditFilters.mockReturnValue({ cursor: "existing", type: "Firearm" });
     m.listAuditEvents.mockResolvedValue({ events: [], nextCursor: null });
     m.toCsv.mockReturnValue("");
 
-    await GET(get("http://localhost/api/admin/audit/export?cursor=existing"));
+    await GET(get("http://localhost/api/admin/audit/export?cursor=existing&type=Firearm"));
 
-    expect(m.listAuditEvents).toHaveBeenCalledWith({ cursor: "existing" }, 500);
+    expect(m.listAuditEvents).toHaveBeenCalledWith({ type: "Firearm", cursor: undefined }, 500);
   });
 });
