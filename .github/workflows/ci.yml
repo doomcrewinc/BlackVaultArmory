@@ -307,6 +307,29 @@ jobs:
         run: ./scripts/ci/windows/Test-WindowsInstallers.ps1
 
   # ---------------------------------------------------------------------------
+  encryption-key-linux:
+    name: Encryption key on Linux Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    # Field encryption (Task 7, carry I3). The key file is mode 600 and owned
+    # by the host user; the app runs as uid 1001. Docker Desktop hides any
+    # mismatch, so only a real Linux daemon can show that the entrypoint's
+    # tmpfs copy works, that the stack still starts without a key (and says
+    # where to put one), and that rotate-key.sh rotates end to end. The script
+    # does everything as a separate uid-1234 user: the runner's own user is
+    # uid 1001, which would mask the problem.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install, start, rotate as a non-root host user
+        run: ./scripts/ci/encryption-key-linux.sh
+
+  # ---------------------------------------------------------------------------
   docker-image:
     name: Docker image builds
     runs-on: ubuntu-latest
