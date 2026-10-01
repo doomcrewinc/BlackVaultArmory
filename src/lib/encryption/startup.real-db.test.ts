@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * Startup (field-encryption spec §2, "Startup sequence") against a REAL
@@ -304,7 +305,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     expect(err).toBeInstanceOf(EncryptionKeyError);
     expect(err.code).toBe("KEY_MISSING");
     expect(err.message).toBe(
-      "No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32",
+      "No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32 Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
     );
     expect(await rawSnapshot()).toBe(before);
   });
@@ -365,7 +366,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     const err = await assertEncryptionKey(raw).catch((e) => e);
     expect(err).toBeInstanceOf(EncryptionKeyError);
     expect(err.code).toBe("KEY_CHECK_LOST");
-    expect(err.message).toContain("restore the pre-upgrade database snapshot in backups/");
+    expect(err.message).toContain("restore the pre-upgrade database snapshot (backups/blackvault-<timestamp>.db or .sql next to docker-compose.yml, or pre-encryption-<timestamp>.db next to the database)");
     expect(err.message).not.toMatch(/settings row/i);
     expect(await raw.appSettings.count()).toBe(0); // no check minted
   });
@@ -558,7 +559,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     expect(err).toBeInstanceOf(EncryptionMigrationError);
     expect(err.message).toContain("1 Firearm row(s) have a serial number but no fingerprint (serialNumberHash)");
     expect(err.message).toContain("This indicates a bug");
-    expect(err.message).toContain("restore the pre-upgrade database snapshot in backups/ and report it");
+    expect(err.message).toContain("restore the pre-upgrade database snapshot (backups/blackvault-<timestamp>.db or .sql next to docker-compose.yml, or pre-encryption-<timestamp>.db next to the database) and report it");
     expect(err.message).not.toMatch(/re-save/);
     expect(await rawSnapshot()).toBe(before);
   });
@@ -820,7 +821,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       await withKey(null, () => within(30_000, register()));
       expect(exit).toHaveBeenCalledWith(1);
       expect(vi.mocked(console.error).mock.calls[0][0]).toBe(
-        "[encryption] No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32",
+        "[encryption] No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32 Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
       );
       expect(await rawSnapshot()).toBe(before);
     });
@@ -832,6 +833,74 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       expect(exit).not.toHaveBeenCalled();
       expect((await raw.firearm.findUnique({ where: { id: "f-sqlite-form" } }))?.serialNumber).toMatch(/^bv2:/);
       expect(await raw.auditEvent.count({ where: { action: "ENCRYPTION_ENABLED" } })).toBe(1);
+    }, 90_000);
+
+    // ── 10 (Task 7, carry N4) ── the first start that encrypts takes its own snapshot ──
+    const snapshotsInDbDir = () =>
+      readdirSync(ctx.dir).filter((n) => /^pre-encryption-\d{8}-\d{6}(-\d+)?\.db$/.test(n));
+
+    it.skipIf(!!ctx.pg)("SQLite: a start that encrypts plaintext first writes pre-encryption-<ts>.db next to the database (plaintext, mode 600); a start with nothing to encrypt writes none", async () => {
+      for (const n of snapshotsInDbDir()) rmSync(join(ctx.dir, n));
+      await seedPlaintext();
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register());
+      expect(exit).not.toHaveBeenCalled();
+      const taken = snapshotsInDbDir();
+      expect(taken).toHaveLength(1);
+      const file = join(ctx.dir, taken[0]);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      const bytes = readFileSync(file);
+      expect(bytes.subarray(0, 15).toString("latin1")).toBe("SQLite format 3");
+      // The snapshot is the PRE-encryption state: the plaintext serial is in it…
+      expect(bytes.includes(Buffer.from("SN-PLAIN-1"))).toBe(true);
+      // …and the live database no longer holds it.
+      expect((await raw.firearm.findUnique({ where: { id: "f-sqlite-form" } }))?.serialNumber).toMatch(/^bv2:/);
+      expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toMatch(new RegExp(`Snapshot taken before encrypting existing data: \\S*/${taken[0].replace(/\./g, "\\.")}\\n`));
+
+      // Second start: nothing left to encrypt, so no new snapshot.
+      await within(60_000, register());
+      expect(snapshotsInDbDir()).toEqual(taken);
+      rmSync(file);
+    }, 120_000);
+
+    it.skipIf(!!ctx.pg)("SQLite: a pre-encryption snapshot from the last 24 h is reused, not repeated (a refused start under restart: unless-stopped must not fill the disk)", async () => {
+      for (const n of snapshotsInDbDir()) rmSync(join(ctx.dir, n));
+      const earlier = join(ctx.dir, "pre-encryption-20000101-000000.db");
+      writeFileSync(earlier, "earlier snapshot"); // mtime = now
+      await seedPlaintext();
+      vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register());
+      expect(snapshotsInDbDir()).toEqual(["pre-encryption-20000101-000000.db"]);
+      expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain("Keeping the pre-encryption snapshot taken earlier");
+      rmSync(earlier);
+    }, 120_000);
+
+    it.skipIf(!!ctx.pg || process.getuid?.() === 0)("SQLite: when the snapshot cannot be written, refuses to start and encrypts nothing", async () => {
+      for (const n of snapshotsInDbDir()) rmSync(join(ctx.dir, n));
+      await seedPlaintext();
+      const before = await rawSnapshot();
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      chmodSync(ctx.dir, 0o500); // the database stays readable; no new file can be created beside it
+      try {
+        await within(60_000, register());
+      } finally {
+        chmodSync(ctx.dir, 0o700);
+      }
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(vi.mocked(console.error).mock.calls.flat().join("\n")).toContain("Could not take the pre-encryption database snapshot, so nothing was encrypted");
+      expect(await rawSnapshot()).toBe(before);
+      expect(snapshotsInDbDir()).toEqual([]);
+    }, 120_000);
+
+    it.skipIf(!ctx.pg)("PostgreSQL: a start that encrypts plaintext logs loudly that no snapshot was taken, with the pg_dump command, and continues", async () => {
+      await seedPlaintext();
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register());
+      expect(exit).not.toHaveBeenCalled();
+      const errors = vi.mocked(console.error).mock.calls.flat().join("\n");
+      expect(errors).toContain("NO database");
+      expect(errors).toContain("docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql");
+      expect((await raw.firearm.findUnique({ where: { id: "f-sqlite-form" } }))?.serialNumber).toMatch(/^bv2:/);
     }, 90_000);
   });
 });

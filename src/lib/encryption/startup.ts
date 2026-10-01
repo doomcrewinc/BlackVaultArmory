@@ -10,6 +10,7 @@ import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
 import { redactStoredChanges } from "../audit/redact";
 import { isValidTimeZone, normalizeInstant } from "../date-migration";
+import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
 
 /**
  * Startup steps for field encryption at rest
@@ -32,6 +33,29 @@ const KEY_CHECK_PLAINTEXT = "blackvault-key-check";
 const KEY_CHECK_AAD = "AppSettings.encryptionKeyCheck";
 const SETTINGS_ID = "singleton";
 const LEGACY_PREFIX = "enc:";
+
+/**
+ * Where the pre-upgrade snapshots really are (Task 7, hint consistency):
+ * update.sh / update.bat write backups/blackvault-<ts>.db (SQLite) or .sql
+ * (PostgreSQL) next to docker-compose.yml; a first start that encrypts
+ * SQLite data writes pre-encryption-<ts>.db next to the database itself
+ * (./pre-encryption-snapshot.ts).
+ */
+const SNAPSHOT_HINT =
+  "the pre-upgrade database snapshot (backups/blackvault-<timestamp>.db or .sql next to docker-compose.yml, " +
+  "or pre-encryption-<timestamp>.db next to the database)";
+
+/**
+ * KEY_MISSING on a database with nothing encrypted yet (a fresh install, or
+ * the first start of this version): where the key file goes on the host.
+ * The first upgrade into this version runs the OLD update.sh (it git-pulls
+ * itself), which creates no key, so this is the line those users see.
+ */
+const CREATE_KEY_HINT =
+  "Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file " +
+  "secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: " +
+  "openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . " +
+  "Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.";
 
 type Row = Record<string, unknown> & { id: string };
 type Delegate = {
@@ -168,7 +192,7 @@ async function loadKeys(raw: RawClient): Promise<FieldKeys> {
   } catch (e) {
     if (!(e instanceof EncryptionKeyError) || e.code !== "KEY_MISSING") throw e;
     const id = await existingKeyId(raw);
-    if (!id) throw e;
+    if (!id) throw new EncryptionKeyError("KEY_MISSING", `${e.message} ${CREATE_KEY_HINT}`);
     throw new EncryptionKeyError(
       "KEY_MISSING",
       `${e.message.replace(/\s*Generate one with:.*$/, "")} This database is already encrypted: ` +
@@ -235,7 +259,7 @@ export async function assertEncryptionKey(raw: RawClient): Promise<void> {
     "KEY_CHECK_LOST",
     `The encryption key check (AppSettings.encryptionKeyCheck) is missing, and none of the database's encrypted ` +
       `values can be read with the provided key (${keys.id}). Refusing to start: start with the key this database ` +
-      "was encrypted with, or restore the pre-upgrade database snapshot in backups/.",
+      `was encrypted with, or restore ${SNAPSHOT_HINT}.`,
   );
 }
 
@@ -480,7 +504,7 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
       if (missing > 0) {
         throw new EncryptionMigrationError(
           `${missing} ${model} row(s) have a serial number but no fingerprint (serialNumberHash). ` +
-            "This indicates a bug. Refusing to start: restore the pre-upgrade database snapshot in backups/ and report it.",
+            `This indicates a bug. Refusing to start: restore ${SNAPSHOT_HINT} and report it.`,
           { model, field: "serialNumberHash" },
         );
       }
@@ -539,6 +563,10 @@ export async function runEncryptionStartup(): Promise<{ counts: Record<string, n
   const raw = createRawPrismaClient();
   try {
     await assertEncryptionKey(raw);
+    // Task 7 (carry N4): before the transaction opens, and only when there is
+    // plaintext to encrypt. Throws (refuse to start) if an SQLite snapshot
+    // cannot be written.
+    await takePreEncryptionSnapshot(raw);
     const result = await runEncryptionMigration(raw);
     const changed = Object.entries(result.counts).filter(([, n]) => n > 0);
     if (changed.length) {
