@@ -116,9 +116,14 @@ Pre-V1 values in the `enc:` format (`src/lib/crypto.ts`) are recognized only by 
 
 `base client → encryption extension → audit extension`, exported from `src/lib/prisma.ts`.
 
-The audit layer sees plaintext args and decrypted rows, and redacts them. The first plan task is a
-real-DB proof, run on SQLite (`connection_limit=1`) and on Postgres, that these all pass through
-encryption:
+*(Corrected during implementation — see "Changes during implementation" below.)* The audit
+layer's **write capture sees ciphertext, not plaintext**: it wraps the already-encrypting
+client, so the args it records for a create/update are the encrypted form. Its **read-back of
+before- and after-rows is decrypted**, because that read runs back up through the encryption
+extension on its way out. Either way, the **stored audit entries are redacted** before they are
+written, so a serial number or NFA field never appears in the audit log, encrypted or not. The
+first plan task is a real-DB proof, run on SQLite (`connection_limit=1`) and on Postgres, that
+these all pass through encryption correctly:
 - audit before-row reads;
 - audit writes, including nested creates;
 - the audit transaction re-dispatch.
@@ -136,6 +141,14 @@ every model with an encrypted field. For each write it:
 
 Every result is decrypted in place, including nested `include`/`select` results. A value that fails to decrypt throws `EncryptedFieldDecryptError`, carrying the model, id and
 field. Ciphertext is never returned to callers.
+
+**Reads are strict** *(added during implementation)*: a non-null value in a registered column
+that is not in `bv2:` form also throws `EncryptedFieldDecryptError` (cause `PLAINTEXT_AT_REST`),
+not just a value that fails to decrypt. The one-time encryption migration (below) runs on a raw,
+unextended client before the app ever serves a request, so nothing legitimate should reach the
+app client as plaintext in these columns afterward; a value that does is a bug (a missed write
+path), and it is meant to surface as an error page rather than silently return or re-store
+plaintext.
 
 ### Filters
 
@@ -155,23 +168,45 @@ field. Ciphertext is never returned to callers.
 
 ### Startup sequence (`src/instrumentation.ts`, Node only)
 
-1. **Load the key (§1).** On failure, log one line naming each source that was checked, then exit
-   non-zero.
-2. **Key check.** Create it if absent and the database has no encrypted values. If it is absent but
-   `bv2:` values exist, refuse to start (the key check was lost). A mismatch also refuses to start.
-3. **Date migration.** The existing `runStartupDateMigration` runs next. It must reach
-   `nfaApprovalDate` through the encryption extension, or skip values already in `bv2:` form. A test
-   pins this.
-4. **Encryption migration**, in one transaction:
+*(Corrected during implementation — the actual order is key check → snapshot → encryption
+migration → date migration, not key check → date migration → encryption migration as originally
+written below. Strict reads (above) made the original order unworkable: the date migration reads
+`nfaApprovalDate` through the app client, and once that column can legitimately hold a `bv2:`
+value, a plaintext value left over from before the encryption migration ran would make the date
+migration's own read throw. See "Changes during implementation" below.)*
+
+1. **Load the key, then the key check (§1), together.** On failure, log one line naming each
+   source that was checked, then exit non-zero. Create the key check if it is absent and the
+   database has no encrypted values. If it is absent but `bv2:` values exist, refuse to start (the
+   key check was lost). A mismatch also refuses to start.
+2. **Pre-encryption snapshot**, only when the database holds plaintext values to encrypt: on
+   SQLite, `VACUUM INTO` a plaintext copy next to the database before the migration transaction
+   opens (`VACUUM` cannot run inside a transaction). On PostgreSQL, the app cannot dump its own
+   server, so it logs the exact `pg_dump` command to run by hand instead of taking a copy itself.
+   A failed SQLite snapshot refuses to start; nothing is encrypted without a copy to go back to.
+3. **Encryption migration**, in one transaction:
    - Select every row where a listed field is non-null and does not start with `bv2:`.
    - Decrypt `enc:` values with `VAULT_ENCRYPTION_KEY`. If an `enc:` value exists and that key is
      absent or wrong, roll back and refuse to start, naming the row and field.
    - Encrypt each value and fill `serialNumberHash`.
-   - Write one `ENCRYPTION_ENABLED` audit event: actor `system`, `changes: { counts: {Model: n} }`,
-     `keyId`. No event is written when nothing changed.
+   - Delete `DateNormalizationAudit` rows that hold a plaintext `nfaApprovalDate` value — a
+     technical log, not the security audit, and the threat model forbids plaintext NFA at rest even
+     there.
+   - **Scrub existing `AuditEvent` rows** *(decided by the user, 2026-09-30)*: spec 2b's audit log
+     predates NFA-field redaction, so a row written before this spec could still hold a plaintext
+     NFA value in `changes`. In the same transaction, re-run every `AuditEvent.changes` through the
+     current redaction rules and update only the rows that actually change; record the count as
+     `scrubbedAuditRows`.
+   - Write one `ENCRYPTION_ENABLED` audit event when anything changed (counts > 0 or
+     `scrubbedAuditRows` > 0): actor `system`, `changes: { counts: {Model: n}, keyId, scrubbedAuditRows }`.
+     No event is written when nothing changed.
 
    The migration is idempotent. Any failure rolls back and refuses to start, logging the model, id
    and field.
+4. **Date migration.** The existing `runStartupDateMigration` runs last, after encryption. It
+   skips the now-encrypted `nfaApprovalDate` entirely — step 3 already normalises a legacy NFA
+   date to its calendar day before encrypting it, so there is nothing left for the date migration
+   to do there. A test pins this.
 
 ### Refuse to start
 
@@ -204,6 +239,16 @@ differs from the date migration, which logs and continues.
 - Over direct plain-HTTP access, a warning is shown before sending.
 - The download is `blackvault-backup-<date>.sealed.json`.
 - `BACKUP_CREATED` records `sealed: true`.
+- *(Decided during implementation.)* **The request body cap is 64 MB** (`next.config.ts`'s
+  `experimental.proxyClientMaxBodySize`), which covers roughly 37,000 firearms with notes at the
+  measured sealed-envelope size ratio. This is a trade-off, not just a convenience limit: Next
+  buffers an entire incoming request body in memory *before* this (or any route-level) check ever
+  runs, so the cap also bounds how much memory an unauthenticated POST to any route can force the
+  process to hold — a larger figure (256 MB was tried first) let a handful of concurrent large
+  POSTs push the process toward multiple gigabytes of RSS before any handler ran. A household with
+  a larger inventory than 64 MB covers needs a CLI restore path instead of the browser UI (not
+  built yet). Document the reverse proxy's own body-size limit (e.g. Caddy, Nginx Proxy Manager) as
+  the real protection against this, since it rejects an oversized body before it ever reaches Next.
 
 ### Restore
 
@@ -262,10 +307,32 @@ reason is printed. The script refuses to run if the stored key check does not ma
 - Say that the snapshot is plaintext and can be deleted once the upgrade is confirmed.
 - Stop the update if the snapshot fails.
 
+*(Added during implementation.)* **The app also takes its own snapshot, for the first upgrade
+specifically.** `update.sh` / `update.bat` git-pull themselves and keep running the *already
+loaded, old* copy of the script for the rest of that run, so the very first upgrade into this
+spec is driven by an old script that has no idea it needs to take a snapshot before this feature
+encrypts existing data. To cover that one case, the app's own startup (§2, step 2) takes a
+plaintext SQLite snapshot itself, next to the database, whenever it is about to encrypt
+pre-existing data — regardless of whether it was started by the old update script, the new one,
+or by hand. On Linux this app-side snapshot is owned by the container's uid 1001, so removing it
+needs `sudo`.
+
 ### Compose
 
-- A `secrets: blackvault_encryption_key: file: ./secrets/blackvault_encryption_key` entry, mounted into
-  the app service.
+*(Changed during implementation — the Compose `secrets:` entry below was replaced; see "Changes
+during implementation".)*
+
+- ~~A `secrets: blackvault_encryption_key: file: ./secrets/blackvault_encryption_key` entry,
+  mounted into the app service.~~ Replaced by: the whole `secrets/` folder bind-mounted
+  **read-only** into the app service, an in-memory `tmpfs` at `/run/secrets`
+  (`noexec,nosuid,nodev`), and an entrypoint script that, running briefly as root, copies only
+  `blackvault_encryption_key` (and `.new`, during a rotation) from the read-only bind into the
+  tmpfs, owned by the app's `nextjs` user, before dropping to `nextjs` to run the real command.
+  A non-Swarm Compose `secrets:` entry is a plain bind mount whose uid/gid/mode options are
+  silently ignored, so on native Linux Docker the app user (uid 1001) could never have read a
+  key file owned by whoever ran the installer (uid 1000); and a missing key file under `secrets:`
+  blocks container creation outright, which hides the friendlier `KEY_MISSING` message this app
+  prints instead.
 - `BLACKVAULT_ENCRYPTION_KEY` is passed through, empty by default.
 - `VAULT_ENCRYPTION_KEY` stays passed through for the legacy `enc:` upgrade path.
 - The rule that env keys use the `BLACKVAULT_` prefix applies to every new key.
@@ -290,7 +357,9 @@ reason is printed. The script refuses to run if the stored key check does not ma
 - **Real-DB, SQLite and Postgres:**
   - every write kind, nested writes, reads with `include`;
   - serial equality lookups, and the duplicate firearm serial rejected;
-  - the audit layer sees plaintext and redacts it;
+  - the audit layer's write capture sees ciphertext, its before/after row reads are decrypted,
+    and the stored entries are redacted either way (corrected — see "Changes during
+    implementation");
   - the migration is idempotent and rolls back fully on failure;
   - the `enc:` legacy path;
   - rotation end to end.
@@ -329,6 +398,50 @@ reason is printed. The script refuses to run if the stored key check does not ma
    NFA fields and serials as redacted.
 8. **CI.** The Windows `.bat` changes pass the Windows installer job, and CI is green on both
    time-zone legs.
+
+## Changes during implementation
+
+This section lists every place the shipped build deviates from what was written above, added
+when Task 8 corrected the spec to match reality. Each item is also marked inline, above, where it
+applies.
+
+1. **§2, "The audit layer sees plaintext args and decrypted rows."** Wrong: the audit layer's
+   write capture sees **ciphertext**, because it wraps the already-encrypting client. Only its
+   read-back of before/after rows is decrypted (the read path runs back up through the encryption
+   extension). The stored audit entries are redacted regardless of which form they saw. See
+   "Client order" above.
+2. **Startup order.** The spec originally wrote key check → date migration → encryption
+   migration. The shipped order is **key check → pre-encryption snapshot → encryption migration
+   → date migration**. Reads are strict (see below), so the date migration — which reads
+   `nfaApprovalDate` through the app client — cannot run before the encryption migration has
+   guaranteed every value in that column is either still legitimately plain (not yet encrypted
+   at all) or `bv2:` ciphertext; running it in between left a window where a partially-migrated
+   database could make the date migration's own read throw. The encryption migration also now
+   does two things the spec didn't originally call for, in the same transaction: it deletes
+   `DateNormalizationAudit` rows holding a plaintext NFA date, and it scrubs plaintext NFA values
+   out of existing `AuditEvent.changes` rows (decided by the user, 2026-09-30) — spec 2b's audit
+   log predates NFA-field redaction.
+3. **Compose `secrets:`.** Replaced by a read-only bind mount of the whole `secrets/` folder, an
+   in-memory `tmpfs` at `/run/secrets`, and an entrypoint script that copies just the key file(s)
+   into it as the app's own user. A non-Swarm Compose `secrets:` entry ignores uid/gid/mode on the
+   mounted file, so the app user (uid 1001) could never read a key file owned by the installer's
+   user (uid 1000) on native Linux Docker; it also blocks container creation outright when the
+   key file is missing, hiding the friendlier `KEY_MISSING` startup message.
+4. **The app takes its own pre-encryption snapshot, for the first upgrade.** Not in the original
+   spec. `update.sh` / `update.bat` git-pull themselves and finish their run as the *old* script,
+   so the very first upgrade into this spec runs an update script with no idea it should snapshot
+   first. The app's own startup snapshots the SQLite database itself (step 2 above) whenever it is
+   about to encrypt pre-existing data, independent of which script (if any) launched it.
+5. **The body cap is 64 MB,** not a number the original spec named. Settled after a 256 MB figure
+   was tried and found to let a few concurrent large, unauthenticated POSTs push the process
+   toward multiple gigabytes of memory before any handler ran (Next buffers the whole body before
+   any check). 64 MB comfortably covers the backup/restore case and bounds that exposure; the
+   reverse proxy's own body-size limit is documented as the real protection.
+6. **Reads are strict.** The spec described a read throwing only when decryption *fails*. The
+   shipped extension also throws when a non-null registered-column value is simply not in `bv2:`
+   form at all (`PLAINTEXT_AT_REST`) — a value that reaches the app client that way is a bug (a
+   missed write path), and the strict read turns it into a visible error instead of a silent
+   plaintext leak.
 
 ## Known limitations
 
