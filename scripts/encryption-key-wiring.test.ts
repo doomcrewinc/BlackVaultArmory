@@ -68,6 +68,12 @@ describe("docker-compose.yml", () => {
     expect(app).toContain("- BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db");
     expect(app).toContain("- ${DATA_DIR:-./data}/db:/app/data");
   });
+
+  it("docker-compose.dev.yml also sets BLACKVAULT_HOST_DB_DIR (its /app/data is a named volume)", () => {
+    const dev = serviceBlock(read("docker-compose.dev.yml"), "blackvault");
+    expect(dev).toContain("- BLACKVAULT_HOST_DB_DIR=volume blackvault-dev-data");
+    expect(dev).toContain("- blackvault-dev-data:/app/data");
+  });
 });
 
 describe("Dockerfile", () => {

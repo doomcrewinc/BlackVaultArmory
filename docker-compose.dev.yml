@@ -36,6 +36,10 @@ services:
       - ALLOW_DIRECT_ACCESS=${BLACKVAULT_ALLOW_DIRECT_ACCESS:-true}
       # Field encryption: secrets/blackvault_encryption_key (below), or this.
       - BLACKVAULT_ENCRYPTION_KEY=${BLACKVAULT_ENCRYPTION_KEY:-}
+      # /app/data is the named volume below, not a host folder: the app's
+      # pre-encryption snapshot log names it as "volume blackvault-dev-data/…"
+      # (Compose prefixes the real volume name with the project name).
+      - BLACKVAULT_HOST_DB_DIR=volume blackvault-dev-data
     volumes:
       - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads
