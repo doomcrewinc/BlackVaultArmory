@@ -59,12 +59,14 @@ if [ "$PROVIDER" = "sqlite" ]; then
   $COMPOSE stop blackvault || fail "could not stop BlackVault."
   # A copy taken with the app stopped. A leftover rollback journal or WAL
   # (after a crash) belongs to the database, so it is copied beside it.
-  # chmod as well as umask: a default ACL on the folder overrides the umask.
-  (umask 077 && cp "$DB" "$OUT.partial" && chmod 600 "$OUT.partial") ||
+  # Created empty and chmod 600 BEFORE any data is copied in (a default ACL
+  # on the folder overrides the umask); cp onto an existing file keeps its mode.
+  (umask 077 && : > "$OUT.partial" && chmod 600 "$OUT.partial" && cp "$DB" "$OUT.partial") ||
     { rm -f "$OUT.partial"; fail "could not copy $DB (permissions? free disk space?)."; }
   for ext in -journal -wal; do
     if [ -f "$DB$ext" ]; then
-      (umask 077 && cp "$DB$ext" "$OUT$ext" && chmod 600 "$OUT$ext") || { rm -f "$OUT.partial"; fail "could not copy $DB$ext."; }
+      (umask 077 && : > "$OUT$ext" && chmod 600 "$OUT$ext" && cp "$DB$ext" "$OUT$ext") ||
+        { rm -f "$OUT.partial" "$OUT$ext"; fail "could not copy $DB$ext."; }
     fi
   done
   mv "$OUT.partial" "$OUT" || fail "could not finish writing $OUT."

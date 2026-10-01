@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { ENCRYPTED_FIELDS } from "./fields";
@@ -200,8 +200,12 @@ export async function takePreEncryptionSnapshot(
     const partial = `${target}.partial`;
     rmSync(partial, { force: true });
     try {
-      await raw.$executeRawUnsafe(`VACUUM INTO ${sqlLiteral(partial)}`);
+      // Fix round 2: created EMPTY and mode 0600 BEFORE any data is written
+      // (VACUUM INTO accepts an existing empty file); chmod as well, since a
+      // default ACL on the folder can override the creation mode.
+      writeFileSync(partial, "", { mode: 0o600, flag: "wx" });
       chmodSync(partial, 0o600);
+      await raw.$executeRawUnsafe(`VACUUM INTO ${sqlLiteral(partial)}`);
       renameSync(partial, target);
     } catch (e) {
       rmSync(partial, { force: true });
