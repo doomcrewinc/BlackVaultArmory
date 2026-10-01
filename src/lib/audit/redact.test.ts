@@ -27,6 +27,12 @@ describe("isRedactedField", () => {
   });
 });
 
+describe("isRedactedField: serial fingerprint", () => {
+  it("redacts serialNumberHash (field-encryption Task 3): a keyed fingerprint of the serial, never stored in the audit log", () => {
+    expect(isRedactedField("serialNumberHash")).toBe(true);
+  });
+});
+
 describe("redactRecord", () => {
   it("replaces sensitive fields with the redacted marker and leaves the rest", () => {
     const row = { name: "Glock 19", serialNumber: "ABC123", caliber: "9mm" };

@@ -1,6 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { resolveProvider } from "./db/provider";
 import { withAudit } from "./audit/extension";
+import { withEncryption } from "./encryption/extension";
+import type { AppPrismaClient } from "./encryption/app-client-types";
+
+export type { AppPrismaClient, AppTransactionClient } from "./encryption/app-client-types";
 
 /**
  * Both Prisma clients ship in the image; this is the only place that chooses.
@@ -17,19 +21,29 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
   return require("@prisma/client").PrismaClient;
 }
 
-const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
+const globalForPrisma = globalThis as unknown as { prisma: AppPrismaClient | undefined };
 
 /**
- * The app client records every write on an audited model in the audit log
- * (src/lib/audit/extension.ts). Scripts and the migrator that construct their
- * own PrismaClient are not audited.
+ * The app client: `base → encryption → audit` (field-encryption spec, D7).
+ * - It records every write on an audited model in the audit log
+ *   (src/lib/audit/extension.ts).
+ * - It encrypts the registered fields on write, decrypts them on read, and
+ *   looks serials up by fingerprint (src/lib/encryption/extension.ts). The key
+ *   loads on the first encrypted read or write, never at import.
+ * Typed as AppPrismaClient: the generated client with nfaApprovalDate /
+ * nfaTaxPaid as Date / number (src/lib/encryption/app-client-types.ts).
+ *
+ * Scripts and the migrator that construct their own PrismaClient are neither
+ * audited nor encrypted.
  */
-export const prisma: PrismaClient =
+export const prisma: AppPrismaClient =
   globalForPrisma.prisma ??
-  withAudit(
-    new (loadPrismaClient())({
-      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-    }),
-  );
+  (withAudit(
+    withEncryption(
+      new (loadPrismaClient())({
+        log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+      }),
+    ),
+  ) as unknown as AppPrismaClient);
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;

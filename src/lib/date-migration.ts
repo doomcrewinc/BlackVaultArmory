@@ -14,6 +14,7 @@
  * a run with a provisional zone (UTC) can later be corrected from the originals.
  */
 import type { PrismaClient } from "@prisma/client";
+import type { AppPrismaClient } from "./encryption/app-client-types";
 
 // Fix round 1: moved to their own zero-import module so a CLIENT component
 // (src/lib/audit/summary.ts) can read the classification without pulling
@@ -93,7 +94,8 @@ type Audit = {
 type Outcome = "normalized" | "reconverted" | "skippedEdited" | "skippedConcurrent" | null;
 
 export async function runLegacyDateMigration(
-  prisma: PrismaClient,
+  // The app client (src/lib/prisma.ts) or a plain one; only reached through `Client` below.
+  prisma: PrismaClient | AppPrismaClient,
   zone: string
 ): Promise<MigrationSummary> {
   const summary: MigrationSummary = {

@@ -203,7 +203,8 @@ describe(`audit capture against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     const events = await eventsFrom(() =>
       prisma.firearm.update({ where: { id: f.id }, data: { serialNumber: `${SERIAL_MARK}changed` } }),
     );
-    expect(changesOf(events[0])).toEqual({ serialNumber: [REDACTED, REDACTED] });
+    // The fingerprint moves with the serial (field encryption) and is redacted the same way.
+    expect(changesOf(events[0])).toEqual({ serialNumber: [REDACTED, REDACTED], serialNumberHash: [REDACTED, REDACTED] });
   });
 
   it("updateMany → one UPDATE per affected row", async () => {

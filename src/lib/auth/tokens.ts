@@ -98,7 +98,9 @@ export async function peekToken(raw: string, now: Date = new Date()) {
  * issuer-is-an-active-admin check is part of the same conditional update, so it is decided inside
  * the caller's transaction and a refused invite is left unused.
  */
-export async function consumeToken(raw: string, kind: TokenKind, tx: Prisma.TransactionClient, now: Date = new Date()) {
+// `tx` is only the delegate this uses, so both the app's transaction client
+// (AppTransactionClient, src/lib/prisma.ts) and a plain Prisma one fit.
+export async function consumeToken(raw: string, kind: TokenKind, tx: Pick<Prisma.TransactionClient, "authToken">, now: Date = new Date()) {
   const tokenHash = hashToken(raw);
   const where: Prisma.AuthTokenWhereInput = { tokenHash, kind, usedAt: null, OR: unexpired(now) };
   if (kind === "INVITE") where.createdBy = ISSUER_IS_ACTIVE_ADMIN;
