@@ -96,13 +96,24 @@ function Assert([bool]$Condition, [string]$Message) {
   else { Write-Host "    FAIL $Message" -ForegroundColor Red; $script:Failures.Add($Message) }
 }
 
+# Copies one repo file (a path relative to the repo root, sub-folders
+# included) into $DestDir at the same relative path.
+function Copy-RepoFile([string]$Rel, [string]$DestDir) {
+  $src = Join-Path $RepoRoot $Rel
+  if (-not (Test-Path $src)) { return }
+  $dest = Join-Path $DestDir $Rel
+  New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+  Copy-Item $src $dest
+}
+
+# Task 7: update.bat calls scripts\db-snapshot.bat (the REAL one is copied,
+# so every update scenario also exercises it against the docker stub).
+$TreeFiles = @("install.bat", "update.bat", "docker-compose.yml", ".env.example", "scripts\db-snapshot.bat", "secrets\.gitignore")
+
 function New-Sandbox([string]$Name) {
   $dir = Join-Path $Sandboxes $Name
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  foreach ($f in @("install.bat", "update.bat", "docker-compose.yml", ".env.example")) {
-    $src = Join-Path $RepoRoot $f
-    if (Test-Path $src) { Copy-Item $src $dir }
-  }
+  foreach ($f in $TreeFiles) { Copy-RepoFile $f $dir }
   return $dir
 }
 
@@ -410,6 +421,7 @@ Assert ($r.Output -match "Public URL: the address people open BlackVault at") "r
 Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\. Aborting\.") "says why it stopped"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 Assert ($r.StubLog -notmatch "compose build") "did NOT build"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "Task 7: wrote NO key file"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario P4b
@@ -427,10 +439,7 @@ Show-EvidenceIfFailed $r
 function New-GitRemote([string]$Name, [string]$UpdateBatSource) {
   $origin = Join-Path $Sandboxes "$Name-origin"
   New-Item -ItemType Directory -Force -Path $origin | Out-Null
-  foreach ($f in @("install.bat", "docker-compose.yml", ".env.example")) {
-    $src = Join-Path $RepoRoot $f
-    if (Test-Path $src) { Copy-Item $src $origin }
-  }
+  foreach ($f in $TreeFiles) { if ($f -ne "update.bat") { Copy-RepoFile $f $origin } }
   Copy-Item $UpdateBatSource (Join-Path $origin "update.bat")
   Set-Content -Path (Join-Path $origin "README.md") -Value "v1" -Encoding Ascii
   & git -C $origin init -q --initial-branch=main | Out-Null
@@ -503,6 +512,8 @@ Show-EvidenceIfFailed $r
 # ---------------------------------------------------------------- scenario P5
 Write-Scenario "update.bat - second run asks only whether the URL is still current"
 $envBefore = [IO.File]::ReadAllBytes((Join-Path $work ".env"))
+$keyPathP5 = Join-Path $work "secrets\blackvault_encryption_key"
+$keyBeforeP5 = if (Test-Path $keyPathP5) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($keyPathP5)) } else { "" }
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.Output -match "Public URL is: https://vault\.example\.com") "showed the current URL"
@@ -512,6 +523,9 @@ Assert ($r.Output -notmatch "Keep allowing direct access") "did NOT ask about di
 Assert ($r.Output -notmatch "Trusted proxies:") "did NOT ask for trusted proxies again"
 Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env"))) -eq [Convert]::ToBase64String($envBefore)) ".env byte-for-byte unchanged"
 Assert ($r.StubLog -match "compose up -d") "still restarted"
+Assert (($keyBeforeP5 -ne "") -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes($keyPathP5)) -eq $keyBeforeP5)) "Task 7: the key file from the first run is kept byte for byte"
+Assert ($r.Output -match "existing, unchanged") "Task 7: says the existing key was kept"
+Assert ($r.Output -notmatch "BACK THIS FILE UP") "Task 7: no new-key message on the second run"
 
 Show-EvidenceIfFailed $r
 
@@ -1217,6 +1231,208 @@ Assert ((Get-Content $stale -Raw) -eq ("cd" * 32)) "the stale .new is byte-for-b
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is untouched"
 Show-EvidenceIfFailed $r
 
+# =============================================================================
+#            field encryption (Task 7): key file, pre-upgrade snapshot
+# =============================================================================
+$BoxLine = "BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered."
+
+# True when $Path has inheritance disabled and an explicit, non-inherited
+# Full Control grant for the current user's SID (compared as SIDs, as RK5).
+function Test-UserOnlyAcl([string]$Path) {
+  if (-not (Test-Path $Path)) { return $false }
+  $acl = Get-Acl $Path
+  if (-not $acl.AreAccessRulesProtected) { return $false }
+  $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+  $grant = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+    $_.IdentityReference.Value -eq $sid -and
+    $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+    -not $_.IsInherited -and
+    (($_.FileSystemRights -band $full) -eq $full)
+  })
+  return ($grant.Count -gt 0)
+}
+
+# Index of the first stub-log line equal to (or, with -Prefix, starting
+# with) $Text; -1 when absent. The stub logs one invocation per line.
+function Get-CallIndex([string]$Log, [string]$Text, [switch]$Prefix) {
+  $lines = @($Log -split "`r?`n")
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($Prefix) { if ($lines[$i].StartsWith($Text)) { return $i } }
+    elseif ($lines[$i] -ceq $Text) { return $i }
+  }
+  return -1
+}
+
+function Get-Backups([string]$Dir) {
+  $b = Join-Path $Dir "backups"
+  if (-not (Test-Path $b)) { return @() }
+  return @(Get-ChildItem $b -File | Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+# ---------------------------------------------------------------- scenario K1
+Write-Scenario "install.bat - fresh install creates secrets\blackvault_encryption_key: 64 hex, user-only ACL, boxed message, before the build"
+$d = New-Sandbox "key-install"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path $keyPath) "the key file exists"
+$key = if (Test-Path $keyPath) { (Get-Content $keyPath -Raw).Trim() } else { "" }
+Assert ($key -cmatch "^[0-9a-f]{64}$") "the key is exactly 64 lowercase hex characters (real CSPRNG path)"
+Assert (Test-UserOnlyAcl $keyPath) "the key file is restricted to the current user (inheritance off, explicit Full Control)"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence on one line"
+Assert ($r.Output -match "Encryption key created: .*secrets\\blackvault_encryption_key") "names the key file"
+Assert (($key -ne "") -and ($r.Output -notmatch $key)) "the key is never echoed"
+$iKey = $r.Output.IndexOf("Encryption key created")
+$iBuild = $r.Output.IndexOf("Building BlackVault image")
+Assert (($iKey -ge 0) -and ($iBuild -gt $iKey)) "the key is created before the image is built"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario K2
+Write-Scenario "install.bat - never overwrites an existing key file"
+$d = New-Sandbox "key-install-existing"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "secrets") | Out-Null
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+Set-Content -Path $keyPath -Value ("cd" * 32) -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-Content $keyPath -Raw) -eq ("cd" * 32)) "the key file is byte-for-byte unchanged"
+Assert ($r.Output -match "existing, unchanged") "says the existing key was kept"
+Assert (-not $r.Output.Contains($BoxLine)) "no new-key message"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario K3
+Write-Scenario "install.bat - re-run over a configured install creates the missing key before starting"
+$d = New-Sandbox "key-install-rerun"
+Set-SqliteInstall $d "7030"
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "the key file was created"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence"
+Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U1
+Write-Scenario "update.bat - SQLite: key created, snapshot copied into backups\ AFTER the build and BEFORE the new image starts"
+$origin = New-GitRemote "key-update-sqlite" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-sqlite"
+Set-SqliteInstall $work "7031"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the key file was created"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1 -and $snaps[0] -match "^blackvault-\d{8}-\d{6}\.db$") "one snapshot backups\blackvault-<ts>.db (got: $($snaps -join ', '))"
+if ($snaps.Count -eq 1) {
+  $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work "backups\$($snaps[0])"))) -eq
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work "data\db\vault.db")))
+  Assert $same "the snapshot is a byte-for-byte copy of vault.db"
+  Assert ($r.Output -match [regex]::Escape("Database snapshot saved: backups\$($snaps[0])")) "prints the snapshot path"
+}
+Assert (Test-UserOnlyAcl (Join-Path $work "backups")) "backups\ is restricted to the current user"
+Assert ($r.Output -match "this snapshot is NOT encrypted") "prints the plaintext warning"
+$iBuild = Get-CallIndex $r.StubLog "compose build --pull"
+$iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert (($iBuild -ge 0) -and ($iStop -gt $iBuild) -and ($iUp -gt $iStop)) "order: build, stop (snapshot), up -d (got $iBuild, $iStop, $iUp)"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U2
+Write-Scenario "update.bat - the snapshot fails: exits 1, never starts the new image, starts the old container again"
+$origin = New-GitRemote "key-update-snapfail" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-snapfail"
+Set-SqliteInstall $work "7032"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "") -EnvVars @{ "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed: could not stop BlackVault") "db-snapshot.bat names the failure"
+Assert ($r.Output -match "the update stopped here") "update.bat says it stopped"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started (no 'compose up -d')"
+Assert ((Get-CallIndex $r.StubLog "compose start blackvault") -ge 0) "the old container was started again"
+Assert (@(Get-Backups $work).Count -eq 0) "no snapshot file left behind"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U3
+Write-Scenario "update.bat - PostgreSQL: pg_dump through the db container into backups\blackvault-<ts>.sql before the start"
+$origin = New-GitRemote "key-update-pg" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-pg"
+New-Item -ItemType Directory -Force -Path (Join-Path $work "data\postgres") | Out-Null
+$pgpw = "ab" * 24
+@("DATA_DIR=$work\data", "PORT=3000", "COMPOSE_PROFILES=postgres", "BLACKVAULT_DB_PROVIDER=postgres",
+  "BLACKVAULT_POSTGRES_PASSWORD=$pgpw", "BLACKVAULT_DATABASE_URL=postgresql://blackvault:$pgpw@db:5432/blackvault",
+  "BLACKVAULT_PUBLIC_URL=https://vault.example.com", "BLACKVAULT_TRUSTED_PROXIES=", "BLACKVAULT_DIRECT_ACCESS_INITIAL=on") |
+  Set-Content -Path (Join-Path $work ".env") -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1 -and $snaps[0] -match "^blackvault-\d{8}-\d{6}\.sql$") "one snapshot backups\blackvault-<ts>.sql (got: $($snaps -join ', '))"
+if ($snaps.Count -eq 1) {
+  Assert ((Get-Content (Join-Path $work "backups\$($snaps[0])") -Raw) -match "compose exec -T db pg_dump") "the .sql holds what pg_dump printed (the stub echoes its command)"
+}
+$iDump = Get-CallIndex $r.StubLog "compose exec -T db pg_dump -U blackvault -d blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert ((Get-CallIndex $r.StubLog "compose up -d --wait db") -ge 0) "made sure the db container is running"
+Assert (($iDump -ge 0) -and ($iUp -gt $iDump)) "pg_dump ran before the app start (got $iDump, $iUp)"
+Assert ((Get-CallIndex $r.StubLog "compose stop blackvault") -eq -1) "PostgreSQL: the app was not stopped for the dump"
+Assert ($r.Output -match "this snapshot is NOT encrypted") "prints the plaintext warning"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U4
+Write-Scenario "update.bat - PostgreSQL: pg_dump fails: exits 1, no partial file, never starts the new image"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_FAIL_ON" = "exec" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed: pg_dump failed") "names the failure"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started"
+Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "*.partial" -ErrorAction SilentlyContinue).Count -eq 0) "no .partial file left"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario 10c
+Write-Scenario "update.bat - FIRST HOP: develop's update.bat (663523c) pulls this release and its resumed run creates the key and the snapshot"
+# cmd.exe resumes the NEW file at the byte past the OLD file's `git pull`
+# line (scenario 10b), so everything after the pull is the new code even on
+# the first upgrade. This is the Windows answer to "the old script runs the
+# upgrade" (update.sh re-executes itself instead).
+$oldBat3 = Join-Path $Sandboxes "old-update-663523c.bat"
+& cmd.exe /c "git -C ""$RepoRoot"" show 663523c:update.bat > ""$oldBat3"""
+if ((-not (Test-Path $oldBat3)) -or ((Get-Item $oldBat3).Length -lt 7000)) {
+  throw "Could not extract 663523c:update.bat (the Windows job needs fetch-depth: 0)."
+}
+$origin = New-GitRemote "key-update-first-hop" $oldBat3
+$work = New-WorkingClone $origin "key-update-first-hop"
+Set-SqliteInstall $work "7033"
+Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
+$onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+$onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
+Assert ($onDiskBefore -notmatch "ensure_encryption_key") "the script that started is the old one (premise)"
+Assert ($onDiskAfter -match "ensure_encryption_key") "the pull replaced it with this release's update.bat (premise)"
+Assert ($r.ExitCode -eq 0) "cmd.exe survived the swap and exited 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the key file was created on the first hop"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1) "a snapshot was taken on the first hop (got: $($snaps -join ', '))"
+$iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert (($iStop -ge 0) -and ($iUp -gt $iStop)) "snapshot before the new image started (got $iStop, $iUp)"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario DS1
+Write-Scenario "scripts\db-snapshot.bat called by another script: returns its errorlevel, leaves the caller's folder and variables alone, never pauses"
+$d = New-Sandbox "db-snapshot-call"
+Set-SqliteInstall $d "7034"
+@("@echo off", "setlocal EnableDelayedExpansion", "set ""DB_PROVIDER=caller-value""", "set ""OUT=caller-out""",
+  "call scripts\db-snapshot.bat", "echo RC=!errorlevel!", "echo CWD=!CD!", "echo VARS=!DB_PROVIDER!/!OUT!") |
+  Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
+Assert ($r.Output -match "RC=0") "errorlevel 0 on success"
+Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's current folder is unchanged"
+Assert ($r.Output -match "VARS=caller-value/caller-out") "the caller's variables are unchanged (setlocal)"
+Assert (@(Get-Backups $d).Count -eq 1) "wrote one snapshot"
+Assert ((Get-CallIndex $r.StubLog "compose start" -Prefix) -eq -1) "did not start the app again (the caller decides)"
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad -EnvVars @{ "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.Output -match "RC=1") "errorlevel 1 when the app cannot be stopped"
+Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's folder is unchanged on failure too"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
@@ -1224,5 +1440,5 @@ if ($script:Failures.Count -gt 0) {
   foreach ($f in $script:Failures) { Write-Host "  FAILED: $f" -ForegroundColor Red }
   exit 1
 }
-Write-Host "install.bat, update.bat and rotate-key.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
+Write-Host "install.bat, update.bat, rotate-key.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
 exit 0

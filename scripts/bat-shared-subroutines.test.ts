@@ -29,7 +29,14 @@ const FILES = {
   update: readFileSync(path.join(ROOT, "update.bat")).toString("latin1"),
 } as const;
 
-const SUBROUTINES = ["valid_public_url", "prompt_yes_no", "prompt_trusted_proxies", "show_setup_token"] as const;
+const SUBROUTINES = [
+  "valid_public_url",
+  "prompt_yes_no",
+  "prompt_trusted_proxies",
+  "show_setup_token",
+  // Task 7: the field-encryption key (mirrors scripts/encryption-key.sh).
+  "ensure_encryption_key",
+] as const;
 
 const TERMINATOR = /^(exit \/b \d+|goto :eof|goto :[A-Za-z_]+_again)$/i;
 
