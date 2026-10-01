@@ -1036,7 +1036,7 @@ Assert ($keyAfter -ne $keyBefore.Trim()) "the active key actually changed"
 Assert ($r.Output -notmatch [regex]::Escape($keyAfter)) "the new key is never echoed to the terminal"
 Assert ($r.Output -match "Key rotation complete") "prints the completion banner"
 Assert ($r.Output -match "Back up secrets\\blackvault_encryption_key now\.") "tells the admin to back up the active key"
-Assert ($r.Output -match [regex]::Escape("now saved as $($oldFiles[0].Name)")) "names the exact .old file the pre-rotation snapshot needs"
+Assert ($r.Output -match [regex]::Escape("now saved as secrets\$($oldFiles[0].Name)")) "names the exact .old file the pre-rotation snapshot needs"
 Assert ($r.Output -match "can only be opened with it") "says the snapshot can only be opened with the .old key, so it must be kept"
 # M5: assert the active key file's ACL was actually restricted (M2: applied
 # to the file BEFORE content was written; `move` preserves it across the rename).
