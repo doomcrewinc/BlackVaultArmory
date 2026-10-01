@@ -105,6 +105,20 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Gated off by default (src/app/api/backup/restore/route.c1.proxy-body-size.test.ts's
+      # describe.skipIf) because it builds the real app and starts a real
+      # server process, unlike the rest of the suite. Run here, right after
+      # the Build step above, so it reuses that build's
+      # .next/standalone/server.js instead of invoking `next build` again —
+      # see the test file's own docblock. Proves, through an actual Next.js
+      # server process (not a directly-called route handler, which never
+      # goes through src/proxy.ts), that a sealed backup under
+      # next.config.ts's proxyClientMaxBodySize actually restores.
+      - name: Real-server body-size test (review C1)
+        env:
+          RUN_SERVER_TESTS: "1"
+        run: npx vitest run src/app/api/backup/restore/route.c1.proxy-body-size.test.ts
+
   # ---------------------------------------------------------------------------
   test:
     name: Tests (${{ matrix.label }})
