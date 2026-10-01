@@ -1493,6 +1493,88 @@ Assert ((Get-Content (Join-Path $work "install.bat") -Raw) -match ":: my local t
 Assert ($r.ExitCode -eq 1) "the pull refused, so update.bat stops with 1 (got $($r.ExitCode))"
 Show-EvidenceIfFailed $r
 
+# --------------------------------------------------------------- scenario E3
+Write-Scenario "update.bat - self-heal: override lines left by an interrupted run are stripped first, the rest kept (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-heal"
+$work = New-WorkingClone $origin "eol-heal"
+Set-SqliteInstall $work "7042"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`ninstall.bat -text blackvault-update`r`nupdate.bat -text blackvault-update`r`n", [Text.Encoding]::ASCII)
+Set-Content -Path "$attrs.blackvault-update" -Value "stale backup" -Encoding Ascii
+$attrBefore = (& git -C $work check-attr text -- install.bat)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($attrBefore -match "text: unset") "premise: the leftover override was in effect (got '$attrBefore')"
+Assert ($r.Output -match "Removing a line-ending override left in") "says it removed the leftover override"
+Assert ((Test-Path $attrs) -and ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n")) "only the marked lines were removed (got '$(if (Test-Path $attrs) { [IO.File]::ReadAllText($attrs) })')"
+Assert (-not (Test-Path "$attrs.blackvault-update")) "the stale backup is gone"
+Assert ((& git -C $work check-attr text -- install.bat) -match "text: set") "install.bat is text again, so it checks out CRLF"
+# A checkout of an LF blob comes out CRLF again.
+& git -C $work add --renormalize install.bat | Out-Null
+& git -C $work -c user.name=ci -c user.email=ci@example.com commit -q -m "renormalize" | Out-Null
+Remove-Item (Join-Path $work "install.bat")
+& git -C $work checkout -- install.bat | Out-Null
+$ib = [IO.File]::ReadAllBytes((Join-Path $work "install.bat"))
+$crlf = 0; for ($i = 1; $i -lt $ib.Length; $i++) { if ($ib[$i] -eq 10 -and $ib[$i - 1] -eq 13) { $crlf++ } }
+$lf = 0; for ($i = 0; $i -lt $ib.Length; $i++) { if ($ib[$i] -eq 10) { $lf++ } }
+Assert (($lf -gt 0) -and ($crlf -eq $lf)) "a fresh checkout of install.bat is all CRLF ($crlf of $lf line ends)"
+Show-EvidenceIfFailed $r
+
+Write-Scenario "update.bat - self-heal: a file holding ONLY override lines is removed (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-heal-only"
+$work = New-WorkingClone $origin "eol-heal-only"
+Set-SqliteInstall $work "7043"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "install.bat -text blackvault-update`r`nupdate.bat -text blackvault-update`r`n", [Text.Encoding]::ASCII)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert (-not (Test-Path $attrs)) "the attributes file, which only held our lines, is gone"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E4
+Write-Scenario "update.bat - the attributes backup cannot be written (backup path locked): skips the fix, leaves the file untouched, no override left (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-copy-fails"
+$work = New-WorkingClone $origin "eol-copy-fails"
+Set-SqliteInstall $work "7044"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`n", [Text.Encoding]::ASCII)
+Set-PastMtime $work
+Add-CrlfBatChange $origin
+# Lock the BACKUP path (a leftover file the self-heal cannot delete while it
+# is locked), so `copy /y` onto it fails; Git can still read the real file.
+Set-Content -Path "$attrs.blackvault-update" -Value "locked leftover" -Encoding Ascii
+$flag = Join-Path $Sandboxes "eol-copy-fails.lock"
+$job = Start-FileLockJob "$attrs.blackvault-update" $flag
+if (-not (Wait-ForFile $flag 60)) { throw "the lock job never took the lock" }
+try {
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+} finally {
+  Stop-FileLockJob $job $flag
+}
+Assert ($r.Output -match "could not back up \.git\\info\\attributes, so the line-ending fix is skipped") "says the fix is skipped"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n") "the attributes file is byte-for-byte unchanged (no override line in it)"
+Assert ($r.ExitCode -eq 1) "the pull then refuses as before, exit 1 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E5
+Write-Scenario "update.bat - an attributes file without a final newline: the override still applies and the file is restored byte for byte (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-no-newline"
+$work = New-WorkingClone $origin "eol-no-newline"
+Set-SqliteInstall $work "7045"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary", [Text.Encoding]::ASCII)
+Set-PastMtime $work
+Add-CrlfBatChange $origin
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the override took effect: the pull went through"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary") "restored byte for byte (no newline added)"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"

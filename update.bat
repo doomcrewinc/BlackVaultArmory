@@ -666,7 +666,7 @@ echo ERROR: could not create the encryption key file secrets\blackvault_encrypti
 exit /b 1
 
 :: :clear_eol_only_change - mirrors clear_bat_eol_only_changes in update.sh
-:: (change them together). Runs right before `git pull` (fix round 1, I4).
+:: (change them together). Runs right before `git pull` (fix rounds 1-2, I4).
 :: Releases before this one stored install.bat and update.bat with CRLF in
 :: the index while .gitattributes says `text eol=crlf`, so Git reports both
 :: as modified on every checkout and a pull that changes them aborts with
@@ -676,9 +676,21 @@ exit /b 1
 :: .git\info\attributes, then `git update-index --refresh`), which records
 :: them as unchanged: they ARE the committed bytes. No file is rewritten -
 :: cmd.exe is reading this one. Real local edits are left alone.
+::
+:: The override must never outlive this run (left behind, every later
+:: checkout writes the .bat files with LF). Each added line carries the
+:: marker attribute `blackvault-update` (Git rejects a line with a trailing
+:: `#` comment and ignores it whole); every copy/move is checked and a
+:: failure restores; and every run first strips marked lines left by a run
+:: that could not restore (Ctrl-C answered Y at "Terminate batch job").
 :clear_eol_only_change
 git rev-parse --git-dir >nul 2>&1
 if errorlevel 1 goto :eof
+set "_GA="
+for /f "usebackq delims=" %%P in (`git rev-parse --git-path info/attributes`) do set "_GA=%%P"
+if not defined _GA goto :eof
+set "_GA=!_GA:/=\!"
+call :heal_eol_override
 git diff --quiet -- install.bat update.bat >nul 2>&1
 if not errorlevel 1 goto :eof
 git diff --ignore-cr-at-eol --quiet -- install.bat update.bat >nul 2>&1
@@ -687,25 +699,56 @@ if errorlevel 1 (
   goto :eof
 )
 echo Clearing a line-ending-only difference in install.bat / update.bat before pulling...
-set "_GA="
-for /f "usebackq delims=" %%P in (`git rev-parse --git-path info/attributes`) do set "_GA=%%P"
-if not defined _GA goto :eof
-set "_GA=!_GA:/=\!"
 for %%D in ("!_GA!") do if not exist "%%~dpD" mkdir "%%~dpD" 2>nul
 set "_GA_BAK="
-if exist "!_GA!" (
-  set "_GA_BAK=!_GA!.blackvault-update"
-  copy /y "!_GA!" "!_GA!.blackvault-update" >nul
+if not exist "!_GA!" goto :eol_override_add
+copy /y "!_GA!" "!_GA!.blackvault-update" >nul 2>&1
+if errorlevel 1 (
+  echo WARNING: could not back up .git\info\attributes, so the line-ending fix is skipped.
+  if exist "!_GA!.blackvault-update" del /f /q "!_GA!.blackvault-update" >nul 2>&1
+  goto :eof
 )
-(echo install.bat -text)>>"!_GA!"
-(echo update.bat -text)>>"!_GA!"
+set "_GA_BAK=!_GA!.blackvault-update"
+:: An existing file without a final newline: start our lines on a new one.
+set "_GA_NL=0"
+set "BV_GA_PATH=!_GA!"
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -NonInteractive -Command "$b = [IO.File]::ReadAllBytes($env:BV_GA_PATH); if ($b.Length -gt 0 -and $b[-1] -ne 10) { '1' } else { '0' }" 2^>nul`) do set "_GA_NL=%%L"
+set "BV_GA_PATH="
+if "!_GA_NL!"=="1" (
+  (echo.)>>"!_GA!" || goto :eol_override_restore
+)
+:eol_override_add
+(echo install.bat -text blackvault-update)>>"!_GA!" || goto :eol_override_restore
+(echo update.bat -text blackvault-update)>>"!_GA!" || goto :eol_override_restore
 :: The file must be older than the index Git writes next, or Git treats it
 :: as "racily clean" and compares it again with the normal attributes.
 ping -n 2 127.0.0.1 >nul
 git update-index -q --refresh >nul 2>&1
+:eol_override_restore
 if defined _GA_BAK (
-  move /y "!_GA_BAK!" "!_GA!" >nul
+  move /y "!_GA_BAK!" "!_GA!" >nul 2>&1
+  if errorlevel 1 echo WARNING: could not restore .git\info\attributes from its backup.
 ) else (
-  del /f /q "!_GA!" >nul 2>&1
+  if exist "!_GA!" del /f /q "!_GA!" >nul 2>&1
 )
+:: Whatever happened above, no marked line may survive.
+call :heal_eol_override
+goto :eof
+
+:: :heal_eol_override - removes override lines (marked blackvault-update)
+:: and backups that an interrupted run left behind. Needs _GA.
+:heal_eol_override
+if exist "!_GA!.blackvault-update" del /f /q "!_GA!.blackvault-update" >nul 2>&1
+if not exist "!_GA!" goto :eof
+findstr /l /c:" blackvault-update" "!_GA!" >nul 2>&1
+if errorlevel 1 goto :eof
+echo Removing a line-ending override left in .git\info\attributes by an interrupted update...
+findstr /v /l /c:" blackvault-update" "!_GA!" > "!_GA!.blackvault-heal" 2>nul
+for %%F in ("!_GA!.blackvault-heal") do if %%~zF EQU 0 (
+  del /f /q "!_GA!.blackvault-heal" >nul 2>&1
+  del /f /q "!_GA!" >nul 2>&1
+  goto :eof
+)
+move /y "!_GA!.blackvault-heal" "!_GA!" >nul 2>&1
+if errorlevel 1 echo WARNING: could not clean .git\info\attributes; delete its lines ending in blackvault-update by hand.
 goto :eof
