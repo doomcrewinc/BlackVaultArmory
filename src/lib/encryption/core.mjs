@@ -167,22 +167,20 @@ export function openBackup(passphrase, envelope) {
       || typeof e.tag !== "string" || typeof e.data !== "string") {
     throw new SealError("UNSUPPORTED", "Unsupported or malformed sealed backup.");
   }
-  // Validate salt length before deriving (DoS protection)
+  // Validate decoded lengths before any decryption (DoS and integrity protection)
   const decodedSalt = unb64u(k.salt);
-  if (decodedSalt.length !== 16) {
-    throw new SealError("UNSUPPORTED", "Invalid salt length in sealed backup.");
+  const decodedIv = unb64u(e.iv);
+  const decodedTag = unb64u(e.tag);
+  if (decodedSalt.length !== 16 || decodedIv.length !== 12 || decodedTag.length !== 16) {
+    throw new SealError("UNSUPPORTED", "Invalid salt, IV or tag length in sealed backup.");
   }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { tag, data, ...header } = e;
   try {
-    const decodedIv = unb64u(e.iv);
-    const decodedTag = unb64u(e.tag);
-    if (decodedIv.length !== 12 || decodedTag.length !== 16) {
-      throw new Error("Invalid IV or tag length");
-    }
     const d = createDecipheriv("aes-256-gcm", passKey(passphrase, decodedSalt, k), decodedIv, { authTagLength: 16 });
     d.setAAD(Buffer.from(canonicalJson(header), "utf8"));
     d.setAuthTag(decodedTag);
-    return Buffer.concat([d.update(unb64u(data)), d.final()]).toString("utf8");
+    return Buffer.concat([d.update(unb64u(e.data)), d.final()]).toString("utf8");
   } catch {
     throw new SealError("WRONG_PASSPHRASE_OR_DAMAGED", "Wrong passphrase or damaged file.");
   }

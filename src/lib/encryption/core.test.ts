@@ -78,6 +78,14 @@ describe("loadMasterKey", () => {
       expect(error.message).toContain("BLACKVAULT_ENCRYPTION_KEY");
     }
   });
+  it("corrupt key file throws KEY_INVALID naming the file, even with valid env key", () => {
+    try { core.loadMasterKey({ BLACKVAULT_ENCRYPTION_KEY: HEX }, fsWith({ [core.DEFAULT_KEY_FILE]: "invalid" })); throw new Error("no throw"); }
+    catch (e: unknown) {
+      const error = e as core.EncryptionKeyError;
+      expect(error.code).toBe("KEY_INVALID");
+      expect(error.message).toContain(core.DEFAULT_KEY_FILE);
+    }
+  });
 });
 
 describe("field encryption", () => {
@@ -190,11 +198,13 @@ describe("sealed backups", () => {
     expect(() => core.openBackup("correct horse battery", { ...env, note: "x" }))
       .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
   });
-  it("truncated GCM tag in sealed backup is rejected", () => {
+  it("truncated GCM tag in sealed backup is rejected BEFORE decryption", () => {
     const env = JSON.parse(core.sealBackup("correct horse battery", json));
     const truncatedTag = Buffer.from(Buffer.from(env.tag, "base64url").slice(0, 4)).toString("base64url");
+    const t = Date.now();
     expect(() => core.openBackup("correct horse battery", { ...env, tag: truncatedTag }))
-      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+      .toThrow(expect.objectContaining({ code: "UNSUPPORTED" }));
+    expect(Date.now() - t).toBeLessThan(200);
   });
   it("invalid salt length in sealed backup is rejected BEFORE deriving", () => {
     const env = JSON.parse(core.sealBackup("correct horse battery", json));
@@ -204,16 +214,20 @@ describe("sealed backups", () => {
       .toThrow(expect.objectContaining({ code: "UNSUPPORTED" }));
     expect(Date.now() - t).toBeLessThan(200);
   });
-  it("invalid IV length in sealed backup is rejected", () => {
+  it("invalid IV length in sealed backup is rejected BEFORE decryption", () => {
     const env = JSON.parse(core.sealBackup("correct horse battery", json));
     const badIv = Buffer.alloc(8).toString("base64url");
+    const t = Date.now();
     expect(() => core.openBackup("correct horse battery", { ...env, iv: badIv }))
-      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+      .toThrow(expect.objectContaining({ code: "UNSUPPORTED" }));
+    expect(Date.now() - t).toBeLessThan(200);
   });
-  it("invalid tag length in sealed backup is rejected", () => {
+  it("invalid tag length in sealed backup is rejected BEFORE decryption", () => {
     const env = JSON.parse(core.sealBackup("correct horse battery", json));
     const badTag = Buffer.alloc(8).toString("base64url");
+    const t = Date.now();
     expect(() => core.openBackup("correct horse battery", { ...env, tag: badTag }))
-      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+      .toThrow(expect.objectContaining({ code: "UNSUPPORTED" }));
+    expect(Date.now() - t).toBeLessThan(200);
   });
 });
