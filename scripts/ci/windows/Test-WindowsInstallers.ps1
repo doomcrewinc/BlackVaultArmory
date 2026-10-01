@@ -1433,6 +1433,66 @@ Assert ($r.Output -match "RC=1") "errorlevel 1 when the app cannot be stopped"
 Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's folder is unchanged on failure too"
 Show-EvidenceIfFailed $r
 
+# --------------------------------------------------------------- scenario E1
+# Fix round 1 (I4). Releases before this one stored install.bat/update.bat
+# with CRLF IN THE INDEX under `*.bat text eol=crlf`, so Git reports them
+# modified and a pull that changes them aborts. update.bat's
+# :clear_eol_only_change must let that pull through without rewriting a byte.
+function Set-CrlfIndexedBats([string]$Repo, [string]$Message) {
+  foreach ($f in @("install.bat", "update.bat")) {
+    $sha = (& git -C $Repo hash-object -w --no-filters $f).Trim()
+    & git -C $Repo update-index --add --cacheinfo "100644,$sha,$f" | Out-Null
+  }
+  & git -C $Repo -c user.name=ci -c user.email=ci@example.com commit -q -m $Message | Out-Null
+}
+function Set-PastMtime([string]$Dir) {
+  foreach ($f in @("install.bat", "update.bat")) { (Get-Item (Join-Path $Dir $f)).LastWriteTime = (Get-Date).AddMinutes(-1) }
+}
+function New-CrlfIndexRemote([string]$Name) {
+  $origin = New-GitRemote $Name (Join-Path $RepoRoot "update.bat")
+  Set-Content -Path (Join-Path $origin ".gitattributes") -Value "*.bat text eol=crlf" -Encoding Ascii
+  & git -C $origin add .gitattributes | Out-Null
+  Set-CrlfIndexedBats $origin "bat files with CRLF in the index"
+  return $origin
+}
+function Add-CrlfBatChange([string]$Origin) {
+  foreach ($f in @("install.bat", "update.bat")) { Add-Content -Path (Join-Path $Origin $f) -Value ":: a newer release" -Encoding Ascii }
+  Set-CrlfIndexedBats $Origin "a newer release changes both .bat files"
+}
+
+Write-Scenario "update.bat - CRLF in the index, line endings only: the pull of a release changing both .bat files goes through (fix round 1, I4)"
+$origin = New-CrlfIndexRemote "eol-only"
+$work = New-WorkingClone $origin "eol-only"
+Set-SqliteInstall $work "7040"
+Set-PastMtime $work
+$porcelain = (& git -C $work status --porcelain -- install.bat update.bat) -join "`n"
+Assert ($porcelain -match "M install\.bat" -and $porcelain -match "M update\.bat") "premise: Git reports both files modified (got '$porcelain')"
+Add-CrlfBatChange $origin
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.Output -match "Clearing a line-ending-only difference") "says it is clearing the line-ending-only difference"
+Assert ($r.Output -notmatch "would be overwritten") "the pull did not abort"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "git pull advanced HEAD"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert (-not (Test-Path (Join-Path $work ".git\info\attributes"))) "the temporary attributes override is gone"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E2
+Write-Scenario "update.bat - a REAL local edit to install.bat is left alone (fix round 1, I4)"
+$origin = New-CrlfIndexRemote "eol-real-edit"
+$work = New-WorkingClone $origin "eol-real-edit"
+Set-SqliteInstall $work "7041"
+Set-PastMtime $work
+Add-Content -Path (Join-Path $work "install.bat") -Value ":: my local tweak" -Encoding Ascii
+Add-CrlfBatChange $origin
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.Output -match "has local edits; they are left alone") "says the local edits are left alone"
+Assert ($r.Output -notmatch "Clearing a line-ending-only difference") "did not touch Git's view of the files"
+Assert ((Get-Content (Join-Path $work "install.bat") -Raw) -match ":: my local tweak") "the local edit survived"
+Assert ($r.ExitCode -eq 1) "the pull refused, so update.bat stops with 1 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"

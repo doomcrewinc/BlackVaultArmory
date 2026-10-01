@@ -102,6 +102,39 @@ fi
 echo ""
 
 # ── Pull latest code ──────────────────────────────────────────
+# Fix round 1 (I4). Releases before this one stored install.bat and
+# update.bat with CRLF in the index while .gitattributes says
+# `text eol=crlf`, so Git reports both as modified on every checkout, and a
+# pull that changes them aborts ("Your local changes ... would be
+# overwritten"). When the ONLY difference is line endings, Git is made to
+# re-check the two files byte for byte (a temporary `-text` in
+# .git/info/attributes, then `git update-index --refresh`), which records them
+# as unchanged: they ARE the committed bytes. `git checkout -- <file>` does
+# not help (it rewrites the same bytes and Git still reports them modified),
+# and no file is rewritten. Real local edits are left alone.
+# update.bat mirrors this in :clear_eol_only_change.
+clear_bat_eol_only_changes() {
+  local attrs backup=""
+  git diff --quiet -- install.bat update.bat 2>/dev/null && return 0
+  if ! git diff --ignore-cr-at-eol --quiet -- install.bat update.bat 2>/dev/null; then
+    echo "Note: install.bat or update.bat has local edits; they are left alone."
+    return 0
+  fi
+  echo "Clearing a line-ending-only difference in install.bat / update.bat before pulling..."
+  attrs=$(git rev-parse --git-path info/attributes) || return 0
+  mkdir -p "$(dirname "$attrs")" || return 0
+  if [ -f "$attrs" ]; then
+    backup="$attrs.blackvault-update.$$"
+    cp -p "$attrs" "$backup" || return 0
+  fi
+  printf 'install.bat -text\nupdate.bat -text\n' >> "$attrs"
+  # The files must be older than the index Git writes next, or Git treats
+  # them as "racily clean" and compares them again with the normal attributes.
+  sleep 1
+  git update-index -q --refresh >/dev/null 2>&1 || true
+  if [ -n "$backup" ]; then mv -f "$backup" "$attrs"; else rm -f "$attrs"; fi
+}
+
 # `git pull` replaces this file, but bash keeps running the copy it already
 # opened: everything below would be the OLD script's steps. So when the pull
 # brought anything new, start over with the new update.sh. The pull is
@@ -112,6 +145,7 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
     echo "Running the updated update.sh."
     echo ""
   else
+    clear_bat_eol_only_changes
     echo "Pulling latest updates from GitHub..."
     HEAD_BEFORE=$(git rev-parse HEAD 2>/dev/null || true)
     git pull

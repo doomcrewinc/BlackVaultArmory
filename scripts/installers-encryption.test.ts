@@ -397,3 +397,126 @@ describe("update.sh after git pull", () => {
     expect(next.calls).toContain(`AT-APP-START backups=[${snaps[0]} ] key=yes`);
   });
 });
+
+
+// ─── fix round 1, I4: the .bat files' line endings must not block the pull ──
+
+describe("update.sh before git pull: install.bat / update.bat line endings (fix round 1, I4)", () => {
+  const BAT_V1 = "@echo off\r\nrem v1\r\n";
+  const BAT_V2 = "@echo off\r\nrem v2\r\n";
+
+  /** Stages the two .bat files with CRLF IN THE INDEX, as releases before this one did. */
+  function stageCrlfBats(dir: string, content: string) {
+    for (const f of ["install.bat", "update.bat"]) {
+      fs.writeFileSync(path.join(dir, f), content);
+      const sha = git(dir, "hash-object", "-w", "--no-filters", f);
+      git(dir, "update-index", "--add", "--cacheinfo", `100644,${sha},${f}`);
+    }
+  }
+
+  function originWithBats(crlfIndex: boolean): string {
+    const origin = newOrigin((d) => {
+      copyTree(d);
+      fs.writeFileSync(path.join(d, ".gitattributes"), "*.bat text eol=crlf\n");
+      for (const f of ["install.bat", "update.bat"]) fs.writeFileSync(path.join(d, f), BAT_V1);
+    });
+    if (crlfIndex) {
+      // `git add` normalised them to LF; re-stage the raw CRLF bytes.
+      stageCrlfBats(origin, BAT_V1);
+      git(origin, "commit", "-q", "--amend", "--no-edit");
+      expect(git(origin, "ls-files", "--eol", "update.bat")).toMatch(/^i\/crlf/);
+    }
+    return origin;
+  }
+
+  /**
+   * Any stat change (a backup tool, a copy, a racy clone) makes Git compare
+   * the content, and then a CRLF index entry under `text eol=crlf` reads as
+   * modified. Bumping the mtime gets there deterministically.
+   */
+  function touchBats(dir: string) {
+    const later = new Date(Date.now() - 60_000); // in the past: a future mtime would stay "racy"
+    for (const f of ["install.bat", "update.bat"]) fs.utimesSync(path.join(dir, f), later, later);
+  }
+
+  function pushBatChange(origin: string, crlfIndex: boolean) {
+    if (crlfIndex) {
+      stageCrlfBats(origin, BAT_V2);
+      git(origin, "commit", "-q", "-m", "v2 changes both .bat files");
+    } else {
+      commitAll(origin, (d) => {
+        for (const f of ["install.bat", "update.bat"]) fs.writeFileSync(path.join(d, f), BAT_V2);
+      }, "v2 changes both .bat files");
+    }
+  }
+
+  it("CRLF-in-index checkout (line endings only): the pull goes through, both files arrive, nothing local is lost", () => {
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    // Premise: Git reports the two files modified although no byte changed.
+    expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toMatch(/M install\.bat[\s\S]*M update\.bat/);
+    // And a plain pull of a release that changes them aborts.
+    pushBatChange(origin, true);
+    const plain = spawnSync("git", ["pull", "-q"], { cwd: work, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig") } });
+    expect(plain.status).not.toBe(0);
+    expect(plain.stderr).toContain("would be overwritten");
+
+    const before = git(work, "rev-parse", "HEAD");
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Clearing a line-ending-only difference in install.bat / update.bat before pulling...");
+    expect(git(work, "rev-parse", "HEAD")).not.toBe(before);
+    expect(fs.readFileSync(path.join(work, "install.bat"), "utf8")).toBe(BAT_V2);
+    expect(fs.existsSync(path.join(work, ".git/info/attributes"))).toBe(false); // the temporary override is gone
+  });
+
+  it("an existing .git/info/attributes is restored byte for byte", () => {
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    fs.mkdirSync(path.join(work, ".git/info"), { recursive: true });
+    fs.writeFileSync(path.join(work, ".git/info/attributes"), "*.png binary\n");
+    touchBats(work);
+    pushBatChange(origin, true);
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Clearing a line-ending-only difference");
+    expect(fs.readFileSync(path.join(work, ".git/info/attributes"), "utf8")).toBe("*.png binary\n");
+  });
+
+  it("a REAL local edit is left alone: the pull still refuses, and the edit survives", () => {
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    fs.appendFileSync(path.join(work, "install.bat"), "rem my local tweak\r\n");
+    pushBatChange(origin, true);
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("Note: install.bat or update.bat has local edits; they are left alone.");
+    expect(r.out).not.toContain("Clearing a line-ending-only difference");
+    expect(fs.readFileSync(path.join(work, "install.bat"), "utf8")).toBe(`${BAT_V1}rem my local tweak\r\n`);
+    expect(r.calls).not.toContain("compose up -d");
+  });
+
+  it("LF in the index (this release on): a fresh clone is clean and a later release changing both .bat files pulls without help", () => {
+    const origin = originWithBats(false);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toBe("");
+    expect(fs.readFileSync(path.join(work, "update.bat"), "utf8")).toBe(BAT_V1); // CRLF on disk
+    pushBatChange(origin, false);
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain("Clearing a line-ending-only difference");
+    expect(fs.readFileSync(path.join(work, "update.bat"), "utf8")).toBe(BAT_V2);
+    expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toBe("");
+  });
+});

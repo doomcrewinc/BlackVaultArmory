@@ -138,7 +138,7 @@ echo.
 echo.
 
 :: Byte pad (these 2 lines)
-:: explained after git pull
+call :clear_eol_only_change
 :: ── Pull latest code ──────────────────────────────────────────
 git rev-parse --git-dir >nul 2>&1
 if errorlevel 1 goto :rebuild
@@ -150,6 +150,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
+:: The second of the two "byte pad" lines above is a real command (fix round 1,
+:: I4: `call :clear_eol_only_change`, same length as the comment it replaced).
 :: The two-line byte pad above `git pull` is for the e570bd8 update.bat
 :: (what develop shipped before this release). It runs `git pull` as a
 :: top-level line, so once the pull replaces this file cmd.exe resumes here
@@ -662,3 +664,48 @@ set "_KEY="
 if exist "!_EK!" for %%F in ("!_EK!") do if %%~zF EQU 0 del /f /q "!_EK!"
 echo ERROR: could not create the encryption key file secrets\blackvault_encryption_key.
 exit /b 1
+
+:: :clear_eol_only_change - mirrors clear_bat_eol_only_changes in update.sh
+:: (change them together). Runs right before `git pull` (fix round 1, I4).
+:: Releases before this one stored install.bat and update.bat with CRLF in
+:: the index while .gitattributes says `text eol=crlf`, so Git reports both
+:: as modified on every checkout and a pull that changes them aborts with
+:: "Your local changes ... would be overwritten". When the ONLY difference is
+:: line endings (`git diff --ignore-cr-at-eol` finds none), Git is made to
+:: re-check the two files byte for byte (a temporary `-text` in
+:: .git\info\attributes, then `git update-index --refresh`), which records
+:: them as unchanged: they ARE the committed bytes. No file is rewritten -
+:: cmd.exe is reading this one. Real local edits are left alone.
+:clear_eol_only_change
+git rev-parse --git-dir >nul 2>&1
+if errorlevel 1 goto :eof
+git diff --quiet -- install.bat update.bat >nul 2>&1
+if not errorlevel 1 goto :eof
+git diff --ignore-cr-at-eol --quiet -- install.bat update.bat >nul 2>&1
+if errorlevel 1 (
+  echo Note: install.bat or update.bat has local edits; they are left alone.
+  goto :eof
+)
+echo Clearing a line-ending-only difference in install.bat / update.bat before pulling...
+set "_GA="
+for /f "usebackq delims=" %%P in (`git rev-parse --git-path info/attributes`) do set "_GA=%%P"
+if not defined _GA goto :eof
+set "_GA=!_GA:/=\!"
+for %%D in ("!_GA!") do if not exist "%%~dpD" mkdir "%%~dpD" 2>nul
+set "_GA_BAK="
+if exist "!_GA!" (
+  set "_GA_BAK=!_GA!.blackvault-update"
+  copy /y "!_GA!" "!_GA!.blackvault-update" >nul
+)
+(echo install.bat -text)>>"!_GA!"
+(echo update.bat -text)>>"!_GA!"
+:: The file must be older than the index Git writes next, or Git treats it
+:: as "racily clean" and compares it again with the normal attributes.
+ping -n 2 127.0.0.1 >nul
+git update-index -q --refresh >nul 2>&1
+if defined _GA_BAK (
+  move /y "!_GA_BAK!" "!_GA!" >nul
+) else (
+  del /f /q "!_GA!" >nul 2>&1
+)
+goto :eof
