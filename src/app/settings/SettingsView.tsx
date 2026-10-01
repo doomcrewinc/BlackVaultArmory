@@ -36,14 +36,17 @@ function looksSealed(value: unknown): value is { format: string } {
 const MIN_PASSPHRASE_LENGTH = 12;
 
 /**
- * Client mirror of isSecureRequest (src/lib/server/request-gate.ts), the
- * signal the admin page already uses to warn about the session cookie over
- * plain HTTP: true when THIS page was loaded over plain HTTP, not HTTPS.
- * Reused here rather than inventing a new signal — a backup passphrase typed
- * into this page is exactly the kind of secret that warning exists for.
+ * The browser's own "is this page a secure context" verdict — true HTTPS, or
+ * loopback (http://localhost, 127.0.0.1), which browsers already treat as
+ * secure because the traffic never leaves the host. `window.location.protocol`
+ * alone would also flag localhost, which is noise: loopback dev/debugging is
+ * not the plain-HTTP-on-the-LAN risk this warning exists for (review M5).
+ * Reused rather than inventing a new signal — the same kind of "is this
+ * connection trustworthy" check the admin page's session-cookie `secure` flag
+ * already relies on server-side (`isSecureRequest`, src/lib/server/request-gate.ts).
  */
 function isPlainHttpPage(): boolean {
-  return typeof window !== "undefined" && window.location.protocol !== "https:";
+  return typeof window !== "undefined" && !window.isSecureContext;
 }
 
 function PassphraseWarning() {
@@ -598,8 +601,15 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                     <FormField label="Passphrase">
                       <input
                         id="restorePassphrase"
+                        name="restore-backup-passphrase"
                         type="password"
-                        autoComplete="current-password"
+                        // Not "current-password": this is a one-off backup
+                        // passphrase, never the admin's own login password —
+                        // offering to fill or save it as the site login would
+                        // be actively wrong (review M4). Browsers ignore a
+                        // bare autoComplete="off" on password fields, so a
+                        // distinctive `name` goes with it.
+                        autoComplete="off"
                         value={restorePassphrase}
                         onChange={(e) => setRestorePassphrase(e.target.value)}
                         className={INPUT_CLASS}

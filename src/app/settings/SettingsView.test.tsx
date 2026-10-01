@@ -56,7 +56,13 @@ async function renderLoaded(isAdmin: boolean) {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  Object.defineProperty(window, "isSecureContext", { value: undefined, configurable: true });
 });
+
+/** jsdom doesn't implement isSecureContext (always undefined); stub it directly to test the M5 signal. */
+function stubSecureContext(value: boolean) {
+  Object.defineProperty(window, "isSecureContext", { value, configurable: true });
+}
 
 describe("SettingsView — direct-access control", () => {
   it("an admin sees a toggle", async () => {
@@ -194,6 +200,22 @@ describe("SettingsView — admin-only sections", () => {
   });
 });
 
+describe("SettingsView — plain-HTTP warning (review M5)", () => {
+  it("shows the warning when the page is not a secure context", async () => {
+    stubSecureContext(false);
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(screen.getAllByText(/not using HTTPS/i).length).toBeGreaterThan(0);
+  });
+
+  it("hides the warning on a secure context (e.g. localhost, which the brief's own signal — isSecureContext — already treats as secure)", async () => {
+    stubSecureContext(true);
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(screen.queryByText(/not using HTTPS/i)).toBeNull();
+  });
+});
+
 describe("SettingsView — restore", () => {
   // Spec §Restore: the RESTORE audit event names the backup file. The file
   // name travels URI-encoded in X-Backup-Filename; the body is unchanged.
@@ -322,6 +344,11 @@ describe("SettingsView — restore", () => {
 
     await waitFor(() => expect(document.getElementById("restorePassphrase")).toBeTruthy());
     expect(screen.queryByText(/not encrypted/i)).toBeNull();
+    // Review M4: never "current-password" — that invites a password manager
+    // to offer the admin's own LOGIN password here. Browsers ignore a bare
+    // autocomplete="off" on password fields, so it needs a distinctive name too.
+    expect(document.getElementById("restorePassphrase")).toHaveAttribute("autocomplete", "off");
+    expect(document.getElementById("restorePassphrase")).not.toHaveAttribute("name", "password");
     // The Restore button only appears once the file is parsed; disabled
     // because no passphrase has been entered yet — nothing to send to it.
     fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
@@ -387,6 +414,13 @@ describe("SettingsView — restore", () => {
 });
 
 describe("SettingsView — sealed backup creation", () => {
+  it("keeps the backup-creation fields as new-password (review M4 only changes the restore field)", async () => {
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(document.getElementById("backupPassphrase")).toHaveAttribute("autocomplete", "new-password");
+    expect(document.getElementById("backupPassphraseConfirm")).toHaveAttribute("autocomplete", "new-password");
+  });
+
   it("rejects a passphrase under 12 characters without calling the API", async () => {
     const base = stubFetch({ allowed: true, source: "setting" });
     const backupCalls: RequestInit[] = [];
