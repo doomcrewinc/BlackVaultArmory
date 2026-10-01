@@ -242,7 +242,10 @@ if [ -z "$NEW_KEY" ] || [ "${#NEW_KEY}" -ne 64 ]; then
 fi
 # .new cannot exist here (checked in step 1). N3: the write is an
 # if-condition, so a failure is handled here, once, not by the ERR trap.
-if ! ( umask 077; printf '%s' "$NEW_KEY" > "$NEW_KEY_FILE" ); then
+# Fix round 1: umask alone is not enough. A default ACL on secrets/ (the
+# GitHub runner's home has one) overrides the umask, and CI saw the new key
+# arrive 664. The empty file is chmod 600 BEFORE any key material is written.
+if ! ( umask 077 && : > "$NEW_KEY_FILE" && chmod 600 "$NEW_KEY_FILE" && printf '%s' "$NEW_KEY" > "$NEW_KEY_FILE" ); then
   NEW_KEY=""
   echo "ERROR: could not write the new key to $NEW_KEY_FILE."
   # Created by THIS run a moment ago and never handed to the rotation, so

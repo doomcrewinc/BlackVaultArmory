@@ -63,7 +63,9 @@ ensure_encryption_key() {
   # if the key file appeared meanwhile (never overwritten), and a failed
   # write never leaves a half-written key behind under the real name.
   tmp="secrets/.blackvault_encryption_key.tmp.$$"
-  if ! (umask 077 && printf '%s\n' "$key" > "$tmp"); then
+  # chmod BEFORE the key is written: a default ACL on secrets/ overrides
+  # the umask (seen on the GitHub runner), so umask alone is not enough.
+  if ! (umask 077 && : > "$tmp" && chmod 600 "$tmp" && printf '%s\n' "$key" > "$tmp"); then
     key=""
     rm -f "$tmp"
     echo "ERROR: could not write the encryption key to secrets/."

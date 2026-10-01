@@ -59,11 +59,12 @@ if [ "$PROVIDER" = "sqlite" ]; then
   $COMPOSE stop blackvault || fail "could not stop BlackVault."
   # A copy taken with the app stopped. A leftover rollback journal or WAL
   # (after a crash) belongs to the database, so it is copied beside it.
-  (umask 077 && cp "$DB" "$OUT.partial") ||
+  # chmod as well as umask: a default ACL on the folder overrides the umask.
+  (umask 077 && cp "$DB" "$OUT.partial" && chmod 600 "$OUT.partial") ||
     { rm -f "$OUT.partial"; fail "could not copy $DB (permissions? free disk space?)."; }
   for ext in -journal -wal; do
     if [ -f "$DB$ext" ]; then
-      (umask 077 && cp "$DB$ext" "$OUT$ext") || { rm -f "$OUT.partial"; fail "could not copy $DB$ext."; }
+      (umask 077 && cp "$DB$ext" "$OUT$ext" && chmod 600 "$OUT$ext") || { rm -f "$OUT.partial"; fail "could not copy $DB$ext."; }
     fi
   done
   mv "$OUT.partial" "$OUT" || fail "could not finish writing $OUT."
@@ -73,7 +74,8 @@ else
   echo "Making sure the database container is running..."
   $COMPOSE up -d --wait db || fail "could not start the database container."
   echo "Dumping the PostgreSQL database..."
-  if ! (umask 077 && $COMPOSE exec -T db pg_dump -U blackvault -d blackvault > "$OUT.partial"); then
+  if ! (umask 077 && : > "$OUT.partial" && chmod 600 "$OUT.partial" &&
+    $COMPOSE exec -T db pg_dump -U blackvault -d blackvault > "$OUT.partial"); then
     rm -f "$OUT.partial"
     fail "pg_dump failed."
   fi
