@@ -115,7 +115,8 @@ services:
         bind:
           create_host_path: false
     tmpfs:
-      - /run/secrets
+      # In memory only; no setuid, devices or executables on it.
+      - /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 30s

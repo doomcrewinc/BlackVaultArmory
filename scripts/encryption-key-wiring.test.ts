@@ -45,7 +45,7 @@ describe.each(["docker-compose.yml", "docker-compose.dev.yml"])("%s", (file) => 
   });
 
   it("gives /run/secrets a tmpfs, so the entrypoint's copy of the key never touches disk", () => {
-    expect(app).toMatch(/\n {4}tmpfs:\n {6}- \/run\/secrets\n/);
+    expect(app).toMatch(/\n {4}tmpfs:\n(?: {6}#[^\n]*\n)* {6}- \/run\/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700\n/);
   });
 
   it("passes BLACKVAULT_ENCRYPTION_KEY through, empty by default", () => {

@@ -26,6 +26,23 @@ step() { echo; echo "::group::$*"; }
 endstep() { echo "::endgroup::"; }
 fail() { echo "::error::$*"; exit 1; }
 as_user() { sudo -u "$TEST_USER" -H bash -c "cd '$APP' && $*"; }
+# has TEXT PATTERN: grep -q on a here-string. Never `cmd | grep -q`: under
+# pipefail an early grep exit can SIGPIPE the writer and fail the pipeline.
+has() { grep -q -- "$2" <<<"$1"; }
+
+# Asserts /run/secrets inside container $1 (or, with $1 = "-", the /proc/mounts
+# text in $2) is its own tmpfs mounted nosuid,nodev,noexec, and prints it.
+assert_secrets_tmpfs() {
+  local mounts="$2" line opts o
+  line=$(awk '$2 == "/run/secrets"' <<<"$mounts")
+  echo "/run/secrets mount ($1): ${line:-<none>}"
+  [ -n "$line" ] || fail "$1: /run/secrets is not a separate mount"
+  [ "$(awk '{print $3}' <<<"$line")" = "tmpfs" ] || fail "$1: /run/secrets is not a tmpfs ($line)"
+  opts=",$(awk '{print $4}' <<<"$line"),"
+  for o in nosuid nodev noexec; do
+    case "$opts" in *",$o,"*) ;; *) fail "$1: /run/secrets tmpfs lacks $o ($line)" ;; esac
+  done
+}
 
 dump_logs() {
   echo "::group::container logs (on failure)"
@@ -85,9 +102,9 @@ endstep
 step "docker compose config renders the key mount and the tmpfs"
 CONFIG=$(as_user "docker compose config")
 echo "$CONFIG" | grep -A6 "target: /run/blackvault-secrets"
-echo "$CONFIG" | grep -q "source: $APP/secrets" || fail "compose config: secrets/ bind source missing"
-echo "$CONFIG" | grep -q "target: /run/blackvault-secrets" || fail "compose config: mount target missing"
-echo "$CONFIG" | grep -A3 "^    tmpfs:" | grep -q "/run/secrets" || fail "compose config: /run/secrets tmpfs missing"
+has "$CONFIG" "source: $APP/secrets" || fail "compose config: secrets/ bind source missing"
+has "$CONFIG" "target: /run/blackvault-secrets" || fail "compose config: mount target missing"
+has "$CONFIG" "/run/secrets:rw,noexec,nosuid,nodev" || fail "compose config: /run/secrets tmpfs (noexec,nosuid,nodev) missing"
 endstep
 
 step "build the image"
@@ -100,19 +117,19 @@ as_user "docker compose up -d"
 LOGS=""
 for _ in $(seq 1 40); do
   LOGS=$(as_user "docker compose logs --no-color blackvault" 2>&1 || true)
-  echo "$LOGS" | grep -q "\[encryption\] No encryption key" && break
+  has "$LOGS" "\[encryption\] No encryption key" && break
   sleep 3
 done
 echo "$LOGS" | grep "\[encryption\]" || true
-echo "$LOGS" | grep -q "Looked for the file /run/secrets/blackvault_encryption_key" || fail "no KEY_MISSING line naming /run/secrets/blackvault_encryption_key"
-echo "$LOGS" | grep -q "secrets/blackvault_encryption_key next to docker-compose.yml" || fail "KEY_MISSING does not say where the key goes on the host"
+has "$LOGS" "Looked for the file /run/secrets/blackvault_encryption_key" || fail "no KEY_MISSING line naming /run/secrets/blackvault_encryption_key"
+has "$LOGS" "secrets/blackvault_encryption_key next to docker-compose.yml" || fail "KEY_MISSING does not say where the key goes on the host"
 as_user "docker compose stop"
 endstep
 
 step "2. install.sh (existing-install path) creates the key as $TEST_USER; the app starts with it"
 OUT=$(as_user "./install.sh" </dev/null)
 echo "$OUT" | tail -20
-echo "$OUT" | grep -q "BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered." || fail "no back-up message"
+has "$OUT" "BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered." || fail "no back-up message"
 KEY="$APP/secrets/blackvault_encryption_key"
 [ "$(sudo stat -c '%a %U' "$KEY")" = "600 $TEST_USER" ] || fail "key file is $(sudo stat -c '%a %U' "$KEY"), want 600 $TEST_USER"
 [ "$(sudo stat -c '%a %U' "$APP/secrets")" = "700 $TEST_USER" ] || fail "secrets/ is $(sudo stat -c '%a %U' "$APP/secrets"), want 700 $TEST_USER"
@@ -124,12 +141,21 @@ else
 fi
 wait_healthy
 LOGS=$(as_user "docker compose logs --no-color blackvault")
-echo "$LOGS" | grep -q "Refusing to start\|refusing to start" && fail "the app refused to start with the key"
+has "$LOGS" "Refusing to start\|refusing to start" && fail "the app refused to start with the key"
 # Inside: the app user reads the tmpfs copy; older keys are never copied.
 docker exec -u nextjs blackvault sh -c 'test -r /run/secrets/blackvault_encryption_key' || fail "nextjs cannot read /run/secrets/blackvault_encryption_key"
 [ "$(docker exec blackvault stat -c '%a %U' /run/secrets/blackvault_encryption_key)" = "400 nextjs" ] || fail "in-container copy is not 400 nextjs"
-docker exec blackvault sh -c 'mount | grep " /run/secrets "' | grep -q tmpfs || fail "/run/secrets is not a tmpfs"
-docker exec blackvault sh -c 'ps -o user,args | grep "[g]ate.mjs"' | grep -q "^nextjs" || fail "the app is not running as nextjs"
+echo "docker inspect: $(docker inspect -f '{{json .HostConfig.Tmpfs}} {{json .Mounts}}' blackvault)"
+MOUNTS=$(docker exec blackvault cat /proc/mounts)
+echo "$MOUNTS"
+assert_secrets_tmpfs "app container" "$MOUNTS"
+PS=$(docker exec blackvault ps -o user,args)
+echo "$PS"
+has "$PS" "^nextjs .*gate.mjs" || fail "the app is not running as nextjs"
+# `docker compose run` (what the rotation uses) gets the same tmpfs and copy.
+RUN_OUT=$(as_user "docker compose run --rm -T blackvault sh -c 'cat /proc/mounts; echo COPY=\$(stat -c \"%a %U\" /run/secrets/blackvault_encryption_key)'")
+assert_secrets_tmpfs "compose run container" "$RUN_OUT"
+has "$RUN_OUT" "COPY=400 nextjs" || fail "compose run: no 400 nextjs key copy ($(grep COPY= <<<"$RUN_OUT"))"
 OLD_ID=$(key_id_of "$KEY")
 [ "$(db_key_id)" = "$OLD_ID" ] || fail "key check id $(db_key_id) != key file id $OLD_ID"
 echo "app started; key check id $OLD_ID"
@@ -138,7 +164,7 @@ endstep
 step "3. rotate-key.sh end to end (SQLite)"
 OUT=$(as_user "./rotate-key.sh" </dev/null)
 echo "$OUT" | tail -30
-echo "$OUT" | grep -q "Key rotation complete" || fail "rotation did not complete"
+has "$OUT" "Key rotation complete" || fail "rotation did not complete"
 sudo ls -la "$APP/secrets" "$APP/backups"
 sudo ls "$APP/backups" | grep -Eq '^blackvault-[0-9]{8}-[0-9]{6}\.db$' || fail "no pre-rotation snapshot in backups/"
 OLD_FILES=$(sudo find "$APP/secrets" -name 'blackvault_encryption_key.old-*' | wc -l)
@@ -149,7 +175,7 @@ NEW_ID=$(key_id_of "$KEY")
 wait_healthy
 [ "$(db_key_id)" = "$NEW_ID" ] || fail "after rotation the key check id is $(db_key_id), want $NEW_ID"
 LOGS=$(as_user "docker compose logs --no-color --since 2m blackvault")
-echo "$LOGS" | grep -q "Refusing to start\|refusing to start" && fail "the app refused to start on the new key"
+has "$LOGS" "Refusing to start\|refusing to start" && fail "the app refused to start on the new key"
 echo "rotated $OLD_ID -> $NEW_ID; app healthy on the new key"
 endstep
 
