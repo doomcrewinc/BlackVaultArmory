@@ -354,6 +354,26 @@ function git(cwd: string, ...args: string[]) {
   return r.stdout.trim();
 }
 
+/**
+ * The fenced code block between `<!-- readme-recovery-<marker>:start/end -->`
+ * in THIS checkout's real README.md (fix round 1, I2) — not a hand-copied
+ * approximation, so a test executing it proves what a reader actually sees.
+ */
+function extractReadmeBlock(marker: string): string {
+  const text = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  const startTag = `<!-- readme-recovery-${marker}:start -->`;
+  const endTag = `<!-- readme-recovery-${marker}:end -->`;
+  const si = text.indexOf(startTag);
+  const ei = text.indexOf(endTag);
+  if (si === -1 || ei === -1 || ei < si) {
+    throw new Error(`README.md markers for "${marker}" not found or out of order (si=${si} ei=${ei})`);
+  }
+  const block = text.slice(si + startTag.length, ei);
+  const m = block.match(/```[a-z]*\n([\s\S]*?)```/);
+  if (!m) throw new Error(`No fenced code block found between the "${marker}" markers`);
+  return m[1];
+}
+
 /** An origin repo whose first commit is `firstTree` (a function filling the dir); returns its path. */
 function newOrigin(fill: (dir: string) => void): string {
   const origin = path.join(tmp, "origin");
@@ -618,4 +638,75 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
     expect(fs.readFileSync(path.join(work, "update.bat"), "utf8")).toBe(BAT_V2);
     expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toBe("");
   });
+
+  // ─── README one-time recovery command (fix round 1, I2) ─────────────────
+  // Nested in this describe (not module scope): it reuses originWithBats,
+  // touchBats and pushBatChange above, which are closures over BAT_V1/BAT_V2.
+  //
+  // The README documents TWO commands (POSIX here; a Windows cmd.exe one,
+  // tested by scripts/ci/windows/Test-WindowsInstallers.ps1), each wrapped in
+  // `<!-- readme-recovery-<platform>:start/end -->` HTML comments so a test
+  // can pull the ACTUAL documented text out of README.md and execute it,
+  // rather than a hand-copied approximation that could silently drift from
+  // what a reader actually sees.
+  describe("README recovery command, extracted verbatim from README.md and executed (fix round 1, I2)", () => {
+  it("premise: the markers exist and wrap a real recovery command", () => {
+    const script = extractReadmeBlock("posix");
+    expect(script).toContain("git pull");
+    expect(script).toContain("./update.sh");
+    expect(script).toContain("info/attributes");
+  });
+
+  it("POSIX block: on a CRLF-dirty clone, the pull succeeds and no stray attributes file is left", () => {
+    const script = extractReadmeBlock("posix");
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    // Premise: Git reports both files modified although no byte changed, and
+    // a plain pull of a release that changes them aborts (same premise as
+    // the "CRLF-in-index checkout" scenario above).
+    expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toMatch(/M install\.bat[\s\S]*M update\.bat/);
+    pushBatChange(origin, true);
+    const plain = spawnSync("git", ["pull", "-q"], { cwd: work, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig") } });
+    expect(plain.status).not.toBe(0);
+
+    // A real clone's update.sh is executable (Git records the bit); the
+    // recovery command's last line runs it directly (`./update.sh`), unlike
+    // this harness's own `run()`, which always invokes scripts via `bash
+    // <script>` and so never depends on the executable bit.
+    fs.chmodSync(path.join(work, "update.sh"), 0o755);
+    fs.writeFileSync(path.join(work, "recovery.sh"), script);
+    const before = git(work, "rev-parse", "HEAD");
+    const r = run(work, "recovery.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(git(work, "rev-parse", "HEAD")).not.toBe(before);
+    expect(fs.existsSync(path.join(work, ".git/info/attributes"))).toBe(false);
+    expect(r.calls).toContain("AT-APP-START");
+  });
+
+  it("POSIX block: restores an EXISTING .git/info/attributes byte for byte, even with no trailing newline", () => {
+    const script = extractReadmeBlock("posix");
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    fs.mkdirSync(path.join(work, ".git/info"), { recursive: true });
+    // No trailing newline (fix round 1, I2): the exact case the ORIGINAL
+    // recovery command's `printf '...' >> "$ATTRS"` glued onto, corrupting
+    // the user's last line.
+    fs.writeFileSync(path.join(work, ".git/info/attributes"), "*.png binary");
+    pushBatChange(origin, true);
+
+    fs.chmodSync(path.join(work, "update.sh"), 0o755);
+    fs.writeFileSync(path.join(work, "recovery.sh"), script);
+    const before = git(work, "rev-parse", "HEAD");
+    const r = run(work, "recovery.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(git(work, "rev-parse", "HEAD")).not.toBe(before);
+    expect(fs.readFileSync(path.join(work, ".git/info/attributes"), "utf8")).toBe("*.png binary");
+  });
+  }); // close nested "README recovery command" describe
 });

@@ -1575,6 +1575,81 @@ Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary") "restored byte for by
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Show-EvidenceIfFailed $r
 
+# ──────────────────────────────────────────────────────────────────────────
+# README one-time recovery command (fix round 1, I2): the README documents
+# TWO commands (POSIX in README.md, and this Windows one), each wrapped in
+# `<!-- readme-recovery-<platform>:start/end -->` HTML comments so a test can
+# pull the ACTUAL documented text out of README.md and run it, instead of a
+# hand-copied approximation that could silently drift from what a reader
+# actually sees. scripts/installers-encryption.test.ts does the same for the
+# POSIX block, from the same markers.
+# ──────────────────────────────────────────────────────────────────────────
+function Get-ReadmeBlock([string]$Marker) {
+  $readme = Get-Content -Raw -Path (Join-Path $RepoRoot "README.md")
+  $startTag = "<!-- readme-recovery-${Marker}:start -->"
+  $endTag = "<!-- readme-recovery-${Marker}:end -->"
+  $si = $readme.IndexOf($startTag)
+  $ei = $readme.IndexOf($endTag)
+  if ($si -lt 0 -or $ei -lt 0 -or $ei -le $si) {
+    throw "README.md markers for '$Marker' not found or out of order (si=$si ei=$ei)"
+  }
+  $block = $readme.Substring($si + $startTag.Length, $ei - $si - $startTag.Length)
+  $m = [regex]::Match($block, '```[a-z]*\r?\n(.*?)```', [Text.RegularExpressions.RegexOptions]::Singleline)
+  if (-not $m.Success) { throw "No fenced code block found between the '$Marker' markers" }
+  return $m.Groups[1].Value
+}
+
+# NOTE: uses $RepoRoot's REAL README.md, not New-GitRemote's placeholder one
+# (New-GitRemote writes a one-line "v1"/"v2" README.md into the sandbox
+# origin purely so the pull scenarios above have something trivial to
+# change — the documented recovery command comes from this checkout's own
+# README.md, same as a real reader would copy it from GitHub).
+$windowsRecoveryBlock = Get-ReadmeBlock "windows"
+Assert ($windowsRecoveryBlock -match "git pull") "premise: the extracted Windows block contains a git pull (markers found real content)"
+Assert ($windowsRecoveryBlock -match "update\.bat") "premise: the extracted Windows block runs update.bat"
+
+# -------------------------------------------------------------- scenario E6
+Write-Scenario "README recovery command (Windows block, extracted verbatim from README.md) - CRLF-dirty clone: the pull succeeds (fix round 1, I2)"
+$origin = New-CrlfIndexRemote "readme-recovery-windows"
+$work = New-WorkingClone $origin "readme-recovery-windows"
+Set-SqliteInstall $work "7046"
+Set-PastMtime $work
+$porcelain = (& git -C $work status --porcelain -- install.bat update.bat) -join "`n"
+Assert ($porcelain -match "M install\.bat" -and $porcelain -match "M update\.bat") "premise: Git reports both files modified (got '$porcelain')"
+Add-CrlfBatChange $origin
+[IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
+$headBefore = (& git -C $work rev-parse HEAD)
+# Same answers as every other update.bat scenario here: this .env (from
+# Set-SqliteInstall) predates BLACKVAULT_PUBLIC_URL, so the update.bat the
+# recovery command ends by running prompts for it, then direct access
+# (Enter = keep it on), then trusted proxies (Enter = none).
+$r = Invoke-Bat -Dir $work -Script "recovery.cmd" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "cmd.exe ran the recovery command through to update.bat, which exited 0 (got $($r.ExitCode))"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the pull succeeded"
+Assert (-not (Test-Path (Join-Path $work ".git\info\attributes"))) "the temporary attributes override is gone (none existed before)"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Assert ($r.StubLog -match "compose up -d") "update.bat (reached via the recovery command) ran to completion"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario E7
+Write-Scenario "README recovery command (Windows block) - restores an EXISTING .git\info\attributes byte for byte (fix round 1, I2)"
+$origin = New-CrlfIndexRemote "readme-recovery-windows-attrs"
+$work = New-WorkingClone $origin "readme-recovery-windows-attrs"
+Set-SqliteInstall $work "7047"
+Set-PastMtime $work
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`n", [Text.Encoding]::ASCII)
+Add-CrlfBatChange $origin
+[IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "recovery.cmd" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the pull succeeded"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n") "the pre-existing attributes file was restored byte for byte"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
