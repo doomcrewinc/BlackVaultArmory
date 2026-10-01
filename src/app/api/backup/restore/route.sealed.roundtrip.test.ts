@@ -324,4 +324,102 @@ describe("sealed backup round trip (field-encryption spec §3)", () => {
 
     await prisma.appSettings.update({ where: { id: "singleton" }, data: { backupDestinationPath: null } });
   });
+
+  // --- Review I1: legacy non-midnight NFA instant, zone-corrected like startup ---
+
+  it("I1: a legacy non-midnight NFA instant restores as the SAME calendar day as acquisitionDate, in the owner's configured zone", async () => {
+    await prisma.appSettings.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", timezone: "Australia/Sydney" },
+      update: { timezone: "Australia/Sydney" },
+    });
+    try {
+      await prisma.firearm.create({
+        data: {
+          id: "rt-firearm-i1",
+          name: "Sydney Date Rifle",
+          manufacturer: "Acme",
+          model: "I1",
+          caliber: "5.56",
+          serialNumber: "RT-SERIAL-I1",
+          type: "RIFLE",
+          nfaClass: "SBR",
+          nfaTransferMethod: "FORM_4",
+          acquisitionDate: new Date("2025-01-01T00:00:00.000Z"),
+          nfaApprovalDate: new Date("2024-03-12T00:00:00.000Z"),
+        },
+      });
+      const { data: backup } = await (async () => {
+        const response = await createBackup(backupRequest());
+        const envelope = JSON.parse(await response.text());
+        return { data: JSON.parse(openBackup(PASSPHRASE, envelope)) };
+      })();
+
+      // Simulate a PRE-normalisation legacy build's value: local midnight
+      // 2024-03-12 in Sydney (UTC+11 in March), stored as the raw instant
+      // rather than UTC midnight — exactly the shape runLegacyDateMigration
+      // corrects for every OTHER date-only column.
+      const legacyInstant = "2024-03-11T13:00:00.000Z";
+      const row = (backup.firearms as Record<string, unknown>[])[0];
+      row.acquisitionDate = legacyInstant;
+      row.nfaApprovalDate = legacyInstant;
+
+      await prisma.firearm.deleteMany();
+      const response = await restoreBackup(restoreRequest(backup));
+      const json = await response.json();
+      expect(response.status, JSON.stringify(json)).toBe(200);
+
+      const restored = await prisma.firearm.findUniqueOrThrow({ where: { id: "rt-firearm-i1" } });
+      expect(restored.acquisitionDate.toISOString().slice(0, 10)).toBe("2024-03-12");
+      expect(restored.nfaApprovalDate?.toISOString().slice(0, 10)).toBe("2024-03-12");
+    } finally {
+      await prisma.appSettings.update({ where: { id: "singleton" }, data: { timezone: null } });
+    }
+  }, 30_000);
+
+  // --- Review M2: a real content error (duplicate serial) is 400, not 500 ---
+
+  it("M2: a real duplicate serial inside an otherwise well-formed backup is 400, and nothing is written", async () => {
+    await prisma.firearm.create({
+      data: {
+        id: "rt-firearm-existing",
+        name: "Existing Rifle",
+        manufacturer: "Acme",
+        model: "EX",
+        caliber: "9mm",
+        serialNumber: "RT-SERIAL-EXISTING",
+        type: "PISTOL",
+        acquisitionDate: new Date("2025-01-01T00:00:00.000Z"),
+      },
+    });
+    const before = await prisma.firearm.count();
+
+    const response = await restoreBackup(
+      restoreRequest({
+        meta: { version: "1.1" },
+        firearms: [
+          {
+            id: "dup-1", name: "Dup One", manufacturer: "Acme", model: "D", caliber: "9mm",
+            serialNumber: "SAME-SERIAL", type: "PISTOL", acquisitionDate: "2025-01-01T00:00:00.000Z",
+          },
+          {
+            id: "dup-2", name: "Dup Two", manufacturer: "Acme", model: "D", caliber: "9mm",
+            serialNumber: "SAME-SERIAL", type: "PISTOL", acquisitionDate: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+        accessories: [], ammoStocks: [], gear: [], supplies: [], builds: [], buildSlots: [],
+        documents: [], imageCache: [], rangeSessions: [], rangeSessionAmmoLinks: [],
+        ammoTransactions: [], roundCountLogs: [], sessionDrills: [], maintenanceLogs: [],
+        batteryChangeLogs: [], dateNormalizationAudits: [], kits: [], kitItems: [],
+      }),
+    );
+    const json = await response.json();
+
+    expect(response.status, JSON.stringify(json)).toBe(400);
+    expect(json.error).not.toContain("SAME-SERIAL");
+    // Rolled back: the pre-existing row survives, and neither duplicate landed.
+    expect(await prisma.firearm.count()).toBe(before);
+    const existing = await prisma.firearm.findUniqueOrThrow({ where: { id: "rt-firearm-existing" } });
+    expect(existing.serialNumber).toBe("RT-SERIAL-EXISTING");
+  });
 });

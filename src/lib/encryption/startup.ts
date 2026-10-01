@@ -239,20 +239,49 @@ export async function assertEncryptionKey(raw: RawClient): Promise<void> {
 
 // ─── Encryption migration ───────────────────────────────────────
 
+/**
+ * A pre-encryption `nfaApprovalDate` value (fields.ts P3 forms: an ISO
+ * string, an epoch-ms string, or a bare number), parsed and — if it is a
+ * legacy instant NOT at UTC midnight — corrected to its calendar day in
+ * `zone`: the rule `runLegacyDateMigration` would have applied, except the
+ * date migration skips the encrypted NFA fields (src/lib/date-migration.ts).
+ *
+ * THE ONE place this rule lives (review I1): both the startup encryption
+ * migration (`plaintextOf`, below) and the restore route's carry for the
+ * same values arriving in an old backup call this function, rather than
+ * each keeping its own copy of the midnight check — restore had drifted
+ * from this exact rule once already (it used the field-encryption
+ * extension's lexical UTC-day read instead, which ignores the owner's
+ * zone for a non-midnight legacy instant).
+ */
+export function normalizeLegacyNfaDate(model: string, field: string, stored: string | number, zone: string): Date {
+  const value = parsePlaintextValue(model, field, stored);
+  if (!(value instanceof Date)) {
+    // Only ever called for the "date" kind field (nfaApprovalDate); a
+    // registry/caller bug, not reachable for real backup data.
+    throw new TypeError(`${model}.${field} did not parse to a date`);
+  }
+  return value.getTime() % 86_400_000 !== 0 ? normalizeInstant(value, zone) : value;
+}
+
 /** The application value of one pre-encryption stored value, or a thrown error naming why it is unreadable. */
 function plaintextOf(d: EncryptedFieldDescriptor, stored: string | number, zone: string): string | Date | number {
   const text = typeof stored === "string" && stored.startsWith(LEGACY_PREFIX) ? decryptLegacyEnc(stored) : stored;
-  const value = parsePlaintextValue(d.model, d.field, text);
-  // A legacy date-only instant (not at UTC midnight) becomes its calendar day
-  // in the owner's zone — what runLegacyDateMigration would have written. The
-  // date migration skips the encrypted NFA dates (src/lib/date-migration.ts),
-  // so this is the one place they are normalised.
-  if (value instanceof Date && value.getTime() % 86_400_000 !== 0) return normalizeInstant(value, zone);
-  return value;
+  if (d.kind === "date") return normalizeLegacyNfaDate(d.model, d.field, text, zone);
+  return parsePlaintextValue(d.model, d.field, text);
 }
 
+/**
+ * A client with the minimal shape this needs to read `AppSettings.timezone`
+ * — structurally satisfied by both the raw client (this module's own
+ * `RawClient`) and the app client the restore route uses, so the two can
+ * share this instead of each keeping their own copy of "read the configured
+ * zone, default to UTC".
+ */
+type ZoneReader = { appSettings: { findUnique(args: unknown): Promise<{ timezone: string | null } | null> } };
+
 /** The configured zone for date normalisation: AppSettings.timezone when valid, else UTC. */
-async function configuredZone(tx: RawClient): Promise<string> {
+export async function configuredZone(tx: ZoneReader): Promise<string> {
   const settings = await tx.appSettings.findUnique({ where: { id: SETTINGS_ID }, select: { timezone: true } });
   const zone = settings?.timezone;
   return zone && isValidTimeZone(zone) ? zone : "UTC";

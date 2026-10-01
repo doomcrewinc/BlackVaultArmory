@@ -26,12 +26,16 @@ const mocks = vi.hoisted(() => ({
     createMany: vi.fn(),
     upsert: vi.fn(),
     update: vi.fn(),
+    // Read by configuredZone (review I1) before the write transaction opens,
+    // on the OUTER prisma client — null timezone means "UTC", which keeps
+    // every existing UTC-midnight fixture in this file unaffected.
+    findUnique: vi.fn(async () => ({ timezone: null })),
   },
   recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { $transaction: mocks.transaction },
+  prisma: { $transaction: mocks.transaction, appSettings: mocks.appSettings },
 }));
 
 vi.mock("@/lib/date-migration", () => ({
@@ -65,6 +69,15 @@ function makeTx() {
       }),
     };
   }
+  return tx;
+}
+
+/** Like makeTx(), but `deleteMany` on `delegate` throws `err` — simulates a failure partway through the real transaction, with a real delegate name attached (review M1's "model" tag). */
+function makeTxFailingAt(delegate: string, err: unknown) {
+  const tx = makeTx();
+  (tx[delegate] as { deleteMany: () => Promise<unknown> }).deleteMany = vi.fn(async () => {
+    throw err;
+  });
   return tx;
 }
 
@@ -428,8 +441,13 @@ describe("POST /api/backup/restore", () => {
     expect(row.nfaControlNumber).toBe("12345");
     expect(row.nfaTaxPaid).toBe(200);
     expect(row.nfaRegisteredTo).toBe("Doe Family Trust");
-    // Verbatim, not re-derived: the date is still the string from the file.
-    expect(row.nfaApprovalDate).toBe("2024-03-12T00:00:00.000Z");
+    // Not re-derived by the NFA-classification normalizer (the rule under
+    // test here). It DOES pass through the shared legacy-date zone-check
+    // (review I1, applied to every row regardless of class — the same way
+    // the startup migration applies it unconditionally), which reads this
+    // already-UTC-midnight value as a Date instead of leaving the original
+    // string — same calendar day, same instant, just the app-facing type.
+    expect((row.nfaApprovalDate as Date).toISOString()).toBe("2024-03-12T00:00:00.000Z");
   });
 
   // Same rule, the armor group. normalizeGearArmorFields' own docblock names
@@ -684,13 +702,15 @@ describe("POST /api/backup/restore", () => {
     );
   });
 
-  it("never touches AppSettings", async () => {
+  it("never WRITES AppSettings (read-only findUnique for the configured zone is expected)", async () => {
     await POST(
       restoreRequest({ ...v11Payload(), appSettings: [{ id: "singleton" }] }),
     );
 
-    for (const fn of Object.values(mocks.appSettings))
-      expect(fn).not.toHaveBeenCalled();
+    expect(mocks.appSettings.deleteMany).not.toHaveBeenCalled();
+    expect(mocks.appSettings.createMany).not.toHaveBeenCalled();
+    expect(mocks.appSettings.upsert).not.toHaveBeenCalled();
+    expect(mocks.appSettings.update).not.toHaveBeenCalled();
   });
 
   it("runs the post-restore date migration after a successful restore", async () => {
@@ -725,6 +745,81 @@ describe("POST /api/backup/restore", () => {
     expect(response.status).toBe(500);
     expect(json.error).toMatch(/has not been modified/);
     expect(mocks.runConfiguredDateMigration).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  // --- Review M1/M2: content errors vs genuine server faults ---------------
+
+  it("M2: our own TypeError (encryption extension validation) is 400 with a safe message, not 500", async () => {
+    const err = new TypeError("Firearm.serialNumber must be a string");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).not.toMatch(/has not been modified/); // the 500-path message
+    expect(json.error).not.toContain("serialNumber"); // safe/generic, not the raw error text
+    spy.mockRestore();
+  });
+
+  it("M2: a PrismaClientKnownRequestError (e.g. P2002 duplicate serial) is 400, not 500", async () => {
+    const err = Object.assign(new Error("Unique constraint failed on the fields: (`serialNumberHash`)"), {
+      name: "PrismaClientKnownRequestError",
+      code: "P2002",
+      meta: { modelName: "Firearm", target: ["serialNumberHash"] },
+    });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+
+    expect(response.status).toBe(400);
+    expect(mocks.runConfiguredDateMigration).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("M2: an unclassified error stays 500 (not every transaction failure is a content error)", async () => {
+    const err = new Error("ECONNRESET");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(500);
+    spy.mockRestore();
+  });
+
+  it("M1: a PrismaClientValidationError's row-dumping message is never logged; code/name/model are", async () => {
+    const dump = `Invalid \`prisma.firearm.create()\` invocation:\n{ data: { name: "SecretRifleName", notes: "SUPER SECRET NOTE", manufacturer: 12345 } }`;
+    const err = Object.assign(new Error(dump), { name: "PrismaClientValidationError" });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).not.toContain("SecretRifleName");
+    expect(json.error).not.toContain("SUPER SECRET NOTE");
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).not.toContain("SecretRifleName");
+    expect(logged).not.toContain("SUPER SECRET NOTE");
+    expect(logged).toContain("PrismaClientValidationError");
+    expect(logged).toContain("firearm"); // the model being written when it failed
+    spy.mockRestore();
+  });
+
+  it("M1: a plain TypeError's (safe, templated) message IS logged, with the model", async () => {
+    const err = new TypeError("Firearm.serialNumber must be a string");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await POST(restoreRequest(v11Payload()));
+
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("Firearm.serialNumber must be a string");
+    expect(logged).toContain("firearm");
     spy.mockRestore();
   });
 
