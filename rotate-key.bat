@@ -67,10 +67,11 @@ if exist "%NEW_KEY_FILE%" goto :stale_new_key
 call :require_compose
 if not defined COMPOSE goto :compose_too_old
 
-:: M3: an absolute bind source. A relative ".\secrets" depends on how the
-:: Compose engine resolves `run -v` relative paths (version-dependent); %CD%
-:: is absolute the moment the `cd /d` above has run.
-set "SECRETS_DIR=%CD%\secrets"
+:: Task 7 (carry I3): no `-v` mount of secrets\ any more. docker-compose.yml
+:: already mounts the whole secrets\ folder into every blackvault container,
+:: `compose run` ones included, and the image's entrypoint copies
+:: blackvault_encryption_key and blackvault_encryption_key.new from it into
+:: /run/secrets, readable by the app user (uid 1001).
 
 :: ── 2. Stop the app ────────────────────────────────────────────
 echo Stopping BlackVault...
@@ -78,12 +79,10 @@ echo Stopping BlackVault...
 if errorlevel 1 goto :stop_failed
 
 :: ── 3. Snapshot the database (same script the update scripts use) ──
-:: Ruling R4: called unconditionally; if it is missing or fails, stop here -
-:: never rotate without a snapshot. Task 7 creates scripts\db-snapshot.bat;
-:: until then this step always fails loudly, by design.
+:: Ruling R4: called unconditionally; if it fails (or is missing), stop
+:: here - never rotate without a snapshot.
 echo.
 echo Snapshotting database...
-if not exist "scripts\db-snapshot.bat" goto :no_snapshot_script
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
 
@@ -117,7 +116,7 @@ set "NEW_KEY="
 :: ── 5. Run the rotation inside the container, in one transaction ──
 echo.
 echo Rotating encryption key (this may take a while on a large inventory)...
-%COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new
+%COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new
 if not errorlevel 1 goto :do_swap
 
 :: The rotation command itself exited non-zero. That does NOT mean nothing
@@ -128,7 +127,7 @@ echo.
 echo The rotation command exited with an error. Checking which key the database
 echo is actually encrypted with before touching any file...
 set "PROBE_ANSWER="
-for /f "usebackq delims=" %%P in (`%COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new 2^>nul`) do set "PROBE_ANSWER=%%P"
+for /f "usebackq delims=" %%P in (`%COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new 2^>nul`) do set "PROBE_ANSWER=%%P"
 
 if "!PROBE_ANSWER!"=="NEW" (
   echo Confirmed: the database is already encrypted with the NEW key.
@@ -195,7 +194,7 @@ echo        To resolve by hand:
 :: N1: in this state the active key file still holds the OLD key, the only key for
 :: the pre-rotation snapshot, so step 2 moves it aside first.
 echo          1. Make sure Docker/the database are reachable, then re-run this one line:
-echo             %COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new
+echo             %COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new
 echo          2. If it answers NEW:
 echo               move /y %KEY_FILE% %OLD_KEY_FILE%
 echo               move /y %NEW_KEY_FILE% %KEY_FILE%
@@ -204,14 +203,6 @@ echo             Keep %OLD_KEY_FILE% for as long as you keep the pre-rotation sn
 echo          3. If it answers OLD:
 echo               move /y %NEW_KEY_FILE% %UNUSED_KEY_FILE%
 echo               %COMPOSE% start blackvault
-pause
-exit /b 1
-
-:no_snapshot_script
-echo ERROR: scripts\db-snapshot.bat is missing. Refusing to rotate the encryption
-echo        key without a database snapshot taken first.
-echo Restarting BlackVault; nothing was changed.
-%COMPOSE% start blackvault
 pause
 exit /b 1
 

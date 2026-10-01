@@ -43,7 +43,9 @@ FROM node:24-alpine AS runner
 
 WORKDIR /app
 
-RUN apk add --no-cache libc6-compat openssl
+# su-exec: scripts/docker-entrypoint.sh starts as root only to copy the
+# field-encryption key where uid 1001 can read it, then drops to nextjs.
+RUN apk add --no-cache libc6-compat openssl su-exec
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -66,6 +68,16 @@ COPY --from=builder /app/gate ./gate
 # link, promoting the user to admin with --promote. Plain JS, no build step.
 COPY --from=builder /app/scripts/admin-reset-link.mjs ./scripts/admin-reset-link.mjs
 
+# Key rotation (rotate-key.sh / rotate-key.bat run it with `docker compose
+# run`). Plain JS; it imports the one crypto module directly, so that file
+# ships too.
+COPY --from=builder /app/scripts/rotate-encryption-key.mjs ./scripts/rotate-encryption-key.mjs
+COPY --from=builder /app/src/lib/encryption/core.mjs ./src/lib/encryption/core.mjs
+
+# Copies the encryption key from the host's secrets/ folder to a tmpfs
+# readable by nextjs, then drops to nextjs (see the script's header).
+COPY --from=builder /app/scripts/docker-entrypoint.sh /usr/local/bin/blackvault-entrypoint
+
 # Copy Prisma schemas and migrations (both providers) so we can run
 # migrate deploy at startup. node_modules/.prisma carries BOTH generated
 # clients: .prisma/client (Postgres) and .prisma/client-sqlite (SQLite).
@@ -79,9 +91,13 @@ COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 
 # Create persistent data directories
 RUN mkdir -p /app/data /app/uploads && \
-    chown -R nextjs:nodejs /app/data /app/uploads /app
+    chown -R nextjs:nodejs /app/data /app/uploads /app && \
+    chmod 755 /usr/local/bin/blackvault-entrypoint
 
-USER nextjs
+# No `USER nextjs` here: the entrypoint starts as root and drops to nextjs
+# with su-exec before the app (or any `docker compose run` command) starts.
+# Started with `--user` (or compose `user:`), it skips straight to the command.
+ENTRYPOINT ["/usr/local/bin/blackvault-entrypoint"]
 
 EXPOSE 3000
 

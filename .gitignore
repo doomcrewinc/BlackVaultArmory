@@ -60,3 +60,10 @@ prisma/prisma/*.db-journal
 node_modules/
 .blackvault.env
 .worktrees/
+
+# Field encryption: the key folder is tracked only for its .gitignore (so it
+# always exists for docker-compose.yml's mount); its contents never are.
+/secrets/*
+!/secrets/.gitignore
+# Plaintext database snapshots written by update.sh / update.bat.
+/backups/

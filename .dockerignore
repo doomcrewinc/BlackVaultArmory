@@ -21,3 +21,8 @@ prisma/prisma
 .github
 .superpowers
 coverage
+
+# Never in the build context: the field-encryption key (`COPY . .` would bake
+# it into the builder stage) and the plaintext database snapshots.
+secrets
+backups

@@ -858,11 +858,10 @@ Show-EvidenceIfFailed $r
 # =============================================================================
 # Covers Task 6 of the field-encryption plan: rotate-key.bat has, like
 # install.bat/update.bat, never run on real cmd.exe before this. Docker is
-# stubbed exactly as above. scripts\db-snapshot.bat (Task 7) does not exist in
-# this repo yet, so these scenarios supply their OWN stand-in copy of it
-# inside each sandbox (never the repo) — the same boundary the docker stub
-# sits at: proving THIS script's logic, not scripts\db-snapshot.bat's, which
-# is someone else's file.
+# stubbed exactly as above. These scenarios supply their OWN stand-in copy of
+# scripts\db-snapshot.bat inside each sandbox — the same boundary the docker
+# stub sits at: proving THIS script's logic. The real scripts\db-snapshot.bat
+# has its own scenarios (DS*, below).
 
 function New-RotateSandbox {
   param([string]$Name, [switch]$WithSnapshot, [switch]$SnapshotFails)
@@ -971,13 +970,13 @@ Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "key file 
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario RK3
-Write-Scenario "rotate-key.bat - scripts\db-snapshot.bat missing: stops, refuses, restarts, exits 1 (ruling R4)"
+Write-Scenario "rotate-key.bat - scripts\db-snapshot.bat missing: the call fails, so it refuses, restarts, exits 1 (ruling R4; the explicit missing-file check was removed in Task 7)"
 $d = New-RotateSandbox "rotate-no-snapshot"
 $keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
 $r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.StubLog -match "compose stop blackvault") "stopped the app first"
-Assert ($r.Output -match "scripts\\db-snapshot\.bat is missing") "names the missing snapshot script"
+Assert ($r.Output -match "database snapshot failed") "treats the missing snapshot script as a failed snapshot"
 Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
 Assert ($r.StubLog -notmatch "compose run") "never attempted the rotation itself"
 Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new key file left behind"
@@ -1005,9 +1004,9 @@ $r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.StubLog -match "compose stop blackvault") "stopped the app"
 Assert ($r.Output -match "\[stub snapshot\]") "ran the snapshot script"
-# M3: an ABSOLUTE bind source (%CD%\secrets), not the old relative ".\secrets".
-$secretsAbs = Join-Path $d "secrets"
-Assert ($r.StubLog -match [regex]::Escape("compose run --rm -v ${secretsAbs}:/run/rotate:ro blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new")) "ran the rotation with the exact spec'd command, using an absolute bind source"
+# Task 7 (I3): no -v bind of secrets\ - docker-compose.yml mounts it and the
+# image's entrypoint copies both keys into /run/secrets for the app user.
+Assert ($r.StubLog -match [regex]::Escape("compose run --rm blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new")) "ran the rotation with the exact command, keys read from /run/secrets"
 Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
 Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no stray .new file after a successful swap"
 # I2: the previous key is kept under a TIMESTAMPED name, never the bare ".old"
@@ -1093,9 +1092,8 @@ Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_
 Assert ($r.Output -match [regex]::Escape("--probe")) "prints the exact recovery command to re-run"
 # N4: the probe command must be ONE copy-pasteable line (a trailing ^ used to
 # join the following echo lines into it, printing literal "echo" words).
-$secretsAbs = Join-Path $d "secrets"
 $probeLines = @($r.Output -split "`r?`n" | Where-Object { $_ -match [regex]::Escape("--probe") })
-$probeCmd = "docker compose run --rm -v `"${secretsAbs}:/run/rotate:ro`" blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new"
+$probeCmd = "docker compose run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new"
 Assert ($probeLines.Count -eq 1) "the probe command is printed on exactly one line (got $($probeLines.Count))"
 Assert (($probeLines.Count -eq 1) -and ($probeLines[0].Trim() -ceq $probeCmd)) "that line is exactly the runnable probe command, nothing else on it"
 # N1: step 2 moves the OLD key aside BEFORE moving .new into place.

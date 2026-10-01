@@ -153,10 +153,12 @@ generate_key() {
   fi
 }
 
-# M3: an absolute bind source. A relative `./secrets` depends on how the
-# Compose engine resolves `run -v` relative paths (version-dependent); $PWD
-# is absolute the moment the `cd` above has run.
-SECRETS_DIR="$PWD/secrets"
+# Task 7 (carry I3): no `-v` mount of secrets/ any more. docker-compose.yml
+# already mounts the whole secrets/ folder into every blackvault container,
+# `compose run` ones included, and the image's entrypoint copies
+# blackvault_encryption_key and blackvault_encryption_key.new from it into
+# /run/secrets, readable by the app user (uid 1001). A direct bind of the
+# 600 files would be unreadable by that user on Linux.
 
 # Restarts the app on the unchanged OLD key after a failure before the
 # rotation ran. The start is an if-condition so a failing restart cannot
@@ -174,10 +176,10 @@ restart_unchanged() {
 # round 1, C1) when it cannot tell. Sets PROBE_ANSWER and PROBE_STATUS;
 # never trips `set -e` itself (the whole call is the condition of the `if`).
 run_probe() {
-  if PROBE_ANSWER=$($COMPOSE run --rm -v "$SECRETS_DIR:/run/rotate:ro" blackvault \
+  if PROBE_ANSWER=$($COMPOSE run --rm blackvault \
     node scripts/rotate-encryption-key.mjs --probe \
-    --old-key-file /run/rotate/blackvault_encryption_key \
-    --new-key-file /run/rotate/blackvault_encryption_key.new); then
+    --old-key-file /run/secrets/blackvault_encryption_key \
+    --new-key-file /run/secrets/blackvault_encryption_key.new); then
     PROBE_STATUS=0
   else
     PROBE_STATUS=$?
@@ -214,18 +216,11 @@ echo "Stopping BlackVault..."
 $COMPOSE stop blackvault
 
 # ── 3. Snapshot the database (same script the update scripts use) ──
-# Ruling R4: called unconditionally; if it is missing or fails, stop here —
-# never rotate without a snapshot. Task 7 creates scripts/db-snapshot.sh; until
-# then this step always fails loudly, by design.
+# Ruling R4: called unconditionally; if it fails (or is missing), stop here —
+# never rotate without a snapshot.
 PHASE="snapshot"
 echo ""
 echo "Snapshotting database..."
-if [ ! -f "./scripts/db-snapshot.sh" ]; then
-  echo "ERROR: scripts/db-snapshot.sh is missing. Refusing to rotate the encryption"
-  echo "       key without a database snapshot taken first."
-  restart_unchanged
-  exit 1
-fi
 if ! ./scripts/db-snapshot.sh; then
   echo "ERROR: database snapshot failed. See the output above."
   restart_unchanged
@@ -262,10 +257,10 @@ NEW_KEY=""
 PHASE="rotate"
 echo ""
 echo "Rotating encryption key (this may take a while on a large inventory)..."
-if $COMPOSE run --rm -v "$SECRETS_DIR:/run/rotate:ro" blackvault \
+if $COMPOSE run --rm blackvault \
   node scripts/rotate-encryption-key.mjs \
-  --old-key-file /run/rotate/blackvault_encryption_key \
-  --new-key-file /run/rotate/blackvault_encryption_key.new
+  --old-key-file /run/secrets/blackvault_encryption_key \
+  --new-key-file /run/secrets/blackvault_encryption_key.new
 then
   # ── 6. Success: swap the key files and restart ──────────────
   do_swap_and_restart
@@ -312,10 +307,10 @@ else
       echo "       Do NOT delete $KEY_FILE or $NEW_KEY_FILE."
       echo "       To resolve by hand:"
       echo "         1. Make sure Docker/the database are reachable, then re-run:"
-      echo "            $COMPOSE run --rm -v \"$SECRETS_DIR:/run/rotate:ro\" blackvault \\"
+      echo "            $COMPOSE run --rm blackvault \\"
       echo "              node scripts/rotate-encryption-key.mjs --probe \\"
-      echo "              --old-key-file /run/rotate/blackvault_encryption_key \\"
-      echo "              --new-key-file /run/rotate/blackvault_encryption_key.new"
+      echo "              --old-key-file /run/secrets/blackvault_encryption_key \\"
+      echo "              --new-key-file /run/secrets/blackvault_encryption_key.new"
       # N1: in this state $KEY_FILE still holds the OLD key, which is the
       # only key for the pre-rotation snapshot. Move it aside first.
       echo "         2. If it answers NEW:"

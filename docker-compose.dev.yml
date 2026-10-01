@@ -34,9 +34,20 @@ services:
       - DATABASE_URL=postgresql://blackvault:devpass@db:5432/blackvault
       - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-http://localhost:3000}
       - ALLOW_DIRECT_ACCESS=${BLACKVAULT_ALLOW_DIRECT_ACCESS:-true}
+      # Field encryption: secrets/blackvault_encryption_key (below), or this.
+      - BLACKVAULT_ENCRYPTION_KEY=${BLACKVAULT_ENCRYPTION_KEY:-}
     volumes:
       - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads
+      # Same key wiring as docker-compose.yml (see the comment there).
+      - type: bind
+        source: ./secrets
+        target: /run/blackvault-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /run/secrets
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 30s
