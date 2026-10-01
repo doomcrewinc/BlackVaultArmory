@@ -264,6 +264,30 @@ describe("summarize — encryption events", () => {
     expect(summarize(event({ action: "ENCRYPTION_ENABLED", changes: null }))).toBe("Encryption enabled");
   });
 
+  it("ENCRYPTION_ENABLED mentions scrubbed audit rows alongside the counts (Task 4b)", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 1, Accessory: 0, Gear: 0 }, keyId: "abcd1234", scrubbedAuditRows: 3 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 firearm, 3 audit entries scrubbed");
+  });
+
+  it("ENCRYPTION_ENABLED: scrubbed audit rows alone, with every count at 0, still reads as a sentence (Task 4b)", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 0, Accessory: 0, Gear: 0 }, keyId: "abcd1234", scrubbedAuditRows: 1 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 audit entry scrubbed");
+  });
+
+  it("ENCRYPTION_ENABLED: scrubbedAuditRows of 0 is left out, same as an absent field", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 1 }, keyId: "abcd1234", scrubbedAuditRows: 0 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 firearm");
+  });
+
   it("KEY_ROTATED names both key ids", () => {
     const e = event({ action: "KEY_ROTATED", changes: { from: "abcd1234", to: "ef567890", counts: { Firearm: 3 } } });
     expect(summarize(e)).toBe("Encryption key rotated (abcd1234 → ef567890)");

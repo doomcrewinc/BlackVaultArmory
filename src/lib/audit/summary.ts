@@ -257,7 +257,10 @@ export function summarize(event: AuditEventDto): string {
 
     case "ENCRYPTION_ENABLED": {
       // Written once by the startup encryption migration (src/lib/encryption/startup.ts):
-      // `changes: { counts: { Firearm, Accessory, Gear }, keyId }`.
+      // `changes: { counts: { Firearm, Accessory, Gear }, keyId, scrubbedAuditRows }`.
+      // `scrubbedAuditRows` (Task 4b) is absent on events written before that
+      // task, and 0 whenever nothing needed scrubbing — both read the same as
+      // "nothing to mention", so only a positive count adds a fragment.
       const counts = isRecord(event.changes) && isRecord(event.changes.counts) ? event.changes.counts : {};
       const parts = Object.entries(ENCRYPTED_MODEL_NOUNS)
         .map(([model, [one, many]]) => {
@@ -265,6 +268,10 @@ export function summarize(event: AuditEventDto): string {
           return typeof n === "number" && n > 0 ? `${n} ${n === 1 ? one : many}` : null;
         })
         .filter((p): p is string => p !== null);
+      const scrubbed = isRecord(event.changes) ? event.changes.scrubbedAuditRows : undefined;
+      if (typeof scrubbed === "number" && scrubbed > 0) {
+        parts.push(`${scrubbed} ${scrubbed === 1 ? "audit entry" : "audit entries"} scrubbed`);
+      }
       return parts.length ? `Encryption enabled: ${parts.join(", ")}` : "Encryption enabled";
     }
 

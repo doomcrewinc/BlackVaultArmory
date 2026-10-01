@@ -442,7 +442,11 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     const events = await raw.auditEvent.findMany();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ action: "ENCRYPTION_ENABLED", actorName: "system", actorId: null, entityType: null });
-    expect(JSON.parse(events[0].changes!)).toEqual({ counts: { Firearm: 4, Accessory: 1, Gear: 1 }, keyId: keys.id });
+    expect(JSON.parse(events[0].changes!)).toEqual({
+      counts: { Firearm: 4, Accessory: 1, Gear: 1 },
+      keyId: keys.id,
+      scrubbedAuditRows: 0, // no pre-existing AuditEvent rows in this test
+    });
 
     // A second start writes nothing.
     const snapshot = await rawSnapshot();
@@ -588,6 +592,131 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     await raw.gear.create({ data: { id: "g-l", name: "P", category: "ARMOR", serialNumber: legacyEncrypt(LEGACY_KEY, "G") } });
     await expect(start()).rejects.toBeInstanceOf(EncryptionMigrationError);
     expect(await raw.dateNormalizationAudit.count()).toBe(1);
+  });
+
+  // ── Task 4b: scrub plaintext NFA values from existing audit entries ──
+  describe("scrubbing plaintext NFA values from existing audit entries", () => {
+    function auditRow(overrides: Row = {}) {
+      return {
+        actorName: "system",
+        action: "CREATE",
+        entityType: "Firearm",
+        entityId: "f1",
+        entityLabel: "Glock 19",
+        changes: null,
+        ...overrides,
+      };
+    }
+
+    it("scrubs plaintext NFA values, keeps diff-pair shape, and leaves non-NFA rows byte-identical", async () => {
+      const update = await raw.auditEvent.create({
+        data: auditRow({
+          action: "UPDATE",
+          changes: JSON.stringify({ nfaControlNumber: ["OLD-1", "NEW-2"], notes: ["a", "b"] }),
+        }),
+      });
+      const create = await raw.auditEvent.create({
+        data: auditRow({
+          action: "CREATE",
+          changes: JSON.stringify({ nfaRegisteredTo: "Trust One", nfaTaxPaid: "200.0", name: "Glock 19" }),
+        }),
+      });
+      const del = await raw.auditEvent.create({
+        data: auditRow({
+          action: "DELETE",
+          changes: JSON.stringify({
+            nfaApprovalDate: "2026-09-25T00:00:00.000Z",
+            name: "Glock 19",
+            _children: { MaintenanceLog: 2 },
+          }),
+        }),
+      });
+      const login = await raw.auditEvent.create({
+        data: auditRow({
+          action: "LOGIN",
+          entityType: null,
+          entityId: null,
+          entityLabel: null,
+          changes: JSON.stringify({ username: "jeff" }),
+        }),
+      });
+      const nullRow = await raw.auditEvent.create({
+        data: auditRow({ action: "LOGIN", entityType: null, entityId: null, entityLabel: null, changes: null }),
+      });
+
+      const before = await raw.auditEvent.findMany({ orderBy: { id: "asc" } });
+
+      await start();
+
+      const after = await raw.auditEvent.findMany({ orderBy: { id: "asc" } });
+
+      // No row's stored `changes` contains any plaintext canary any more.
+      const canaries = ["OLD-1", "NEW-2", "Trust One", "200.0", "2026-09-25T00:00:00.000Z"];
+      for (const row of after) {
+        if (!row.changes) continue;
+        for (const canary of canaries) expect(row.changes, `${row.id}: ${canary}`).not.toContain(canary);
+      }
+
+      const updated = after.find((r) => r.id === update.id)!;
+      expect(JSON.parse(updated.changes!)).toEqual({ nfaControlNumber: ["[redacted]", "[redacted]"], notes: ["a", "b"] });
+
+      const created = after.find((r) => r.id === create.id)!;
+      expect(JSON.parse(created.changes!)).toEqual({ nfaRegisteredTo: "[redacted]", nfaTaxPaid: "[redacted]", name: "Glock 19" });
+
+      const deleted = after.find((r) => r.id === del.id)!;
+      expect(JSON.parse(deleted.changes!)).toEqual({
+        nfaApprovalDate: "[redacted]",
+        name: "Glock 19",
+        _children: { MaintenanceLog: 2 },
+      });
+
+      // LOGIN and null rows: byte-identical stored strings (no NFA fields to scrub).
+      expect(after.find((r) => r.id === login.id)!.changes).toBe(before.find((r) => r.id === login.id)!.changes);
+      expect(after.find((r) => r.id === nullRow.id)!.changes).toBe(before.find((r) => r.id === nullRow.id)!.changes);
+
+      // Every other column of every pre-existing row is unchanged.
+      for (const b of before) {
+        const a = after.find((r) => r.id === b.id)!;
+        expect(a.at).toEqual(b.at);
+        expect(a.actorId).toBe(b.actorId);
+        expect(a.actorName).toBe(b.actorName);
+        expect(a.actorIp).toBe(b.actorIp);
+        expect(a.action).toBe(b.action);
+        expect(a.entityType).toBe(b.entityType);
+        expect(a.entityId).toBe(b.entityId);
+        expect(a.entityLabel).toBe(b.entityLabel);
+      }
+
+      // ENCRYPTION_ENABLED carries scrubbedAuditRows = 3 (the update/create/delete rows).
+      const enabledEvents = after.filter((r) => r.action === "ENCRYPTION_ENABLED");
+      expect(enabledEvents).toHaveLength(1);
+      expect(JSON.parse(enabledEvents[0].changes!)).toMatchObject({ scrubbedAuditRows: 3 });
+
+      // Idempotent: a second start scrubs 0 and writes no further ENCRYPTION_ENABLED event.
+      await start();
+      expect(await raw.auditEvent.count({ where: { action: "ENCRYPTION_ENABLED" } })).toBe(1);
+    });
+
+    it("scrubs audit rows even on an already-encrypted database with nothing left to encrypt", async () => {
+      await start(); // nothing to encrypt; creates the key check
+      await raw.auditEvent.create({
+        data: auditRow({ action: "CREATE", changes: JSON.stringify({ nfaRegisteredTo: "Trust Two", name: "AR-15" }) }),
+      });
+      await start();
+      const rows = await raw.auditEvent.findMany({ where: { action: "CREATE" } });
+      expect(rows.every((r) => !String(r.changes).includes("Trust Two"))).toBe(true);
+      expect(await raw.auditEvent.count({ where: { action: "ENCRYPTION_ENABLED" } })).toBe(1);
+    });
+
+    it("the scrub rolls back with a failed migration (append-only guard is bypassed only inside the rolled-back transaction)", async () => {
+      await raw.auditEvent.create({
+        data: auditRow({ action: "CREATE", changes: JSON.stringify({ nfaRegisteredTo: "Trust Three", name: "AR-15" }) }),
+      });
+      await raw.gear.create({ data: { id: "g-scrub-fail", name: "P", category: "ARMOR", serialNumber: legacyEncrypt(LEGACY_KEY, "G") } });
+      await expect(start()).rejects.toBeInstanceOf(EncryptionMigrationError);
+      const rows = await raw.auditEvent.findMany({ where: { action: "CREATE" } });
+      expect(rows.some((r) => String(r.changes).includes("Trust Three"))).toBe(true);
+    });
   });
 
   // ── fix round 1, I4 ──

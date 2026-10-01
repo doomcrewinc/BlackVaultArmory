@@ -8,6 +8,7 @@ import { encodeForStorage, parsePlaintextValue } from "./extension";
 import { getFieldKeys } from "./keys";
 import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
+import { redactStoredChanges } from "../audit/redact";
 import { isValidTimeZone, normalizeInstant } from "../date-migration";
 
 /**
@@ -39,7 +40,8 @@ type Delegate = {
   update(args: unknown): Promise<unknown>;
 };
 type RawClient = PrismaClient;
-type RawTx = Record<string, Delegate> & { auditEvent: { create(args: unknown): Promise<unknown> } };
+type AuditDelegate = Delegate & { create(args: unknown): Promise<unknown> };
+type RawTx = Record<string, Delegate> & { auditEvent: AuditDelegate };
 
 function delegateOf(client: unknown, d: Pick<EncryptedFieldDescriptor, "delegate">): Delegate {
   return (client as Record<string, Delegate>)[d.delegate];
@@ -339,6 +341,64 @@ function assertNoDuplicateSerial(rows: Row[], updates: Array<{ row: Row; data: R
   }
 }
 
+// ─── Audit-log scrub (Task 4b) ───────────────────────────────────
+
+/** Rows per page when scanning AuditEvent — bounds memory; connection_limit=1 bounds itself (one tx, one connection). */
+const AUDIT_SCRUB_PAGE = 500;
+
+/**
+ * Scrubs plaintext NFA values out of existing AuditEvent rows (spec 2b
+ * predates the NFA fields' redaction, so rows written before this branch may
+ * still hold them in `changes`). Runs inside the SAME transaction as the
+ * encryption migration, on the raw client: the app client's audit extension
+ * makes AuditEvent append-only (src/lib/audit/extension.ts), and that guard
+ * must stay for ordinary application code — only this one-time startup step,
+ * on the unextended raw client, may rewrite an AuditEvent row.
+ *
+ * Pages through the table by id (never loads it all into memory at once),
+ * re-serialising each row's `changes` with `redactStoredChanges` in the exact
+ * format `writeAuditEvent` writes it (`JSON.stringify`), and updates only
+ * rows whose serialised result differs from what is stored — so a row with
+ * nothing sensitive (LOGIN, a plain CREATE, `changes: null`) is never
+ * touched, and a second run touches nothing. Returns the number of rows
+ * changed.
+ */
+async function scrubAuditEvents(tx: RawTx): Promise<number> {
+  let scrubbed = 0;
+  let cursor: string | undefined;
+
+  for (;;) {
+    const rows: Array<{ id: string; changes: string | null }> = (await tx.auditEvent.findMany({
+      where: { changes: { not: null } },
+      select: { id: true, changes: true },
+      orderBy: { id: "asc" },
+      take: AUDIT_SCRUB_PAGE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })) as unknown as Array<{ id: string; changes: string | null }>;
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      if (row.changes === null) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.changes);
+      } catch {
+        continue; // not JSON (should not happen: writeAuditEvent always JSON.stringifies); leave it alone
+      }
+      const serialised = JSON.stringify(redactStoredChanges(parsed));
+      if (serialised !== row.changes) {
+        await tx.auditEvent.update({ where: { id: row.id }, data: { changes: serialised } });
+        scrubbed++;
+      }
+    }
+
+    cursor = rows[rows.length - 1].id;
+    if (rows.length < AUDIT_SCRUB_PAGE) break;
+  }
+
+  return scrubbed;
+}
+
 /** Long enough for a large inventory on slow storage; the server is not serving yet. */
 const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
 
@@ -449,11 +509,17 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
       where: { OR: ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => ({ model: d.model, field: d.field })) },
     });
 
-    if (Object.values(counts).some((n) => n > 0)) {
+    // Task 4b: scrub plaintext NFA values out of existing audit entries.
+    // Unconditional — this must happen even when there is no plaintext
+    // inventory left to encrypt (an already-encrypted database can still
+    // hold pre-redaction audit rows from spec 2b).
+    const scrubbedAuditRows = await scrubAuditEvents(tx);
+
+    if (Object.values(counts).some((n) => n > 0) || scrubbedAuditRows > 0) {
       await writeAuditEvent(tx, {
         action: "ENCRYPTION_ENABLED",
         actor: SYSTEM_ACTOR,
-        changes: { counts, keyId: keys.id },
+        changes: { counts, keyId: keys.id, scrubbedAuditRows },
       });
     }
     return { counts };
