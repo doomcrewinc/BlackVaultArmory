@@ -57,11 +57,30 @@
  * holds the numeric string `"1790380800000"` (epoch milliseconds as text,
  * no decimal point, no ISO formatting), and `nfaTaxPaid` holds `"200.0"`.
  *
+ * Postgres, by contrast (same migration, `ALTER COLUMN ... TYPE TEXT USING
+ * to_char(...)` rather than a table rebuild — see the Postgres migration),
+ * produces a genuine ISO string for `nfaApprovalDate`:
+ * `"2026-09-25T00:00:00.000Z"`, exactly `Date.prototype.toISOString()`'s
+ * format — and a plain numeric string for `nfaTaxPaid` (`"200"`, `"199.99"`,
+ * `::text` is lossless for `float8` on Postgres >= 12).
+ *
  * Task 4's startup encryption migration must therefore accept, for
- * `nfaApprovalDate`: a numeric string of epoch milliseconds (what this
- * database's data actually is, post-migration) and an ISO string (the other
- * case plan note P3 anticipates, e.g. from a differently-written install);
- * and for `nfaTaxPaid`: a numeric string (`"200.0"` here) or a bare number.
+ * `nfaApprovalDate`: a numeric string of epoch milliseconds (what SQLite's
+ * data actually is, post-migration) AND an ISO string (what Postgres's data
+ * actually is — not merely a possibility plan note P3 allows for); and for
+ * `nfaTaxPaid`: a numeric string (`"200.0"` on SQLite, `"200"`/`"199.99"` on
+ * Postgres) or a bare number.
+ *
+ * WARNING for whoever writes that parser: `new Date("1790380800000")` is an
+ * **Invalid Date** — the `Date` constructor's string overload only parses
+ * ISO 8601 (or a handful of other date-ish formats), never a bare numeric
+ * string as milliseconds. A numeric-string `nfaApprovalDate` (the SQLite
+ * case above) must go through `Number(value)` first — `new
+ * Date(Number("1790380800000"))` — before being handed a `Date` constructor,
+ * or the migration will silently corrupt every SQLite install's NFA approval
+ * dates into `Invalid Date` / encrypt the string "Invalid Date" or throw,
+ * depending on where that `Date` is used next. An ISO string (the Postgres
+ * case) goes straight to `new Date(value)` as normal.
  */
 
 export type EncryptedFieldKind = "string" | "date" | "number";

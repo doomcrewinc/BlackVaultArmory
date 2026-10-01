@@ -53,11 +53,14 @@ BASELINE_FILES=(
   # serialNumberHash (D1 — serialNumber is ciphertext once Task 3 lands, so it
   # can no longer be the unique key). prisma/seed.ts upserts firearms by
   # `where: { serialNumber: ... }`, which no longer type-checks against
-  # FirearmWhereUniqueInput. The spec's where-rewrite (serialNumber equality
-  # -> serialNumberHash, Task 3) should make this work again at runtime; see
-  # task-2-report.md for why this is baselined separately from the
-  # Date/number sites above instead of reusing their marker.
-  "prisma/seed.ts"                             # field-encryption: Task 3's where-rewrite (serialNumber -> serialNumberHash) should restore this
+  # FirearmWhereUniqueInput. Fix round 1 (review M2): the encryption
+  # extension's where-rewrite only covers a `WhereInput` filter (e.g. a
+  # lookup), not a `WhereUniqueInput` key, so it cannot make this compile —
+  # Task 3 rewrites the seed itself (findFirst by serialNumber, then
+  # create/update) instead of relying on the extension; see task-2-report.md
+  # for why this is baselined separately from the Date/number sites above
+  # instead of reusing their marker.
+  "prisma/seed.ts"                             # field-encryption: Task 3 rewrites the seed (findFirst + create/update)
 )
 
 echo "==> tsc --noEmit -p ."
