@@ -82,7 +82,7 @@ function run(dir: string, script: string, input: string, env: Record<string, str
       GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig"),
       GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
       ...env,
-    },
+    } as unknown as NodeJS.ProcessEnv,
     timeout: 60_000,
   });
   return {
