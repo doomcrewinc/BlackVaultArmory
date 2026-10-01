@@ -17,8 +17,9 @@ set -Eeo pipefail
 # encrypted with. So a non-zero rotation run is followed by a read-only
 # --probe (OLD/NEW/NEITHER, by which key opens the database's key check)
 # before anything is deleted or restarted: NEW completes the swap exactly as
-# a normal success would, OLD discards the unused new key and restarts on
-# the old one, and NEITHER (or the probe itself failing) keeps every key
+# a normal success would, OLD sets the unused new key aside (renamed to
+# .new.unused-<ts>, never deleted — fix round 2, N2) and restarts on the
+# old one, and NEITHER (or the probe itself failing) keeps every key
 # file untouched, does NOT start the app, and prints exact recovery
 # commands — never a silent guess.
 #
@@ -44,8 +45,15 @@ NEW_KEY_FILE="secrets/blackvault_encryption_key.new"
 # I2: a timestamped name, never the bare "secrets/blackvault_encryption_key.old" —
 # the pre-rotation snapshot (step 3) is sealed under THIS run's old key, so a
 # second rotation must never silently overwrite the file that opens it.
-OLD_KEY_FILE="secrets/blackvault_encryption_key.old-$(date -u +%Y%m%d-%H%M%S)"
+ROTATE_TS="$(date -u +%Y%m%d-%H%M%S)"
+OLD_KEY_FILE="secrets/blackvault_encryption_key.old-$ROTATE_TS"
 [ -e "$OLD_KEY_FILE" ] && OLD_KEY_FILE="${OLD_KEY_FILE}-$$" # pathological same-second collision
+# Fix round 2 (N2, ruling): the wrappers NEVER delete a key file that may
+# have been handed to the rotation. When the probe confirms OLD, .new is
+# renamed to this name instead of removed, in case the probe was wrong (e.g.
+# an orphaned rotation container still running — task-6-rereview.md N2).
+UNUSED_KEY_FILE="secrets/blackvault_encryption_key.new.unused-$ROTATE_TS"
+[ -e "$UNUSED_KEY_FILE" ] && UNUSED_KEY_FILE="${UNUSED_KEY_FILE}-$$"
 
 PHASE="init"
 
@@ -53,8 +61,12 @@ PHASE="init"
 # around it — the only such commands below are `$COMPOSE stop`, the two
 # key-file `mv`s, and the post-swap `$COMPOSE start`. Every other failure
 # path (missing/failing snapshot, keygen, writing .new, the rotation run
-# itself) is explicitly checked and prints its own message before `exit 1`,
-# which does not pass back through this trap (a plain `exit` never fires ERR).
+# itself, every restart-on-the-old-key) is the CONDITION of an if/||, so
+# with `set -E` the trap still does not fire for it — not in this shell and
+# not in the $(...) / ( ... ) subshells it runs (fix round 2, N3: before,
+# `NEW_KEY=$(generate_key)` and the `( umask 077; printf ... )` write ran
+# bare, so the trap pre-empted their checks and left the app stopped). Each
+# prints its own message before `exit 1`, which never fires ERR.
 on_err() {
   local code=$?
   case "$PHASE" in
@@ -67,10 +79,14 @@ on_err() {
       echo "ERROR: rotation succeeded, but renaming the key files failed (exit $code)."
       echo "       $KEY_FILE should still hold the OLD key, unchanged."
       echo "       The database itself is now encrypted with the NEW key, in $NEW_KEY_FILE."
+      # N1: move the OLD key aside FIRST — it is the only key that opens
+      # the pre-rotation snapshot taken in step 3.
       echo "       Recover by hand, then restart:"
+      echo "         mv $KEY_FILE $OLD_KEY_FILE"
       echo "         mv $NEW_KEY_FILE $KEY_FILE"
       echo "         $COMPOSE start blackvault"
-      echo "       Back up $KEY_FILE once BlackVault is confirmed working."
+      echo "       Back up $KEY_FILE once BlackVault is confirmed working, and keep"
+      echo "       $OLD_KEY_FILE for as long as you keep the pre-rotation snapshot."
       ;;
     swap2)
       echo ""
@@ -109,6 +125,18 @@ if [ ! -f "$KEY_FILE" ]; then
   echo "       Run ./install.sh first, or restore your key file from backup."
   exit 1
 fi
+# Fix round 2 (N2): a leftover .new may be the ONLY copy of the key the
+# database is encrypted with (an earlier run that ended ambiguously). Never
+# overwrite or delete it; refuse before anything is stopped.
+if [ -e "$NEW_KEY_FILE" ]; then
+  echo "ERROR: $NEW_KEY_FILE already exists, left by an earlier rotation."
+  echo "       It may hold the key the database is encrypted with, so this script"
+  echo "       will not overwrite it. Nothing was changed; BlackVault was not stopped."
+  echo "       Resolve it first (see the earlier run's output, or check which key"
+  echo "       the database uses with the --probe command in rotate-key.sh), then"
+  echo "       move it out of secrets/ and run this script again."
+  exit 1
+fi
 
 # Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
 # is touched when it is missing or older, so the running BlackVault keeps running.
@@ -129,6 +157,17 @@ generate_key() {
 # Compose engine resolves `run -v` relative paths (version-dependent); $PWD
 # is absolute the moment the `cd` above has run.
 SECRETS_DIR="$PWD/secrets"
+
+# Restarts the app on the unchanged OLD key after a failure before the
+# rotation ran. The start is an if-condition so a failing restart cannot
+# fire the ERR trap on top of the caller's message (fix round 2, N3).
+restart_unchanged() {
+  echo "Restarting BlackVault; nothing was changed."
+  if ! $COMPOSE start blackvault; then
+    echo "ERROR: BlackVault failed to restart. Nothing was changed; start it by"
+    echo "       hand once you've checked the logs: $COMPOSE start blackvault"
+  fi
+}
 
 # Runs the rotation script's read-only --probe inside the container: prints
 # OLD, NEW or NEITHER on success (always exit 0), or exits non-zero (fix
@@ -184,14 +223,12 @@ echo "Snapshotting database..."
 if [ ! -f "./scripts/db-snapshot.sh" ]; then
   echo "ERROR: scripts/db-snapshot.sh is missing. Refusing to rotate the encryption"
   echo "       key without a database snapshot taken first."
-  echo "Restarting BlackVault; nothing was changed."
-  $COMPOSE start blackvault
+  restart_unchanged
   exit 1
 fi
 if ! ./scripts/db-snapshot.sh; then
   echo "ERROR: database snapshot failed. See the output above."
-  echo "Restarting BlackVault; nothing was changed."
-  $COMPOSE start blackvault
+  restart_unchanged
   exit 1
 fi
 
@@ -199,18 +236,26 @@ fi
 PHASE="keygen"
 echo ""
 echo "Generating new encryption key..."
-NEW_KEY=$(generate_key)
+# N3: `|| NEW_KEY=""` makes the substitution an or-list, so a failing
+# openssl/urandom reaches the explicit check below instead of the ERR trap.
+NEW_KEY=$(generate_key) || NEW_KEY=""
 if [ -z "$NEW_KEY" ] || [ "${#NEW_KEY}" -ne 64 ]; then
+  NEW_KEY=""
   echo "ERROR: could not generate a new encryption key (need openssl or /dev/urandom)."
-  echo "Restarting BlackVault; nothing was changed."
-  $COMPOSE start blackvault
+  restart_unchanged
   exit 1
 fi
-rm -f "$NEW_KEY_FILE"
-(
-  umask 077
-  printf '%s' "$NEW_KEY" > "$NEW_KEY_FILE"
-)
+# .new cannot exist here (checked in step 1). N3: the write is an
+# if-condition, so a failure is handled here, once, not by the ERR trap.
+if ! ( umask 077; printf '%s' "$NEW_KEY" > "$NEW_KEY_FILE" ); then
+  NEW_KEY=""
+  echo "ERROR: could not write the new key to $NEW_KEY_FILE."
+  # Created by THIS run a moment ago and never handed to the rotation, so
+  # the database cannot be using it: removing a partial write is safe.
+  rm -f "$NEW_KEY_FILE" || true
+  restart_unchanged
+  exit 1
+fi
 NEW_KEY=""
 
 # ── 5. Run the rotation inside the container, in one transaction ──
@@ -244,9 +289,15 @@ else
       echo "Confirmed: the database is still encrypted with the OLD key; the"
       echo "rotation did not take effect."
       PHASE="cleanup-after-failed-rotate"
-      rm -f "$NEW_KEY_FILE"
-      echo "Restarting BlackVault on the previous key; nothing was changed."
-      $COMPOSE start blackvault
+      # N2 (ruling): set .new aside, never delete it.
+      if mv "$NEW_KEY_FILE" "$UNUSED_KEY_FILE"; then
+        echo "The unused new key was set aside as $UNUSED_KEY_FILE."
+        echo "It can be deleted once BlackVault has run normally on the old key."
+      else
+        echo "WARNING: could not rename $NEW_KEY_FILE to $UNUSED_KEY_FILE."
+        echo "         Move it out of secrets/ by hand before the next rotation."
+      fi
+      restart_unchanged
       exit 1
       ;;
     *)
@@ -265,8 +316,16 @@ else
       echo "              node scripts/rotate-encryption-key.mjs --probe \\"
       echo "              --old-key-file /run/rotate/blackvault_encryption_key \\"
       echo "              --new-key-file /run/rotate/blackvault_encryption_key.new"
-      echo "         2. If it answers NEW:  mv $NEW_KEY_FILE $KEY_FILE   then  $COMPOSE start blackvault"
-      echo "         3. If it answers OLD:  rm $NEW_KEY_FILE             then  $COMPOSE start blackvault"
+      # N1: in this state $KEY_FILE still holds the OLD key, which is the
+      # only key for the pre-rotation snapshot. Move it aside first.
+      echo "         2. If it answers NEW:"
+      echo "              mv $KEY_FILE $OLD_KEY_FILE"
+      echo "              mv $NEW_KEY_FILE $KEY_FILE"
+      echo "              $COMPOSE start blackvault"
+      echo "            Keep $OLD_KEY_FILE for as long as you keep the pre-rotation snapshot."
+      echo "         3. If it answers OLD:"
+      echo "              mv $NEW_KEY_FILE $UNUSED_KEY_FILE"
+      echo "              $COMPOSE start blackvault"
       exit 1
       ;;
   esac
