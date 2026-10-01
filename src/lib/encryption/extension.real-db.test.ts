@@ -53,6 +53,7 @@ import {
   EncryptedFieldQueryError,
   decodeFromStorage,
   encodeForStorage,
+  parsePlaintextValue,
 } from "@/lib/encryption/extension";
 
 type Row = Record<string, unknown>;
@@ -568,6 +569,16 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       expect((err.cause as { code?: string }).code).toBe("KEY_MISMATCH");
     });
 
+    it("STRICT: a plaintext serial written behind the extension's back makes the app read throw PLAINTEXT_AT_REST", async () => {
+      const g = await prisma.gear.create({ data: { name: "Strict", category: "ARMOR", serialNumber: "G-strict" } });
+      await rawSet("Gear", g.id, "serialNumber", "G-strict-plaintext");
+      const err = await within(5_000, prisma.gear.findUnique({ where: { id: g.id } })).catch((e) => e);
+      expect(err).toBeInstanceOf(EncryptedFieldDecryptError);
+      expect(err).toMatchObject({ model: "Gear", id: g.id, field: "serialNumber", code: "PLAINTEXT_AT_REST" });
+      expect(String(err.message)).not.toContain("G-strict-plaintext");
+      await rawSet("Gear", g.id, "serialNumber", null);
+    });
+
     it("a value moved into another column (AAD mismatch) does not decrypt", async () => {
       const f = await prisma.firearm.create({ data: firearmData({ nfaControlNumber: "CTRL-move" }) });
       const row = await rawRow("Firearm", f.id);
@@ -606,10 +617,34 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       expect(decodeFromStorage("Firearm", "nfaTaxPaid", null)).toBeNull();
     });
 
-    it("decodes the pre-encryption stored forms (fields.ts P3): epoch-ms and ISO dates, numeric strings", () => {
-      expect(decodeFromStorage("Firearm", "nfaApprovalDate", "1790380800000")).toEqual(new Date(1790380800000));
-      expect(decodeFromStorage("Firearm", "nfaApprovalDate", "2026-09-25T00:00:00.000Z")).toEqual(new Date("2026-09-25T00:00:00.000Z"));
-      expect(decodeFromStorage("Firearm", "nfaTaxPaid", "200.0")).toBe(200);
+    it("parses the pre-encryption stored forms (fields.ts P3) for the startup migration: epoch-ms and ISO dates, numeric strings, numbers", () => {
+      expect(parsePlaintextValue("Firearm", "nfaApprovalDate", "1790380800000")).toEqual(new Date(1790380800000));
+      expect(parsePlaintextValue("Firearm", "nfaApprovalDate", 1790380800000)).toEqual(new Date(1790380800000));
+      expect(parsePlaintextValue("Firearm", "nfaApprovalDate", "2026-09-25T00:00:00.000Z")).toEqual(new Date("2026-09-25T00:00:00.000Z"));
+      expect(parsePlaintextValue("Firearm", "nfaTaxPaid", "200.0")).toBe(200);
+      expect(parsePlaintextValue("Firearm", "nfaTaxPaid", 200)).toBe(200);
+      expect(parsePlaintextValue("Gear", "serialNumber", "G-1")).toBe("G-1");
+      expect(() => parsePlaintextValue("Firearm", "nfaApprovalDate", "not a date")).toThrow(TypeError);
+      expect(() => parsePlaintextValue("Firearm", "nfaTaxPaid", "")).toThrow(TypeError);
+    });
+
+    it("STRICT: a plaintext value at rest is never passed through (PLAINTEXT_AT_REST)", () => {
+      for (const [model, field, value] of [
+        ["Gear", "serialNumber", "G-1"],
+        ["Firearm", "nfaApprovalDate", "1790380800000"],
+        ["Firearm", "nfaTaxPaid", "200.0"],
+        ["Firearm", "nfaTaxPaid", 200],
+      ] as const) {
+        let err: unknown;
+        try {
+          decodeFromStorage(model, field, value, "row-1");
+        } catch (e) {
+          err = e;
+        }
+        expect(err, `${model}.${field}`).toBeInstanceOf(EncryptedFieldDecryptError);
+        expect(err).toMatchObject({ model, id: "row-1", field, code: "PLAINTEXT_AT_REST" });
+        expect(((err as Error).cause as { code?: string }).code).toBe("PLAINTEXT_AT_REST");
+      }
     });
 
     it("refuses a field that is not registered", () => {

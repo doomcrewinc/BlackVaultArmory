@@ -15,6 +15,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import type { AppPrismaClient } from "./encryption/app-client-types";
+import { isEncryptedField } from "./encryption/fields";
 
 // Fix round 1: moved to their own zero-import module so a CLIENT component
 // (src/lib/audit/summary.ts) can read the classification without pulling
@@ -109,6 +110,17 @@ export async function runLegacyDateMigration(
   const client = prisma as unknown as Client;
 
   for (const { model, delegate, field } of DATE_ONLY_FIELDS) {
+    // The encrypted NFA approval dates (field-encryption spec D1) are skipped:
+    // - the startup encryption migration (src/lib/encryption/startup.ts)
+    //   normalises a legacy instant to its calendar day in this same zone
+    //   while it encrypts it, and every later write goes through the
+    //   extension's date-only serialisation, so no legacy value can remain;
+    // - `writeIfUnchanged` filters by equality on the value, which the
+    //   extension refuses on an encrypted field (ciphertext is randomised);
+    // - DateNormalizationAudit stores originals in plaintext DateTime
+    //   columns, which would leak an encrypted field.
+    // Cost: a zone change no longer re-converts an NFA approval date.
+    if (isEncryptedField(model, field)) continue;
     const rows = await client[delegate].findMany({ select: { id: true, [field]: true } });
     const audits = (await client.dateNormalizationAudit.findMany({
       where: { model, field },

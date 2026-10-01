@@ -20,6 +20,8 @@ export const AUDIT_ACTIONS = [
   "DIRECT_ACCESS_CHANGED",
   "BACKUP_CREATED",
   "RESTORE",
+  "ENCRYPTION_ENABLED",
+  "KEY_ROTATED",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

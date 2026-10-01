@@ -1,0 +1,337 @@
+import { createDecipheriv } from "node:crypto";
+import type { PrismaClient } from "@prisma/client";
+import { decryptValue, encryptValue, envelopeKeyId, fingerprint, isEncrypted, EncryptionKeyError } from "./core.mjs";
+import { ENCRYPTED_FIELDS, encryptedFieldsFor, type EncryptedFieldDescriptor } from "./fields";
+import { encodeForStorage, parsePlaintextValue } from "./extension";
+import { getFieldKeys } from "./keys";
+import { SYSTEM_ACTOR } from "../audit/context";
+import { writeAuditEvent } from "../audit/record";
+import { isValidTimeZone, normalizeInstant } from "../date-migration";
+
+/**
+ * Startup steps for field encryption at rest
+ * (docs/superpowers/specs/2026-09-30-field-encryption-design.md §2, "Startup
+ * sequence"), run by src/instrumentation.ts before the app serves:
+ *
+ * 1. assertEncryptionKey: load the key, then create or verify the key check.
+ * 2. runEncryptionMigration: encrypt every pre-encryption value, once, in one
+ *    transaction.
+ *
+ * Both take a RAW client (createRawPrismaClient in src/lib/prisma.ts, ruling
+ * R1): they read and write the stored form itself, which the app client's
+ * extension would refuse (strict reads) or re-encrypt. Every failure throws —
+ * the caller refuses to start.
+ *
+ * Imports stay relative (no `@/`): scripts load this under plain ts-node.
+ */
+
+const KEY_CHECK_PLAINTEXT = "blackvault-key-check";
+const KEY_CHECK_AAD = "AppSettings.encryptionKeyCheck";
+const SETTINGS_ID = "singleton";
+const LEGACY_PREFIX = "enc:";
+
+type Row = Record<string, unknown> & { id: string };
+type Delegate = {
+  findFirst(args: unknown): Promise<Row | null>;
+  findMany(args: unknown): Promise<Row[]>;
+  update(args: unknown): Promise<unknown>;
+};
+type RawClient = PrismaClient;
+type RawTx = Record<string, Delegate> & { auditEvent: { create(args: unknown): Promise<unknown> } };
+
+function delegateOf(client: unknown, d: Pick<EncryptedFieldDescriptor, "delegate">): Delegate {
+  return (client as Record<string, Delegate>)[d.delegate];
+}
+
+/** The models that hold an encrypted field, in registry order, with their fields. */
+const ENCRYPTED_MODELS: ReadonlyArray<{ model: string; delegate: string; fields: ReadonlyArray<EncryptedFieldDescriptor> }> = [
+  ...new Set(ENCRYPTED_FIELDS.map((f) => f.model)),
+].map((model) => {
+  const fields = encryptedFieldsFor(model);
+  return { model, delegate: fields[0].delegate, fields };
+});
+
+// ─── Errors ─────────────────────────────────────────────────────
+
+/**
+ * A row the encryption migration could not convert. The whole migration has
+ * been rolled back; the message names the row and field and how to fix it.
+ */
+export class EncryptionMigrationError extends Error {
+  readonly model: string | null;
+  readonly id: string | null;
+  readonly field: string | null;
+
+  constructor(message: string, where: { model?: string; id?: string; field?: string } = {}, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "EncryptionMigrationError";
+    this.model = where.model ?? null;
+    this.id = where.id ?? null;
+    this.field = where.field ?? null;
+  }
+}
+
+/** A legacy `enc:` value that cannot be read: VAULT_ENCRYPTION_KEY missing, invalid or wrong, or the value damaged. */
+export class LegacyDecryptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LegacyDecryptError";
+  }
+}
+
+// ─── Legacy `enc:` values ───────────────────────────────────────
+
+/**
+ * Decrypts a pre-V1 `enc:<iv b64>:<ciphertext b64>:<tag b64>` value
+ * (AES-256-GCM under the hex key in VAULT_ENCRYPTION_KEY) — a port of
+ * decryptField in src/lib/crypto.ts, which that module returned as
+ * "[unreadable — wrong key?]" on failure. This throws instead: the migration
+ * must never encrypt an error string as if it were the serial.
+ */
+export function decryptLegacyEnc(stored: string, env: Record<string, string | undefined> = process.env): string {
+  if (!stored.startsWith(LEGACY_PREFIX)) throw new LegacyDecryptError("Not a legacy enc: value.");
+  const hex = (env.VAULT_ENCRYPTION_KEY ?? "").trim();
+  if (!hex) {
+    throw new LegacyDecryptError("VAULT_ENCRYPTION_KEY is not set; it is needed to read this legacy enc: value.");
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new LegacyDecryptError("VAULT_ENCRYPTION_KEY is invalid: it must be 64 hex characters.");
+  }
+  const parts = stored.slice(LEGACY_PREFIX.length).split(":");
+  if (parts.length !== 3) throw new LegacyDecryptError("The legacy enc: value is malformed.");
+  const [ivB64, ctB64, tagB64] = parts;
+  const tag = Buffer.from(tagB64, "base64");
+  if (tag.length !== 16) throw new LegacyDecryptError("The legacy enc: value is malformed (tag length).");
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", Buffer.from(hex, "hex"), Buffer.from(ivB64, "base64"), {
+      authTagLength: 16,
+    });
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(Buffer.from(ctB64, "base64")), decipher.final()]).toString("utf8");
+  } catch {
+    throw new LegacyDecryptError("VAULT_ENCRYPTION_KEY is wrong, or the legacy enc: value is damaged.");
+  }
+}
+
+// ─── Key check ──────────────────────────────────────────────────
+
+/** True when any registered field anywhere holds a `bv2:` value. */
+async function anyEncryptedValue(raw: RawClient): Promise<boolean> {
+  for (const d of ENCRYPTED_FIELDS) {
+    const hit = await delegateOf(raw, d).findFirst({
+      where: { [d.field]: { startsWith: "bv2:" } },
+      select: { id: true },
+    });
+    if (hit) return true;
+  }
+  return false;
+}
+
+/**
+ * Step 1 + 2 of the startup sequence. Loads the key (EncryptionKeyError
+ * KEY_MISSING / KEY_INVALID / KEY_CONFLICT from core.mjs), then:
+ * - no key check and no `bv2:` value anywhere: creates the key check;
+ * - no key check but `bv2:` values exist: KEY_CHECK_LOST;
+ * - a key check that does not open with this key: KEY_MISMATCH, naming the
+ *   expected and the provided key id.
+ */
+export async function assertEncryptionKey(raw: RawClient): Promise<void> {
+  const keys = getFieldKeys();
+  const settings = await raw.appSettings.findUnique({
+    where: { id: SETTINGS_ID },
+    select: { encryptionKeyCheck: true },
+  });
+  const check = settings?.encryptionKeyCheck ?? null;
+
+  if (check === null) {
+    if (await anyEncryptedValue(raw)) {
+      throw new EncryptionKeyError(
+        "KEY_CHECK_LOST",
+        "The encryption key check (AppSettings.encryptionKeyCheck) is missing, but the database holds encrypted values. " +
+          "Refusing to start: restore the database or its settings row from a backup taken with this key.",
+      );
+    }
+    const created = encryptValue(keys, KEY_CHECK_AAD, KEY_CHECK_PLAINTEXT);
+    await raw.appSettings.upsert({
+      where: { id: SETTINGS_ID },
+      create: { id: SETTINGS_ID, encryptionKeyCheck: created },
+      update: { encryptionKeyCheck: created },
+    });
+    return;
+  }
+
+  let expected = "unknown";
+  try {
+    expected = envelopeKeyId(check);
+    if (decryptValue(keys, KEY_CHECK_AAD, check) === KEY_CHECK_PLAINTEXT) return;
+  } catch {
+    // Falls through to the mismatch error below.
+  }
+  throw new EncryptionKeyError(
+    "KEY_MISMATCH",
+    `Wrong encryption key: this database was encrypted with key ${expected}, but the provided key is ${keys.id}. ` +
+      "Start with the key this database was encrypted with.",
+  );
+}
+
+// ─── Encryption migration ───────────────────────────────────────
+
+/** The application value of one pre-encryption stored value, or a thrown error naming why it is unreadable. */
+function plaintextOf(d: EncryptedFieldDescriptor, stored: string | number, zone: string): string | Date | number {
+  const text = typeof stored === "string" && stored.startsWith(LEGACY_PREFIX) ? decryptLegacyEnc(stored) : stored;
+  const value = parsePlaintextValue(d.model, d.field, text);
+  // A legacy date-only instant (not at UTC midnight) becomes its calendar day
+  // in the owner's zone — what runLegacyDateMigration would have written. The
+  // date migration skips the encrypted NFA dates (src/lib/date-migration.ts),
+  // so this is the one place they are normalised.
+  if (value instanceof Date && value.getTime() % 86_400_000 !== 0) return normalizeInstant(value, zone);
+  return value;
+}
+
+/** The configured zone for date normalisation: AppSettings.timezone when valid, else UTC. */
+async function configuredZone(tx: RawClient): Promise<string> {
+  const settings = await tx.appSettings.findUnique({ where: { id: SETTINGS_ID }, select: { timezone: true } });
+  const zone = settings?.timezone;
+  return zone && isValidTimeZone(zone) ? zone : "UTC";
+}
+
+/** Converts one row: the `update` data for its pre-encryption fields, or null when it has none. */
+function encryptRow(model: string, fields: ReadonlyArray<EncryptedFieldDescriptor>, row: Row, zone: string) {
+  const data: Record<string, string | null> = {};
+  for (const d of fields) {
+    const stored = row[d.field];
+    if (stored === null || stored === undefined || isEncrypted(stored)) continue;
+    let value: string | Date | number;
+    try {
+      value = plaintextOf(d, stored as string | number, zone);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      const hint =
+        e instanceof LegacyDecryptError
+          ? " Set VAULT_ENCRYPTION_KEY to the key the pre-V1 build used, then start again."
+          : " Correct the value, then start again.";
+      throw new EncryptionMigrationError(
+        `Cannot encrypt ${model}.${d.field} for id ${row.id}: ${reason}${hint}`,
+        { model, id: row.id, field: d.field },
+        e,
+      );
+    }
+    data[d.field] = encodeForStorage(model, d.field, value);
+    if (d.fingerprint) data.serialNumberHash = fingerprint(getFieldKeys(), value as string);
+  }
+  return Object.keys(data).length ? data : null;
+}
+
+/** Long enough for a large inventory on slow storage; the server is not serving yet. */
+const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
+
+/**
+ * Step 4 of the startup sequence: encrypts every registered field that is
+ * non-null and not yet `bv2:`, fills `serialNumberHash`, and writes one
+ * ENCRYPTION_ENABLED audit event (actor `system`, `changes: { counts, keyId }`)
+ * when anything changed — all in ONE transaction on the raw client, so any
+ * failure leaves every row as it was. Legacy `enc:` values are decrypted with
+ * VAULT_ENCRYPTION_KEY first.
+ *
+ * Idempotent: a second run finds nothing to convert and writes nothing.
+ *
+ * Afterwards it asserts that every row with a serial has a fingerprint (carry
+ * M4: a NULL `serialNumberHash` bypasses the duplicate-serial unique index and
+ * makes the serial unfindable); if not, it throws and the transaction rolls
+ * back.
+ *
+ * Uses only the transaction client while the transaction is open: on SQLite
+ * `connection_limit=1` a second connection would wait on the write lock.
+ */
+export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: Record<string, number> }> {
+  const keys = getFieldKeys();
+  return raw.$transaction(async (txClient) => {
+    const tx = txClient as unknown as RawClient & RawTx;
+    const zone = await configuredZone(tx);
+    const counts: Record<string, number> = {};
+
+    for (const { model, fields } of ENCRYPTED_MODELS) {
+      const select = Object.fromEntries([["id", true], ["updatedAt", true], ...fields.map((d) => [d.field, true])]);
+      const rows = await delegateOf(tx, fields[0]).findMany({ select, orderBy: { id: "asc" } });
+      let changed = 0;
+      for (const row of rows) {
+        const data = encryptRow(model, fields, row, zone);
+        if (!data) continue;
+        try {
+          // updatedAt kept: encrypting a row is not an edit, and "recently
+          // updated" lists must not all jump to the upgrade time.
+          await delegateOf(tx, fields[0]).update({ where: { id: row.id }, data: { ...data, updatedAt: row.updatedAt } });
+        } catch (e) {
+          throw new EncryptionMigrationError(
+            `Cannot store the encrypted values of ${model} id ${row.id}: ${e instanceof Error ? e.message : String(e)}`,
+            { model, id: row.id },
+            e,
+          );
+        }
+        changed++;
+      }
+      counts[model] = changed;
+    }
+
+    for (const { model, fields } of ENCRYPTED_MODELS) {
+      if (!fields.some((d) => d.fingerprint)) continue;
+      // Filtered here, not in `where`: Firearm.serialNumber is required, and
+      // Prisma rejects `{ not: null }` on a required field.
+      const missing = (
+        await delegateOf(tx, fields[0]).findMany({
+          where: { serialNumberHash: null },
+          select: { id: true, serialNumber: true },
+        })
+      ).filter((r) => r.serialNumber !== null).length;
+      if (missing > 0) {
+        throw new EncryptionMigrationError(
+          `${missing} ${model} row(s) have a serial number but no serialNumberHash fingerprint. ` +
+            "Refusing to start: restore from a backup, or re-save those serials with the current key.",
+          { model, field: "serialNumberHash" },
+        );
+      }
+    }
+
+    if (Object.values(counts).some((n) => n > 0)) {
+      await writeAuditEvent(tx, {
+        action: "ENCRYPTION_ENABLED",
+        actor: SYSTEM_ACTOR,
+        changes: { counts, keyId: keys.id },
+      });
+    }
+    return { counts };
+  }, MIGRATION_TX);
+}
+
+// ─── The startup hook ───────────────────────────────────────────
+
+/**
+ * The encryption part of src/instrumentation.ts's register(): opens a raw
+ * client, checks the key, runs the migration, and closes the client (so no
+ * extra connection outlives startup). Throws on any failure; the caller
+ * refuses to start.
+ */
+export async function runEncryptionStartup(): Promise<{ counts: Record<string, number> }> {
+  const { createRawPrismaClient } = await import("../prisma");
+  const raw = createRawPrismaClient();
+  try {
+    await assertEncryptionKey(raw);
+    const result = await runEncryptionMigration(raw);
+    const changed = Object.entries(result.counts).filter(([, n]) => n > 0);
+    if (changed.length) {
+      console.log(`[encryption] Encrypted existing data: ${changed.map(([m, n]) => `${m} ${n}`).join(", ")}`);
+    }
+    return result;
+  } finally {
+    await raw.$disconnect();
+  }
+}
+
+/** One log line for a startup failure: the error's own message (EncryptionKeyError / EncryptionMigrationError carry a fix hint). */
+export function startupFailureLine(error: unknown): string {
+  if (error instanceof EncryptionKeyError || error instanceof EncryptionMigrationError) {
+    return `[encryption] ${error.message}`.replace(/\s+/g, " ");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return `[encryption] Startup failed, refusing to start: ${message} — fix the cause and start again.`.replace(/\s+/g, " ");
+}

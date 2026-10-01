@@ -21,6 +21,19 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
   return require("@prisma/client").PrismaClient;
 }
 
+/**
+ * A client with NO extensions (ruling R1): neither encryption nor audit. Only
+ * for startup steps that must see and rewrite the stored form itself — the
+ * key check and the one-time encryption migration (src/lib/encryption/
+ * startup.ts). Each call opens its own connection pool; the caller must
+ * `$disconnect()` it. Never use it to serve requests.
+ */
+export function createRawPrismaClient(): PrismaClient {
+  return new (loadPrismaClient())({
+    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  });
+}
+
 const globalForPrisma = globalThis as unknown as { prisma: AppPrismaClient | undefined };
 
 /**

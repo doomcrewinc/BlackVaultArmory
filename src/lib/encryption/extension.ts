@@ -48,7 +48,7 @@ export class EncryptedFieldDecryptError extends Error {
   readonly model: string;
   readonly id: string | null;
   readonly field: string;
-  /** The underlying failure: "KEY_MISMATCH" or "MALFORMED" (EncryptionKeyError), else "DECRYPT_FAILED" (tampered / wrong AAD). */
+  /** The underlying failure: "KEY_MISMATCH" or "MALFORMED" (EncryptionKeyError), "PLAINTEXT_AT_REST" (a non-`bv2:` value), else "DECRYPT_FAILED" (tampered / wrong AAD). */
   readonly code: string;
 
   constructor(model: string, id: string | null, field: string, cause: unknown) {
@@ -151,11 +151,13 @@ export function encodeForStorage(model: string, field: string, value: unknown): 
  * The application value of a stored `model.field`: a string, a Date
  * (`nfaApprovalDate`) or a number (`nfaTaxPaid`), or null.
  *
- * A stored value that is not `bv2:` is a pre-encryption plaintext (the startup
- * migration, Task 4, converts those) and is returned as its application type,
- * not decrypted. A `bv2:` value that fails to decrypt throws
- * EncryptedFieldDecryptError (`code` says why: KEY_MISMATCH, MALFORMED,
- * DECRYPT_FAILED).
+ * STRICT: every non-null stored value must be `bv2:` ciphertext. A plaintext
+ * value at rest throws EncryptedFieldDecryptError with code
+ * PLAINTEXT_AT_REST — the startup migration (./startup.ts) encrypts every
+ * pre-encryption value through a raw client before the app serves, so a
+ * plaintext value here means a write path bypassed the extension. A `bv2:`
+ * value that fails to decrypt throws EncryptedFieldDecryptError (`code` says
+ * why: KEY_MISMATCH, MALFORMED, DECRYPT_FAILED).
  */
 export function decodeFromStorage(
   model: string,
@@ -165,20 +167,38 @@ export function decodeFromStorage(
 ): string | Date | number | null {
   const d = requireDescriptor(model, field);
   if (stored === null || stored === undefined) return null;
-  if (typeof stored !== "string") return stored as string | Date | number; // a pre-migration native value
-  let text = stored;
-  if (isEncrypted(stored)) {
-    try {
-      text = decryptValue(getFieldKeys(), aadFor(model, field), stored);
-    } catch (e) {
-      throw new EncryptedFieldDecryptError(model, id, field, e);
-    }
+  if (!isEncrypted(stored)) {
+    const cause = Object.assign(new Error(`${model}.${field} holds a plaintext value at rest`), {
+      code: "PLAINTEXT_AT_REST",
+    });
+    throw new EncryptedFieldDecryptError(model, id, field, cause);
+  }
+  let text: string;
+  try {
+    text = decryptValue(getFieldKeys(), aadFor(model, field), stored);
+  } catch (e) {
+    throw new EncryptedFieldDecryptError(model, id, field, e);
   }
   try {
     return deserialize(d, text);
   } catch (e) {
     throw new EncryptedFieldDecryptError(model, id, field, e);
   }
+}
+
+/**
+ * The application value of a PRE-ENCRYPTION stored value (the startup
+ * migration's input, ./startup.ts): a string as-is; for `nfaApprovalDate` a
+ * Date from epoch milliseconds (a number, or a numeric string — SQLite) or an
+ * ISO string (Postgres); for `nfaTaxPaid` a number from a number or numeric
+ * string (fields.ts P3). Throws TypeError on anything unreadable.
+ */
+export function parsePlaintextValue(model: string, field: string, value: string | number): string | Date | number {
+  const d = requireDescriptor(model, field);
+  if (typeof value === "number" && d.kind === "string") {
+    throw new TypeError(`${model}.${field} holds a number, expected text`);
+  }
+  return deserialize(d, String(value));
 }
 
 // ─── Writes ─────────────────────────────────────────────────────

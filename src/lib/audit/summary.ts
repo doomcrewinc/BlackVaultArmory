@@ -160,6 +160,13 @@ function childFragments(changes: unknown): string[] {
   return childEntries(changes).map((e) => `${e.count} ${e.label} ${e.count === 1 ? "entry" : "entries"}`);
 }
 
+/** Singular / plural nouns for the models ENCRYPTION_ENABLED counts, in display order. */
+const ENCRYPTED_MODEL_NOUNS: Record<string, [string, string]> = {
+  Firearm: ["firearm", "firearms"],
+  Accessory: ["accessory", "accessories"],
+  Gear: ["gear item", "gear items"],
+};
+
 function quoted(label: string | null): string {
   return `"${label ?? "item"}"`;
 }
@@ -240,6 +247,26 @@ export function summarize(event: AuditEventDto): string {
     case "RESTORE": {
       const file = isRecord(event.changes) ? asString(event.changes.file) : undefined;
       return `Restored the database from backup${file ? ` ${file}` : ""}`;
+    }
+
+    case "ENCRYPTION_ENABLED": {
+      // Written once by the startup encryption migration (src/lib/encryption/startup.ts):
+      // `changes: { counts: { Firearm, Accessory, Gear }, keyId }`.
+      const counts = isRecord(event.changes) && isRecord(event.changes.counts) ? event.changes.counts : {};
+      const parts = Object.entries(ENCRYPTED_MODEL_NOUNS)
+        .map(([model, [one, many]]) => {
+          const n = counts[model];
+          return typeof n === "number" && n > 0 ? `${n} ${n === 1 ? one : many}` : null;
+        })
+        .filter((p): p is string => p !== null);
+      return parts.length ? `Encryption enabled: ${parts.join(", ")}` : "Encryption enabled";
+    }
+
+    case "KEY_ROTATED": {
+      // `changes: { from, to, counts }` (the key-rotation script, Task 6).
+      const from = isRecord(event.changes) ? asString(event.changes.from) : undefined;
+      const to = isRecord(event.changes) ? asString(event.changes.to) : undefined;
+      return from && to ? `Encryption key rotated (${from} → ${to})` : "Encryption key rotated";
     }
 
     default:
