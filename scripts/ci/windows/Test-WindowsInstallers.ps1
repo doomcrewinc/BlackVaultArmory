@@ -884,6 +884,72 @@ function New-RotateSandbox {
   return $dir
 }
 
+# Fix round 2 (N5): poll for a file instead of sleeping a fixed time.
+function Wait-ForFile([string]$Path, [int]$TimeoutSeconds = 60) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while (-not (Test-Path $Path)) {
+    if ((Get-Date) -gt $deadline) { return $false }
+    Start-Sleep -Milliseconds 100
+  }
+  return $true
+}
+
+# Holds an exclusive lock (FileShare.None) on $Path in a background job, so
+# `move /y` on it fails with a real Windows sharing violation. When $WaitFor
+# is given, the job first waits for that file to appear (the docker stub's
+# BV_STUB_RUN_HANDSHAKE .ready file). It writes $Flag once the lock is held;
+# callers wait for $Flag, never for a fixed time (fix round 2, N5). The job
+# closes the handle itself when "$Flag.release" appears, so the lock is
+# provably gone before anything after Stop-FileLockJob touches the file
+# (stopping a job does not run its remaining statements).
+function Start-FileLockJob([string]$Path, [string]$Flag, [string]$WaitFor = "") {
+  return Start-Job -ArgumentList $Path, $Flag, $WaitFor -ScriptBlock {
+    param($p, $flag, $waitFor)
+    if ($waitFor) {
+      $deadline = (Get-Date).AddSeconds(90)
+      while (-not (Test-Path $waitFor)) {
+        if ((Get-Date) -gt $deadline) { return }
+        Start-Sleep -Milliseconds 100
+      }
+    }
+    $fs = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+      Set-Content -Path $flag -Value "locked" -Encoding Ascii
+      $deadline = (Get-Date).AddSeconds(240)
+      while (-not (Test-Path "$flag.release")) {
+        if ((Get-Date) -gt $deadline) { break }
+        Start-Sleep -Milliseconds 100
+      }
+    } finally {
+      $fs.Close()
+    }
+  }
+}
+
+function Stop-FileLockJob($Job, [string]$Flag) {
+  Set-Content -Path "$Flag.release" -Value "release" -Encoding Ascii
+  Wait-Job $Job -Timeout 30 | Out-Null
+  Stop-Job $Job -ErrorAction SilentlyContinue | Out-Null
+  Remove-Job $Job -Force -ErrorAction SilentlyContinue | Out-Null
+}
+
+# Runs, one by one and literally, every printed recovery line that starts
+# with "move /y" (fix round 2, N1: following the text must keep the OLD key).
+# Returns how many it ran.
+function Invoke-PrintedMoves([string]$Dir, [string]$Output) {
+  $moves = @($Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^move /y ' })
+  foreach ($m in $moves) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/d /c $m"
+    $psi.WorkingDirectory = $Dir
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc.WaitForExit(30000)) { $proc.Kill() }
+  }
+  return $moves.Count
+}
+
 # ---------------------------------------------------------------- scenario RK1
 Write-Scenario "rotate-key.bat - no secrets\blackvault_encryption_key: exits 1, touches nothing"
 $d = New-RotateSandbox "rotate-nokey"
@@ -963,13 +1029,21 @@ Assert ($r.Output -match "can only be opened with it") "says the snapshot can on
 # to the file BEFORE content was written; `move` preserves it across the rename).
 $acl = Get-Acl (Join-Path $d "secrets\blackvault_encryption_key")
 Assert ($acl.AreAccessRulesProtected) "inheritance is disabled on the active key file (icacls /inheritance:r took effect)"
-$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User
-$grant = $acl.Access | Where-Object { $_.IdentityReference -eq $currentUser -and $_.FileSystemRights -match "FullControl" }
-Assert ($null -ne $grant) "the current user has an explicit Full Control grant on the active key file"
+# N5: compare SIDs with SIDs. $acl.Access yields NTAccount identities, which
+# never -eq the SecurityIdentifier from WindowsIdentity.
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+$grant = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+  $_.IdentityReference.Value -eq $currentSid -and
+  $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+  -not $_.IsInherited -and
+  (($_.FileSystemRights -band $fullControl) -eq $fullControl)
+})
+Assert ($grant.Count -gt 0) "the current user's SID has an explicit, non-inherited Full Control grant on the active key file"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario RK6
-Write-Scenario "rotate-key.bat - rotation run fails, probe confirms OLD: deletes .new, restarts on the OLD key, exits 1"
+Write-Scenario "rotate-key.bat - rotation run fails, probe confirms OLD: sets .new aside as .new.unused-<ts> (never deleted), restarts on the OLD key, exits 1"
 $d = New-RotateSandbox "rotate-run-fails-old" -WithSnapshot
 $keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
 $r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "OLD" }
@@ -977,7 +1051,16 @@ Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.StubLog -match "compose run") "attempted the rotation"
 Assert ($r.Output -match "Confirmed: the database is still encrypted with the OLD key") "reports the probe's OLD answer"
 Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault on the previous key"
-Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new key file was deleted (confirmed unused)"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new name is free again for the next rotation"
+# N2 (ruling): the wrappers never delete a key file; the unused one is renamed.
+$unused = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*")
+Assert ($unused.Count -eq 1) "exactly one .new.unused-<ts> file was kept (got $($unused.Count))"
+if ($unused.Count -eq 1) {
+  Assert ($unused[0].Name -match "^blackvault_encryption_key\.new\.unused-\d{8}-\d{6}") "the .new.unused file name matches the YYYYmmdd-HHMMSS pattern"
+  Assert ((Get-Content $unused[0].FullName -Raw).Trim() -match "^[0-9a-f]{64}$") "the .new.unused file holds the generated key (64 hex chars)"
+  Assert ($r.Output -match [regex]::Escape("set aside as secrets\$($unused[0].Name)")) "names the exact .new.unused file"
+}
+Assert ($r.Output -match "can be deleted once BlackVault has run normally") "says when the unused key can be deleted"
 Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file: the original key was never renamed"
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is byte-for-byte unchanged"
 Show-EvidenceIfFailed $r
@@ -1008,6 +1091,20 @@ Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new 
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is untouched"
 Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file: no rename was attempted"
 Assert ($r.Output -match [regex]::Escape("--probe")) "prints the exact recovery command to re-run"
+# N4: the probe command must be ONE copy-pasteable line (a trailing ^ used to
+# join the following echo lines into it, printing literal "echo" words).
+$secretsAbs = Join-Path $d "secrets"
+$probeLines = @($r.Output -split "`r?`n" | Where-Object { $_ -match [regex]::Escape("--probe") })
+$probeCmd = "docker compose run --rm -v `"${secretsAbs}:/run/rotate:ro`" blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new"
+Assert ($probeLines.Count -eq 1) "the probe command is printed on exactly one line (got $($probeLines.Count))"
+Assert (($probeLines.Count -eq 1) -and ($probeLines[0].Trim() -ceq $probeCmd)) "that line is exactly the runnable probe command, nothing else on it"
+# N1: step 2 moves the OLD key aside BEFORE moving .new into place.
+$mOld = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key secrets\\blackvault_encryption_key\.old-\d{8}-\d{6}\r?$')
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert ($mOld.Success -and $mNew.Success -and $mOld.Index -lt $mNew.Index) "NEW recovery: moves the OLD key to .old-<ts> first, then .new into place"
+# N2: step 3 renames, never deletes.
+Assert ($r.Output -match '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\.new\.unused-\d{8}-\d{6}\r?$') "OLD recovery: renames .new to .new.unused-<ts>"
+Assert ($r.Output -notmatch '(?m)^\s*del ') "no recovery line deletes a key file"
 Show-EvidenceIfFailed $r
 
 # -------------------------------------------------------------- scenario RK6d
@@ -1029,18 +1126,13 @@ $keyPath = Join-Path $d "secrets\blackvault_encryption_key"
 # Holds an exclusive lock on the active key file for the run's duration, so
 # `move /y` on it fails with a real Windows sharing violation — the one
 # Windows failure window task-6-review.md flagged as untested.
-$lockJob = Start-Job -ArgumentList $keyPath -ScriptBlock {
-  param($p)
-  $fs = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-  Start-Sleep -Seconds 25
-  $fs.Close()
-}
-Start-Sleep -Milliseconds 500
+$lockFlag = Join-Path $Sandboxes "rotate-swap-fails.locked"
+$lockJob = Start-FileLockJob -Path $keyPath -Flag $lockFlag
 try {
+  Assert (Wait-ForFile $lockFlag 60) "the lock job holds its lock before the run starts (polled, not a fixed sleep)"
   $r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
 } finally {
-  Stop-Job $lockJob -ErrorAction SilentlyContinue | Out-Null
-  Remove-Job $lockJob -Force -ErrorAction SilentlyContinue | Out-Null
+  Stop-FileLockJob $lockJob $lockFlag
 }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "rotation succeeded, but renaming the key files failed") "names the swap failure precisely (not a generic error)"
@@ -1049,6 +1141,82 @@ Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart on an 
 Assert ((Get-Content $keyPath -Raw) -eq $keyBefore) "the active key file still holds the ORIGINAL key (the first move never completed)"
 Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new still holds the key the database is now actually encrypted with"
 Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file was created (the first move failed before renaming anything)"
+# N1: the OLD key is moved aside first, then .new into place.
+$mOld = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key secrets\\blackvault_encryption_key\.old-\d{8}-\d{6}\r?$')
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert ($mOld.Success -and $mNew.Success -and $mOld.Index -lt $mNew.Index) "recovery text moves the OLD key to .old-<ts> BEFORE moving .new into place"
+# Follow the printed lines literally (lock released): the OLD key must survive.
+$newKey = (Get-Content (Join-Path $d "secrets\blackvault_encryption_key.new") -Raw).Trim()
+$ran = Invoke-PrintedMoves -Dir $d -Output $r.Output
+Assert ($ran -eq 2) "the recovery text holds exactly two move commands (got $ran)"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "after following the text: .old-<ts> holds the ORIGINAL key (the pre-rotation snapshot stays openable)"
+Assert ((Get-Content $keyPath -Raw).Trim() -eq $newKey) "after following the text: the active key file holds the key the database is encrypted with"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "after following the text: no .new left"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK7b
+Write-Scenario "rotate-key.bat - the SECOND key-file move fails (.new locked): :swap_failed_2 text, no restart, exits 1 (fix round 2, N5)"
+$d = New-RotateSandbox "rotate-swap2-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+$newPath = Join-Path $d "secrets\blackvault_encryption_key.new"
+# The stub's rotation run signals .ready (after the .bat has written .new),
+# the job locks .new and writes .ack, and only then does the run return - so
+# the first move (active -> .old-<ts>) succeeds and the second (.new ->
+# active) hits a sharing violation. No timing guesses.
+$hs = Join-Path $Sandboxes "rotate-swap2-fails.hs"
+$lockJob = Start-FileLockJob -Path $newPath -Flag "$hs.ack" -WaitFor "$hs.ready"
+try {
+  $r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_HANDSHAKE" = $hs }
+} finally {
+  Stop-FileLockJob $lockJob "$hs.ack"
+}
+Assert (Test-Path "$hs.ack") "the lock on .new was taken during the rotation run (handshake completed)"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "rotation succeeded, but finishing the key-file swap failed") "names the second-move failure precisely"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
+Assert (-not (Test-Path $keyPath)) "the active key file is missing (moved to .old-<ts>), as the text says"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "the .old-<ts> file holds the ORIGINAL key"
+Assert (Test-Path $newPath) ".new still holds the key the database is now encrypted with"
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert $mNew.Success "prints the exact recovery move (.new -> active)"
+$newKey = if (Test-Path $newPath) { (Get-Content $newPath -Raw).Trim() } else { "" }
+$ran = Invoke-PrintedMoves -Dir $d -Output $r.Output
+Assert ($ran -eq 1) "the recovery text holds exactly one move command (got $ran)"
+Assert ((Test-Path $keyPath) -and (Get-Content $keyPath -Raw).Trim() -eq $newKey) "after following the text: the active key file holds the database's key"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK7c
+Write-Scenario "rotate-key.bat - rotation and swap succeed but the restart fails: :restart_after_swap_failed, no 'complete' banner, exits 1 (fix round 2, N5)"
+$d = New-RotateSandbox "rotate-restart-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "start" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose start blackvault") "tried to restart"
+Assert ($r.Output -match "Key rotation succeeded and the key files were swapped, but BlackVault") "says the rotation and swap succeeded"
+Assert ($r.Output -match "failed to restart") "says the restart failed"
+Assert ($r.Output -notmatch "Key rotation complete") "no completion banner"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "the .old-<ts> file holds the ORIGINAL key"
+Assert ($oldFiles.Count -eq 1 -and $r.Output -match [regex]::Escape($oldFiles[0].Name)) "names the exact .old-<ts> file to keep"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim() -ne $keyBefore.Trim()) "the active key file holds the NEW key"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new left"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RK8
+Write-Scenario "rotate-key.bat - a stale .new from an earlier run exists: refuses before stopping anything, never touches it (fix round 2, N2)"
+$d = New-RotateSandbox "rotate-stale-new" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$stale = Join-Path $d "secrets\blackvault_encryption_key.new"
+Set-Content -Path $stale -Value ("cd" * 32) -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "already exists, left by an earlier rotation") "explains the stale .new"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Assert ((Get-Content $stale -Raw) -eq ("cd" * 32)) "the stale .new is byte-for-byte unchanged"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is untouched"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report

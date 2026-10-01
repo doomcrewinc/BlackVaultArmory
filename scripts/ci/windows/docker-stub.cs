@@ -42,6 +42,12 @@
 //                            scenario can fail the real rotation run while
 //                            still controlling what the recovery probe says.
 //   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
+//   BV_STUB_RUN_HANDSHAKE    fix round 2 (N5): a path prefix. The (non-probe)
+//                            rotation `compose run` writes PREFIX.ready, then
+//                            waits up to 60 s for PREFIX.ack before returning.
+//                            Lets a scenario act at an exact point — after the
+//                            .bat has written .new, before the key-file swap
+//                            (e.g. lock .new so the SECOND move fails).
 
 using System;
 using System.IO;
@@ -113,6 +119,22 @@ internal static class DockerStub
                     Console.WriteLine(answer);
                 }
                 return 0;
+            }
+
+            string handshake = Environment.GetEnvironmentVariable("BV_STUB_RUN_HANDSHAKE");
+            if (!string.IsNullOrEmpty(handshake))
+            {
+                File.WriteAllText(handshake + ".ready", "");
+                DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+                while (!File.Exists(handshake + ".ack"))
+                {
+                    if (DateTime.UtcNow > deadline)
+                    {
+                        Console.Error.WriteLine("[stub] BV_STUB_RUN_HANDSHAKE: no .ack within 60 s");
+                        return 1;
+                    }
+                    System.Threading.Thread.Sleep(100);
+                }
             }
         }
 
