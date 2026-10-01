@@ -3,13 +3,13 @@ export const DEFAULT_KEY_FILE: string;
 export const SEAL_FORMAT: "blackvault-sealed-backup";
 
 export class EncryptionKeyError extends Error {
-  code: "KEY_MISSING" | "KEY_INVALID" | "KEY_CONFLICT" | "KEY_MISMATCH" | "KEY_CHECK_LOST";
-  constructor(code: string, message: string);
+  code: "KEY_MISSING" | "KEY_INVALID" | "KEY_CONFLICT" | "KEY_MISMATCH" | "KEY_CHECK_LOST" | "MALFORMED";
+  constructor(code: "KEY_MISSING" | "KEY_INVALID" | "KEY_CONFLICT" | "KEY_MISMATCH" | "KEY_CHECK_LOST" | "MALFORMED", message: string);
 }
 
 export class SealError extends Error {
   code: "WRONG_PASSPHRASE_OR_DAMAGED" | "UNSUPPORTED" | "PASSPHRASE_TOO_SHORT";
-  constructor(code: string, message: string);
+  constructor(code: "WRONG_PASSPHRASE_OR_DAMAGED" | "UNSUPPORTED" | "PASSPHRASE_TOO_SHORT", message: string);
 }
 
 export interface FieldKeys {

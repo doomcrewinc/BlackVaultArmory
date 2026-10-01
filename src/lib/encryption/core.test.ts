@@ -53,6 +53,31 @@ describe("loadMasterKey", () => {
       expect(error.message).toContain("openssl rand -hex 32");
     }
   });
+  it("file wins over env var and source names the file", () => {
+    const r = core.loadMasterKey({ BLACKVAULT_ENCRYPTION_KEY: HEX }, fsWith({ [core.DEFAULT_KEY_FILE]: HEX }));
+    expect(r.source).toContain(core.DEFAULT_KEY_FILE);
+    expect(r.source).not.toContain("BLACKVAULT_ENCRYPTION_KEY");
+  });
+  it("empty or whitespace env var falls back to file", () => {
+    const r = core.loadMasterKey({ BLACKVAULT_ENCRYPTION_KEY: "   " }, fsWith({ [core.DEFAULT_KEY_FILE]: HEX }));
+    expect(r.source).toContain(core.DEFAULT_KEY_FILE);
+  });
+  it("KEY_INVALID names the file when key file is corrupt", () => {
+    try { core.loadMasterKey({}, fsWith({ [core.DEFAULT_KEY_FILE]: "invalid" })); throw new Error("no throw"); }
+    catch (e: unknown) {
+      const error = e as core.EncryptionKeyError;
+      expect(error.code).toBe("KEY_INVALID");
+      expect(error.message).toContain(core.DEFAULT_KEY_FILE);
+    }
+  });
+  it("KEY_INVALID names env var when env var is corrupt", () => {
+    try { core.loadMasterKey({ BLACKVAULT_ENCRYPTION_KEY: "invalid" }, fsWith({})); throw new Error("no throw"); }
+    catch (e: unknown) {
+      const error = e as core.EncryptionKeyError;
+      expect(error.code).toBe("KEY_INVALID");
+      expect(error.message).toContain("BLACKVAULT_ENCRYPTION_KEY");
+    }
+  });
 });
 
 describe("field encryption", () => {
@@ -93,6 +118,28 @@ describe("field encryption", () => {
     expect(keys.enc.equals(keys.idx)).toBe(false);
     expect(keys.enc.equals(Buffer.from(HEX, "hex"))).toBe(false);
   });
+  it("truncated GCM tag is rejected", () => {
+    const c = core.encryptValue(keys, "A.b", "x");
+    const parts = c.split(":");
+    const truncatedTag = Buffer.from(Buffer.from(parts[4], "base64url").slice(0, 4)).toString("base64url");
+    parts[4] = truncatedTag;
+    expect(() => core.decryptValue(keys, "A.b", parts.join(":"))).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
+  it("known-answer test for keyId", () => {
+    expect(core.keyId(core.parseKeyHex(HEX))).toBe("e0e77a50");
+  });
+  it("known-answer test for enc subkey", () => {
+    expect(core.deriveKeys(core.parseKeyHex(HEX)).enc.toString("hex"))
+      .toBe("ac903742cde9dd78dfd0e0c03d856297af575b196ae90f5dbaf5f391d39cdde9");
+  });
+  it("known-answer test for idx subkey", () => {
+    expect(core.deriveKeys(core.parseKeyHex(HEX)).idx.toString("hex"))
+      .toBe("f1efe0a76e073fddbcf62dbf2e7583dab9691b551048cf916425e748829cf8a7");
+  });
+  it("known-answer test for fingerprint", () => {
+    expect(core.fingerprint(keys, "ABC"))
+      .toBe("a678af096900e8ef536b72f2f79430bcdcbcc9bf20a2711a74576116414a8646");
+  });
 });
 
 describe("sealed backups", () => {
@@ -131,5 +178,42 @@ describe("sealed backups", () => {
   it("passphrase under 12 characters is refused when sealing", () => {
     expect(() => core.sealBackup("short", json)).toThrow(expect.objectContaining({ code: "PASSPHRASE_TOO_SHORT" }));
     expect(() => core.sealBackup("ü".repeat(12), json)).not.toThrow();
+  });
+  it("emoji passphrase under 12 code points is rejected", () => {
+    expect(() => core.sealBackup("🔫".repeat(11), json)).toThrow(expect.objectContaining({ code: "PASSPHRASE_TOO_SHORT" }));
+  });
+  it("NFD unicode passphrase under 12 code points is rejected", () => {
+    expect(() => core.sealBackup("ü".normalize("NFD").repeat(11), json)).toThrow(expect.objectContaining({ code: "PASSPHRASE_TOO_SHORT" }));
+  });
+  it("header tampering breaks sealed backup", () => {
+    const env = JSON.parse(core.sealBackup("correct horse battery", json));
+    expect(() => core.openBackup("correct horse battery", { ...env, note: "x" }))
+      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+  });
+  it("truncated GCM tag in sealed backup is rejected", () => {
+    const env = JSON.parse(core.sealBackup("correct horse battery", json));
+    const truncatedTag = Buffer.from(Buffer.from(env.tag, "base64url").slice(0, 4)).toString("base64url");
+    expect(() => core.openBackup("correct horse battery", { ...env, tag: truncatedTag }))
+      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+  });
+  it("invalid salt length in sealed backup is rejected BEFORE deriving", () => {
+    const env = JSON.parse(core.sealBackup("correct horse battery", json));
+    const badSalt = Buffer.alloc(8).toString("base64url");
+    const t = Date.now();
+    expect(() => core.openBackup("correct horse battery", { ...env, kdf: { ...env.kdf, salt: badSalt } }))
+      .toThrow(expect.objectContaining({ code: "UNSUPPORTED" }));
+    expect(Date.now() - t).toBeLessThan(200);
+  });
+  it("invalid IV length in sealed backup is rejected", () => {
+    const env = JSON.parse(core.sealBackup("correct horse battery", json));
+    const badIv = Buffer.alloc(8).toString("base64url");
+    expect(() => core.openBackup("correct horse battery", { ...env, iv: badIv }))
+      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
+  });
+  it("invalid tag length in sealed backup is rejected", () => {
+    const env = JSON.parse(core.sealBackup("correct horse battery", json));
+    const badTag = Buffer.alloc(8).toString("base64url");
+    expect(() => core.openBackup("correct horse battery", { ...env, tag: badTag }))
+      .toThrow(expect.objectContaining({ code: "WRONG_PASSPHRASE_OR_DAMAGED" }));
   });
 });

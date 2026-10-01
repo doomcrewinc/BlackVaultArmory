@@ -34,9 +34,31 @@ export function generateKeyHex() { return randomBytes(32).toString("hex"); }
  */
 export function loadMasterKey(env = process.env, fsImpl = nodeFs) {
   const filePath = env.BLACKVAULT_ENCRYPTION_KEY_FILE || DEFAULT_KEY_FILE;
-  const fromFile = fsImpl.existsSync(filePath) ? parseKeyHex(fsImpl.readFileSync(filePath, "utf8")) : null;
+  let fromFile = null;
+  if (fsImpl.existsSync(filePath)) {
+    try {
+      fromFile = parseKeyHex(fsImpl.readFileSync(filePath, "utf8"));
+    } catch (e) {
+      if (e instanceof EncryptionKeyError && e.code === "KEY_INVALID") {
+        throw new EncryptionKeyError("KEY_INVALID",
+          `Encryption key in ${filePath} is invalid. Must be 64 hex characters. ${GENERATE_HINT}`);
+      }
+      throw e;
+    }
+  }
   const envText = (env.BLACKVAULT_ENCRYPTION_KEY ?? "").trim();
-  const fromEnv = envText ? parseKeyHex(envText) : null;
+  let fromEnv = null;
+  if (envText) {
+    try {
+      fromEnv = parseKeyHex(envText);
+    } catch (e) {
+      if (e instanceof EncryptionKeyError && e.code === "KEY_INVALID") {
+        throw new EncryptionKeyError("KEY_INVALID",
+          `BLACKVAULT_ENCRYPTION_KEY is invalid. Must be 64 hex characters. ${GENERATE_HINT}`);
+      }
+      throw e;
+    }
+  }
   if (fromFile && fromEnv && !fromFile.equals(fromEnv)) {
     throw new EncryptionKeyError("KEY_CONFLICT",
       `Encryption key in ${filePath} differs from BLACKVAULT_ENCRYPTION_KEY. Remove one of them.`);
@@ -66,7 +88,9 @@ export function isEncrypted(v) { return typeof v === "string" && v.startsWith(FI
 
 function parseField(stored) {
   const parts = String(stored).slice(FIELD_PREFIX.length).split(":");
-  if (!isEncrypted(stored) || parts.length !== 4) throw new Error("Not a bv2 value");
+  if (!isEncrypted(stored) || parts.length !== 4) {
+    throw new EncryptionKeyError("MALFORMED", "Not a bv2-format encrypted value");
+  }
   const [id, iv, ct, tag] = parts;
   return { id, iv: unb64u(iv), ct: unb64u(ct), tag: unb64u(tag) };
 }
@@ -86,7 +110,10 @@ export function decryptValue(keys, aad, stored) {
   if (f.id !== keys.id) {
     throw new EncryptionKeyError("KEY_MISMATCH", `Value was encrypted with key ${f.id}, current key is ${keys.id}.`);
   }
-  const d = createDecipheriv("aes-256-gcm", keys.enc, f.iv);
+  if (f.tag.length !== 16) {
+    throw new EncryptionKeyError("MALFORMED", "Invalid GCM tag length");
+  }
+  const d = createDecipheriv("aes-256-gcm", keys.enc, f.iv, { authTagLength: 16 });
   d.setAAD(Buffer.from(aad, "utf8"));
   d.setAuthTag(f.tag);
   return Buffer.concat([d.update(f.ct), d.final()]).toString("utf8");
@@ -140,11 +167,21 @@ export function openBackup(passphrase, envelope) {
       || typeof e.tag !== "string" || typeof e.data !== "string") {
     throw new SealError("UNSUPPORTED", "Unsupported or malformed sealed backup.");
   }
+  // Validate salt length before deriving (DoS protection)
+  const decodedSalt = unb64u(k.salt);
+  if (decodedSalt.length !== 16) {
+    throw new SealError("UNSUPPORTED", "Invalid salt length in sealed backup.");
+  }
   const { tag, data, ...header } = e;
   try {
-    const d = createDecipheriv("aes-256-gcm", passKey(passphrase, unb64u(k.salt), k), unb64u(e.iv));
+    const decodedIv = unb64u(e.iv);
+    const decodedTag = unb64u(e.tag);
+    if (decodedIv.length !== 12 || decodedTag.length !== 16) {
+      throw new Error("Invalid IV or tag length");
+    }
+    const d = createDecipheriv("aes-256-gcm", passKey(passphrase, decodedSalt, k), decodedIv, { authTagLength: 16 });
     d.setAAD(Buffer.from(canonicalJson(header), "utf8"));
-    d.setAuthTag(unb64u(tag));
+    d.setAuthTag(decodedTag);
     return Buffer.concat([d.update(unb64u(data)), d.final()]).toString("utf8");
   } catch {
     throw new SealError("WRONG_PASSPHRASE_OR_DAMAGED", "Wrong passphrase or damaged file.");
