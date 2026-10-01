@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
-import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
 import { normalizeMoney } from "@/lib/money";
@@ -50,7 +49,7 @@ export async function GET(
 
     return NextResponse.json({
       ...firearm,
-      serialNumber: decryptField(firearm.serialNumber),
+      serialNumber: firearm.serialNumber,
       notes: firearm.notes,
       buildCount: firearm._count.builds,
       rangeSessionCount: firearm._count.rangeSessions,

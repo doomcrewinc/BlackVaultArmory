@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
-import { decryptField } from "@/lib/crypto";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
 import { normalizeMoney } from "@/lib/money";
@@ -63,7 +62,7 @@ export async function GET(request: NextRequest) {
         (sum, session) => sum + session.roundsFired,
         0,
       ),
-      serialNumber: decryptField(firearm.serialNumber) ?? firearm.serialNumber,
+      serialNumber: firearm.serialNumber,
       notes: firearm.notes,
       buildCount: firearm._count.builds,
       activeBuild: firearm.builds[0] ?? null,
