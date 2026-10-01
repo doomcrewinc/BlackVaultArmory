@@ -801,13 +801,14 @@ would need a command-line restore path, which does not exist yet.
 `rotate-key.sh` (Mac/Linux) and `rotate-key.bat` (Windows), next to `docker-compose.yml`,
 generate a brand-new key and re-encrypt every value under it:
 
-1. The database is **always snapshotted first**, before anything else happens.
-2. The app is stopped, a new key is generated, and the rotation runs inside the
-   container in one database transaction.
-3. On success the old key is kept, never deleted, renamed to
+1. The app is **stopped first** — SQLite needs that for a consistent copy.
+2. The database is snapshotted.
+3. A new key is generated, and the rotation runs inside the container in one
+   database transaction.
+4. On success the old key is kept, never deleted, renamed to
    `secrets/blackvault_encryption_key.old-<timestamp>`. **Keep that file** for as long as
    you keep the pre-rotation snapshot the script just took — only the old key opens it.
-4. The app restarts on the new key.
+5. The app restarts on the new key.
 
 The wrappers **never delete a key file.** If a rotation run is interrupted or its result
 is ambiguous, the script asks the database itself which key it is actually encrypted
@@ -825,58 +826,89 @@ is safe to run next.
 
 ### Upgrading to this release
 
-The update scripts (`update.sh` / `update.bat`) snapshot your database into `backups/`
-before starting the new image, as they always have. On top of that, BlackVault's own
-first start after this upgrade takes **its own** snapshot
-(`pre-encryption-<timestamp>.db`, next to `vault.db`) just before it encrypts your
-existing data, in case the update script that ran was an older copy that predates this
-feature. **Both snapshots are plain text.** Delete them once you've confirmed BlackVault
-is working normally. On Linux, the app's own snapshot is owned by uid 1001 (the
-container's user), so deleting it needs `sudo`.
+**PostgreSQL users: take your own copy BEFORE starting the new version.** The app cannot
+dump its own PostgreSQL server, so unlike SQLite it does not take a snapshot of existing
+data before encrypting it — it only logs a warning, by which point the data is already
+encrypted. Run this yourself first, with the OLD version still running:
 
-**Linux only: run `./update.sh` twice** for this specific upgrade. `update.sh` updates
-itself by pulling the new code and then re-running the *already-loaded, old* copy of
-itself in the same process — so the very first run brings up the new image with no
-encryption key yet, and BlackVault waits at startup logging that the key is missing. Run
-`./update.sh` again (or `git pull && ./update.sh` if you'd rather not wait) and the
-second run creates the key and starts normally. Windows is not affected.
+```bash
+docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql
+```
+
+The update scripts (`update.sh` / `update.bat`) also snapshot your database into
+`backups/` before starting the new image — new in this release, not something earlier
+versions did. On top of that, BlackVault's own first start after this upgrade takes
+**its own** snapshot too (`pre-encryption-<timestamp>.db`, next to `vault.db`, SQLite
+only) just before it encrypts your existing data, in case the update script that ran was
+an older copy that predates this feature. **All of these snapshots are plain text.**
+Delete them once you've confirmed BlackVault is working normally. On Linux, the app's own
+snapshot is owned by uid 1001 (the container's user), so deleting it needs `sudo`.
+
+**Mac/Linux: run `./update.sh` twice** for this specific upgrade. The copy of
+`update.sh` you already have pulls the new code, and then keeps running — bash does not
+reload a script out from under itself — so the rest of that same run is still the *old*
+code: it builds and starts the new image with no encryption key. The new image then exits
+immediately on `KEY_MISSING` and Docker's `restart: unless-stopped` puts it in a restart
+loop. Run `./update.sh` again (or `git pull && ./update.sh` if you'd rather not wait) and
+this second run is the new script end to end: it creates the key, takes its snapshot, and
+starts normally. This is not a Linux-specific quirk — macOS runs the exact same
+`./update.sh` and hits the exact same restart loop. Windows is not affected: `update.bat`
+resumes execution *inside the newly-pulled file* immediately after its own `git pull`
+line, so even a Windows user's very first run is effectively the new script and creates
+the key and the snapshot in one pass.
 
 **If `git pull` refuses, saying `install.bat` or `update.bat` would be overwritten:**
 some existing clones have those two files marked as locally modified purely because of
-line endings, which blocks the very first pull into this release. Run this one-time
-recovery from the BlackVault folder, which backs up and restores any existing
-`.git/info/attributes` instead of assuming there isn't one:
+line endings, which blocks the very first pull into this release. Run the one-time
+recovery for your platform, from the BlackVault folder.
+
+<!-- readme-recovery-posix:start -->
+Mac/Linux (bash or zsh) — backs up and restores any existing `.git/info/attributes`
+instead of assuming there isn't one, and copes with one that has no trailing newline:
 
 ```bash
 ATTRS=$(git rev-parse --git-path info/attributes)
 [ -f "$ATTRS" ] && cp -p "$ATTRS" "$ATTRS.bak"
-printf 'install.bat -text\nupdate.bat -text\n' >> "$ATTRS"
+printf '\ninstall.bat -text\nupdate.bat -text\n' >> "$ATTRS"
 sleep 1
 git update-index -q --refresh
 if [ -f "$ATTRS.bak" ]; then mv "$ATTRS.bak" "$ATTRS"; else rm -f "$ATTRS"; fi
 git pull
 ./update.sh
 ```
+<!-- readme-recovery-posix:end -->
+
+<!-- readme-recovery-windows:start -->
+Windows — save the following as `recovery.cmd` in the BlackVault folder (next to
+`docker-compose.yml`) and run it:
+
+```cmd
+for /f "usebackq delims=" %%P in (`git rev-parse --git-path info/attributes`) do set "ATTRS=%%P"
+set "ATTRS=%ATTRS:/=\%"
+if exist "%ATTRS%" copy /y "%ATTRS%" "%ATTRS%.bak" >nul
+(echo.&echo install.bat -text&echo update.bat -text)>>"%ATTRS%"
+ping -n 2 127.0.0.1 >nul
+git update-index -q --refresh
+if exist "%ATTRS%.bak" (move /y "%ATTRS%.bak" "%ATTRS%" >nul) else (del /f /q "%ATTRS%")
+git pull
+update.bat
+```
+<!-- readme-recovery-windows:end -->
 
 (`git checkout -- install.bat update.bat` does **not** fix this — it rewrites the same
 bytes Git already has, so Git still reports them modified. The commands above instead
 make Git re-check the two files byte-for-byte against what's already committed.)
 
-**PostgreSQL:** the app cannot dump its own PostgreSQL server, so instead of taking a
-snapshot itself it logs a warning with the exact `pg_dump` command to run by hand if you
-want a copy:
-
-```bash
-docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql
-```
-
 ### Admin commands now need `-u nextjs`
 
 The container's entrypoint drops from root to the `nextjs` user before the app itself
-starts, so that it can read the encryption key — but `docker compose exec` runs a new
-command in the container directly, bypassing that entrypoint, and now defaults to
-**root**. Admin commands like the password-reset link (see **Users and sign-in** above)
-need `-u nextjs` added explicitly:
+starts — but `docker compose exec` runs a new command in the container directly,
+bypassing that entrypoint, and now defaults to **root**. Running an admin command as root
+is not itself a security problem (root can read everything `nextjs` can, including the
+key), but it can leave root-owned files on the data volume — for example a SQLite journal
+file the app itself then cannot clean up as `nextjs`. Admin commands like the
+password-reset link (see **Users and sign-in** above) should add `-u nextjs` explicitly
+to avoid that, even though the specific command below never reads the encryption key:
 
 ```bash
 docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username>

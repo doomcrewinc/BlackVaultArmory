@@ -206,6 +206,13 @@ export default function FullArmoryPreviewPage() {
           </div>
         </section>
 
+        <section className="print:hidden rounded-lg border border-[#F5A623]/30 bg-[#F5A623]/10 p-3">
+          <p className="text-xs text-[#F5A623]">
+            Exports contain serial numbers in plain text. Fields are encrypted at rest in the database;
+            this preview and the PDF it builds decrypt them so the output can be read without BlackVault.
+          </p>
+        </section>
+
         {pdfError ? (
           <section className="print:hidden rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 p-3">
             <p className="text-xs text-[#E53935]">{pdfError}</p>

@@ -117,6 +117,16 @@ async function renderLoaded() {
   await screen.findByRole("button", { name: /download pdf/i });
 }
 
+describe("Full Armory preview — plaintext warning", () => {
+  it("tells the user exports contain serial numbers in plain text (Task 8 fix round 1, M6)", async () => {
+    // The preview page produces the most complete plaintext artifact (the
+    // rich PDF, photos and merged receipts included), reached directly by
+    // URL — the config page's warning does not cover it.
+    await renderLoaded();
+    expect(screen.getByText(/exports contain serial numbers in plain text/i)).toBeInTheDocument();
+  });
+});
+
 describe("Full Armory preview — Download PDF", () => {
   it("offers the control once the preview has loaded", async () => {
     await renderLoaded();
