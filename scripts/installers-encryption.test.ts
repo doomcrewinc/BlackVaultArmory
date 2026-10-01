@@ -10,7 +10,7 @@
  * started" is checked on the real script, not inferred from its text.
  * The Windows twins are covered by scripts/ci/windows/Test-WindowsInstallers.ps1.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -69,6 +69,44 @@ exit 0
 `,
     { mode: 0o755 },
   );
+}
+
+/**
+ * Starts `script` in the background and sends it `signal` as soon as
+ * `.git/info/attributes` holds the temporary override (i.e. during the 1 s
+ * sleep in clear_bat_eol_only_changes). Resolves with the exit status.
+ */
+async function runAndInterrupt(dir: string, script: string, input: string, signal: NodeJS.Signals) {
+  const child = spawn("bash", [script], {
+    cwd: dir,
+    env: {
+      PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      HOME: tmp,
+      GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig"),
+      GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
+    } as unknown as NodeJS.ProcessEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stdin.end(input);
+  let out = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (out += d));
+  const attrs = path.join(dir, ".git/info/attributes");
+  const deadline = Date.now() + 20_000;
+  let sawOverride = false;
+  while (Date.now() < deadline && child.exitCode === null) {
+    if (fs.existsSync(attrs) && fs.readFileSync(attrs, "utf8").includes("-text blackvault-update")) {
+      sawOverride = true;
+      child.kill(signal);
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const code = await new Promise<number | null>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve(child.exitCode);
+    else child.on("exit", (c) => resolve(c));
+  });
+  return { code, out, sawOverride };
 }
 
 function run(dir: string, script: string, input: string, env: Record<string, string> = {}) {
@@ -486,6 +524,67 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("Clearing a line-ending-only difference");
     expect(fs.readFileSync(path.join(work, ".git/info/attributes"), "utf8")).toBe("*.png binary\n");
+  });
+
+  it("SIGTERM or SIGINT during the override: the trap puts .git/info/attributes back exactly (fix round 2)", async () => {
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      const origin = originWithBats(true);
+      const work = path.join(tmp, `work-${signal}`);
+      git(tmp, "clone", "-q", origin, work);
+      sqliteInstall(work);
+      fs.mkdirSync(path.join(work, ".git/info"), { recursive: true });
+      fs.writeFileSync(path.join(work, ".git/info/attributes"), "*.png binary\n");
+      touchBats(work);
+      const r = await runAndInterrupt(work, "update.sh", "\n\n", signal);
+      expect(r.sawOverride, r.out).toBe(true);
+      expect(r.code).toBe(signal === "SIGTERM" ? 143 : 130);
+      expect(fs.readFileSync(path.join(work, ".git/info/attributes"), "utf8")).toBe("*.png binary\n");
+      expect(fs.readdirSync(path.join(work, ".git/info")).filter((f) => f.includes("blackvault"))).toEqual([]); // no backup left
+      fs.rmSync(path.join(origin), { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("SIGKILL during the override (no trap can run): the NEXT run strips the marked lines first, and .bat files check out CRLF again (fix round 2)", async () => {
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    touchBats(work);
+    const killed = await runAndInterrupt(work, "update.sh", "\n\n", "SIGKILL");
+    expect(killed.sawOverride).toBe(true);
+    const attrs = path.join(work, ".git/info/attributes");
+    // Premise: the override is left behind, and it would make a checkout LF.
+    expect(fs.readFileSync(attrs, "utf8")).toContain("install.bat -text blackvault-update");
+    expect(git(work, "check-attr", "text", "--", "install.bat")).toBe("install.bat: text: unset");
+
+    pushBatChange(origin, true);
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Removing a line-ending override left in .git/info/attributes by an interrupted update...");
+    expect(fs.existsSync(attrs)).toBe(false); // there was no file before: none now
+    expect(git(work, "check-attr", "text", "--", "install.bat")).toBe("install.bat: text: set");
+    // A checkout of an LF blob comes out CRLF again.
+    git(work, "add", "--renormalize", "install.bat");
+    git(work, "commit", "-q", "-m", "renormalize");
+    fs.rmSync(path.join(work, "install.bat"));
+    git(work, "checkout", "--", "install.bat");
+    expect(fs.readFileSync(path.join(work, "install.bat"), "utf8")).toBe(BAT_V2);
+  }, 60_000);
+
+  it("an attributes file with NO trailing newline: the override starts on its own line (it works) and the file is restored byte for byte (fix round 2)", () => {
+    const origin = originWithBats(true);
+    const work = path.join(tmp, "work");
+    git(tmp, "clone", "-q", origin, work);
+    sqliteInstall(work);
+    fs.mkdirSync(path.join(work, ".git/info"), { recursive: true });
+    fs.writeFileSync(path.join(work, ".git/info/attributes"), "*.png binary");
+    touchBats(work);
+    pushBatChange(origin, true);
+    const before = git(work, "rev-parse", "HEAD");
+    const r = run(work, "update.sh", "\n\n");
+    expect(r.code, r.out).toBe(0);
+    expect(git(work, "rev-parse", "HEAD")).not.toBe(before); // the override took effect, so the pull went through
+    expect(fs.readFileSync(path.join(work, ".git/info/attributes"), "utf8")).toBe("*.png binary");
   });
 
   it("a REAL local edit is left alone: the pull still refuses, and the edit survives", () => {
