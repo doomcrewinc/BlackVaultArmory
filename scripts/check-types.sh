@@ -36,6 +36,28 @@ cd "$(dirname "$0")/.." || exit 1
 BASELINE_FILES=(
   "src/app/api/exports/data/route.backup.test.ts"
   "scripts/check-migration-drift.test.ts"
+  # --- field-encryption Task 2 (prisma/schema.base.prisma: nfaApprovalDate
+  # DateTime->String, nfaTaxPaid Float->String). src/lib/nfa.ts's
+  # NfaPaperwork type (and every call site below that spreads it into a
+  # Prisma create/update data object) still types these Date | null /
+  # number | null; the generated Prisma types are now string | null. Task 3
+  # restores the app-facing Date/number types via the encryption extension's
+  # result typing (src/lib/prisma.ts) — remove every line below once it does.
+  "src/app/api/firearms/route.ts"              # // field-encryption: Task 3 restores Date/number
+  "src/app/api/firearms/[id]/route.ts"         # // field-encryption: Task 3 restores Date/number
+  "src/app/api/accessories/route.ts"           # // field-encryption: Task 3 restores Date/number
+  "src/app/api/accessories/[id]/route.ts"      # // field-encryption: Task 3 restores Date/number
+  "src/app/vault/[id]/page.tsx"                # // field-encryption: Task 3 restores Date/number
+  # --- field-encryption Task 2, DIFFERENT root cause (not Date/number): the
+  # same schema change moves Firearm's unique constraint from serialNumber to
+  # serialNumberHash (D1 — serialNumber is ciphertext once Task 3 lands, so it
+  # can no longer be the unique key). prisma/seed.ts upserts firearms by
+  # `where: { serialNumber: ... }`, which no longer type-checks against
+  # FirearmWhereUniqueInput. The spec's where-rewrite (serialNumber equality
+  # -> serialNumberHash, Task 3) should make this work again at runtime; see
+  # task-2-report.md for why this is baselined separately from the
+  # Date/number sites above instead of reusing their marker.
+  "prisma/seed.ts"                             # field-encryption: Task 3's where-rewrite (serialNumber -> serialNumberHash) should restore this
 )
 
 echo "==> tsc --noEmit -p ."

@@ -13,6 +13,18 @@ describe("isRedactedField", () => {
       expect(isRedactedField(field), field).toBe(false);
     }
   });
+
+  it("redacts the NFA fields (field-encryption D1): control number, registered-to, transfer method, approval date, tax paid", () => {
+    for (const field of [
+      "nfaControlNumber",
+      "nfaRegisteredTo",
+      "nfaTransferMethod",
+      "nfaApprovalDate",
+      "nfaTaxPaid",
+    ]) {
+      expect(isRedactedField(field), field).toBe(true);
+    }
+  });
 });
 
 describe("redactRecord", () => {
