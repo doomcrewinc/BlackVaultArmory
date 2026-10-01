@@ -24,6 +24,7 @@ A self-hosted, local-only web app for tracking firearms, accessories, and range 
 - CSV and PDF export
 - Dashboard
 - Mobile access via local network
+- Serial numbers and NFA paperwork encrypted at rest
 
 ---
 
@@ -478,14 +479,14 @@ Run this inside the container (see **[Users and sign-in](#users-and-sign-in)** b
 details):
 
 ```bash
-docker compose exec blackvault node scripts/admin-reset-link.mjs <username>
+docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username>
 ```
 
 It prints a one-time password reset link, valid 24 hours. If that admin account was disabled
 or demoted, add `--promote` to also restore admin access:
 
 ```bash
-docker compose exec blackvault node scripts/admin-reset-link.mjs <username> --promote
+docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username> --promote
 ```
 
 ---
@@ -610,14 +611,14 @@ If the only admin forgets their password, or their account gets disabled or demo
 run this inside the container:
 
 ```bash
-docker compose exec blackvault node scripts/admin-reset-link.mjs <username>
+docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username>
 ```
 
 It prints a one-time reset link, valid 24 hours. Add `--promote` to also make that user an
 active admin again (clearing any disabled state):
 
 ```bash
-docker compose exec blackvault node scripts/admin-reset-link.mjs <username> --promote
+docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username> --promote
 ```
 
 Anyone who can run this already has shell on the Docker host, and therefore the database — it
@@ -727,6 +728,159 @@ line and restart to go back to the stored setting.
 If file or image uploads fail behind your proxy but work at `http://localhost:<port>`,
 check your proxy's upload size limit (for nginx, `client_max_body_size`) — reverse
 proxies default to a much smaller limit than BlackVault's own.
+
+BlackVault itself caps a request body (this is what the sealed-backup restore upload
+uses) at **64 MB**. Set your reverse proxy's own upload limit to at least that — for
+example `client_max_body_size 64m;` in nginx / Nginx Proxy Manager, or
+`request_body { max_size 64MB }` in Caddy. This matters even though BlackVault has its
+own cap: Next.js buffers an incoming request body in memory *before* it ever checks that
+cap, so an unauthenticated request with no size limit at all in front of it can still
+force the server to hold a very large body in memory. Your reverse proxy's limit is the
+real protection against that; BlackVault's own 64 MB figure only bounds how large a
+legitimate restore upload may be (roughly 37,000 firearms with notes, sealed).
+
+---
+
+## Field Encryption
+
+Serial numbers and NFA paperwork are encrypted at rest. Signed-in users see them exactly
+as before; anyone who only has the disk, the Docker volume, a database dump or a plain
+backup file cannot read them.
+
+### What is encrypted
+
+- **Firearm** and **Accessory**: `serialNumber`, `nfaControlNumber`, `nfaRegisteredTo`,
+  `nfaTransferMethod`, `nfaApprovalDate`, `nfaTaxPaid`.
+- **Gear**: `serialNumber`.
+- Nothing else — NFA class, prices, notes and everything else stay plain text.
+
+A serial number can only be looked up by **exact match**. Encrypted fields cannot be
+searched, sorted, filtered or partially matched (no "contains", no case-insensitive
+match) — that would require decrypting every row to compare it.
+
+### The key — BACK UP THE KEY
+
+The encryption key normally lives in a file, `secrets/blackvault_encryption_key`, next
+to `docker-compose.yml`. `install.sh` / `install.bat` create it the first time you
+install. It is mounted into the container **read-only**; on startup the container copies
+it into an in-memory, non-executable tmpfs at `/run/secrets`, readable only by the `nextjs`
+user (uid 1001) the app runs as — the key file on your host disk keeps its normal
+ownership and permissions the whole time.
+
+The alternative is the environment variable `BLACKVAULT_ENCRYPTION_KEY` (64 hex
+characters) in `.env`. If both the key file and the environment variable are set to
+**different** values, BlackVault refuses to start.
+
+BlackVault also refuses to start if the key is missing, wrong for the database it is
+opening, or the database's key check cannot be verified at all. There is no recovery
+from a lost key other than restoring it from a backup of the key file itself, or
+restoring a sealed backup (below), which uses its own passphrase instead.
+
+> ⚠️ **BACK UP THE KEY.** Without `secrets/blackvault_encryption_key` (or whatever you
+> set `BLACKVAULT_ENCRYPTION_KEY` to), your serial numbers and NFA records cannot be
+> recovered. Keep a copy somewhere other than the server it protects.
+
+### Sealed backups
+
+A backup downloaded from **Settings → Backup** is sealed with a passphrase **you**
+choose (at least 12 characters) — not the server's encryption key. That means a sealed
+backup can be restored onto a different install with a different encryption key,
+as long as you remember the passphrase. A wrong passphrase, or a damaged file, changes
+nothing.
+
+An older, unsealed (plain JSON) backup from before this release still restores — you'll
+see a warning that the file is not encrypted first.
+
+Restoring a backup is capped at 64 MB (see **Upload size** above for why, and how to
+also set a matching limit on your reverse proxy). That is comfortably enough for a very
+large inventory (around 37,000 firearms with notes); a household with more than that
+would need a command-line restore path, which does not exist yet.
+
+### Rotation
+
+`rotate-key.sh` (Mac/Linux) and `rotate-key.bat` (Windows), next to `docker-compose.yml`,
+generate a brand-new key and re-encrypt every value under it:
+
+1. The database is **always snapshotted first**, before anything else happens.
+2. The app is stopped, a new key is generated, and the rotation runs inside the
+   container in one database transaction.
+3. On success the old key is kept, never deleted, renamed to
+   `secrets/blackvault_encryption_key.old-<timestamp>`. **Keep that file** for as long as
+   you keep the pre-rotation snapshot the script just took — only the old key opens it.
+4. The app restarts on the new key.
+
+The wrappers **never delete a key file.** If a rotation run is interrupted or its result
+is ambiguous, the script asks the database itself which key it is actually encrypted
+with before touching anything, and prints exact recovery commands rather than guessing.
+An unused new key that was generated but never used is renamed to
+`secrets/blackvault_encryption_key.new.unused-<timestamp>` — safe to delete once
+BlackVault has run normally again on the old key. If a `secrets/blackvault_encryption_key.new`
+file is already sitting there from an earlier, unfinished rotation, the script refuses to
+run at all until you move it out of `secrets/` by hand — it may be the only remaining copy
+of the key the database is actually encrypted with.
+
+Any recovery text the scripts print is meant to be followed exactly, in order; it names
+the current state of each key file precisely because that state determines which command
+is safe to run next.
+
+### Upgrading to this release
+
+The update scripts (`update.sh` / `update.bat`) snapshot your database into `backups/`
+before starting the new image, as they always have. On top of that, BlackVault's own
+first start after this upgrade takes **its own** snapshot
+(`pre-encryption-<timestamp>.db`, next to `vault.db`) just before it encrypts your
+existing data, in case the update script that ran was an older copy that predates this
+feature. **Both snapshots are plain text.** Delete them once you've confirmed BlackVault
+is working normally. On Linux, the app's own snapshot is owned by uid 1001 (the
+container's user), so deleting it needs `sudo`.
+
+**Linux only: run `./update.sh` twice** for this specific upgrade. `update.sh` updates
+itself by pulling the new code and then re-running the *already-loaded, old* copy of
+itself in the same process — so the very first run brings up the new image with no
+encryption key yet, and BlackVault waits at startup logging that the key is missing. Run
+`./update.sh` again (or `git pull && ./update.sh` if you'd rather not wait) and the
+second run creates the key and starts normally. Windows is not affected.
+
+**If `git pull` refuses, saying `install.bat` or `update.bat` would be overwritten:**
+some existing clones have those two files marked as locally modified purely because of
+line endings, which blocks the very first pull into this release. Run this one-time
+recovery from the BlackVault folder, which backs up and restores any existing
+`.git/info/attributes` instead of assuming there isn't one:
+
+```bash
+ATTRS=$(git rev-parse --git-path info/attributes)
+[ -f "$ATTRS" ] && cp -p "$ATTRS" "$ATTRS.bak"
+printf 'install.bat -text\nupdate.bat -text\n' >> "$ATTRS"
+sleep 1
+git update-index -q --refresh
+if [ -f "$ATTRS.bak" ]; then mv "$ATTRS.bak" "$ATTRS"; else rm -f "$ATTRS"; fi
+git pull
+./update.sh
+```
+
+(`git checkout -- install.bat update.bat` does **not** fix this — it rewrites the same
+bytes Git already has, so Git still reports them modified. The commands above instead
+make Git re-check the two files byte-for-byte against what's already committed.)
+
+**PostgreSQL:** the app cannot dump its own PostgreSQL server, so instead of taking a
+snapshot itself it logs a warning with the exact `pg_dump` command to run by hand if you
+want a copy:
+
+```bash
+docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql
+```
+
+### Admin commands now need `-u nextjs`
+
+The container's entrypoint drops from root to the `nextjs` user before the app itself
+starts, so that it can read the encryption key — but `docker compose exec` runs a new
+command in the container directly, bypassing that entrypoint, and now defaults to
+**root**. Admin commands like the password-reset link (see **Users and sign-in** above)
+need `-u nextjs` added explicitly:
+
+```bash
+docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <username>
+```
 
 ---
 
