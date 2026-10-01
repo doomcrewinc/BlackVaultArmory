@@ -126,6 +126,17 @@ has "$LOGS" "secrets/blackvault_encryption_key next to docker-compose.yml" || fa
 as_user "docker compose stop"
 endstep
 
+step "1b. seed plaintext rows, as a release before field encryption stored them"
+# The schema exists: the refused start above ran `prisma migrate deploy` first.
+# Written as root into the 1001-owned file; SQLite keeps the owner, and the
+# rollback journal is gone after the commit.
+sudo sqlite3 "$APP/data/db/vault.db" ".read scripts/ci/encryption-seed.sql"
+[ "$(sudo stat -c '%u' "$APP/data/db/vault.db")" = "1001" ] || fail "vault.db is no longer owned by 1001"
+SEEDED=$(sudo sqlite3 "$APP/data/db/vault.db" "SELECT (SELECT count(*) FROM Firearm) || ' ' || (SELECT count(*) FROM Accessory) || ' ' || (SELECT count(*) FROM Gear) || ' ' || (SELECT serialNumber FROM Firearm WHERE id = 'ci-f1');")
+[ "$SEEDED" = "3 2 2 CI-SERIAL-F1" ] || fail "seed: got '$SEEDED'"
+echo "seeded plaintext: Firearm 3, Accessory 2, Gear 2"
+endstep
+
 step "2. install.sh (existing-install path) creates the key as $TEST_USER; the app starts with it"
 OUT=$(as_user "./install.sh" </dev/null)
 echo "$OUT" | tail -20
@@ -134,11 +145,11 @@ KEY="$APP/secrets/blackvault_encryption_key"
 [ "$(sudo stat -c '%a %U' "$KEY")" = "600 $TEST_USER" ] || fail "key file is $(sudo stat -c '%a %U' "$KEY"), want 600 $TEST_USER"
 [ "$(sudo stat -c '%a %U' "$APP/secrets")" = "700 $TEST_USER" ] || fail "secrets/ is $(sudo stat -c '%a %U' "$APP/secrets"), want 700 $TEST_USER"
 # The container user cannot read the host file directly — the very problem.
+# If it could, this job would prove nothing about the entrypoint: fail.
 if docker run --rm --user 1001:1001 -v "$APP/secrets:/k:ro" alpine:3 cat /k/blackvault_encryption_key >/dev/null 2>&1; then
-  echo "::warning::uid 1001 could read the 600 key file directly; the I3 premise did not hold on this runner"
-else
-  echo "confirmed: uid 1001 cannot read the mode-600 host key file directly"
+  fail "uid 1001 could read the mode-600 host key file directly; the I3 premise does not hold, so this run proves nothing"
 fi
+echo "confirmed: uid 1001 cannot read the mode-600 host key file directly"
 wait_healthy
 LOGS=$(as_user "docker compose logs --no-color blackvault")
 has "$LOGS" "Refusing to start\|refusing to start" && fail "the app refused to start with the key"
@@ -163,14 +174,31 @@ has "$RUN_OUT" "COPY=400 nextjs" || fail "compose run: no 400 nextjs key copy ($
 OLD_ID=$(key_id_of "$KEY")
 [ "$(db_key_id)" = "$OLD_ID" ] || fail "key check id $(db_key_id) != key file id $OLD_ID"
 echo "app started; key check id $OLD_ID"
+# The first start encrypted the seeded rows, after its own snapshot.
+has "$LOGS" "Encrypted existing data: Firearm 3, Accessory 2, Gear 2" || fail "startup did not encrypt the seeded rows"
+has "$LOGS" "Snapshot taken before encrypting existing data: $APP/data/db/pre-encryption-" || fail "no snapshot log line with the HOST path"
+mapfile -t SNAPS < <(sudo find "$APP/data/db" -maxdepth 1 -name 'pre-encryption-*' -printf '%f\n')
+echo "app snapshots: ${SNAPS[*]:-<none>}"
+[ "${#SNAPS[@]}" = "1" ] || fail "expected one pre-encryption snapshot (and no .partial), found ${#SNAPS[@]}"
+[[ "${SNAPS[0]}" =~ ^pre-encryption-[0-9]{8}-[0-9]{6}\.db$ ]] || fail "unexpected snapshot name ${SNAPS[0]}"
+SNAP="$APP/data/db/${SNAPS[0]}"
+[ "$(sudo stat -c '%a %u' "$SNAP")" = "600 1001" ] || fail "app snapshot is $(sudo stat -c '%a %u' "$SNAP"), want 600 1001"
+[ "$(sudo sqlite3 "$SNAP" "SELECT serialNumber FROM Firearm WHERE id = 'ci-f1';")" = "CI-SERIAL-F1" ] || fail "the app snapshot does not hold the plaintext serial"
+for t in Firearm Accessory Gear; do
+  n=$(sudo sqlite3 "$APP/data/db/vault.db" "SELECT count(*) FROM $t WHERE serialNumber IS NOT NULL AND serialNumber NOT LIKE 'bv2:$OLD_ID:%';")
+  [ "$n" = "0" ] || fail "$n $t serial(s) not encrypted under $OLD_ID"
+done
+echo "pre-encryption snapshot ${SNAPS[0]} (600, uid 1001, plaintext); every serial now bv2:$OLD_ID"
 endstep
 
 step "3. rotate-key.sh end to end (SQLite)"
 OUT=$(as_user "./rotate-key.sh" </dev/null)
 echo "$OUT" | tail -30
 has "$OUT" "Key rotation complete" || fail "rotation did not complete"
+has "$OUT" "(Firearm 3, Accessory 2, Gear 2)" || fail "rotation did not re-encrypt the seeded rows"
 sudo ls -la "$APP/secrets" "$APP/backups"
-sudo ls "$APP/backups" | grep -Eq '^blackvault-[0-9]{8}-[0-9]{6}\.db$' || fail "no pre-rotation snapshot in backups/"
+BACKUPS=$(sudo find "$APP/backups" -maxdepth 1 -type f -printf '%f\n')
+has "$BACKUPS" '^blackvault-[0-9]\{8\}-[0-9]\{6\}\.db$' || fail "no pre-rotation snapshot in backups/ (have: $BACKUPS)"
 OLD_FILES=$(sudo find "$APP/secrets" -name 'blackvault_encryption_key.old-*' | wc -l)
 [ "$OLD_FILES" = "1" ] || fail "expected one .old-<ts> key, found $OLD_FILES"
 [ "$(key_id_of "$(sudo find "$APP/secrets" -name 'blackvault_encryption_key.old-*')")" = "$OLD_ID" ] || fail ".old-<ts> does not hold the original key"
@@ -178,6 +206,11 @@ NEW_ID=$(key_id_of "$KEY")
 [ "$NEW_ID" != "$OLD_ID" ] || fail "the key file did not change"
 wait_healthy
 [ "$(db_key_id)" = "$NEW_ID" ] || fail "after rotation the key check id is $(db_key_id), want $NEW_ID"
+for t in Firearm Accessory Gear; do
+  n=$(sudo sqlite3 "$APP/data/db/vault.db" "SELECT count(*) FROM $t WHERE serialNumber LIKE 'bv2:$NEW_ID:%';")
+  want=$([ "$t" = Firearm ] && echo 3 || echo 2)
+  [ "$n" = "$want" ] || fail "$t: $n serial(s) under the new key $NEW_ID, want $want"
+done
 LOGS=$(as_user "docker compose logs --no-color --since 2m blackvault")
 has "$LOGS" "Refusing to start\|refusing to start" && fail "the app refused to start on the new key"
 echo "rotated $OLD_ID -> $NEW_ID; app healthy on the new key"
