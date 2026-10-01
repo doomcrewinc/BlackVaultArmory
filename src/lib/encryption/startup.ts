@@ -53,8 +53,9 @@ const SNAPSHOT_HINT =
  */
 const CREATE_KEY_HINT =
   "Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file " +
-  "secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: " +
-  "openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . " +
+  "secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself, from that folder, with: " +
+  "(umask 077 && openssl rand -hex 32 > secrets/blackvault_encryption_key) && chmod 700 secrets " +
+  "(umask 077: the file is never readable by others, not even briefly). " +
   "Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.";
 
 type Row = Record<string, unknown> & { id: string };
@@ -192,7 +193,7 @@ async function loadKeys(raw: RawClient): Promise<FieldKeys> {
   } catch (e) {
     if (!(e instanceof EncryptionKeyError) || e.code !== "KEY_MISSING") throw e;
     const id = await existingKeyId(raw);
-    if (!id) throw new EncryptionKeyError("KEY_MISSING", `${e.message} ${CREATE_KEY_HINT}`);
+    if (!id) throw new EncryptionKeyError("KEY_MISSING", `${e.message}. ${CREATE_KEY_HINT}`);
     throw new EncryptionKeyError(
       "KEY_MISSING",
       `${e.message.replace(/\s*Generate one with:.*$/, "")} This database is already encrypted: ` +

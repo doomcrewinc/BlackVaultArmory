@@ -305,7 +305,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     expect(err).toBeInstanceOf(EncryptionKeyError);
     expect(err.code).toBe("KEY_MISSING");
     expect(err.message).toBe(
-      "No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32 Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
+      "No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32. Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself, from that folder, with: (umask 077 && openssl rand -hex 32 > secrets/blackvault_encryption_key) && chmod 700 secrets (umask 077: the file is never readable by others, not even briefly). Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
     );
     expect(await rawSnapshot()).toBe(before);
   });
@@ -821,7 +821,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       await withKey(null, () => within(30_000, register()));
       expect(exit).toHaveBeenCalledWith(1);
       expect(vi.mocked(console.error).mock.calls[0][0]).toBe(
-        "[encryption] No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32 Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself in that folder with: openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key . Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
+        "[encryption] No encryption key. Looked for the file /nonexistent/blackvault-test/no-key-file and the env var BLACKVAULT_ENCRYPTION_KEY. Generate one with: openssl rand -hex 32. Docker install: run ./update.sh (update.bat on Windows) again; it creates the key file secrets/blackvault_encryption_key next to docker-compose.yml. Or create it yourself, from that folder, with: (umask 077 && openssl rand -hex 32 > secrets/blackvault_encryption_key) && chmod 700 secrets (umask 077: the file is never readable by others, not even briefly). Then start BlackVault again, and back that file up: without it your serial numbers and NFA records cannot be recovered.",
       );
       expect(await rawSnapshot()).toBe(before);
     });

@@ -101,6 +101,13 @@ describe("scripts/docker-entrypoint.sh", () => {
     expect(script.trimEnd().split("\n").pop()).toBe('exec su-exec nextjs:nodejs "$@"');
   });
 
+  it("refuses a key file that is a symbolic link, before copying anything (M9)", () => {
+    const loop = script.slice(script.indexOf("for name in"));
+    expect(loop.indexOf('[ -L "$SRC/$name" ]')).toBeGreaterThan(-1);
+    expect(loop.indexOf('[ -L "$SRC/$name" ]')).toBeLessThan(loop.indexOf("cat "));
+    expect(script).toContain("is a symbolic link");
+  });
+
   it("is checked out with LF endings everywhere (it runs in Linux, built from any checkout)", () => {
     expect(read(".gitattributes")).toMatch(/^scripts\/docker-entrypoint\.sh text eol=lf$/m);
     expect(script).not.toContain("\r");

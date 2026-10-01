@@ -1330,7 +1330,7 @@ if ($snaps.Count -eq 1) {
   Assert ($r.Output -match [regex]::Escape("Database snapshot saved: backups\$($snaps[0])")) "prints the snapshot path"
 }
 Assert (Test-UserOnlyAcl (Join-Path $work "backups")) "backups\ is restricted to the current user"
-Assert ($r.Output -match "this snapshot is NOT encrypted") "prints the plaintext warning"
+Assert ($r.Output -match "this snapshot is a plain, unencrypted copy") "prints the plaintext warning"
 $iBuild = Get-CallIndex $r.StubLog "compose build --pull"
 $iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
 $iUp = Get-CallIndex $r.StubLog "compose up -d"
@@ -1373,7 +1373,7 @@ $iUp = Get-CallIndex $r.StubLog "compose up -d"
 Assert ((Get-CallIndex $r.StubLog "compose up -d --wait db") -ge 0) "made sure the db container is running"
 Assert (($iDump -ge 0) -and ($iUp -gt $iDump)) "pg_dump ran before the app start (got $iDump, $iUp)"
 Assert ((Get-CallIndex $r.StubLog "compose stop blackvault") -eq -1) "PostgreSQL: the app was not stopped for the dump"
-Assert ($r.Output -match "this snapshot is NOT encrypted") "prints the plaintext warning"
+Assert ($r.Output -match "this snapshot is a plain, unencrypted copy") "prints the plaintext warning"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario U4

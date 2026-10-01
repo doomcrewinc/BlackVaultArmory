@@ -197,7 +197,7 @@ describe("update.sh (no git checkout)", () => {
     expect(modeOf(snap)).toBe(0o600);
     expect(modeOf(path.join(dir, "backups"))).toBe(0o700);
     expect(r.out).toContain(`Database snapshot saved: backups/${snaps[0]}`);
-    expect(r.out).toContain("this snapshot is NOT encrypted");
+    expect(r.out).toContain("this snapshot is a plain, unencrypted copy");
     // Order: rebuild, stop the app, (copy), start the new image.
     const build = indexOfCall(r.calls, "compose build --pull");
     const stop = indexOfCall(r.calls, "compose stop blackvault");
@@ -252,7 +252,7 @@ describe("update.sh (no git checkout)", () => {
     expect(r.calls).toContain("compose exec -T db pg_dump -U blackvault -d blackvault");
     expect(r.calls).not.toContain("compose stop blackvault"); // pg_dump needs no downtime
     expect(indexOfCall(r.calls, "compose exec -T db pg_dump")).toBeLessThan(indexOfCall(r.calls, "AT-APP-START"));
-    expect(r.out).toContain("this snapshot is NOT encrypted");
+    expect(r.out).toContain("this snapshot is a plain, unencrypted copy");
   });
 
   it("PostgreSQL: a failing pg_dump aborts non-zero, leaves no partial file, never starts the new image", () => {

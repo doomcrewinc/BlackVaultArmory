@@ -194,5 +194,15 @@ done
 echo "key 600 $TEST_USER, secrets/ 700, snapshots 600, unreadable by other users"
 endstep
 
+step "5. the entrypoint refuses a key file that is a symlink (M9)"
+as_user "ln -s /etc/shadow secrets/blackvault_encryption_key.new"
+if SYM_OUT=$(as_user "docker compose run --rm -T blackvault true" 2>&1); then
+  fail "compose run started with a symlinked .new key: $SYM_OUT"
+fi
+echo "$SYM_OUT" | tail -3
+has "$SYM_OUT" "blackvault_encryption_key.new is a symbolic link" || fail "no symlink refusal message"
+as_user "rm secrets/blackvault_encryption_key.new"
+endstep
+
 as_user "docker compose down" || true
 echo "encryption key handling verified on real Linux Docker"

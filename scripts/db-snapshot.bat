@@ -29,6 +29,10 @@ set "BLACKVAULT_DATABASE_URL="
 set "BLACKVAULT_DB_PROVIDER="
 set "BLACKVAULT_POSTGRES_PASSWORD="
 
+:: The caller's Compose command (update.bat / rotate-key.bat set COMPOSE
+:: after checking the version); plain `docker compose` when run on its own.
+if not defined COMPOSE set "COMPOSE=docker compose"
+
 call :provider_from_env
 set "TS="
 for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')" 2^>nul`) do set "TS=%%T"
@@ -60,6 +64,13 @@ if exist ".env" (
   )
 )
 if defined DATA_DIR set "DATA_DIR=!DATA_DIR:"=!"
+:: Trim surrounding spaces and tabs, as env_value in compose-provider.sh does.
+if defined DATA_DIR for /f "tokens=* delims=	 " %%V in ("!DATA_DIR!") do set "DATA_DIR=%%V"
+:trim_data_dir
+if not defined DATA_DIR goto :trim_data_dir_done
+if "!DATA_DIR:~-1!"==" " set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
+if "!DATA_DIR:~-1!"=="	" set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
+:trim_data_dir_done
 if not defined DATA_DIR set "DATA_DIR=.\data"
 set "DB=!DATA_DIR!\db\vault.db"
 if not exist "!DB!" (
@@ -68,7 +79,7 @@ if not exist "!DB!" (
 )
 set "OUT=backups\blackvault-!TS!.db"
 echo Stopping BlackVault for a consistent copy of the database...
-docker compose stop blackvault
+%COMPOSE% stop blackvault
 if errorlevel 1 (
   set "FAIL_MSG=could not stop BlackVault."
   goto :fail
@@ -93,13 +104,13 @@ goto :ok
 :postgres
 set "OUT=backups\blackvault-!TS!.sql"
 echo Making sure the database container is running...
-docker compose up -d --wait db
+%COMPOSE% up -d --wait db
 if errorlevel 1 (
   set "FAIL_MSG=could not start the database container."
   goto :fail
 )
 echo Dumping the PostgreSQL database...
-docker compose exec -T db pg_dump -U blackvault -d blackvault > "!OUT!.partial"
+%COMPOSE% exec -T db pg_dump -U blackvault -d blackvault > "!OUT!.partial"
 if errorlevel 1 (
   if exist "!OUT!.partial" del /f /q "!OUT!.partial"
   set "FAIL_MSG=pg_dump failed."
@@ -119,9 +130,12 @@ if errorlevel 1 (
 :ok
 echo.
 echo Database snapshot saved: !OUT!
-echo WARNING: this snapshot is NOT encrypted. Taken before the upgrade that turns on
-echo          field encryption, it holds your serial numbers and NFA records in plain
-echo          text. Delete it once BlackVault is confirmed working:  del "!OUT!"
+echo WARNING: this snapshot is a plain, unencrypted copy of the database file. Names,
+echo          notes and everything else in it can be read by anyone who can read the
+echo          file. Serial numbers and NFA records too, if it was taken before field
+echo          encryption was first turned on; otherwise they need the encryption key
+echo          that was in use when it was taken.
+echo          Delete it once BlackVault is confirmed working:  del "!OUT!"
 :ok_nothing
 popd
 exit /b 0

@@ -47,6 +47,12 @@ if [ -d "$SRC" ]; then
   chown nextjs:nodejs "$DST"
   chmod 700 "$DST"
   for name in blackvault_encryption_key blackvault_encryption_key.new; do
+    # Fix round 1 (M9): a symlink would be followed INSIDE the container
+    # (e.g. to /etc/shadow) and its target copied where nextjs can read it.
+    if [ -L "$SRC/$name" ]; then
+      echo "[entrypoint] Refusing to start: secrets/$name is a symbolic link. Replace it with the key file itself." >&2
+      exit 1
+    fi
     [ -f "$SRC/$name" ] || continue
     if ! (umask 077 && cat "$SRC/$name" > "$DST/$name"); then
       echo "[entrypoint] Cannot read the key file $name from the secrets folder (mounted at $SRC). Refusing to start." >&2
