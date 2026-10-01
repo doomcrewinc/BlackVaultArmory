@@ -26,6 +26,8 @@ fi
 . ./scripts/public-url-prompts.sh
 # shellcheck source=scripts/setup-token.sh
 . ./scripts/setup-token.sh
+# shellcheck source=scripts/encryption-key.sh
+. ./scripts/encryption-key.sh
 
 # Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
 # is written when it is missing or older.
@@ -58,6 +60,9 @@ if [ -f ".env" ]; then
     if [ "$EXISTING_PROVIDER" != "sqlite" ]; then
       check_postgres_env || true
     fi
+    # This image refuses to start without the field-encryption key; an
+    # existing key is never touched.
+    ensure_encryption_key || exit 1
     echo "Starting with existing configuration..."
     $COMPOSE up -d
     exit 0
@@ -76,6 +81,7 @@ if [ ! -f ".env" ] && [ -f ".blackvault.env" ]; then
     # Legacy configs predate PostgreSQL support: they are always SQLite, and a
     # .env with no COMPOSE_PROFILES line runs SQLite on the one compose file.
     echo "Found your existing database at: $EXISTING_DATA_DIR"
+    ensure_encryption_key || exit 1
     echo "Rebuilding with existing configuration (SQLite)..."
     $COMPOSE build
     $COMPOSE up -d
@@ -224,6 +230,12 @@ if [ "$DB_PROVIDER" = "postgres" ]; then
   echo "A random PostgreSQL password was generated and saved in .env (not shown)."
   echo "Keep .env safe: your database cannot be opened without it."
 fi
+
+# ── Field-encryption key ──────────────────────────────────────
+# secrets/blackvault_encryption_key, mode 600; never overwritten if it is
+# already there (scripts/encryption-key.sh).
+echo ""
+ensure_encryption_key || exit 1
 
 # ── Build and start ───────────────────────────────────────────
 echo ""

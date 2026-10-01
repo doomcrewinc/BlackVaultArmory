@@ -15,8 +15,6 @@ echo ""
 . ./scripts/public-url-prompts.sh
 # shellcheck source=scripts/setup-token.sh
 . ./scripts/setup-token.sh
-# shellcheck source=scripts/encryption-key.sh
-. ./scripts/encryption-key.sh
 
 # ── Docker Compose v2.20+ ─────────────────────────────────────
 # docker-compose.yml needs it. Exits before anything is touched (no .env
@@ -102,28 +100,11 @@ fi
 echo ""
 
 # ── Pull latest code ──────────────────────────────────────────
-# `git pull` replaces this file, but bash keeps running the copy it already
-# opened: everything below would be the OLD script's steps. So when the pull
-# brought anything new, start over with the new update.sh. The pull is
-# skipped on that second run (BLACKVAULT_UPDATE_REEXEC=1); everything before
-# this point is safe to run twice.
 if git rev-parse --git-dir > /dev/null 2>&1; then
-  if [ -n "${BLACKVAULT_UPDATE_REEXEC:-}" ]; then
-    echo "Running the updated update.sh."
-    echo ""
-  else
-    echo "Pulling latest updates from GitHub..."
-    HEAD_BEFORE=$(git rev-parse HEAD 2>/dev/null || true)
-    git pull
-    echo ""
-    if [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$HEAD_BEFORE" ]; then
-      echo "Restarting the update with the new update.sh..."
-      echo ""
-      BLACKVAULT_UPDATE_REEXEC=1 exec bash ./update.sh "$@"
-    fi
-  fi
+  echo "Pulling latest updates from GitHub..."
+  git pull
+  echo ""
 fi
-unset BLACKVAULT_UPDATE_REEXEC
 
 # ── Public URL, trusted proxies, direct access ────────────────
 # BLACKVAULT_PUBLIC_URL is required from this release on: the container will
@@ -156,34 +137,10 @@ if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
   set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
 fi
 
-# ── Field-encryption key ──────────────────────────────────────
-# Created only if missing (scripts/encryption-key.sh); an existing key is
-# never touched. The new image refuses to start without one.
-echo ""
-ensure_encryption_key || {
-  echo "       Nothing was rebuilt or restarted."
-  exit 1
-}
-
-# ── Rebuild ───────────────────────────────────────────────────
+# ── Rebuild and restart ───────────────────────────────────────
 echo "Rebuilding BlackVault image..."
 $COMPOSE build --pull
 
-# ── Snapshot the database, BEFORE the new image starts ────────
-# The first start of a new version can change the stored data (this release
-# encrypts serial numbers and NFA records). On SQLite the snapshot stops the
-# app; if it fails, the old container is started again and the update stops.
-echo ""
-echo "Snapshotting the database..."
-if ! ./scripts/db-snapshot.sh; then
-  echo ""
-  echo "ERROR: the database snapshot failed, so the update stopped here. See above."
-  echo "       The new version was NOT started."
-  $COMPOSE start blackvault >/dev/null 2>&1 || true
-  exit 1
-fi
-
-# ── Restart ───────────────────────────────────────────────────
 echo ""
 echo "Restarting..."
 $COMPOSE up -d

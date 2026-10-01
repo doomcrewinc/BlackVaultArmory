@@ -1,0 +1,86 @@
+# shellcheck shell=bash
+#
+# Shared by install.sh and update.sh: creates the field-encryption key file
+# if it is missing. Source it; do not run it. install.bat and update.bat
+# mirror it in :ensure_encryption_key (change them together).
+#
+# The key: 32 random bytes as 64 lowercase hex characters
+# (docs/superpowers/specs/2026-09-30-field-encryption-design.md §1), in
+# secrets/blackvault_encryption_key next to docker-compose.yml, mode 600,
+# folder mode 700. docker-compose.yml mounts the folder read-only and the
+# image's entrypoint hands the key to the app (scripts/docker-entrypoint.sh).
+#
+# An existing key file is NEVER overwritten or modified: it may be the only
+# key the database is encrypted with.
+
+ENCRYPTION_KEY_FILE="secrets/blackvault_encryption_key"
+
+# 64 lowercase hex characters from the OS CSPRNG. Never echoed.
+generate_encryption_key() {
+  if command -v openssl &>/dev/null; then
+    openssl rand -hex 32
+  else
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  fi
+}
+
+# Prints the boxed back-up message for the key file at $1.
+print_key_backup_box() {
+  echo ""
+  echo "=========================================================================="
+  echo "  Encryption key created: $1"
+  echo ""
+  echo "  BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered."
+  echo ""
+  echo "  Keep a copy somewhere other than this machine (a password manager, a USB"
+  echo "  drive). Anyone with this file AND your database can read those records."
+  echo "=========================================================================="
+  echo ""
+}
+
+# Creates $ENCRYPTION_KEY_FILE (relative to the current directory) when it
+# does not exist. Returns 0 when the file exists afterwards (created now or
+# already there), 1 with a message when it cannot be created.
+ensure_encryption_key() {
+  local key tmp
+  if [ -e "$ENCRYPTION_KEY_FILE" ] || [ -L "$ENCRYPTION_KEY_FILE" ]; then
+    echo "Encryption key: $ENCRYPTION_KEY_FILE (existing, unchanged)"
+    return 0
+  fi
+  if ! mkdir -p secrets || ! chmod 700 secrets; then
+    echo "ERROR: could not create the secrets folder for the encryption key."
+    return 1
+  fi
+  key=$(generate_encryption_key) || key=""
+  case "$key" in
+    *[!0-9a-f]* | "") key="" ;;
+  esac
+  if [ "${#key}" -ne 64 ]; then
+    echo "ERROR: could not generate an encryption key (need openssl or /dev/urandom)."
+    return 1
+  fi
+  # Written to a temporary name, then hard-linked into place: the link fails
+  # if the key file appeared meanwhile (never overwritten), and a failed
+  # write never leaves a half-written key behind under the real name.
+  tmp="secrets/.blackvault_encryption_key.tmp.$$"
+  if ! (umask 077 && printf '%s\n' "$key" > "$tmp"); then
+    key=""
+    rm -f "$tmp"
+    echo "ERROR: could not write the encryption key to secrets/."
+    return 1
+  fi
+  key=""
+  if ! ln "$tmp" "$ENCRYPTION_KEY_FILE" 2>/dev/null; then
+    rm -f "$tmp"
+    if [ -e "$ENCRYPTION_KEY_FILE" ]; then
+      echo "Encryption key: $ENCRYPTION_KEY_FILE (existing, unchanged)"
+      return 0
+    fi
+    echo "ERROR: could not create $ENCRYPTION_KEY_FILE."
+    return 1
+  fi
+  rm -f "$tmp"
+  chmod 600 "$ENCRYPTION_KEY_FILE"
+  print_key_backup_box "$PWD/$ENCRYPTION_KEY_FILE"
+  return 0
+}
