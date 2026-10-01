@@ -261,9 +261,54 @@ function backupFileName(request: NextRequest): string | undefined {
 }
 
 /**
+ * Review round 2, M2 follow-up: the original `/^P2\d{3}$/` match was too
+ * broad. It also matched P2024 (timed out fetching a connection from the
+ * pool), P2028 (a transaction API error — e.g. the transaction already
+ * closed) and P2034 (a transaction failed due to a write conflict or
+ * deadlock, safe to retry) — none of those are about the uploaded FILE's
+ * content, and calling them 400 would misreport a real infrastructure
+ * problem as "your backup file is bad."
+ *
+ * This is an explicit ALLOW-list instead: only Prisma Client error codes
+ * that mean "the data itself doesn't fit the schema" (Prisma 5.22 error
+ * reference, https://www.prisma.io/docs/orm/reference/error-reference).
+ * Restore only ever calls `deleteMany`/`createMany` with no relational
+ * connects or raw queries, so not every content code below is reachable in
+ * practice today, but each is still a genuine "bad data" code, never an
+ * infra one, so including it is safe:
+ *
+ * - P2000  The provided value for a column is too long for the column's type.
+ * - P2001  The record searched for does not exist (a `where` target is missing).
+ * - P2002  Unique constraint failed (e.g. a duplicate serial's fingerprint).
+ * - P2003  Foreign key constraint failed on a field.
+ * - P2004  A constraint failed on the database.
+ * - P2005  The stored value is invalid for the field's type.
+ * - P2006  The provided value is not valid for the field.
+ * - P2007  Data validation error.
+ * - P2011  Null constraint violation on a field.
+ * - P2012  Missing a required value.
+ * - P2013  Missing a required argument.
+ * - P2014  The change would violate a required relation between two records.
+ * - P2019  Input error (a nested write's input doesn't satisfy a constraint).
+ * - P2020  Value out of range for the field's type.
+ *
+ * Deliberately EXCLUDED: P2008/P2009/P2010/P2016 (query building/parsing —
+ * a bug, not file content), P2015/P2017/P2018 (relation lookups — restore
+ * does no relational connects), P2021/P2022 (schema/column mismatch — a
+ * real schema-drift bug), P2024/P2028/P2034 (connection pool timeout,
+ * transaction API error, write conflict — infrastructure, not content; the
+ * review's own example, P2028, is proven to stay 500 below), and anything
+ * outside P2xxx entirely.
+ */
+const RESTORE_CONTENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "P2000", "P2001", "P2002", "P2003", "P2004", "P2005", "P2006", "P2007",
+  "P2011", "P2012", "P2013", "P2014", "P2019", "P2020",
+]);
+
+/**
  * Whether `error` is a CONTENT problem with the uploaded file — a duplicate
  * serial, a wrong type on a column, a non-string serial (review M2) — rather
- * than a genuine server fault. These three shapes are everything the write
+ * than a genuine server fault. These shapes are everything the write
  * transaction below can throw for bad file content:
  * - our own `TypeError` (the encryption extension's `serialize()`, or
  *   `normalizeLegacyNfaDate` above, both throw a templated TypeError for a
@@ -272,17 +317,18 @@ function backupFileName(request: NextRequest): string | undefined {
  *   `.name` only, duck-typed like the code check below: the SQLite and
  *   Postgres clients each ship their own error classes, so `instanceof`
  *   against one would miss the other);
- * - a Prisma "known request" error, e.g. P2002 on a duplicate
- *   `serialNumberHash` (the pattern `@/lib/auth/route-helpers.ts`'s
- *   `isUniqueViolation` already uses, generalised to the P2xxx family).
- * Anything else (a real outage, a bug) is left to stay a 500.
+ * - a Prisma "known request" error whose `.code` is in the allow-list above
+ *   (the pattern `@/lib/auth/route-helpers.ts`'s `isUniqueViolation`
+ *   already uses for P2002 alone, generalised here to the rest of the
+ *   content-error family — and ONLY that family).
+ * Anything else (a real outage, a timeout, a bug) is left to stay a 500.
  */
 function isRestoreContentError(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (typeof error !== "object" || error === null) return false;
   const e = error as { name?: unknown; code?: unknown };
   if (e.name === "PrismaClientValidationError") return true;
-  return typeof e.code === "string" && /^P2\d{3}$/.test(e.code);
+  return typeof e.code === "string" && RESTORE_CONTENT_ERROR_CODES.has(e.code);
 }
 
 /**

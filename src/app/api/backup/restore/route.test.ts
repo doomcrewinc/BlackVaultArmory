@@ -790,6 +790,46 @@ describe("POST /api/backup/restore", () => {
     spy.mockRestore();
   });
 
+  // Review round 2, M2 follow-up: the P2xxx match was too broad and also
+  // caught infrastructure codes. P2028 ("transaction API error") is the
+  // review's own example — it must stay 500, not become a false "your
+  // backup file is bad" 400.
+  it("M2 follow-up: P2028 (a transaction API error — infrastructure, not content) stays 500", async () => {
+    const err = Object.assign(new Error("Transaction API error: Transaction already closed"), {
+      name: "PrismaClientKnownRequestError",
+      code: "P2028",
+    });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status, JSON.stringify(json)).toBe(500);
+    expect(json.error).toMatch(/has not been modified/);
+    spy.mockRestore();
+  });
+
+  it.each(["P2024", "P2034"])("M2 follow-up: %s (connection timeout / write conflict — infrastructure) stays 500", async (code) => {
+    const err = Object.assign(new Error("infra"), { name: "PrismaClientKnownRequestError", code });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(500);
+    spy.mockRestore();
+  });
+
+  it.each(["P2002", "P2000", "P2003", "P2011", "P2020"])("M2 follow-up: %s (a content/constraint code) is 400", async (code) => {
+    const err = Object.assign(new Error("content"), { name: "PrismaClientKnownRequestError", code });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(400);
+    spy.mockRestore();
+  });
+
   it("M1: a PrismaClientValidationError's row-dumping message is never logged; code/name/model are", async () => {
     const dump = `Invalid \`prisma.firearm.create()\` invocation:\n{ data: { name: "SecretRifleName", notes: "SUPER SECRET NOTE", manufacturer: 12345 } }`;
     const err = Object.assign(new Error(dump), { name: "PrismaClientValidationError" });
