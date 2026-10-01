@@ -22,6 +22,36 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
 }
 
 /**
+ * Review (Task 5 fix round 2, M1): the plain-string `log` form (`["error"]`)
+ * makes Prisma print each event straight to stdout/stderr ITSELF — Prisma's
+ * own doing, not this app's `console.error` calls. For a
+ * `PrismaClientValidationError` that printed text is the full
+ * pretty-printed invocation: every field of every row in the failing write
+ * (reproduced directly against the SQLite client; see
+ * src/app/api/backup/restore/route.ts's `logRestoreError` for the same
+ * finding at the route-error-handling layer, fixed in round 1 — this is the
+ * SEPARATE leak at the Prisma-client-construction layer that round 1 missed).
+ *
+ * The object form (`{ emit: "event", level: "error" }`) suppresses that
+ * automatic printing and instead emits an `'error'` event on the client,
+ * handled below. Prisma's `LogEvent` (node_modules/@prisma/client/runtime/
+ * library.d.ts) is `{ timestamp, message, target }` — there is no `model` or
+ * `code` at this layer (those exist only on a caught
+ * `PrismaClientKnownRequestError`, which call sites like the restore route
+ * already log safely). `message` is exactly the unsafe string above and is
+ * NEVER logged here; only `target` (an engine-internal component tag, never
+ * row data) is.
+ */
+function logPrismaErrorEventSafely(client: { $on(event: "error", listener: (e: { message: string; target: string }) => void): void }): void {
+  client.$on("error", (e) => {
+    console.error(`[prisma] query engine error (target: ${e.target})`);
+  });
+}
+
+/** Every client this module constructs shares one log config: no automatic row-carrying stdout/stderr output (review M1). */
+const SAFE_LOG_CONFIG = [{ emit: "event", level: "error" }] as const;
+
+/**
  * A client with NO extensions (ruling R1): neither encryption nor audit. Only
  * for startup steps that must see and rewrite the stored form itself — the
  * key check and the one-time encryption migration (src/lib/encryption/
@@ -29,9 +59,9 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
  * `$disconnect()` it. Never use it to serve requests.
  */
 export function createRawPrismaClient(): PrismaClient {
-  return new (loadPrismaClient())({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
+  const client = new (loadPrismaClient())({ log: [...SAFE_LOG_CONFIG] });
+  logPrismaErrorEventSafely(client as unknown as Parameters<typeof logPrismaErrorEventSafely>[0]);
+  return client;
 }
 
 const globalForPrisma = globalThis as unknown as { prisma: AppPrismaClient | undefined };
@@ -49,14 +79,12 @@ const globalForPrisma = globalThis as unknown as { prisma: AppPrismaClient | und
  * Scripts and the migrator that construct their own PrismaClient are neither
  * audited nor encrypted.
  */
-export const prisma: AppPrismaClient =
-  globalForPrisma.prisma ??
-  (withAudit(
-    withEncryption(
-      new (loadPrismaClient())({
-        log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-      }),
-    ),
-  ) as unknown as AppPrismaClient);
+function buildAppClient(): AppPrismaClient {
+  const base = new (loadPrismaClient())({ log: [...SAFE_LOG_CONFIG] });
+  logPrismaErrorEventSafely(base as unknown as Parameters<typeof logPrismaErrorEventSafely>[0]);
+  return withAudit(withEncryption(base)) as unknown as AppPrismaClient;
+}
+
+export const prisma: AppPrismaClient = globalForPrisma.prisma ?? buildAppClient();
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;

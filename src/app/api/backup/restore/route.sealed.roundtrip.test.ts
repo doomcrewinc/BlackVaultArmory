@@ -422,4 +422,74 @@ describe("sealed backup round trip (field-encryption spec §3)", () => {
     const existing = await prisma.firearm.findUniqueOrThrow({ where: { id: "rt-firearm-existing" } });
     expect(existing.serialNumber).toBe("RT-SERIAL-EXISTING");
   });
+
+  // --- Review round 2, M1 (not fixed in round 1): Prisma's OWN log:["error"] ---
+  // printed row data to stdout/stderr directly, independent of this route's
+  // own console.error call. src/lib/prisma.ts now constructs every client
+  // with log: [{ emit: "event", level: "error" }] and a handler that never
+  // logs the event's .message (confirmed unsafe — see the comment at its
+  // definition), only .target. This is a REAL Prisma validation error (a
+  // genuine wrong-type column value), not a mocked error shape, with every
+  // console method AND the raw stdout/stderr write streams captured.
+
+  it("M1 (fix round 2): a real Prisma validation error during restore never prints the row's name or notes, on any output channel", async () => {
+    const canaryName = "StdoutLeakCanaryName";
+    const canaryNote = "StdoutLeakCanaryNote";
+    const captured: string[] = [];
+    const consoleSpies = (["log", "warn", "error", "info", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        captured.push(args.map((a) => (a instanceof Error ? `${a.message}\n${a.stack}` : String(a))).join(" "));
+      }),
+    );
+    const outWrite = process.stdout.write.bind(process.stdout);
+    const errWrite = process.stderr.write.bind(process.stderr);
+    process.stdout.write = ((chunk: unknown) => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: unknown) => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    let response: Response;
+    try {
+      response = await restoreBackup(
+        restoreRequest({
+          meta: { version: "1.1" },
+          firearms: [
+            {
+              id: "validation-leak-1",
+              name: canaryName,
+              manufacturer: 12345, // wrong type: a real PrismaClientValidationError, not a mock
+              model: "M",
+              caliber: "9mm",
+              serialNumber: "VALIDATION-LEAK-SER-1",
+              type: "PISTOL",
+              notes: canaryNote,
+              acquisitionDate: "2025-01-01T00:00:00.000Z",
+            },
+          ],
+          accessories: [], ammoStocks: [], gear: [], supplies: [], builds: [], buildSlots: [],
+          documents: [], imageCache: [], rangeSessions: [], rangeSessionAmmoLinks: [],
+          ammoTransactions: [], roundCountLogs: [], sessionDrills: [], maintenanceLogs: [],
+          batteryChangeLogs: [], dateNormalizationAudits: [], kits: [], kitItems: [],
+        }),
+      );
+    } finally {
+      process.stdout.write = outWrite;
+      process.stderr.write = errWrite;
+      consoleSpies.forEach((s) => s.mockRestore());
+    }
+    const json = await response.json();
+
+    expect(response.status, JSON.stringify(json)).toBe(400);
+    const all = captured.join("\n");
+    expect(all).not.toContain(canaryName);
+    expect(all).not.toContain(canaryNote);
+    expect(JSON.stringify(json)).not.toContain(canaryName);
+    expect(JSON.stringify(json)).not.toContain(canaryNote);
+    // The suppression actually ran (not a vacuous pass because nothing logged at all).
+    expect(all).toContain("PrismaClientValidationError");
+  });
 });
