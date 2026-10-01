@@ -101,9 +101,15 @@ migration on both providers.
 
 - `AppSettings.encryptionKeyCheck` holds the ciphertext of the fixed string `blackvault-key-check`
   (AAD `AppSettings.encryptionKeyCheck`).
-- It is created on the first run that has a key.
+- *(Corrected during implementation — see "Changes during implementation" below.)* It is
+  created **inside the encryption migration's transaction** (§2, step 3), never before —
+  so a failed first run never pins the database to a key nothing was actually encrypted
+  with. The startup key-check step itself (§2, step 1) is read-only.
 - On every start, a failure to decrypt it means refuse to start. The log names the expected key id and
-  the provided key id.
+  the provided key id. If the check is absent but the database already holds `bv2:` values
+  (no check ever existed, or it was lost), the key is instead verified by decrypting one of
+  those values directly: success self-heals (the migration recreates the check), and only
+  when **nothing** decrypts does it refuse to start (`KEY_CHECK_LOST`).
 
 ### Legacy values
 
@@ -114,16 +120,26 @@ Pre-V1 values in the `enc:` format (`src/lib/crypto.ts`) are recognized only by 
 
 ### Client order
 
-`base client → encryption extension → audit extension`, exported from `src/lib/prisma.ts`.
+`base client → encryption extension → audit extension` (the composition order:
+`withAudit(withEncryption(base))`), exported from `src/lib/prisma.ts`.
 
-*(Corrected during implementation — see "Changes during implementation" below.)* The audit
-layer's **write capture sees ciphertext, not plaintext**: it wraps the already-encrypting
-client, so the args it records for a create/update are the encrypted form. Its **read-back of
-before- and after-rows is decrypted**, because that read runs back up through the encryption
-extension on its way out. Either way, the **stored audit entries are redacted** before they are
-written, so a serial number or NFA field never appears in the audit log, encrypted or not. The
-first plan task is a real-DB proof, run on SQLite (`connection_limit=1`) and on Postgres, that
-these all pass through encryption correctly:
+*(Corrected during implementation, twice — see "Changes during implementation" below;
+fix round 1 corrected the correction.)* Composition order is not hook-firing order: Prisma
+runs an extended client's query hooks in the order the extensions were **added**, so the
+**encryption** hook — added first, by `withEncryption(base)` — runs first/outermost, and
+the **audit** hook runs nested inside it. Because of that nesting:
+- the audit layer's **write capture sees ciphertext, not plaintext** — it is nested inside
+  the encryption hook, which has already encrypted the args by the time audit's own hook
+  runs;
+- the audit layer's own before/after row reads are **fresh, independent calls that
+  re-enter the whole chain from the top**, so they pass through the encryption hook's
+  decrypt-on-read and come back decrypted — not because anything travels back "up
+  through" encryption from a single nested call.
+
+Either way, the **stored audit entries are redacted** before they are written, so a serial
+number or NFA field never appears in the audit log, encrypted or not. The first plan task
+is a real-DB proof, run on SQLite (`connection_limit=1`) and on Postgres, that these all
+pass through encryption correctly:
 - audit before-row reads;
 - audit writes, including nested creates;
 - the audit transaction re-dispatch.
@@ -175,10 +191,15 @@ written below. Strict reads (above) made the original order unworkable: the date
 value, a plaintext value left over from before the encryption migration ran would make the date
 migration's own read throw. See "Changes during implementation" below.)*
 
-1. **Load the key, then the key check (§1), together.** On failure, log one line naming each
-   source that was checked, then exit non-zero. Create the key check if it is absent and the
-   database has no encrypted values. If it is absent but `bv2:` values exist, refuse to start (the
-   key check was lost). A mismatch also refuses to start.
+1. **Load the key, then the key check (§1), together — read-only.** On failure, log one
+   line naming each source that was checked, then exit non-zero. This step never writes
+   anything, including the key check itself (that is created later, inside step 3's
+   transaction, and only on success). A key check present but undecryptable with the
+   loaded key refuses to start (`KEY_MISMATCH`, naming the expected and provided key id).
+   A key check absent while `bv2:` values already exist is **not** an automatic refusal:
+   the key is verified by attempting to decrypt one of those values directly — if one
+   decrypts, the key is proven and step 3 recreates the check (self-heal); only when
+   **none** of them decrypts does this refuse to start (`KEY_CHECK_LOST`).
 2. **Pre-encryption snapshot**, only when the database holds plaintext values to encrypt: on
    SQLite, `VACUUM INTO` a plaintext copy next to the database before the migration transaction
    opens (`VACUUM` cannot run inside a transaction). On PostgreSQL, the app cannot dump its own
@@ -189,6 +210,9 @@ migration's own read throw. See "Changes during implementation" below.)*
    - Decrypt `enc:` values with `VAULT_ENCRYPTION_KEY`. If an `enc:` value exists and that key is
      absent or wrong, roll back and refuse to start, naming the row and field.
    - Encrypt each value and fill `serialNumberHash`.
+   - Create `AppSettings.encryptionKeyCheck` if it is still absent at this point (§1 "Key
+     check") — inside this same transaction, so a failed migration never pins the database
+     to a key nothing was actually encrypted with.
    - Delete `DateNormalizationAudit` rows that hold a plaintext `nfaApprovalDate` value — a
      technical log, not the security audit, and the threat model forbids plaintext NFA at rest even
      there.
@@ -202,7 +226,10 @@ migration's own read throw. See "Changes during implementation" below.)*
      No event is written when nothing changed.
 
    The migration is idempotent. Any failure rolls back and refuses to start, logging the model, id
-   and field.
+   and field. *(Added during implementation, M8.)* A duplicate is possible here specifically
+   because two legacy `enc:` ciphertexts can encode the same plaintext serial without the old
+   unique index ever noticing — the migration refuses, naming both row ids (never the serial
+   itself), before writing anything.
 4. **Date migration.** The existing `runStartupDateMigration` runs last, after encryption. It
    skips the now-encrypted `nfaApprovalDate` entirely — step 3 already normalises a legacy NFA
    date to its calendar day before encrypting it, so there is nothing left for the date migration
@@ -239,16 +266,18 @@ differs from the date migration, which logs and continues.
 - Over direct plain-HTTP access, a warning is shown before sending.
 - The download is `blackvault-backup-<date>.sealed.json`.
 - `BACKUP_CREATED` records `sealed: true`.
-- *(Decided during implementation.)* **The request body cap is 64 MB** (`next.config.ts`'s
-  `experimental.proxyClientMaxBodySize`), which covers roughly 37,000 firearms with notes at the
-  measured sealed-envelope size ratio. This is a trade-off, not just a convenience limit: Next
-  buffers an entire incoming request body in memory *before* this (or any route-level) check ever
-  runs, so the cap also bounds how much memory an unauthenticated POST to any route can force the
-  process to hold — a larger figure (256 MB was tried first) let a handful of concurrent large
-  POSTs push the process toward multiple gigabytes of RSS before any handler ran. A household with
-  a larger inventory than 64 MB covers needs a CLI restore path instead of the browser UI (not
-  built yet). Document the reverse proxy's own body-size limit (e.g. Caddy, Nginx Proxy Manager) as
-  the real protection against this, since it rejects an oversized body before it ever reaches Next.
+- *(Decided during implementation — corrected in fix round 1.)* **The request body cap is
+  64 MB** (`next.config.ts`'s `experimental.proxyClientMaxBodySize`), which covers roughly
+  37,000 firearms with notes at the measured sealed-envelope size ratio. This number does
+  **not** meaningfully bound memory exposure: Next buffers an entire incoming request body
+  in memory *before* this (or any route-level) check ever runs, so even the previous
+  10 MB cap let a measured 624 MB through in testing — a larger cap (256 MB was tried
+  first here) makes that worse, but a smaller one does not make it safe. 64 MB is chosen
+  only to comfortably cover the legitimate restore-upload case; a household with a larger
+  inventory needs a CLI restore path instead of the browser UI (not built yet). The actual
+  protection against the memory-exhaustion risk is the **reverse proxy's own** body-size
+  limit (e.g. Caddy, Nginx Proxy Manager), which must be set and which rejects an oversized
+  body before it ever reaches Next — document that limit, not this cap, as the mitigation.
 
 ### Restore
 
@@ -257,10 +286,18 @@ differs from the date migration, which logs and continues.
 - A plain JSON backup restores after a warning that the file is not encrypted.
 - Restored values are written through the extension, so they are encrypted with the current key.
 - `RESTORE` records `sealed: true|false`.
+- *(Added during implementation, M8.)* A backup written before this spec shipped can still carry
+  a pre-V1 `enc:...` value (the old `src/lib/crypto.ts` scheme) — restore decrypts it with
+  `VAULT_ENCRYPTION_KEY` first, in place, so the extension then encrypts the real plaintext under
+  the current key rather than storing the literal string `"enc:..."`. It can also carry
+  `DateNormalizationAudit` rows for the now-encrypted `nfaApprovalDate`, which restore drops for
+  the same reason the startup migration deletes them (plaintext NFA copies); any legacy NFA date
+  it does restore is normalised to its calendar day the same way the startup migration does.
 
 ### Shared crypto core
 
-`src/lib/encryption/core.mjs` is plain ESM, with `core.d.ts` beside it. It holds:
+`src/lib/encryption/core.mjs` is plain ESM, with `core.d.mts` beside it *(shipped as
+`.d.mts`, not `.d.ts` as first written here — Task 1 carry I1)*. It holds:
 - key parsing and loading;
 - HKDF subkeys;
 - field encrypt/decrypt;
@@ -284,11 +321,30 @@ Host wrappers `rotate-key.sh` and `rotate-key.bat` run these steps:
    - recomputes every `serialNumberHash`;
    - replaces `encryptionKeyCheck`;
    - writes `KEY_ROTATED` (actor `system (key rotation)`, `changes: { from: oldKeyId, to: newKeyId, counts }`).
-5. On success, move the old key to `…key.old` and the new key into place.
+5. On success, move the old key to `secrets/blackvault_encryption_key.old-<timestamp>` *(corrected
+   during implementation — see "Changes during implementation": never the bare `…key.old`, so a
+   second rotation never overwrites the file the pre-rotation snapshot needs)* and the new key into
+   place.
 6. Start the app.
 
-On any failure the database transaction rolls back, the key files are left as they were, and the
-reason is printed. The script refuses to run if the stored key check does not match the current key.
+*(Corrected during implementation.)* On any failure the database transaction rolls back and the
+reason is printed, but the key files are not simply "left as they were" in every case: the
+rotation script can exit non-zero AFTER its transaction already committed (a disconnect error, a
+broken pipe), so the wrapper cannot treat every non-zero exit as "nothing changed". A non-zero
+rotation run is instead followed by a read-only `--probe` that asks the database itself which key
+its stored check actually opens with:
+- **NEW** (the rotation did take effect) → complete the swap exactly as a normal success would;
+- **OLD** (it did not) → rename the unused new key to
+  `secrets/blackvault_encryption_key.new.unused-<timestamp>` (never deleted — it can be removed by
+  hand once the app has run normally on the old key) and restart on the old key;
+- **ambiguous or the probe itself fails** → leave every key file untouched, do **not** start the
+  app, and print the exact commands to resolve it by hand.
+
+The wrappers **never delete a key file** in any of these paths. Before any of this runs, a
+leftover `secrets/blackvault_encryption_key.new` from an earlier, unresolved rotation makes the
+wrapper **refuse to run at all** — it may be the only remaining copy of the key the database is
+encrypted with — until it is moved out of `secrets/` by hand. The script also refuses to run if
+the stored key check does not match the current key.
 
 ### Installers
 
@@ -306,16 +362,28 @@ reason is printed. The script refuses to run if the stored key check does not ma
   - Postgres: `pg_dump` via the db container.
 - Say that the snapshot is plaintext and can be deleted once the upgrade is confirmed.
 - Stop the update if the snapshot fails.
+- *(Added during implementation, M8.)* `update.sh` re-executes itself once a pull actually brought
+  changes, so later upgrades (this one's second run included) run the fully new script rather
+  than finishing out the old one. Separately, if `install.bat`/`update.bat` are the only files
+  Git reports modified, and the difference is line endings only, the script temporarily marks
+  them `-text` in `.git/info/attributes` (restoring any existing file byte for byte, including one
+  with no trailing newline) so the pull is not blocked by a difference that is not a real local
+  edit; the override never outlives the run, and every run first strips one an interrupted
+  previous run could not clean up.
 
-*(Added during implementation.)* **The app also takes its own snapshot, for the first upgrade
-specifically.** `update.sh` / `update.bat` git-pull themselves and keep running the *already
-loaded, old* copy of the script for the rest of that run, so the very first upgrade into this
-spec is driven by an old script that has no idea it needs to take a snapshot before this feature
-encrypts existing data. To cover that one case, the app's own startup (§2, step 2) takes a
-plaintext SQLite snapshot itself, next to the database, whenever it is about to encrypt
-pre-existing data — regardless of whether it was started by the old update script, the new one,
-or by hand. On Linux this app-side snapshot is owned by the container's uid 1001, so removing it
-needs `sudo`.
+*(Added during implementation — corrected in fix round 1.)* **The app also takes its own
+snapshot, for the first upgrade specifically, on Mac/Linux.** `update.sh` git-pulls itself and
+then keeps running — bash does not reload a running script out from under itself — so the rest
+of that first run is still the *old* `update.sh`, which has no idea it needs to take a snapshot
+before this feature encrypts existing data. `update.bat` does **not** have this problem the same
+way: cmd.exe resumes a running batch file by byte offset, and the pull replaces the file
+underneath it such that the resumed execution lands inside the **newly-pulled** script, past its
+own `git pull` line — so even a Windows user's very first run is effectively the new script, and
+creates the key and takes the update-script snapshot in one pass. To cover the Mac/Linux gap (and
+as a safety net regardless of how BlackVault was started), the app's own startup (§2, step 2)
+takes a plaintext SQLite snapshot itself, next to the database, whenever it is about to encrypt
+pre-existing data. On Linux this app-side snapshot is owned by the container's uid 1001, so
+removing it needs `sudo`.
 
 ### Compose
 
@@ -333,6 +401,11 @@ during implementation".)*
   key file owned by whoever ran the installer (uid 1000); and a missing key file under `secrets:`
   blocks container creation outright, which hides the friendlier `KEY_MISSING` message this app
   prints instead.
+- *(Added during implementation, M8.)* The image's Dockerfile no longer has a `USER nextjs` line
+  — the entrypoint above needs to start as root to do that key copy. One side effect:
+  `docker compose exec` (which bypasses the entrypoint) now defaults to root instead of `nextjs`,
+  so an admin command run that way should add `-u nextjs` to avoid leaving root-owned files on
+  the data volume.
 - `BLACKVAULT_ENCRYPTION_KEY` is passed through, empty by default.
 - `VAULT_ENCRYPTION_KEY` stays passed through for the legacy `enc:` upgrade path.
 - The rule that env keys use the `BLACKVAULT_` prefix applies to every new key.
@@ -344,6 +417,10 @@ during implementation".)*
 - Every startup failure produces one log line with a fix hint, then a non-zero exit.
 - Runtime decrypt failures surface through the normal error boundary. Ciphertext is never rendered.
 - Unsupported queries throw, so tests catch them.
+- *(Added during implementation, M8.)* Every Prisma client this app constructs logs errors as an
+  `'error'` **event** (`emit: "event"`), never the plain-string log form — which would have Prisma
+  print the full failing query, row data included, straight to stdout/stderr on a validation
+  error. The event handler logs only an engine-internal target tag, never the message.
 
 ### Tests
 
@@ -405,43 +482,86 @@ This section lists every place the shipped build deviates from what was written 
 when Task 8 corrected the spec to match reality. Each item is also marked inline, above, where it
 applies.
 
-1. **§2, "The audit layer sees plaintext args and decrypted rows."** Wrong: the audit layer's
-   write capture sees **ciphertext**, because it wraps the already-encrypting client. Only its
-   read-back of before/after rows is decrypted (the read path runs back up through the encryption
-   extension). The stored audit entries are redacted regardless of which form they saw. See
-   "Client order" above.
+1. **"The audit layer sees plaintext args and decrypted rows"** (originally in "Client order"
+   above). Wrong, and fix round 1's first attempt at correcting it was *also* wrong (it said
+   encryption "must sit under" audit and the read-back travels "back up through" encryption —
+   backwards nesting). What actually happens, per `src/lib/encryption/extension.ts`'s REDISPATCH
+   comment: the **encryption** hook runs first/outermost in `withAudit(withEncryption(base))`,
+   and the **audit** hook runs *nested inside it*. So audit's write capture sees **ciphertext**
+   (encryption's hook already ran on the way in), and audit's own before/after row reads are
+   decrypted because they are **fresh calls that re-enter the whole chain from the top**, not
+   because a result travels back up a single nested call. The stored audit entries are redacted
+   regardless of which form they saw. See "Client order" above.
 2. **Startup order.** The spec originally wrote key check → date migration → encryption
    migration. The shipped order is **key check → pre-encryption snapshot → encryption migration
-   → date migration**. Reads are strict (see below), so the date migration — which reads
-   `nfaApprovalDate` through the app client — cannot run before the encryption migration has
-   guaranteed every value in that column is either still legitimately plain (not yet encrypted
-   at all) or `bv2:` ciphertext; running it in between left a window where a partially-migrated
-   database could make the date migration's own read throw. The encryption migration also now
-   does two things the spec didn't originally call for, in the same transaction: it deletes
-   `DateNormalizationAudit` rows holding a plaintext NFA date, and it scrubs plaintext NFA values
-   out of existing `AuditEvent.changes` rows (decided by the user, 2026-09-30) — spec 2b's audit
-   log predates NFA-field redaction.
+   → date migration**. The reason: reads are strict (item 6 below), so the date migration — which
+   reads `nfaApprovalDate` through the app client — must not run until the encryption migration
+   has guaranteed every value in that column is either legitimately still plain (not yet reached
+   by the migration) or `bv2:` ciphertext; running the date migration any earlier risks it hitting
+   a value the migration hasn't converted yet and throwing on a read that used to just see
+   plaintext. The encryption migration also now does two things the spec didn't originally call
+   for, in the same transaction: it deletes `DateNormalizationAudit` rows holding a plaintext NFA
+   date, and it scrubs plaintext NFA values out of existing `AuditEvent.changes` rows (decided by
+   the user, 2026-09-30) — spec 2b's audit log predates NFA-field redaction.
 3. **Compose `secrets:`.** Replaced by a read-only bind mount of the whole `secrets/` folder, an
    in-memory `tmpfs` at `/run/secrets`, and an entrypoint script that copies just the key file(s)
    into it as the app's own user. A non-Swarm Compose `secrets:` entry ignores uid/gid/mode on the
-   mounted file, so the app user (uid 1001) could never read a key file owned by the installer's
-   user (uid 1000) on native Linux Docker; it also blocks container creation outright when the
-   key file is missing, hiding the friendlier `KEY_MISSING` startup message.
-4. **The app takes its own pre-encryption snapshot, for the first upgrade.** Not in the original
-   spec. `update.sh` / `update.bat` git-pull themselves and finish their run as the *old* script,
-   so the very first upgrade into this spec runs an update script with no idea it should snapshot
-   first. The app's own startup snapshots the SQLite database itself (step 2 above) whenever it is
-   about to encrypt pre-existing data, independent of which script (if any) launched it.
-5. **The body cap is 64 MB,** not a number the original spec named. Settled after a 256 MB figure
-   was tried and found to let a few concurrent large, unauthenticated POSTs push the process
-   toward multiple gigabytes of memory before any handler ran (Next buffers the whole body before
-   any check). 64 MB comfortably covers the backup/restore case and bounds that exposure; the
-   reverse proxy's own body-size limit is documented as the real protection.
+   mounted file, so the app user (uid 1001) could never read a key file owned by whoever ran the
+   installer (uid 1000) on native Linux Docker; it also blocks container creation outright when
+   the key file is missing, hiding the friendlier `KEY_MISSING` startup message. See "Compose"
+   above.
+4. **The app takes its own pre-encryption snapshot, for the first upgrade — on Mac/Linux.** Not
+   in the original spec, and fix round 1's first version of this item wrongly said `update.bat`
+   has the same gap as `update.sh`. `update.sh` git-pulls itself and then keeps running as the
+   *old* script (bash does not reload a running script), so the very first Mac/Linux upgrade into
+   this spec has no idea it should snapshot first. `update.bat` does not share this gap: cmd.exe
+   resumes a running batch file by byte offset, and that offset lands inside the **newly-pulled**
+   file past its own `git pull` line, so even a Windows user's first run is effectively the new
+   script. The app's own startup snapshots the SQLite database itself (step 2 above) whenever it
+   is about to encrypt pre-existing data, regardless of platform or which script (if any) launched
+   it, as a safety net either way. See "Update scripts" above.
+5. **The body cap is 64 MB,** not a number the original spec named — but, corrected in fix round
+   1, **it does not bound memory exposure**. Next buffers an entire request body before this (or
+   any) check runs, so even the previous 10 MB cap let a measured 624 MB through; a smaller cap
+   does not make that safe, it only changes how large a legitimate restore upload may be. 64 MB
+   was chosen to comfortably cover the backup/restore case (roughly 37,000 firearms with notes).
+   The actual protection against the memory-exhaustion risk is the reverse proxy's own body-size
+   limit, which must be set and is documented as the real mitigation — not this cap. See "Backup
+   UI" above.
 6. **Reads are strict.** The spec described a read throwing only when decryption *fails*. The
    shipped extension also throws when a non-null registered-column value is simply not in `bv2:`
    form at all (`PLAINTEXT_AT_REST`) — a value that reaches the app client that way is a bug (a
    missed write path), and the strict read turns it into a visible error instead of a silent
    plaintext leak.
+7. **The key check is created inside the encryption migration's transaction, not eagerly, and a
+   lost check self-heals.** The spec originally said the check "is created on the first run that
+   has a key" and that an absent check with existing `bv2:` values refuses to start
+   unconditionally. Neither matches the shipped behaviour: the startup key-check step (§2, step 1)
+   is read-only; the check is created only inside step 3's transaction, on success, so a failed
+   first migration never pins the database to a key nothing was encrypted with; and an absent
+   check with existing `bv2:` values is verified by decrypting one of them directly — success
+   self-heals (the migration recreates the check), and `KEY_CHECK_LOST` is raised only when
+   **nothing** decrypts. See "Key check" and the startup sequence above.
+8. **Rotation's failure handling and the old key's name.** The spec said the old key moves to the
+   bare `…key.old` and that any failure leaves the key files "as they were". Shipped: the old key
+   moves to a **timestamped** `…key.old-<timestamp>` (so a second rotation never overwrites the
+   file the pre-rotation snapshot needs); a rotation run that exits non-zero is not assumed to
+   have changed nothing — the wrapper probes the database to find out, and completes the swap,
+   restarts on the old key with the unused new key renamed aside
+   (`…key.new.unused-<timestamp>`, never deleted), or — if that probe itself cannot tell — leaves
+   every key file untouched and does not start the app, printing exact recovery commands instead
+   of guessing; the wrappers never delete a key file in any of these paths; and a leftover `.new`
+   from an earlier, unresolved rotation makes the wrapper refuse to run at all until it is moved
+   out of `secrets/` by hand. See "Rotation" above.
+9. **Minor items not previously listed:** `docker compose exec` defaulting to root (no `USER`
+   line in the image any more) and needing `-u nextjs` for admin commands (see "Compose" above);
+   Prisma error logging being event-only and never logging the raw message (see "Errors" above);
+   `update.sh`'s self-re-exec after a pull and its temporary `.git/info/attributes` line-ending
+   override (see "Update scripts" above); restore's handling of a legacy `enc:` value, a legacy
+   NFA-date normalisation, and dropped `DateNormalizationAudit` rows in an old backup (see
+   "Restore" above); the encryption migration's refusal on two legacy `enc:` serials that decrypt
+   to the same plaintext (see "Encryption migration" above); and `core.mjs`'s type declaration
+   file shipping as `core.d.mts`, not `core.d.ts` (see "Shared crypto core" above).
 
 ## Known limitations
 
