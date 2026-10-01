@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 /**
  * scripts/rotate-encryption-key.mjs against REAL databases, run exactly as
@@ -84,6 +85,17 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     });
   }
 
+  /** Runs the script under `node --require <preloadPath>` — the injection mechanism fix round 1's C1 test needs. */
+  function runScriptWithPreload(args: string[], preloadPath: string) {
+    return spawnSync("node", ["--require", preloadPath, "scripts/rotate-encryption-key.mjs", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env },
+    });
+  }
+
+  const DISCONNECT_THROWS_PRELOAD = path.join(process.cwd(), "scripts", "rotate-encryption-key.disconnect-throws.preload.cjs");
+
   /** Every table this suite writes, emptied in FK order. */
   async function wipe() {
     await raw.auditEvent.deleteMany();
@@ -109,8 +121,13 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     return encryptValue(keys, aadFor(model, field), plaintext);
   }
 
-  /** Seeds one Firearm (full NFA paperwork), one bare Firearm (serial only), one Accessory, one Gear, and the key check — all under `keys`. */
-  async function seed(keys: FieldKeysLike) {
+  /**
+   * Seeds one Firearm (full NFA paperwork), one bare Firearm (serial only), one Accessory, one Gear, and the key
+   * check — all under `keys`. `updatedAt`, when given, is written explicitly on every rotated-model row (Prisma
+   * honours an explicit value over its own `@updatedAt` auto-set), for the I4 "rotation preserves updatedAt" test.
+   */
+  async function seed(keys: FieldKeysLike, updatedAt?: Date) {
+    const stamp = updatedAt ? { updatedAt } : {};
     await raw.firearm.create({
       data: {
         id: "f-nfa",
@@ -128,6 +145,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
         nfaTaxPaid: enc(keys, "Firearm", "nfaTaxPaid", "200"),
         nfaRegisteredTo: enc(keys, "Firearm", "nfaRegisteredTo", "Family Trust"),
         acquisitionDate: new Date("2024-01-01T00:00:00.000Z"),
+        ...stamp,
       },
     });
     await raw.firearm.create({
@@ -141,6 +159,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
         serialNumberHash: fingerprint(keys, "SN-ROTATE-2"),
         type: "PISTOL",
         acquisitionDate: new Date("2024-02-01T00:00:00.000Z"),
+        ...stamp,
       },
     });
     await raw.accessory.create({
@@ -154,9 +173,10 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
         nfaControlNumber: enc(keys, "Accessory", "nfaControlNumber", "ACTRL-0001"),
         nfaApprovalDate: enc(keys, "Accessory", "nfaApprovalDate", "2026-02-01T00:00:00.000Z"),
         nfaTaxPaid: enc(keys, "Accessory", "nfaTaxPaid", "200"),
+        ...stamp,
       },
     });
-    await raw.accessory.create({ data: { id: "a-plain", name: "Light", manufacturer: "Surefire", type: "LIGHT" } });
+    await raw.accessory.create({ data: { id: "a-plain", name: "Light", manufacturer: "Surefire", type: "LIGHT", ...stamp } });
     await raw.gear.create({
       data: {
         id: "g-1",
@@ -164,6 +184,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
         category: "ARMOR",
         serialNumber: enc(keys, "Gear", "serialNumber", "GEAR-ROTATE-1"),
         serialNumberHash: fingerprint(keys, "GEAR-ROTATE-1"),
+        ...stamp,
       },
     });
     await raw.appSettings.create({
@@ -361,7 +382,9 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
   it("usage: missing flags exit 2 with a usage message, before touching the database", async () => {
     const result = runScript([]);
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain("Usage: node scripts/rotate-encryption-key.mjs --old-key-file <path> --new-key-file <path>");
+    expect(result.stderr).toContain(
+      "Usage: node scripts/rotate-encryption-key.mjs [--probe] --old-key-file <path> --new-key-file <path>",
+    );
   });
 
   it("a nonexistent key file exits 1 naming the flag, not the key", async () => {
@@ -380,4 +403,129 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     expect(result.stderr.trim().split("\n")).toHaveLength(1);
     expect(result.stderr).toMatch(/64 hex characters/);
   });
+
+  // ── fix round 1 ────────────────────────────────────────────────
+
+  it("I4: preserves updatedAt on every rotated row", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const fixedUpdatedAt = new Date("2020-06-15T12:00:00.000Z");
+    await seed(oldKeys, fixedUpdatedAt);
+
+    const oldKeyFile = keyFile("old-i4", oldHex);
+    const newKeyFile = keyFile("new-i4", newHex);
+    const result = runScript(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+
+    const rows = [
+      ...(await raw.firearm.findMany()),
+      ...(await raw.accessory.findMany()),
+      ...(await raw.gear.findMany()),
+    ];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect((row.updatedAt as Date).toISOString(), `${row.id}.updatedAt`).toBe(fixedUpdatedAt.toISOString());
+    }
+  }, 60_000);
+
+  it("M4: a failure mid-rotation names the model, id and field", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const thirdHex = generateKeyHex();
+    await seed(keysFromHex(oldHex));
+    await raw.accessory.update({
+      where: { id: "a-nfa" },
+      data: { nfaControlNumber: enc(keysFromHex(thirdHex), "Accessory", "nfaControlNumber", "CTRL-WRONG-KEY") },
+    });
+
+    const oldKeyFile = keyFile("old-m4", oldHex);
+    const newKeyFile = keyFile("new-m4", newHex);
+    const result = runScript(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Cannot rotate Accessory.nfaControlNumber for id a-nfa");
+  }, 60_000);
+
+  // ── C1: probe mode ───────────────────────────────────────────────
+
+  it("--probe reports OLD before rotation and NEW after, exiting 0 both times", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    await seed(keysFromHex(oldHex));
+    const oldKeyFile = keyFile("old-probe-1", oldHex);
+    const newKeyFile = keyFile("new-probe-1", newHex);
+
+    const before = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(before.status, `stderr: ${before.stderr}`).toBe(0);
+    expect(before.stdout.trim()).toBe("OLD");
+
+    const rotated = runScript(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(rotated.status, `stderr: ${rotated.stderr}`).toBe(0);
+
+    const after = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(after.status, `stderr: ${after.stderr}`).toBe(0);
+    expect(after.stdout.trim()).toBe("NEW");
+  }, 60_000);
+
+  it("--probe reports NEITHER, and exits 0, when the key check opens under neither file", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const thirdHex = generateKeyHex();
+    await seed(keysFromHex(thirdHex)); // key check under a key neither file names
+    const oldKeyFile = keyFile("old-probe-2", oldHex);
+    const newKeyFile = keyFile("new-probe-2", newHex);
+
+    const result = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout.trim()).toBe("NEITHER");
+  }, 60_000);
+
+  it("--probe exits non-zero (prints nothing on stdout) when it cannot tell: no key check at all", async () => {
+    const oldKeyFile = keyFile("old-probe-3", generateKeyHex());
+    const newKeyFile = keyFile("new-probe-3", generateKeyHex());
+
+    const result = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/cannot determine which key/);
+  });
+
+  // ── C1: the reviewer's post-commit injection ─────────────────────
+
+  it("C1: exits 0 when $disconnect throws AFTER the transaction has committed — the rotation already succeeded", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+
+    const oldKeyFile = keyFile("old-c1", oldHex);
+    const newKeyFile = keyFile("new-c1", newHex);
+    const result = runScriptWithPreload(
+      ["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile],
+      DISCONNECT_THROWS_PRELOAD,
+    );
+
+    expect(result.status, `stdout: ${result.stdout} stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(`Rotated encryption key ${oldKeys.id} -> ${newKeys.id}`);
+    expect(result.stderr).toMatch(/Warning: rotation committed, but disconnecting from the database afterwards failed/);
+
+    // The commit really happened: every row is under the NEW key, and the
+    // key check only opens with the NEW key — proving this isn't exit 0
+    // papering over a rollback.
+    const firearm = await raw.firearm.findUniqueOrThrow({ where: { id: "f-nfa" } });
+    expect(envelopeKeyId(firearm.serialNumber as unknown as string)).toBe(newKeys.id);
+    const settings = await raw.appSettings.findUniqueOrThrow({ where: { id: "singleton" } });
+    expect(decryptValue(newKeys, KEY_CHECK_AAD, settings.encryptionKeyCheck as string)).toBe(KEY_CHECK_PLAINTEXT);
+    const events = await raw.auditEvent.findMany({ where: { action: "KEY_ROTATED" } });
+    expect(events).toHaveLength(1);
+
+    // And the wrapper's recovery tool agrees: the probe reads NEW, so a
+    // wrapper that runs it after a non-zero exit from this script would
+    // correctly complete the swap rather than deleting the new key file.
+    const probe = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim()).toBe("NEW");
+  }, 60_000);
 });

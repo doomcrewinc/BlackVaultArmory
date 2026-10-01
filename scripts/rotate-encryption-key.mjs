@@ -19,9 +19,22 @@
 // that is rotate-key.sh/.bat's job (step 6 of the spec's rotation list).
 //
 // Usage: node scripts/rotate-encryption-key.mjs --old-key-file <path> --new-key-file <path>
-//   exit 0  success — one line naming the old/new key ids (never the keys) and row counts
-//   exit 1  refusal or failure — one line on stderr; nothing changed
+//   exit 0  success — one line naming the old/new key ids (never the keys) and row counts.
+//           Exits 0 IFF the transaction committed (fix round 1, C1): a failure AFTER that
+//           point (closing the DB connection, a broken stdout pipe) is printed as a
+//           warning, never turns a committed rotation into a non-zero exit — the wrapper's
+//           --probe mode, not this exit code, is what tells a caller "did it commit?" when
+//           something fails around the edges of a run.
+//   exit 1  refusal, or a failure BEFORE commit — one line on stderr; nothing changed
 //   exit 2  usage error
+//
+// Probe mode: node scripts/rotate-encryption-key.mjs --probe --old-key-file <path> --new-key-file <path>
+//   Read-only. Prints exactly one of OLD, NEW or NEITHER (which key currently opens
+//   AppSettings.encryptionKeyCheck) and exits 0. Exits non-zero (nothing printed on
+//   stdout) when it cannot tell — DB unreachable, no key check row, or a key file itself
+//   unreadable. For the wrappers to use after any non-zero exit from a rotation run, to
+//   tell a committed rotation (now reads as NEW) from one that never took effect (OLD)
+//   from a state nobody can vouch for (NEITHER, or the probe itself failing).
 //
 // Plain JS (no ts-node in the runner image), so it cannot import the TS
 // helpers directly, exactly like scripts/admin-reset-link.mjs. It imports
@@ -92,20 +105,24 @@ const PAGE_SIZE = 500;
 const ROTATION_TX = { maxWait: 10_000, timeout: 600_000 };
 
 function usage() {
-  console.error("Usage: node scripts/rotate-encryption-key.mjs --old-key-file <path> --new-key-file <path>");
+  console.error(
+    "Usage: node scripts/rotate-encryption-key.mjs [--probe] --old-key-file <path> --new-key-file <path>",
+  );
 }
 
 function parseArgs(argv) {
   let oldKeyFile;
   let newKeyFile;
+  let probe = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--old-key-file") oldKeyFile = argv[++i];
     else if (a === "--new-key-file") newKeyFile = argv[++i];
+    else if (a === "--probe") probe = true;
     else return null;
   }
   if (!oldKeyFile || !newKeyFile) return null;
-  return { oldKeyFile, newKeyFile };
+  return { oldKeyFile, newKeyFile, probe };
 }
 
 /** Reads a key file into derived FieldKeys, or throws RotationError with a one-line, key-free message. */
@@ -140,6 +157,15 @@ function loadPrismaClient() {
   return require("@prisma/client").PrismaClient;
 }
 
+/** A row this script could not rotate — names the model, id and field, so an admin can find it (fix round 1, M4). */
+class RotationFieldError extends Error {
+  constructor(model, id, field, cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(`Cannot rotate ${model}.${field} for id ${id}: ${reason}`, { cause });
+    this.name = "RotationFieldError";
+  }
+}
+
 /**
  * Re-encrypts every registered field of one model under the new key,
  * paging through the table by id (never loading it whole), and returns the
@@ -147,13 +173,19 @@ function loadPrismaClient() {
  *
  * decryptValue throws EncryptionKeyError (KEY_MISMATCH if the row's key id
  * is not the old key's, MALFORMED if it is not bv2: ciphertext at all) —
- * left to propagate so the whole transaction rolls back: a row rotation
- * cannot partially succeed.
+ * wrapped as RotationFieldError (naming the row) and left to propagate, so
+ * the whole transaction rolls back: a row rotation cannot partially succeed.
+ *
+ * `updatedAt` is written back unchanged (fix round 1, I4) — rotating a row's
+ * encryption is not an edit, the same rule src/lib/encryption/startup.ts's
+ * encryption migration follows for the same reason ("recently updated"
+ * lists must not all jump to the rotation time).
  */
 async function rotateModel(tx, model, delegate, fields, oldKeys, newKeys) {
   const hasFingerprint = fields.some((f) => f.fingerprint);
   const select = {
     id: true,
+    updatedAt: true,
     ...(hasFingerprint ? { serialNumberHash: true } : {}),
     ...Object.fromEntries(fields.map((f) => [f.field, true])),
   };
@@ -175,12 +207,17 @@ async function rotateModel(tx, model, delegate, fields, oldKeys, newKeys) {
         const stored = row[f.field];
         if (stored === null || stored === undefined) continue;
         const aad = aadFor(f.model, f.field);
-        const plaintext = decryptValue(oldKeys, aad, stored);
+        let plaintext;
+        try {
+          plaintext = decryptValue(oldKeys, aad, stored);
+        } catch (e) {
+          throw new RotationFieldError(model, row.id, f.field, e);
+        }
         data[f.field] = encryptValue(newKeys, aad, plaintext);
         if (f.fingerprint) data.serialNumberHash = fingerprint(newKeys, plaintext);
       }
       if (Object.keys(data).length > 0) {
-        await tx[delegate].update({ where: { id: row.id }, data });
+        await tx[delegate].update({ where: { id: row.id }, data: { ...data, updatedAt: row.updatedAt } });
         updated++;
       }
     }
@@ -197,27 +234,54 @@ function describeFailure(e) {
   return message.replace(/\s+/g, " ");
 }
 
-async function main() {
-  const parsed = parseArgs(process.argv.slice(2));
-  if (!parsed) {
-    usage();
-    process.exitCode = 2;
-    return;
-  }
-
-  let oldKeys;
-  let newKeys;
+/** True iff `keys` decrypts `check` to exactly the fixed key-check plaintext. Never throws. */
+function opensKeyCheck(keys, check) {
   try {
-    oldKeys = readKeyFile("--old-key-file", parsed.oldKeyFile);
-    newKeys = readKeyFile("--new-key-file", parsed.newKeyFile);
-  } catch (e) {
-    console.error(describeFailure(e));
-    process.exitCode = 1;
-    return;
+    return decryptValue(keys, KEY_CHECK_AAD, check) === KEY_CHECK_PLAINTEXT;
+  } catch {
+    return false;
   }
+}
 
+/**
+ * Read-only: which key currently opens AppSettings.encryptionKeyCheck —
+ * "OLD", "NEW" or "NEITHER" — or throws when it cannot tell (fix round 1,
+ * C1). Opens and closes its own Prisma client; never writes.
+ */
+async function runProbe(oldKeys, newKeys) {
   const PrismaClient = loadPrismaClient();
   const raw = new PrismaClient();
+  try {
+    const settings = await raw.appSettings.findUnique({
+      where: { id: SETTINGS_ID },
+      select: { encryptionKeyCheck: true },
+    });
+    const check = settings?.encryptionKeyCheck ?? null;
+    if (!check) {
+      throw new RotationError("No encryption key check found; cannot determine which key the database is under.");
+    }
+    if (opensKeyCheck(newKeys, check)) return "NEW";
+    if (opensKeyCheck(oldKeys, check)) return "OLD";
+    return "NEITHER";
+  } finally {
+    // A disconnect failure here is not evidence of anything: the probe
+    // already has its answer (or already failed) before this runs.
+    await raw.$disconnect().catch(() => {});
+  }
+}
+
+/**
+ * Does the rotation. Exits 0 IFF `raw.$transaction` resolves (fix round 1,
+ * C1): `committed` is set the instant that happens, and every statement
+ * after it — printing the summary, `$disconnect` — is not allowed to flip
+ * `process.exitCode` away from its 0 default; a failure there is logged as
+ * a warning instead. This is what makes the reviewer's injection (making
+ * $disconnect throw right after a real commit) exit 0 instead of 1.
+ */
+async function rotate(oldKeys, newKeys) {
+  const PrismaClient = loadPrismaClient();
+  const raw = new PrismaClient();
+  let committed = false;
   try {
     // Refuse before touching anything unless the OLD key opens this
     // database's key check (field-encryption spec §3: "The script refuses
@@ -233,13 +297,7 @@ async function main() {
           "Has BlackVault been started at least once with a key?",
       );
     }
-    let opensWithOldKey;
-    try {
-      opensWithOldKey = decryptValue(oldKeys, KEY_CHECK_AAD, check) === KEY_CHECK_PLAINTEXT;
-    } catch {
-      opensWithOldKey = false;
-    }
-    if (!opensWithOldKey) {
+    if (!opensKeyCheck(oldKeys, check)) {
       throw new RotationError(
         "The old key does not match this database's encryption key check; refusing to rotate. Nothing was changed.",
       );
@@ -277,15 +335,66 @@ async function main() {
 
       return out;
     }, ROTATION_TX);
+    committed = true; // from here on, a failure is a warning, never exitCode=1.
 
     const summary = Object.entries(counts).map(([m, n]) => `${m} ${n}`).join(", ");
-    console.log(`Rotated encryption key ${oldKeys.id} -> ${newKeys.id} (${summary}).`);
+    try {
+      console.log(`Rotated encryption key ${oldKeys.id} -> ${newKeys.id} (${summary}).`);
+    } catch (e) {
+      console.error(`Warning: rotation committed, but printing the summary failed: ${describeFailure(e)}`);
+    }
+  } catch (e) {
+    if (committed) {
+      console.error(`Warning: rotation committed, but a post-commit step failed: ${describeFailure(e)}`);
+    } else {
+      console.error(describeFailure(e));
+      process.exitCode = 1;
+    }
+  } finally {
+    try {
+      await raw.$disconnect();
+    } catch (e) {
+      if (committed) {
+        console.error(`Warning: rotation committed, but disconnecting from the database afterwards failed: ${describeFailure(e)}`);
+      } else {
+        console.error(describeFailure(e));
+        process.exitCode = 1;
+      }
+    }
+  }
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (!parsed) {
+    usage();
+    process.exitCode = 2;
+    return;
+  }
+
+  let oldKeys;
+  let newKeys;
+  try {
+    oldKeys = readKeyFile("--old-key-file", parsed.oldKeyFile);
+    newKeys = readKeyFile("--new-key-file", parsed.newKeyFile);
   } catch (e) {
     console.error(describeFailure(e));
     process.exitCode = 1;
-  } finally {
-    await raw.$disconnect();
+    return;
   }
+
+  if (parsed.probe) {
+    try {
+      console.log(await runProbe(oldKeys, newKeys));
+      process.exitCode = 0;
+    } catch (e) {
+      console.error(describeFailure(e));
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  await rotate(oldKeys, newKeys);
 }
 
 // Only run when executed directly (`node scripts/rotate-encryption-key.mjs`),
