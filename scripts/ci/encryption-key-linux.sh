@@ -151,7 +151,11 @@ echo "$MOUNTS"
 assert_secrets_tmpfs "app container" "$MOUNTS"
 PS=$(docker exec blackvault ps -o user,args)
 echo "$PS"
-has "$PS" "^nextjs .*gate.mjs" || fail "the app is not running as nextjs"
+# Next renames its process ("next-server (v16…)"); the server must be nextjs,
+# and nothing but this `ps` (started as root by docker exec) may be root.
+has "$PS" "^nextjs .*next-server" || fail "the app server is not running as nextjs"
+ROOT_PROCS=$(awk 'NR > 1 && $1 != "nextjs" && $0 !~ /ps -o user,args/' <<<"$PS")
+[ -z "$ROOT_PROCS" ] || fail "processes not running as nextjs: $ROOT_PROCS"
 # `docker compose run` (what the rotation uses) gets the same tmpfs and copy.
 RUN_OUT=$(as_user "docker compose run --rm -T blackvault sh -c 'cat /proc/mounts; echo COPY=\$(stat -c \"%a %U\" /run/secrets/blackvault_encryption_key)'")
 assert_secrets_tmpfs "compose run container" "$RUN_OUT"
