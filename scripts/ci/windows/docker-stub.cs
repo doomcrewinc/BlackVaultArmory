@@ -36,6 +36,12 @@
 //                            for the container log the scripts read the
 //                            first-time setup token from. Unset => the generic
 //                            "[stub] ..." line, which holds no token.
+//   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
+//                            ...` prints on stdout (OLD / NEW / NEITHER).
+//                            Checked independently of BV_STUB_FAIL_ON, so a
+//                            scenario can fail the real rotation run while
+//                            still controlling what the recovery probe says.
+//   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
 
 using System;
 using System.IO;
@@ -81,6 +87,33 @@ internal static class DockerStub
             Console.WriteLine("NAME                STATUS");
             Console.WriteLine("blackvault-app      Up 4 seconds (healthy)");
             return 0;
+        }
+
+        if (string.Equals(sub, "run", StringComparison.OrdinalIgnoreCase))
+        {
+            bool isProbe = false;
+            foreach (string a in args)
+            {
+                if (a == "--probe") { isProbe = true; break; }
+            }
+            if (isProbe)
+            {
+                // Independent of BV_STUB_FAIL_ON on purpose: a scenario fails
+                // the real rotation run via BV_STUB_FAIL_ON=run and separately
+                // controls what the recovery probe reports via these two.
+                string probeStatus = Environment.GetEnvironmentVariable("BV_STUB_PROBE_STATUS");
+                if (!string.IsNullOrEmpty(probeStatus) && probeStatus != "0")
+                {
+                    int code;
+                    return int.TryParse(probeStatus, out code) ? code : 1;
+                }
+                string answer = Environment.GetEnvironmentVariable("BV_STUB_PROBE_ANSWER");
+                if (!string.IsNullOrEmpty(answer))
+                {
+                    Console.WriteLine(answer);
+                }
+                return 0;
+            }
         }
 
         string failOn = Environment.GetEnvironmentVariable("BV_STUB_FAIL_ON");

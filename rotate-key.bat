@@ -7,8 +7,18 @@
 ::
 :: Stops the app, snapshots the database, generates a new key, runs the
 :: rotation inside the container in one transaction, and only then swaps the
-:: key files and restarts. Any failure along the way restarts BlackVault on
-:: the OLD key and leaves the key files exactly as they were.
+:: key files and restarts.
+::
+:: Fix round 1 (task-6-review.md, C1): scripts\rotate-encryption-key.mjs can
+:: exit non-zero AFTER its transaction already committed. Treating every
+:: non-zero rotation run as "nothing changed" could delete the only copy of
+:: a key the database is already encrypted with. So a non-zero rotation run
+:: is followed by a read-only --probe (OLD/NEW/NEITHER, by which key opens
+:: the database's key check) before anything is deleted or restarted: NEW
+:: completes the swap exactly as a normal success would, OLD discards the
+:: unused new key and restarts on the old one, and anything else (NEITHER,
+:: or the probe producing no answer at all) keeps every key file untouched,
+:: does NOT start the app, and prints exact recovery commands.
 ::
 :: Run from the folder this script lives in, even when launched with
 :: "Run as administrator" (which starts in C:\Windows\System32).
@@ -23,7 +33,15 @@ echo.
 
 set "KEY_FILE=secrets\blackvault_encryption_key"
 set "NEW_KEY_FILE=secrets\blackvault_encryption_key.new"
-set "OLD_KEY_FILE=secrets\blackvault_encryption_key.old"
+
+:: I2: a timestamped name, never the bare "secrets\blackvault_encryption_key.old" —
+:: the pre-rotation snapshot (step 3) is sealed under THIS run's old key, so a
+:: second rotation must never silently overwrite the file that opens it.
+set "OLD_TS="
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')" 2^>nul`) do set "OLD_TS=%%T"
+if not defined OLD_TS set "OLD_TS=rotate"
+set "OLD_KEY_FILE=secrets\blackvault_encryption_key.old-!OLD_TS!"
+if exist "!OLD_KEY_FILE!" set "OLD_KEY_FILE=!OLD_KEY_FILE!-%RANDOM%"
 
 :: ── 1. Check the current key exists ───────────────────────────
 if not exist "%KEY_FILE%" (
@@ -38,6 +56,11 @@ if not exist "%KEY_FILE%" (
 :: running BlackVault keeps running.
 call :require_compose
 if not defined COMPOSE goto :compose_too_old
+
+:: M3: an absolute bind source. A relative ".\secrets" depends on how the
+:: Compose engine resolves `run -v` relative paths (version-dependent); %CD%
+:: is absolute the moment the `cd /d` above has run.
+set "SECRETS_DIR=%CD%\secrets"
 
 :: ── 2. Stop the app ────────────────────────────────────────────
 echo Stopping BlackVault...
@@ -68,38 +91,94 @@ if "!NEW_KEY:~63,1!"=="" goto :key_gen_failed
 if not "!NEW_KEY:~64!"=="" goto :key_gen_failed
 for /f "delims=0123456789abcdef" %%X in ("!NEW_KEY!") do goto :key_gen_failed
 
+:: M2: the restrictive ACL is applied to an EMPTY file BEFORE any key
+:: material is written, not after — no window where the new key sits in a
+:: file still carrying the default (inherited) ACL. A failed icacls aborts
+:: the run instead of silently leaving an unhardened key file.
 if exist "%NEW_KEY_FILE%" del /f /q "%NEW_KEY_FILE%"
-(echo !NEW_KEY!)>"%NEW_KEY_FILE%"
+type nul > "%NEW_KEY_FILE%"
 if errorlevel 1 goto :key_gen_failed
 call :restrict_file "%NEW_KEY_FILE%"
+if not defined RESTRICT_OK goto :key_restrict_failed
+(echo !NEW_KEY!)>"%NEW_KEY_FILE%"
+if errorlevel 1 goto :key_gen_failed
 set "NEW_KEY="
 
 :: ── 5. Run the rotation inside the container, in one transaction ──
 echo.
 echo Rotating encryption key (this may take a while on a large inventory)...
-%COMPOSE% run --rm -v "./secrets:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new
-if errorlevel 1 goto :rotation_failed
+%COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new
+if not errorlevel 1 goto :do_swap
+
+:: The rotation command itself exited non-zero. That does NOT mean nothing
+:: changed (fix round 1, C1): the transaction may already have committed and
+:: only a step after it failed. Ask the database itself before touching
+:: anything.
+echo.
+echo The rotation command exited with an error. Checking which key the database
+echo is actually encrypted with before touching any file...
+set "PROBE_ANSWER="
+for /f "usebackq delims=" %%P in (`%COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new 2^>nul`) do set "PROBE_ANSWER=%%P"
+
+if "!PROBE_ANSWER!"=="NEW" (
+  echo Confirmed: the database is already encrypted with the NEW key.
+  echo Completing the key-file swap...
+  goto :do_swap
+)
+if "!PROBE_ANSWER!"=="OLD" (
+  echo Confirmed: the database is still encrypted with the OLD key; the
+  echo rotation did not take effect.
+  if exist "%NEW_KEY_FILE%" del /f /q "%NEW_KEY_FILE%"
+  echo Restarting BlackVault on the previous key; nothing was changed.
+  %COMPOSE% start blackvault
+  pause
+  exit /b 1
+)
+goto :probe_ambiguous
 
 :: ── 6. Success: swap the key files and restart ──────────────
+:: Reached either from step 5 directly, or from the probe confirming NEW —
+:: both are the same recovery from here on.
+:do_swap
 move /y "%KEY_FILE%" "%OLD_KEY_FILE%" >nul
-if errorlevel 1 goto :swap_failed
+if errorlevel 1 goto :swap_failed_1
 move /y "%NEW_KEY_FILE%" "%KEY_FILE%" >nul
-if errorlevel 1 goto :swap_failed
+if errorlevel 1 goto :swap_failed_2
 %COMPOSE% start blackvault
+if errorlevel 1 goto :restart_after_swap_failed
 echo.
 echo ╔══════════════════════════════════════════════════════════╗
 echo ║   Key rotation complete.                                   ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
-echo Back up the new key file now. Delete %OLD_KEY_FILE% once you have
-echo confirmed everything works.
+echo Back up %KEY_FILE% now.
+echo The pre-rotation database snapshot in backups\ is encrypted with the OLD
+echo key, now saved as %OLD_KEY_FILE%. That file can only be opened with it, so
+echo keep %OLD_KEY_FILE% for as long as you keep that snapshot.
 pause
 exit /b 0
 
 :: ════════════════════════════════════════════════════════════
-:: Failure paths — every one restarts BlackVault on the previous key
-:: (except where the app was never successfully stopped) and changes nothing.
+:: Failure paths
 :: ════════════════════════════════════════════════════════════
+
+:probe_ambiguous
+if not defined PROBE_ANSWER set "PROBE_ANSWER=(no answer)"
+echo.
+echo ERROR: could not determine whether the database is encrypted with the OLD
+echo        or the NEW key (probe answered "!PROBE_ANSWER!").
+echo        Nothing was deleted. BlackVault was NOT restarted.
+echo        Do NOT delete %KEY_FILE% or %NEW_KEY_FILE%.
+echo        To resolve by hand:
+echo          1. Make sure Docker/the database are reachable, then re-run:
+echo             %COMPOSE% run --rm -v "%SECRETS_DIR%:/run/rotate:ro" blackvault ^
+echo               node scripts/rotate-encryption-key.mjs --probe ^
+echo               --old-key-file /run/rotate/blackvault_encryption_key ^
+echo               --new-key-file /run/rotate/blackvault_encryption_key.new
+echo          2. If it answers NEW:  move /y %NEW_KEY_FILE% %KEY_FILE%   then  %COMPOSE% start blackvault
+echo          3. If it answers OLD:  del %NEW_KEY_FILE%                 then  %COMPOSE% start blackvault
+pause
+exit /b 1
 
 :no_snapshot_script
 echo ERROR: scripts\db-snapshot.bat is missing. Refusing to rotate the encryption
@@ -124,21 +203,47 @@ echo Restarting BlackVault; nothing was changed.
 pause
 exit /b 1
 
-:rotation_failed
-echo.
-echo ERROR: key rotation failed. See the output above.
+:key_restrict_failed
+echo ERROR: could not restrict the new key file to your user account with icacls.
+echo        Refusing to write key material to an unhardened file.
 if exist "%NEW_KEY_FILE%" del /f /q "%NEW_KEY_FILE%"
-echo Restarting BlackVault on the previous key; nothing was changed.
+echo Restarting BlackVault; nothing was changed.
 %COMPOSE% start blackvault
 pause
 exit /b 1
 
-:swap_failed
+:swap_failed_1
 echo.
-echo ERROR: could not replace the key file after a successful rotation.
-echo        The database is now encrypted with the NEW key, but %KEY_FILE%
-echo        may still hold the OLD one. Check %NEW_KEY_FILE% and %KEY_FILE%
-echo        by hand before starting BlackVault again.
+echo ERROR: rotation succeeded, but renaming the key files failed.
+echo        %KEY_FILE% should still hold the OLD key, unchanged.
+echo        The database itself is now encrypted with the NEW key, in %NEW_KEY_FILE%.
+echo        Recover by hand, then restart:
+echo          move /y %NEW_KEY_FILE% %KEY_FILE%
+echo          %COMPOSE% start blackvault
+echo        Back up %KEY_FILE% once BlackVault is confirmed working.
+pause
+exit /b 1
+
+:swap_failed_2
+echo.
+echo ERROR: rotation succeeded, but finishing the key-file swap failed.
+echo        %KEY_FILE% is now MISSING. %OLD_KEY_FILE% holds the ORIGINAL (old) key.
+echo        %NEW_KEY_FILE% holds the key the database is now actually encrypted with.
+echo        Recover by hand, then restart:
+echo          move /y %NEW_KEY_FILE% %KEY_FILE%
+echo          %COMPOSE% start blackvault
+echo        Back up %KEY_FILE% once BlackVault is confirmed working.
+pause
+exit /b 1
+
+:restart_after_swap_failed
+echo.
+echo Key rotation succeeded and the key files were swapped, but BlackVault
+echo failed to restart.
+echo Back up %KEY_FILE% now - the pre-rotation database snapshot in backups\ is
+echo encrypted with the OLD key, now at %OLD_KEY_FILE%; keep that file for as
+echo long as you keep that snapshot.
+echo Start BlackVault by hand once you've checked the logs: %COMPOSE% start blackvault
 pause
 exit /b 1
 
@@ -192,13 +297,17 @@ goto :eof
 
 :: :restrict_file PATH - restricts PATH to the current user, the same way
 :: install.bat's :restrict_env restricts .env: grant the user full control
-:: first, and only then drop inherited permissions, so a failure never leaves
-:: the file unreadable. Never fails the script; a key file that could not be
-:: restricted is still usable, just not hardened.
+:: first, and only then drop inherited permissions. Sets RESTRICT_OK=1 on
+:: success; leaves it undefined on ANY failure (fix round 1, M2 — the caller
+:: now aborts instead of silently continuing with an unhardened file).
 :restrict_file
+set "RESTRICT_OK="
 set "_SID="
 for /f "tokens=2 delims=," %%S in ('whoami /user /fo csv /nh 2^>nul') do set "_SID=%%~S"
 if not defined _SID goto :eof
 icacls "%~1" /grant:r "*!_SID!:F" >nul 2>&1
+if errorlevel 1 goto :eof
 icacls "%~1" /inheritance:r >nul 2>&1
+if errorlevel 1 goto :eof
+set "RESTRICT_OK=1"
 goto :eof
