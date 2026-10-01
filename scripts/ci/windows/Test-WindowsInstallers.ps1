@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-  Runs install.bat and update.bat non-interactively and asserts what they did.
+  Runs install.bat, update.bat and rotate-key.bat non-interactively and
+  asserts what they did.
 
 .DESCRIPTION
-  These two scripts have NEVER been executed on Windows — the maintainer's
+  These scripts have NEVER been executed on Windows — the maintainer's
   machine has no cmd.exe — so this is the only verification that exists for
   them. It is driven by .github/workflows/ci.yml (windows-latest) and can be
   run by hand on any Windows box:
@@ -852,6 +853,120 @@ Assert ($r.StubLog -notmatch "compose logs blackvault") "never read the log"
 Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "no token shown without the call"
 Show-EvidenceIfFailed $r
 
+# =============================================================================
+#                                rotate-key.bat
+# =============================================================================
+# Covers Task 6 of the field-encryption plan: rotate-key.bat has, like
+# install.bat/update.bat, never run on real cmd.exe before this. Docker is
+# stubbed exactly as above. scripts\db-snapshot.bat (Task 7) does not exist in
+# this repo yet, so these scenarios supply their OWN stand-in copy of it
+# inside each sandbox (never the repo) — the same boundary the docker stub
+# sits at: proving THIS script's logic, not scripts\db-snapshot.bat's, which
+# is someone else's file.
+
+function New-RotateSandbox {
+  param([string]$Name, [switch]$WithSnapshot, [switch]$SnapshotFails)
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("rotate-key.bat", "docker-compose.yml")) {
+    $src = Join-Path $RepoRoot $f
+    if (Test-Path $src) { Copy-Item $src $dir }
+  }
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "secrets") | Out-Null
+  # A fixed, obviously-fake 64-hex-char "key" — never a real one, and never
+  # asserted to be secret in these scenarios (it's test fixture data).
+  Set-Content -Path (Join-Path $dir "secrets\blackvault_encryption_key") -Value ("ab" * 32) -NoNewline -Encoding Ascii
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "scripts") | Out-Null
+  if ($WithSnapshot) {
+    $code = if ($SnapshotFails) { "exit /b 1" } else { "exit /b 0" }
+    Set-Content -Path (Join-Path $dir "scripts\db-snapshot.bat") -Value @("@echo off", "echo [stub snapshot]", $code) -Encoding Ascii
+  }
+  return $dir
+}
+
+# ---------------------------------------------------------------- scenario RK1
+Write-Scenario "rotate-key.bat - no secrets\blackvault_encryption_key: exits 1, touches nothing"
+$d = New-RotateSandbox "rotate-nokey"
+Remove-Item (Join-Path $d "secrets\blackvault_encryption_key") -Force
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "not found\. Nothing to rotate\.") "explains there is no key to rotate"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK2
+Write-Scenario "rotate-key.bat - Docker Compose too old: exits 1 before stopping anything"
+$d = New-RotateSandbox "rotate-old-compose"
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "2\.20 or newer") "explains the v2.20 requirement"
+Assert ($r.StubLog -notmatch "compose stop") "never tried to stop the app"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "key file untouched"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK3
+Write-Scenario "rotate-key.bat - scripts\db-snapshot.bat missing: stops, refuses, restarts, exits 1 (ruling R4)"
+$d = New-RotateSandbox "rotate-no-snapshot"
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose stop blackvault") "stopped the app first"
+Assert ($r.Output -match "scripts\\db-snapshot\.bat is missing") "names the missing snapshot script"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert ($r.StubLog -notmatch "compose run") "never attempted the rotation itself"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new key file left behind"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "key file byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK4
+Write-Scenario "rotate-key.bat - snapshot script fails: refuses, restarts, exits 1"
+$d = New-RotateSandbox "rotate-snapshot-fails" -WithSnapshot -SnapshotFails
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "\[stub snapshot\]") "ran the snapshot script"
+Assert ($r.Output -match "database snapshot failed") "says the snapshot failed"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert ($r.StubLog -notmatch "compose run") "never attempted the rotation itself"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "key file byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK5
+Write-Scenario "rotate-key.bat - full success: snapshot, new key generated, rotation run, key files swapped, restarted"
+$d = New-RotateSandbox "rotate-success" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose stop blackvault") "stopped the app"
+Assert ($r.Output -match "\[stub snapshot\]") "ran the snapshot script"
+Assert ($r.StubLog -match [regex]::Escape("compose run --rm -v ./secrets:/run/rotate:ro blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/rotate/blackvault_encryption_key --new-key-file /run/rotate/blackvault_encryption_key.new")) "ran the rotation with the exact spec'd command"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no stray .new file after a successful swap"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.old")) "the previous key was kept as .old"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key.old") -Raw).Trim() -eq $keyBefore.Trim()) ".old holds the ORIGINAL key"
+$keyAfter = (Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim()
+Assert ($keyAfter -match "^[0-9a-f]{64}$") "the active key file is now 64 lowercase hex chars (real CSPRNG path)"
+Assert ($keyAfter -ne $keyBefore.Trim()) "the active key actually changed"
+Assert ($r.Output -notmatch [regex]::Escape($keyAfter)) "the new key is never echoed to the terminal"
+Assert ($r.Output -match "Key rotation complete") "prints the completion banner"
+Assert ($r.Output -match "Back up the new key file now") "tells the admin to back up the new key"
+Assert ($r.Output -match "Delete .*blackvault_encryption_key\.old once you have") "tells the admin when it's safe to delete the old key"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK6
+Write-Scenario "rotate-key.bat - the rotation command fails: deletes .new, restarts on the OLD key, exits 1"
+$d = New-RotateSandbox "rotate-run-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose run") "attempted the rotation"
+Assert ($r.Output -match "key rotation failed") "says rotation failed"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault on the previous key"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new key file was deleted"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.old"))) "no .old file: the original key was never touched"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
@@ -859,5 +974,5 @@ if ($script:Failures.Count -gt 0) {
   foreach ($f in $script:Failures) { Write-Host "  FAILED: $f" -ForegroundColor Red }
   exit 1
 }
-Write-Host "install.bat and update.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
+Write-Host "install.bat, update.bat and rotate-key.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
 exit 0
