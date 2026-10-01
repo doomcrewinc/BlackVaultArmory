@@ -232,6 +232,17 @@ describe("summarize — security events", () => {
     const e = event({ action: "RESTORE", changes: { file: "blackvault-backup-2026-09-29.json", counts: { Firearm: 3 } } });
     expect(summarize(e)).toBe("Restored the database from backup blackvault-backup-2026-09-29.json");
   });
+
+  // field-encryption spec §Restore: RESTORE's `changes` gains `sealed`.
+  it("RESTORE flags an unsealed (plain) backup file", () => {
+    const e = event({ action: "RESTORE", changes: { file: "old-backup.json", counts: { Firearm: 3 }, sealed: false } });
+    expect(summarize(e)).toBe("Restored the database from backup old-backup.json (unsealed backup)");
+  });
+
+  it("RESTORE from a sealed backup reads the same as before — nothing to flag", () => {
+    const e = event({ action: "RESTORE", changes: { file: "backup.sealed.json", counts: { Firearm: 3 }, sealed: true } });
+    expect(summarize(e)).toBe("Restored the database from backup backup.sealed.json");
+  });
 });
 
 describe("summarize — encryption events", () => {

@@ -246,7 +246,13 @@ export function summarize(event: AuditEventDto): string {
 
     case "RESTORE": {
       const file = isRecord(event.changes) ? asString(event.changes.file) : undefined;
-      return `Restored the database from backup${file ? ` ${file}` : ""}`;
+      // `sealed` (field-encryption spec §Restore) is absent on events recorded
+      // before this shipped, and `true` for every sealed restore going
+      // forward — both read the same as "nothing to flag". Only an explicit
+      // `false` (a plain, unencrypted backup file) is worth calling out in
+      // the one-line summary: it is the security-relevant case.
+      const unsealed = isRecord(event.changes) && event.changes.sealed === false;
+      return `Restored the database from backup${file ? ` ${file}` : ""}${unsealed ? " (unsealed backup)" : ""}`;
     }
 
     case "ENCRYPTION_ENABLED": {

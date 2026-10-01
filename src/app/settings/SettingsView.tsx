@@ -20,6 +20,42 @@ import { APP_VERSION } from "@/lib/version";
 import { DEFAULT_EXPIRY_WARNING_DAYS } from "@/lib/supply";
 
 /**
+ * The exact mark of a sealed backup envelope (core.mjs's SEAL_FORMAT). Not
+ * imported from @/lib/encryption/core.mjs here: that module is plain Node
+ * ESM (node:crypto) with no browser build, and this is a client component —
+ * a string literal matching its one exported constant is the client-safe
+ * mirror, same spirit as the client-side `isPlainHttpPage` mirror below.
+ */
+const SEAL_FORMAT = "blackvault-sealed-backup";
+
+function looksSealed(value: unknown): value is { format: string } {
+  return !!value && typeof value === "object" && (value as Record<string, unknown>).format === SEAL_FORMAT;
+}
+
+/** The passphrase floor sealBackup enforces server-side (core.mjs's MIN_PASSPHRASE) — checked here too, for an instant inline error. */
+const MIN_PASSPHRASE_LENGTH = 12;
+
+/**
+ * Client mirror of isSecureRequest (src/lib/server/request-gate.ts), the
+ * signal the admin page already uses to warn about the session cookie over
+ * plain HTTP: true when THIS page was loaded over plain HTTP, not HTTPS.
+ * Reused here rather than inventing a new signal — a backup passphrase typed
+ * into this page is exactly the kind of secret that warning exists for.
+ */
+function isPlainHttpPage(): boolean {
+  return typeof window !== "undefined" && window.location.protocol !== "https:";
+}
+
+function PassphraseWarning() {
+  if (!isPlainHttpPage()) return null;
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
+      ⚠️ This page is not using HTTPS. A passphrase typed here is sent unencrypted — avoid doing this over an untrusted network.
+    </div>
+  );
+}
+
+/**
  * Settings. `isAdmin` comes from the server page; a plain user gets every admin-only control
  * (backup/restore, app settings, the direct-access switch) read-only with an "Admins only" note.
  * Cosmetic only — the API routes enforce the same with 403.
@@ -54,9 +90,17 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
   const [backupStatus, setBackupStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [backupResult, setBackupResult] = useState<{ filename: string; savedToPath?: string; sizeMB: string } | null>(null);
   const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState("");
+  const [backupPassphraseError, setBackupPassphraseError] = useState<string | null>(null);
+
   const [restoreStatus, setRestoreStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [pendingRestoreFile, setPendingRestoreFile] = useState<File | null>(null);
+  const [pendingRestoreBody, setPendingRestoreBody] = useState<unknown>(null);
+  const [pendingRestoreSealed, setPendingRestoreSealed] = useState(false);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreParseError, setRestoreParseError] = useState<string | null>(null);
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [restoreCounts, setRestoreCounts] = useState<Record<string, number> | null>(null);
 
@@ -217,20 +261,42 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
+  function validateBackupPassphrase(): boolean {
+    if (backupPassphrase.length < MIN_PASSPHRASE_LENGTH) {
+      setBackupPassphraseError(`Passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
+      return false;
+    }
+    if (backupPassphrase !== backupPassphraseConfirm) {
+      setBackupPassphraseError("Passphrases do not match.");
+      return false;
+    }
+    setBackupPassphraseError(null);
+    return true;
+  }
+
   async function handleBackupNow() {
+    if (!validateBackupPassphrase()) return;
     setBackupStatus("loading");
     setBackupError(null);
     setBackupResult(null);
     try {
-      const res = await fetch("/api/backup", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
+      const res = await fetch("/api/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passphrase: backupPassphrase }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
         setBackupStatus("error");
         setBackupError(json.error ?? "Backup failed.");
         return;
       }
-      const filename = json.filename as string;
-      const blob = new Blob([JSON.stringify({ meta: json.meta, ...json.data }, null, 2)], { type: "application/json" });
+      // The response body IS the sealed envelope (field-encryption spec
+      // §Backup UI, P2) — downloaded as-is, never assembled client-side.
+      const blob = await res.blob();
+      const filename = res.headers.get("X-Backup-Filename") ?? "blackvault-backup.sealed.json";
+      const savedToPathHeader = res.headers.get("X-Backup-Saved-To");
+      const savedToPath = savedToPathHeader ? decodeURIComponent(savedToPathHeader) : undefined;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -239,8 +305,11 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setBackupResult({ filename, savedToPath: json.savedToPath, sizeMB: json.sizeMB });
+      const sizeMB = (blob.size / 1_048_576).toFixed(2);
+      setBackupResult({ filename, savedToPath, sizeMB });
       setBackupStatus("success");
+      setBackupPassphrase("");
+      setBackupPassphraseConfirm("");
       setTimeout(() => { setBackupStatus("idle"); setBackupResult(null); }, 8000);
     } catch {
       setBackupStatus("error");
@@ -248,29 +317,39 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
-  function handleRestoreFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setPendingRestoreFile(e.target.files?.[0] ?? null);
+  async function handleRestoreFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null;
+    setPendingRestoreFile(file);
+    setPendingRestoreBody(null);
+    setPendingRestoreSealed(false);
+    setRestorePassphrase("");
+    setRestoreParseError(null);
     setShowRestoreConfirm(false);
     setRestoreStatus("idle");
     setRestoreError(null);
     setRestoreCounts(null);
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed: unknown = JSON.parse(text);
+      setPendingRestoreBody(parsed);
+      setPendingRestoreSealed(looksSealed(parsed));
+    } catch {
+      setRestoreParseError("The selected file is not valid JSON. Please select a .json backup file.");
+    }
   }
 
   async function handleRestoreConfirm() {
-    if (!pendingRestoreFile) return;
+    if (!pendingRestoreFile || pendingRestoreBody === null) return;
+    if (pendingRestoreSealed && restorePassphrase.length === 0) {
+      setRestoreStatus("error");
+      setRestoreError("Enter the passphrase this backup was sealed with.");
+      return;
+    }
     setShowRestoreConfirm(false);
     setRestoreStatus("loading");
     setRestoreError(null);
     try {
-      const text = await pendingRestoreFile.text();
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        setRestoreStatus("error");
-        setRestoreError("The selected file is not valid JSON. Please select a .json backup file.");
-        return;
-      }
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       // For the RESTORE audit event only (spec §Restore). URI-encoded so any
       // file name is a valid header value; the server treats it as untrusted.
@@ -281,10 +360,13 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
       } catch {
         // omit the header
       }
+      const requestBody = pendingRestoreSealed
+        ? { sealed: pendingRestoreBody, passphrase: restorePassphrase }
+        : pendingRestoreBody;
       const res = await fetch("/api/backup/restore", {
         method: "POST",
         headers,
-        body: JSON.stringify(parsed),
+        body: JSON.stringify(requestBody),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
@@ -295,6 +377,8 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
       setRestoreCounts(json.counts);
       setRestoreStatus("success");
       setPendingRestoreFile(null);
+      setPendingRestoreBody(null);
+      setRestorePassphrase("");
     } catch {
       setRestoreStatus("error");
       setRestoreError("Network error during restore.");
@@ -405,14 +489,43 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
 
             {/* Backup Now */}
             <div className="rounded-lg border border-vault-border bg-vault-bg p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium text-vault-text">Backup Now</p>
-                  <p className="mt-0.5 text-xs text-vault-text-muted">
-                    Downloads a complete JSON backup of all vault data.
-                    {backupDestinationPath && " Also saves to your configured destination."}
-                  </p>
-                </div>
+              <div>
+                <p className="text-sm font-medium text-vault-text">Backup Now</p>
+                <p className="mt-0.5 text-xs text-vault-text-muted">
+                  Downloads a complete backup of all vault data, sealed with a passphrase only you know.
+                  {backupDestinationPath && " Also saves to your configured destination."}
+                </p>
+              </div>
+              <PassphraseWarning />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <FormField label="Passphrase" hint={`At least ${MIN_PASSPHRASE_LENGTH} characters.`}>
+                  <input
+                    id="backupPassphrase"
+                    type="password"
+                    autoComplete="new-password"
+                    value={backupPassphrase}
+                    onChange={(e) => { setBackupPassphrase(e.target.value); setBackupPassphraseError(null); }}
+                    className={INPUT_CLASS}
+                    placeholder="Backup passphrase"
+                  />
+                </FormField>
+                <FormField label="Confirm Passphrase">
+                  <input
+                    id="backupPassphraseConfirm"
+                    type="password"
+                    autoComplete="new-password"
+                    value={backupPassphraseConfirm}
+                    onChange={(e) => { setBackupPassphraseConfirm(e.target.value); setBackupPassphraseError(null); }}
+                    className={INPUT_CLASS}
+                    placeholder="Confirm passphrase"
+                  />
+                </FormField>
+              </div>
+              <p className="text-xs text-vault-text-muted">
+                Keep this passphrase somewhere safe. Without it, this backup cannot be restored — not even by BlackVault.
+              </p>
+              {backupPassphraseError && <StatusMessage tone="error" message={backupPassphraseError} />}
+              <div className="flex justify-end">
                 <StandardButton
                   type="button"
                   variant="primary"
@@ -465,7 +578,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                   className="sr-only"
                   onChange={handleRestoreFileChange}
                 />
-                {pendingRestoreFile && !showRestoreConfirm && restoreStatus === "idle" && (
+                {pendingRestoreFile && !showRestoreConfirm && restoreStatus !== "loading" && restoreStatus !== "success" && pendingRestoreBody !== null && (
                   <StandardButton
                     type="button"
                     variant="danger"
@@ -476,6 +589,31 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                   </StandardButton>
                 )}
               </div>
+              {restoreParseError && <StatusMessage tone="error" message={restoreParseError} />}
+              {pendingRestoreFile && pendingRestoreBody !== null && (
+                pendingRestoreSealed ? (
+                  <div className="rounded-lg border border-vault-border bg-vault-surface p-3 flex flex-col gap-2">
+                    <p className="text-xs text-vault-text-muted">Sealed backup detected — enter its passphrase to restore it.</p>
+                    <PassphraseWarning />
+                    <FormField label="Passphrase">
+                      <input
+                        id="restorePassphrase"
+                        type="password"
+                        autoComplete="current-password"
+                        value={restorePassphrase}
+                        onChange={(e) => setRestorePassphrase(e.target.value)}
+                        className={INPUT_CLASS}
+                        placeholder="Backup passphrase"
+                      />
+                    </FormField>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
+                    ⚠️ This backup file is not encrypted. Anyone who had this file could read every serial number and NFA
+                    record it contains.
+                  </div>
+                )
+              )}
               {showRestoreConfirm && pendingRestoreFile && (
                 <div className="rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 p-3 flex flex-col gap-2">
                   <p className="text-sm font-medium text-[#E53935]">
@@ -488,7 +626,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                       type="button"
                       variant="danger"
                       onClick={handleRestoreConfirm}
-                      disabled={restoreStatus === "loading"}
+                      disabled={restoreStatus === "loading" || (pendingRestoreSealed && restorePassphrase.length === 0)}
                       loading={restoreStatus === "loading"}
                       loadingLabel="Restoring…"
                       icon={<RotateCcw className="h-4 w-4" />}
@@ -498,7 +636,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                     <StandardButton
                       type="button"
                       variant="secondary"
-                      onClick={() => { setShowRestoreConfirm(false); setPendingRestoreFile(null); }}
+                      onClick={() => { setShowRestoreConfirm(false); setPendingRestoreFile(null); setPendingRestoreBody(null); }}
                     >
                       Cancel
                     </StandardButton>

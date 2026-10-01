@@ -49,6 +49,24 @@ vi.mock("@/lib/server/auth", () => ({
 import { POST as createBackup } from "@/app/api/backup/route";
 import { POST as restoreBackup } from "@/app/api/backup/restore/route";
 import { prisma } from "@/lib/prisma";
+import { openBackup } from "@/lib/encryption/core.mjs";
+
+const PASSPHRASE = "correct horse battery staple";
+
+function backupRequest() {
+  return new NextRequest("http://localhost/api/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase: PASSPHRASE }),
+  });
+}
+
+/** Runs a real backup and returns the opened plaintext payload (field-encryption spec §3: the response is a sealed envelope). */
+async function backupNow() {
+  const response = await createBackup(backupRequest());
+  const envelope = JSON.parse(await response.text());
+  return { response, data: JSON.parse(openBackup(PASSPHRASE, envelope)) };
+}
 
 const KIT_ID = "kit-roundtrip-1";
 const FIREARM_ID = "kit-rt-firearm";
@@ -165,14 +183,13 @@ describe("backup -> restore round trip for kits", () => {
   it("brings a kit and all six of its lines back pointing at the same records", async () => {
     await seed();
 
-    const backupResponse = await createBackup();
-    const backup = await backupResponse.json();
+    const { response: backupResponse, data: backup } = await backupNow();
 
     expect(backupResponse.status).toBe(200);
     // The backup must carry the kit and every line, or the restore below would
     // be proving nothing.
-    expect(backup.data.kits).toHaveLength(1);
-    expect(backup.data.kitItems).toHaveLength(6);
+    expect(backup.kits).toHaveLength(1);
+    expect(backup.kitItems).toHaveLength(6);
 
     // Wipe the way a user's database is replaced: children first.
     await prisma.kitItem.deleteMany();
@@ -186,7 +203,7 @@ describe("backup -> restore round trip for kits", () => {
     expect(await prisma.kit.count()).toBe(0);
 
     const restoreResponse = await restoreBackup(
-      restoreRequest({ meta: { version: backup.meta.version }, ...backup.data }),
+      restoreRequest({ meta: { version: backup.meta.version }, ...backup }),
     );
     const restored = await restoreResponse.json();
 
@@ -255,8 +272,8 @@ describe("backup -> restore round trip for kits", () => {
     // written before this branch has no `kits` and no `kitItems` key at all,
     // and Task 1 deliberately left both out of V1_0_MODEL_NAMES so that file
     // is still valid.
-    const backup = await (await createBackup()).json();
-    const preKits = { meta: { version: "1.0" }, ...backup.data } as Record<string, unknown>;
+    const { data: backup } = await backupNow();
+    const preKits = { meta: { version: "1.0" }, ...backup } as Record<string, unknown>;
     delete preKits.kits;
     delete preKits.kitItems;
 

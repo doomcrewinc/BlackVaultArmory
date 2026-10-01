@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { NextRequest } from "next/server";
+import { openBackup } from "@/lib/encryption/core.mjs";
 
 /**
  * A real backup -> wipe -> restore round trip for a gear row and its attached
@@ -44,12 +45,30 @@ import { prisma } from "@/lib/prisma";
 const GEAR_ID = "roundtrip-gear-1";
 const DOC_ID = "roundtrip-doc-1";
 
+const PASSPHRASE = "correct horse battery staple";
+
 function restoreRequest(body: unknown) {
   return new NextRequest("http://localhost/api/backup/restore", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function backupRequest(passphrase = PASSPHRASE) {
+  return new NextRequest("http://localhost/api/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase }),
+  });
+}
+
+/** Runs a real backup and returns both the sealed envelope and the opened plaintext payload. */
+async function backupNow(passphrase = PASSPHRASE) {
+  const response = await createBackup(backupRequest(passphrase));
+  const envelope = JSON.parse(await response.text());
+  const data = JSON.parse(openBackup(passphrase, envelope));
+  return { response, envelope, data };
 }
 
 describe("backup -> restore round trip for gear", () => {
@@ -104,18 +123,17 @@ describe("backup -> restore round trip for gear", () => {
       },
     });
 
-    const backupResponse = await createBackup();
-    const backup = await backupResponse.json();
+    const { response: backupResponse, data: backup } = await backupNow();
 
     expect(backupResponse.status).toBe(200);
     // The backup must carry the row and the foreign key, or the restore below
     // would be proving nothing.
-    expect(backup.data.gear).toHaveLength(1);
-    expect(backup.data.gear[0].imageUrl).toBe(
+    expect(backup.gear).toHaveLength(1);
+    expect(backup.gear[0].imageUrl).toBe(
       "/uploads/images/gears/roundtrip.png",
     );
-    expect(backup.data.documents).toHaveLength(1);
-    expect(backup.data.documents[0].gearId).toBe(GEAR_ID);
+    expect(backup.documents).toHaveLength(1);
+    expect(backup.documents[0].gearId).toBe(GEAR_ID);
 
     // Wipe both tables the way a user's database would be replaced.
     await prisma.document.deleteMany();
@@ -126,7 +144,7 @@ describe("backup -> restore round trip for gear", () => {
     const restoreResponse = await restoreBackup(
       restoreRequest({
         meta: { version: backup.meta.version },
-        ...backup.data,
+        ...backup,
       }),
     );
     const restored = await restoreResponse.json();
@@ -158,14 +176,14 @@ describe("backup -> restore round trip for gear", () => {
   }, 60_000);
 
   it("restores a pre-phase-2 backup file, which has no gear key at all", async () => {
-    const backup = await (await createBackup()).json();
+    const { data: backup } = await backupNow();
 
     // A file taken before this phase has no `gear` key, and its document rows
     // have no gearId column either.
     const v1_0 = {
       meta: { version: "1.0" },
-      ...backup.data,
-      documents: (backup.data.documents as Record<string, unknown>[]).map(
+      ...backup,
+      documents: (backup.documents as Record<string, unknown>[]).map(
         (row) => {
           const copy = { ...row };
           delete copy.gearId;

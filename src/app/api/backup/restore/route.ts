@@ -11,6 +11,9 @@ import {
   normalizeFirearmNfaFields,
 } from "@/lib/nfa";
 import { normalizeGearArmorFields } from "@/lib/gear";
+import { openBackup, SealError } from "@/lib/encryption/core.mjs";
+import { ENCRYPTED_FIELDS, encryptedFieldsFor } from "@/lib/encryption/fields";
+import { decryptLegacyEnc, LegacyDecryptError } from "@/lib/encryption/startup";
 
 type WriteDelegate = {
   deleteMany: () => Promise<unknown>;
@@ -35,6 +38,67 @@ function isValidBackup(body: unknown): body is BackupBody {
 
 function isRowObject(row: unknown): row is Record<string, unknown> {
   return typeof row === "object" && row !== null && !Array.isArray(row);
+}
+
+/** `model` -> its backup payload key ("Firearm" -> "firearms"), for the models that hold an encrypted field. */
+const ENCRYPTED_MODEL_KEYS: ReadonlyArray<{ model: string; key: string }> = [
+  ...new Set(ENCRYPTED_FIELDS.map((f) => f.model)),
+].map((model) => ({ model, key: BACKUP_MODELS.find((m) => m.model === model)!.key }));
+
+/**
+ * Carry M6 ("Old backups with pre-V1 values"): a backup written before the
+ * field-encryption epic can still hold a pre-V1 `enc:...` value (the OLD,
+ * now-removed `src/lib/crypto.ts` scheme) in an encrypted field — historically
+ * only `serialNumber`. Restore writes go through the app Prisma client
+ * (@/lib/prisma), whose encryption extension would otherwise encrypt the
+ * literal string `"enc:..."` as if it were the serial. This decrypts every
+ * such value with VAULT_ENCRYPTION_KEY FIRST, in place, so the extension then
+ * encrypts the real plaintext with the CURRENT key.
+ *
+ * Mutates `rows` in place. Throws LegacyDecryptError (missing/wrong
+ * VAULT_ENCRYPTION_KEY, or a damaged value) before any row is touched by the
+ * caller's transaction — the restore must fail clean and change nothing.
+ */
+function decryptLegacyEncInRows(rows: Record<string, unknown[]>): void {
+  for (const { model, key } of ENCRYPTED_MODEL_KEYS) {
+    const fields = encryptedFieldsFor(model);
+    rows[key] = rows[key].map((row) => {
+      if (!isRowObject(row)) return row;
+      let out: Record<string, unknown> | null = null;
+      for (const d of fields) {
+        const value = row[d.field];
+        if (typeof value !== "string" || !value.startsWith("enc:")) continue;
+        const plain = decryptLegacyEnc(value);
+        out = { ...(out ?? row), [d.field]: plain };
+      }
+      return out ?? row;
+    });
+  }
+}
+
+/**
+ * Carry ("DateNormalizationAudit rows"): an old backup can carry
+ * DateNormalizationAudit rows the pre-encryption date migration wrote for
+ * `nfaApprovalDate` (Firearm/Accessory) — plaintext copies of a column that
+ * is now encrypted. The startup encryption migration
+ * (src/lib/encryption/startup.ts, runEncryptionMigration) deliberately
+ * deletes exactly these rows for the same reason; restore must not bring them
+ * back. Rows for every OTHER model/field (e.g. a date-only inventory field)
+ * are left alone.
+ */
+function dropLegacyNfaDateAudits(rows: Record<string, unknown[]>): void {
+  const dropped = new Set(
+    ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => `${d.model}:${d.field}`),
+  );
+  rows.dateNormalizationAudits = (rows.dateNormalizationAudits ?? []).filter((row) => {
+    if (!isRowObject(row)) return true;
+    return !dropped.has(`${row.model}:${row.field}`);
+  });
+}
+
+/** `{ sealed: <envelope>, passphrase: string }` — the sealed-restore request shape (spec §Restore). */
+function isSealedRequest(body: unknown): body is { sealed: unknown; passphrase: unknown } {
+  return typeof body === "object" && body !== null && !Array.isArray(body) && "sealed" in body && "passphrase" in body;
 }
 
 /**
@@ -158,11 +222,41 @@ export async function POST(request: NextRequest) {
   const auth = await requireAdmin();
   if (auth) return auth;
 
-  let body: unknown;
+  let rawBody: unknown;
   try {
-    body = await request.json();
+    rawBody = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Sealed restore (spec §Restore): `{ sealed: <envelope>, passphrase }`. The
+  // plain-backup path below is unchanged for everything else, including an
+  // old v1.1 (or earlier) file that was never sealed.
+  let body: unknown;
+  let sealed: boolean;
+  if (isSealedRequest(rawBody)) {
+    const { sealed: envelope, passphrase } = rawBody;
+    if (typeof passphrase !== "string") {
+      return NextResponse.json({ error: "Passphrase is required." }, { status: 400 });
+    }
+    let opened: string;
+    try {
+      opened = openBackup(passphrase, envelope);
+    } catch (error) {
+      if (error instanceof SealError) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    try {
+      body = JSON.parse(opened);
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    sealed = true;
+  } else {
+    body = rawBody;
+    sealed = false;
   }
 
   if (!isValidBackup(body)) {
@@ -175,8 +269,22 @@ export async function POST(request: NextRequest) {
   const rows: Record<string, unknown[]> = Object.fromEntries(
     BACKUP_MODELS.map(({ key }) => [key, (body[key] as unknown[] | undefined) ?? []])
   );
+
+  // Carry M6: a legacy enc: serial must be decrypted BEFORE anything is
+  // written — this throws (and writes nothing) when VAULT_ENCRYPTION_KEY is
+  // missing or wrong for a value that needs it.
+  try {
+    decryptLegacyEncInRows(rows);
+  } catch (error) {
+    if (error instanceof LegacyDecryptError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+
   normalizeNfaGroups(rows);
   normalizeGearArmorGroups(rows);
+  dropLegacyNfaDateAudits(rows);
 
   // Row-level auditing is off for the whole restore — the replace AND the
   // post-restore date migration — or every restored row (and every normalised
@@ -231,7 +339,7 @@ export async function POST(request: NextRequest) {
   await recordEventBestEffort(null, {
     action: "RESTORE",
     entityLabel: file ?? "Backup restore",
-    changes: file ? { file, counts } : { counts },
+    changes: file ? { file, counts, sealed } : { counts, sealed },
   });
 
   return NextResponse.json({
