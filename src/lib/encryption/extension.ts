@@ -8,10 +8,15 @@ import { toDateOnlyUTC } from "../date";
 /**
  * Field encryption at rest (docs/superpowers/specs/2026-09-30-field-encryption-design.md §2).
  *
- * A Prisma query extension that sits UNDER the audit extension
- * (`withAudit(withEncryption(base))`, src/lib/prisma.ts), so the audit layer
- * sees plaintext args and decrypted rows and redacts them, and only ciphertext
- * reaches the database. For every operation on every model it:
+ * A Prisma query extension. In `withAudit(withEncryption(base))`
+ * (src/lib/prisma.ts) THIS extension's hook runs first/outermost, and the
+ * audit extension's hook runs nested inside it (see the REDISPATCH note
+ * below). Because of that nesting, the audit layer's write capture sees
+ * THIS extension's already-encrypted args, not plaintext — but audit's own
+ * before/after row reads are fresh calls that re-enter the whole chain, so
+ * they pass through this extension's decrypt-on-read and come back
+ * decrypted. Either way, the stored audit `changes` are redacted. Only
+ * ciphertext ever reaches the database. For every operation on every model it:
  *
  * - writes: encrypts each registered field (src/lib/encryption/fields.ts) in
  *   `data` / `create` / `update`, including nested relation writes at any

@@ -119,14 +119,18 @@ A guard test in `src/lib/encryption/fields.test.ts` also fails if a registered f
 schema column is not `String`.
 
 **Client order.** The app's Prisma client is assembled in exactly one place,
-`src/lib/prisma.ts`: `base → encryption → audit`. The encryption extension
-(`src/lib/encryption/extension.ts`) must sit **under** the audit extension
-(`src/lib/audit/extension.ts`) — the audit layer's write capture sees ciphertext (not
-plaintext) going in, because it wraps the already-encrypting client, but the row values
-audit *reads back* (before/after a change, for the audit entry) come back decrypted,
-because the read path runs back up through the encryption extension on its way out. The
-stored audit `changes` are redacted (serial numbers and NFA fields never appear even
-decrypted — see **Audit log** below).
+`src/lib/prisma.ts`: `withAudit(withEncryption(base))`. Prisma runs query hooks in the
+order the extensions were added, so the **encryption** hook runs first/outermost, and
+the **audit** hook runs nested inside it (`src/lib/encryption/extension.ts`'s REDISPATCH
+comment has the full mechanism). One consequence of that nesting: when audit re-dispatches
+its own before/after reads for a row (fresh calls that re-enter the whole chain from the
+top), those calls pass through the encryption hook's decrypt-on-read, so audit sees them
+decrypted. But audit's own *write capture* — the raw args/result of the create/update it
+is auditing — sees whatever the encryption hook already did to them on the way in, i.e.
+**ciphertext, not plaintext**. Either way, the stored audit `changes` are redacted (serial
+numbers and NFA fields never appear even decrypted — see **Audit log** below). Get the
+nesting backwards in a change here and a third extension added later would inherit the
+wrong assumption about what it sees.
 
 **No raw SQL on an encrypted column.** `$queryRaw`/`$executeRaw` (and their `*Unsafe`
 variants) bypass both extensions entirely, so a raw query naming an encrypted column
