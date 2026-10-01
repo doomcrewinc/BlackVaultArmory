@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { ENCRYPTED_FIELDS } from "./fields";
@@ -80,17 +80,76 @@ async function sqliteDatabaseFile(raw: SnapshotClient): Promise<string> {
   return main.file;
 }
 
-/** The newest pre-encryption snapshot in `dir` younger than SNAPSHOT_REUSE_MS, or null. */
-function recentSnapshot(dir: string, now: Date): string | null {
-  if (!existsSync(dir)) return null;
-  let best: { file: string; mtime: number } | null = null;
-  for (const name of readdirSync(dir)) {
-    if (!name.startsWith(SNAPSHOT_PREFIX) || !name.endsWith(".db")) continue;
-    const file = path.join(dir, name);
-    const mtime = statSync(file).mtimeMs;
-    if (now.getTime() - mtime < SNAPSHOT_REUSE_MS && (!best || mtime > best.mtime)) best = { file, mtime };
+/** A FINAL snapshot name; `.partial` files (a copy that never finished) never match. */
+const FINAL_NAME = /^pre-encryption-\d{8}-\d{6}(-\d+)?\.db$/;
+const PARTIAL_NAME = /^pre-encryption-\d{8}-\d{6}(-\d+)?\.db\.partial$/;
+
+/**
+ * True when `file` is a complete SQLite copy of this database: it attaches,
+ * `PRAGMA quick_check` says ok, and it holds the Firearm table. (A VACUUM
+ * INTO killed part-way can leave a file that opens as an EMPTY database and
+ * passes quick_check; the table check catches that.) Read-only; on the one
+ * raw connection, outside any transaction.
+ */
+async function isCompleteSnapshot(raw: SnapshotClient, file: string): Promise<boolean> {
+  try {
+    await raw.$executeRawUnsafe(`ATTACH DATABASE ${sqlLiteral(file)} AS bv_snapshot_check`);
+  } catch {
+    return false;
   }
-  return best?.file ?? null;
+  try {
+    const check = await raw.$queryRawUnsafe<Array<Record<string, unknown>>>("PRAGMA bv_snapshot_check.quick_check");
+    if (check.length !== 1 || Object.values(check[0])[0] !== "ok") return false;
+    const tables = await raw.$queryRawUnsafe<unknown[]>(
+      "SELECT 1 AS hit FROM bv_snapshot_check.sqlite_master WHERE type = 'table' AND name = 'Firearm'",
+    );
+    return tables.length === 1;
+  } catch {
+    return false;
+  } finally {
+    await raw.$executeRawUnsafe("DETACH DATABASE bv_snapshot_check").catch(() => undefined);
+  }
+}
+
+/**
+ * The newest complete pre-encryption snapshot in `dir` younger than
+ * SNAPSHOT_REUSE_MS, or null. Only final names are considered, and each
+ * candidate must pass isCompleteSnapshot (fix round 1, I1).
+ */
+async function recentSnapshot(raw: SnapshotClient, dir: string, now: Date, warn: (line: string) => void): Promise<string | null> {
+  if (!existsSync(dir)) return null;
+  const candidates = readdirSync(dir)
+    .filter((name) => FINAL_NAME.test(name))
+    .map((name) => ({ file: path.join(dir, name), mtime: statSync(path.join(dir, name)).mtimeMs }))
+    .filter((c) => now.getTime() - c.mtime < SNAPSHOT_REUSE_MS)
+    .sort((a, b) => b.mtime - a.mtime);
+  for (const c of candidates) {
+    if (await isCompleteSnapshot(raw, c.file)) return c.file;
+    warn(`[encryption] Ignoring an incomplete or damaged earlier snapshot: ${c.file}`);
+  }
+  return null;
+}
+
+/** Removes `.partial` leftovers of copies that never finished (plaintext, and useless). */
+function removeStalePartials(dir: string): void {
+  if (!existsSync(dir)) return;
+  for (const name of readdirSync(dir)) {
+    if (PARTIAL_NAME.test(name)) rmSync(path.join(dir, name), { force: true });
+  }
+}
+
+/**
+ * Where the snapshot is on the HOST (fix round 1, M14). In the container the
+ * database folder is /app/data, which docker-compose.yml mounts from
+ * ${DATA_DIR}/db and passes as BLACKVAULT_HOST_DB_DIR. Outside a container
+ * the path is already a host path.
+ */
+export function hostPathOf(file: string, env: Record<string, string | undefined> = process.env): string {
+  const inContainerDir = "/app/data/";
+  if (!file.startsWith(inContainerDir)) return file;
+  const hostDir = (env.BLACKVAULT_HOST_DB_DIR ?? "").trim();
+  if (hostDir) return path.posix.join(hostDir.replace(/\\/g, "/"), file.slice(inContainerDir.length));
+  return `${file} (in the container; on the host it is in the db/ folder of your BlackVault data directory)`;
 }
 
 /** SQL string literal (single quotes doubled). */
@@ -128,15 +187,26 @@ export async function takePreEncryptionSnapshot(
   try {
     const dbFile = await sqliteDatabaseFile(raw);
     const dir = path.dirname(dbFile);
-    const reuse = recentSnapshot(dir, now);
+    const reuse = await recentSnapshot(raw, dir, now, warn);
     if (reuse) {
-      log(`[encryption] Keeping the pre-encryption snapshot taken earlier: ${reuse}`);
+      log(`[encryption] Keeping the pre-encryption snapshot taken earlier: ${hostPathOf(reuse)}`);
       return { kind: "reused", file: reuse };
     }
+    removeStalePartials(dir);
     target = path.join(dir, `${SNAPSHOT_PREFIX}${snapshotStamp(now)}.db`);
     if (existsSync(target)) target = path.join(dir, `${SNAPSHOT_PREFIX}${snapshotStamp(now)}-${process.pid}.db`);
-    await raw.$executeRawUnsafe(`VACUUM INTO ${sqlLiteral(target)}`);
-    chmodSync(target, 0o600);
+    // Fix round 1 (I1): written under a .partial name and renamed only once
+    // complete, so a copy killed part-way never carries a final name.
+    const partial = `${target}.partial`;
+    rmSync(partial, { force: true });
+    try {
+      await raw.$executeRawUnsafe(`VACUUM INTO ${sqlLiteral(partial)}`);
+      chmodSync(partial, 0o600);
+      renameSync(partial, target);
+    } catch (e) {
+      rmSync(partial, { force: true });
+      throw e;
+    }
   } catch (e) {
     throw new Error(
       "Could not take the pre-encryption database snapshot, so nothing was encrypted " +
@@ -144,7 +214,7 @@ export async function takePreEncryptionSnapshot(
       { cause: e },
     );
   }
-  log(`[encryption] Snapshot taken before encrypting existing data: ${target}`);
+  log(`[encryption] Snapshot taken before encrypting existing data: ${hostPathOf(target)}`);
   log("[encryption] It is a PLAINTEXT copy of your database. Delete it once BlackVault is confirmed working.");
   return { kind: "taken", file: target };
 }

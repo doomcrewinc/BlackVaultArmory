@@ -62,6 +62,12 @@ describe("docker-compose.yml", () => {
   it("still passes VAULT_ENCRYPTION_KEY through for the legacy enc: upgrade path", () => {
     expect(serviceBlock(read("docker-compose.yml"), "blackvault")).toContain("- VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}");
   });
+
+  it("tells the app the host folder behind /app/data, for the snapshot log line (M14)", () => {
+    const app = serviceBlock(read("docker-compose.yml"), "blackvault");
+    expect(app).toContain("- BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db");
+    expect(app).toContain("- ${DATA_DIR:-./data}/db:/app/data");
+  });
 });
 
 describe("Dockerfile", () => {

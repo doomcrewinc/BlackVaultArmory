@@ -865,14 +865,46 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
 
     it.skipIf(!!ctx.pg)("SQLite: a pre-encryption snapshot from the last 24 h is reused, not repeated (a refused start under restart: unless-stopped must not fill the disk)", async () => {
       for (const n of snapshotsInDbDir()) rmSync(join(ctx.dir, n));
-      const earlier = join(ctx.dir, "pre-encryption-20000101-000000.db");
-      writeFileSync(earlier, "earlier snapshot"); // mtime = now
       await seedPlaintext();
+      // A COMPLETE earlier snapshot (fix round 1: reuse requires one).
+      const earlier = join(ctx.dir, "pre-encryption-20000101-000000.db");
+      await raw.$executeRawUnsafe(`VACUUM INTO '${earlier}'`); // mtime = now
       vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
       await within(60_000, register());
       expect(snapshotsInDbDir()).toEqual(["pre-encryption-20000101-000000.db"]);
       expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain("Keeping the pre-encryption snapshot taken earlier");
       rmSync(earlier);
+    }, 120_000);
+
+    it.skipIf(!!ctx.pg)("SQLite: a truncated final-name snapshot and a stale .partial are NOT reused: a fresh snapshot is taken (fix round 1, I1)", async () => {
+      for (const n of readdirSync(ctx.dir).filter((f) => f.startsWith("pre-encryption-"))) rmSync(join(ctx.dir, n));
+      await seedPlaintext();
+      // What a VACUUM INTO killed part-way leaves: a real copy, cut short.
+      const full = join(ctx.dir, "full-copy.tmp");
+      await raw.$executeRawUnsafe(`VACUUM INTO '${full}'`);
+      const bytes = readFileSync(full);
+      rmSync(full);
+      const truncated = join(ctx.dir, "pre-encryption-20000101-000000.db");
+      writeFileSync(truncated, bytes.subarray(0, Math.floor(bytes.length / 2)));
+      // Its header zeroed (VACUUM INTO writes page 1 last): opens as an EMPTY database.
+      const headerless = join(ctx.dir, "pre-encryption-20000101-000001.db");
+      writeFileSync(headerless, Buffer.concat([Buffer.alloc(4096), bytes.subarray(4096)]));
+      const stale = join(ctx.dir, "pre-encryption-20000101-000002.db.partial");
+      writeFileSync(stale, bytes.subarray(0, 1000));
+
+      vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register());
+      const log = vi.mocked(console.log).mock.calls.flat().join("\n");
+      expect(log).not.toContain("Keeping the pre-encryption snapshot taken earlier");
+      expect(log).toContain("Snapshot taken before encrypting existing data");
+      const errors = vi.mocked(console.error).mock.calls.flat().join("\n");
+      expect(errors).toContain(`Ignoring an incomplete or damaged earlier snapshot: `);
+      const finals = snapshotsInDbDir().filter((n) => !n.startsWith("pre-encryption-2000"));
+      expect(finals).toHaveLength(1);
+      const fresh = readFileSync(join(ctx.dir, finals[0]));
+      expect(fresh.includes(Buffer.from("SN-PLAIN-1"))).toBe(true);
+      expect(readdirSync(ctx.dir).filter((n) => n.endsWith(".partial"))).toEqual([]);
+      for (const n of readdirSync(ctx.dir).filter((f) => f.startsWith("pre-encryption-"))) rmSync(join(ctx.dir, n));
     }, 120_000);
 
     it.skipIf(!!ctx.pg || process.getuid?.() === 0)("SQLite: when the snapshot cannot be written, refuses to start and encrypts nothing", async () => {

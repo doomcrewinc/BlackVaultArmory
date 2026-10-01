@@ -81,6 +81,9 @@ services:
       # Only for upgrades from very old versions: reads legacy enc: serial
       # numbers once, while the first start re-encrypts them.
       - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
+      # Lets the app print the HOST path of the snapshot it takes before its
+      # first encryption (/app/data inside = this folder outside).
+      - BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db
       # Required: the address people open BlackVault at, normally your reverse
       # proxy's HTTPS URL. The app will not start without it.
       - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-}
