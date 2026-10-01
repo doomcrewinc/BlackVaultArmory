@@ -186,19 +186,67 @@ export function decodeFromStorage(
   }
 }
 
+/** Digits-only epoch milliseconds (a leading minus allowed: SQLite stores pre-1970 dates as negative ms). */
+const EPOCH_MS = /^-?\d+$/;
+/** `YYYY-MM-DD`, or full ISO `YYYY-MM-DDTHH:MM:SS(.sss)Z` (what Postgres's to_char migration and toISOString write). */
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z)?$/;
+/** A plain decimal, optionally signed: no exponent, hex, separators, currency or padding. */
+const PLAIN_DECIMAL = /^[+-]?\d+(?:\.\d+)?$/;
+
+/** A strict calendar parse: the components must round-trip (2026-02-30 is refused, not rolled into March). */
+function parseIsoDate(text: string): Date | null {
+  const m = ISO_DATE.exec(text);
+  if (!m) return null;
+  const [, y, mo, d, h = "0", mi = "0", sec = "0", ms = "0"] = m;
+  const parts = [y, mo, d, h, mi, sec].map(Number);
+  const millis = Number(ms.padEnd(3, "0"));
+  const date = new Date(0);
+  date.setUTCFullYear(parts[0], parts[1] - 1, parts[2]); // not Date.UTC: it maps years 0-99 into the 1900s
+  date.setUTCHours(parts[3], parts[4], parts[5], millis);
+  const ok =
+    date.getUTCFullYear() === parts[0] &&
+    date.getUTCMonth() === parts[1] - 1 &&
+    date.getUTCDate() === parts[2] &&
+    date.getUTCHours() === parts[3] &&
+    date.getUTCMinutes() === parts[4] &&
+    date.getUTCSeconds() === parts[5];
+  return ok ? date : null;
+}
+
 /**
  * The application value of a PRE-ENCRYPTION stored value (the startup
- * migration's input, ./startup.ts): a string as-is; for `nfaApprovalDate` a
- * Date from epoch milliseconds (a number, or a numeric string — SQLite) or an
- * ISO string (Postgres); for `nfaTaxPaid` a number from a number or numeric
- * string (fields.ts P3). Throws TypeError on anything unreadable.
+ * migration's input, ./startup.ts), parsed STRICTLY — only the forms a real
+ * writer produced (fields.ts P3):
+ * - string fields: as-is;
+ * - `nfaApprovalDate`: a number or digits-only string of epoch milliseconds
+ *   (SQLite), `YYYY-MM-DD`, or full ISO `YYYY-MM-DDTHH:MM:SS(.sss)Z`
+ *   (Postgres), with a calendar that round-trips;
+ * - `nfaTaxPaid`: a finite number, or a plain optionally-signed decimal.
+ * Anything else throws a TypeError (the migration names the row and field):
+ * a lenient parse would silently turn "2026-09-25 01:30:00" into a day that
+ * depends on the process timezone, or "0x10" into 16.
  */
 export function parsePlaintextValue(model: string, field: string, value: string | number): string | Date | number {
   const d = requireDescriptor(model, field);
-  if (typeof value === "number" && d.kind === "string") {
-    throw new TypeError(`${model}.${field} holds a number, expected text`);
+  const unreadable = (what: string) => new TypeError(`${model}.${field} holds an unreadable ${what}`);
+  switch (d.kind) {
+    case "string":
+      if (typeof value !== "string") throw new TypeError(`${model}.${field} holds a number, expected text`);
+      return value;
+    case "date": {
+      let date: Date | null = null;
+      if (typeof value === "number") date = Number.isInteger(value) ? new Date(value) : null;
+      else if (EPOCH_MS.test(value)) date = new Date(Number(value));
+      else date = parseIsoDate(value);
+      if (!date || Number.isNaN(date.getTime())) throw unreadable("date");
+      return date;
+    }
+    case "number": {
+      const n = typeof value === "number" ? value : PLAIN_DECIMAL.test(value) ? Number(value) : NaN;
+      if (!Number.isFinite(n)) throw unreadable("number");
+      return n;
+    }
   }
-  return deserialize(d, String(value));
 }
 
 // ─── Writes ─────────────────────────────────────────────────────

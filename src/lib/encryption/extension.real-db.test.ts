@@ -628,6 +628,36 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       expect(() => parsePlaintextValue("Firearm", "nfaTaxPaid", "")).toThrow(TypeError);
     });
 
+    it("parses STRICTLY: only the forms a real writer produced (fix round 1, M2)", () => {
+      const date = (v: string | number) => parsePlaintextValue("Firearm", "nfaApprovalDate", v);
+      const tax = (v: string | number) => parsePlaintextValue("Accessory", "nfaTaxPaid", v);
+      // accepted dates
+      expect(date("0")).toEqual(new Date(0));
+      expect(date("-1000")).toEqual(new Date(-1000)); // pre-1970, SQLite INTEGER
+      expect(date("2026-09-25")).toEqual(new Date("2026-09-25T00:00:00.000Z"));
+      expect(date("2026-09-25T01:30:00Z")).toEqual(new Date("2026-09-25T01:30:00.000Z"));
+      expect(date("2024-02-29T00:00:00.000Z")).toEqual(new Date("2024-02-29T00:00:00.000Z"));
+      expect((date("0099-03-01T00:00:00.000Z") as Date).getUTCFullYear()).toBe(99);
+      // refused dates (the review's examples)
+      for (const v of [
+        "", " ", "1e3", " 1790380800000", "1790380800000.0", "+1790380800000",
+        "2026-09-25 00:00:00", "2026-09-25 01:30:00", "2026-02-30T00:00:00.000Z", "2026-02-30",
+        "2026-13-01", "2026-09-25T24:00:00Z", "12/25/2026", "abc", "2026-09-25T00:00:00.000+13:00", 1.5,
+      ]) {
+        expect(() => date(v), JSON.stringify(v)).toThrow(/Firearm\.nfaApprovalDate holds an unreadable date/);
+      }
+      // accepted taxes
+      expect(tax("0")).toBe(0);
+      expect(tax("-5")).toBe(-5);
+      expect(tax("+5")).toBe(5);
+      expect(tax("199.99")).toBe(199.99);
+      expect(tax(200)).toBe(200);
+      // refused taxes
+      for (const v of ["", " ", "1e3", "0x10", "0b11", "Infinity", "NaN", "1,000", "$200", " 200 ", "200.", ".5", Infinity, NaN]) {
+        expect(() => tax(v), JSON.stringify(v)).toThrow(/Accessory\.nfaTaxPaid holds an unreadable number/);
+      }
+    });
+
     it("STRICT: a plaintext value at rest is never passed through (PLAINTEXT_AT_REST)", () => {
       for (const [model, field, value] of [
         ["Gear", "serialNumber", "G-1"],

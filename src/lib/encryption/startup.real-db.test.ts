@@ -43,7 +43,7 @@ vi.mock("@/lib/server/auth", () => ({
 
 import type { PrismaClient } from "@prisma/client";
 import { createRawPrismaClient, prisma } from "@/lib/prisma";
-import { encryptValue, fingerprint, isEncrypted, keyId, EncryptionKeyError } from "@/lib/encryption/core.mjs";
+import { deriveKeys, encryptValue, fingerprint, isEncrypted, keyId, EncryptionKeyError } from "@/lib/encryption/core.mjs";
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
 import { ENCRYPTED_FIELDS } from "@/lib/encryption/fields";
 import { parsePlaintextValue } from "@/lib/encryption/extension";
@@ -272,13 +272,22 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     vi.restoreAllMocks();
   });
 
-  // ── 1 ──
-  it("fresh empty DB with a key: creates the key check; a second start is a no-op", async () => {
+  /** One start's encryption steps, as runEncryptionStartup runs them. */
+  async function start() {
     await within(10_000, assertEncryptionKey(raw));
+    return within(30_000, runEncryptionMigration(raw));
+  }
+
+  const checkOf = async () => (await raw.appSettings.findUnique({ where: { id: "singleton" } }))?.encryptionKeyCheck ?? null;
+
+  // ── 1 ──
+  it("fresh empty DB with a key: the key check is created (by the migration); a second start is a no-op", async () => {
+    await within(10_000, assertEncryptionKey(raw));
+    expect(await checkOf()).toBeNull(); // the key check is read-only (I2)
+    expect(await within(10_000, runEncryptionMigration(raw))).toEqual({ counts: { Firearm: 0, Accessory: 0, Gear: 0 } });
     const settings = await raw.appSettings.findUnique({ where: { id: "singleton" } });
     expect(isEncrypted(settings?.encryptionKeyCheck)).toBe(true);
     expect(settings?.encryptionKeyCheck).toMatch(new RegExp(`^bv2:${keyId(Buffer.from(TEST_KEY, "hex"))}:`));
-    expect(await within(10_000, runEncryptionMigration(raw))).toEqual({ counts: { Firearm: 0, Accessory: 0, Gear: 0 } });
 
     const before = await rawSnapshot();
     await within(10_000, assertEncryptionKey(raw));
@@ -302,7 +311,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
 
   // ── 3 ──
   it("wrong key against an existing key check: KEY_MISMATCH naming both key ids", async () => {
-    await assertEncryptionKey(raw); // creates the check with the test key
+    await start(); // creates the check with the test key
     const before = await rawSnapshot();
     const err = await withKey(OTHER_KEY, () => assertEncryptionKey(raw).catch((e) => e));
     expect(err).toBeInstanceOf(EncryptionKeyError);
@@ -315,7 +324,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
   });
 
   it("a tampered key check is refused too (KEY_MISMATCH)", async () => {
-    await assertEncryptionKey(raw);
+    await start();
     const check = (await raw.appSettings.findUnique({ where: { id: "singleton" } }))!.encryptionKeyCheck!;
     const parts = check.split(":");
     parts[3] = Buffer.from("not the check").toString("base64url");
@@ -323,15 +332,69 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     await expect(assertEncryptionKey(raw)).rejects.toMatchObject({ code: "KEY_MISMATCH" });
   });
 
-  // ── 4 ──
-  it("key check absent while bv2: values exist: KEY_CHECK_LOST", async () => {
+  // ── 4 (fix round 1, I1) ──
+  it("key check absent, bv2: values readable with this key (a seeded DB): the key is proven and the check is created", async () => {
+    // What `prisma db seed` leaves: rows written through the app client, no key check.
+    await prisma.firearm.create({ data: firearm({ id: "f-seeded", serialNumber: "SN-SEEDED" }) });
+    await prisma.gear.create({ data: { id: "g-seeded", name: "Plate", category: "ARMOR", serialNumber: "G-SEEDED" } });
+    expect(await checkOf()).toBeNull();
+
+    expect((await start()).counts).toEqual({ Firearm: 0, Accessory: 0, Gear: 0 });
+    expect(await checkOf()).toMatch(new RegExp(`^bv2:${getFieldKeys().id}:`));
+    expect((await prisma.firearm.findFirst({ where: { serialNumber: "SN-SEEDED" } }))?.id).toBe("f-seeded");
+    await start(); // and the next start passes the check
+  });
+
+  it("key check absent, bv2: values under another key: KEY_MISMATCH naming the found key id", async () => {
+    const other = deriveKeys(Buffer.from(OTHER_KEY, "hex"));
     await raw.gear.create({
-      data: { id: "g-enc", name: "Plate", category: "ARMOR", serialNumber: encryptValue(getFieldKeys(), "Gear.serialNumber", "G-1") },
+      data: { id: "g-other", name: "Plate", category: "ARMOR", serialNumber: encryptValue(other, "Gear.serialNumber", "G-1") },
     });
     const err = await assertEncryptionKey(raw).catch((e) => e);
     expect(err).toBeInstanceOf(EncryptionKeyError);
+    expect(err.code).toBe("KEY_MISMATCH");
+    expect(err.message).toContain(`encrypted with key ${other.id}, but the provided key is ${getFieldKeys().id}`);
+    expect(await checkOf()).toBeNull();
+  });
+
+  it("key check absent and nothing verifiable (this key id, but no value decrypts): KEY_CHECK_LOST, with a followable hint", async () => {
+    const good = encryptValue(getFieldKeys(), "Gear.serialNumber", "G-1");
+    const parts = good.split(":");
+    parts[3] = Buffer.from("tampered").toString("base64url");
+    await raw.gear.create({ data: { id: "g-bad", name: "Plate", category: "ARMOR", serialNumber: parts.join(":") } });
+    const err = await assertEncryptionKey(raw).catch((e) => e);
+    expect(err).toBeInstanceOf(EncryptionKeyError);
     expect(err.code).toBe("KEY_CHECK_LOST");
-    expect(await raw.appSettings.count()).toBe(0); // no fresh check minted over the lost one
+    expect(err.message).toContain("restore the pre-upgrade database snapshot in backups/");
+    expect(err.message).not.toMatch(/settings row/i);
+    expect(await raw.appSettings.count()).toBe(0); // no check minted
+  });
+
+  // ── fix round 1, I2 ──
+  it("a failed first migration leaves no key check, so a start with a different key is not refused as KEY_MISMATCH", async () => {
+    await raw.firearm.create({ data: firearm({ id: "f-legacy-i2", serialNumber: legacyEncrypt(LEGACY_KEY, "SN-I2") }) });
+    // Start 1, key A (the test key), no VAULT_ENCRYPTION_KEY: refused, rolled back.
+    await expect(start()).rejects.toBeInstanceOf(EncryptionMigrationError);
+    expect(await checkOf()).toBeNull();
+    // Start 2, key B, with the legacy key: succeeds.
+    process.env.VAULT_ENCRYPTION_KEY = LEGACY_KEY;
+    await withKey(OTHER_KEY, async () => {
+      expect((await start()).counts.Firearm).toBe(1);
+      expect(await checkOf()).toMatch(new RegExp(`^bv2:${keyId(Buffer.from(OTHER_KEY, "hex"))}:`));
+    });
+  });
+
+  // ── fix round 1, M5 ──
+  it("no key on an already-encrypted database: KEY_MISSING says to restore the original key file, not to generate one", async () => {
+    await prisma.gear.create({ data: { id: "g-m5", name: "Plate", category: "ARMOR", serialNumber: "G-M5" } });
+    const id = getFieldKeys().id;
+    const before = await rawSnapshot();
+    const err = await withKey(null, () => assertEncryptionKey(raw).catch((e) => e));
+    expect(err).toBeInstanceOf(EncryptionKeyError);
+    expect(err.code).toBe("KEY_MISSING");
+    expect(err.message).toContain(`restore the original key file (key id ${id})`);
+    expect(err.message).not.toContain("Generate one with");
+    expect(await rawSnapshot()).toBe(before);
   });
 
   // ── 5 ──
@@ -489,8 +552,70 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     const before = await rawSnapshot();
     const err = await runEncryptionMigration(raw).catch((e) => e);
     expect(err).toBeInstanceOf(EncryptionMigrationError);
-    expect(err.message).toContain("1 Firearm row(s) have a serial number but no serialNumberHash");
+    expect(err.message).toContain("1 Firearm row(s) have a serial number but no fingerprint (serialNumberHash)");
+    expect(err.message).toContain("This indicates a bug");
+    expect(err.message).toContain("restore the pre-upgrade database snapshot in backups/ and report it");
+    expect(err.message).not.toMatch(/re-save/);
     expect(await rawSnapshot()).toBe(before);
+  });
+
+  // ── fix round 1, I3 ──
+  it("scrubs plaintext NFA dates from DateNormalizationAudit, in the same transaction", async () => {
+    await seedPlaintext();
+    const audit = (model: string, field: string, recordId: string) => ({
+      model, field, recordId,
+      originalValue: new Date("2026-09-21T01:30:00.000Z"),
+      appliedValue: new Date("2026-09-20T00:00:00.000Z"),
+      appliedZone: "America/Denver",
+    });
+    await raw.dateNormalizationAudit.createMany({
+      data: [
+        audit("Firearm", "nfaApprovalDate", "f-sqlite-form"),
+        audit("Accessory", "nfaApprovalDate", "a-1"),
+        audit("Firearm", "acquisitionDate", "f-sqlite-form"),
+      ],
+    });
+    await start();
+    const left = await raw.dateNormalizationAudit.findMany();
+    expect(left.map((a) => `${a.model}.${a.field}`)).toEqual(["Firearm.acquisitionDate"]);
+    expect(left.some((a) => a.field === "nfaApprovalDate")).toBe(false);
+  });
+
+  it("the scrub rolls back with a failed migration", async () => {
+    await raw.dateNormalizationAudit.create({
+      data: { model: "Firearm", field: "nfaApprovalDate", recordId: "x", originalValue: new Date(0), appliedValue: new Date(0), appliedZone: "UTC" },
+    });
+    await raw.gear.create({ data: { id: "g-l", name: "P", category: "ARMOR", serialNumber: legacyEncrypt(LEGACY_KEY, "G") } });
+    await expect(start()).rejects.toBeInstanceOf(EncryptionMigrationError);
+    expect(await raw.dateNormalizationAudit.count()).toBe(1);
+  });
+
+  // ── fix round 1, I4 ──
+  it.each([
+    ["two legacy enc: serials", (s: string) => legacyEncrypt(LEGACY_KEY, s), (s: string) => legacyEncrypt(LEGACY_KEY, s)],
+    ["a plaintext serial and a legacy enc: serial", (s: string) => s, (s: string) => legacyEncrypt(LEGACY_KEY, s)],
+  ])("%s that are the same firearm serial: refused before any write, naming both rows and the fix", async (_l, first, second) => {
+    process.env.VAULT_ENCRYPTION_KEY = LEGACY_KEY;
+    await seedPlaintext();
+    await raw.firearm.create({ data: firearm({ id: "f-dup-a", serialNumber: first("SN-DUP") }) });
+    await raw.firearm.create({ data: firearm({ id: "f-dup-b", serialNumber: second("SN-DUP") }) });
+    const before = await rawSnapshot();
+    const err = await start().catch((e) => e);
+    expect(err).toBeInstanceOf(EncryptionMigrationError);
+    expect(err.message).toContain("Firearms f-dup-a and f-dup-b have the same serial number");
+    expect(err.message).toContain("edit the serial of one of them or remove the duplicate");
+    expect(err.message).not.toContain("SN-DUP");
+    expect(err.message).not.toMatch(/prisma|Unique constraint/i);
+    expect(await rawSnapshot()).toBe(before);
+  });
+
+  // ── fix round 1, M2 ──
+  it("an unreadable stored form refuses to start, naming the model, id and field", async () => {
+    await raw.firearm.create({ data: firearm({ id: "f-bad-date", nfaApprovalDate: "2026-09-25 01:30:00" }) });
+    const err = await start().catch((e) => e);
+    expect(err).toBeInstanceOf(EncryptionMigrationError);
+    expect(err).toMatchObject({ model: "Firearm", id: "f-bad-date", field: "nfaApprovalDate" });
+    expect(err.message).toContain("Firearm.nfaApprovalDate for id f-bad-date");
   });
 
   // ── 8 ──

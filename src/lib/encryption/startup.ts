@@ -1,7 +1,9 @@
 import { createDecipheriv } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
-import { decryptValue, encryptValue, envelopeKeyId, fingerprint, isEncrypted, EncryptionKeyError } from "./core.mjs";
-import { ENCRYPTED_FIELDS, encryptedFieldsFor, type EncryptedFieldDescriptor } from "./fields";
+import {
+  decryptValue, encryptValue, envelopeKeyId, fingerprint, isEncrypted, EncryptionKeyError, type FieldKeys,
+} from "./core.mjs";
+import { aadFor, ENCRYPTED_FIELDS, encryptedFieldsFor, type EncryptedFieldDescriptor } from "./fields";
 import { encodeForStorage, parsePlaintextValue } from "./extension";
 import { getFieldKeys } from "./keys";
 import { SYSTEM_ACTOR } from "../audit/context";
@@ -13,7 +15,7 @@ import { isValidTimeZone, normalizeInstant } from "../date-migration";
  * (docs/superpowers/specs/2026-09-30-field-encryption-design.md §2, "Startup
  * sequence"), run by src/instrumentation.ts before the app serves:
  *
- * 1. assertEncryptionKey: load the key, then create or verify the key check.
+ * 1. assertEncryptionKey: load the key and verify it (read-only).
  * 2. runEncryptionMigration: encrypt every pre-encryption value, once, in one
  *    transaction.
  *
@@ -115,62 +117,123 @@ export function decryptLegacyEnc(stored: string, env: Record<string, string | un
 
 // ─── Key check ──────────────────────────────────────────────────
 
-/** True when any registered field anywhere holds a `bv2:` value. */
-async function anyEncryptedValue(raw: RawClient): Promise<boolean> {
+/** Every stored `bv2:` value of every registered field, with the AAD it was sealed under. Read-only. */
+async function encryptedValues(raw: RawClient): Promise<Array<{ aad: string; stored: string }>> {
+  const out: Array<{ aad: string; stored: string }> = [];
   for (const d of ENCRYPTED_FIELDS) {
-    const hit = await delegateOf(raw, d).findFirst({
+    const rows = await delegateOf(raw, d).findMany({
       where: { [d.field]: { startsWith: "bv2:" } },
-      select: { id: true },
+      select: { [d.field]: true },
     });
-    if (hit) return true;
+    for (const r of rows) out.push({ aad: aadFor(d.model, d.field), stored: String(r[d.field]) });
   }
-  return false;
+  return out;
+}
+
+/** The key id a `bv2:` value names, or null when it is malformed. */
+function idOf(stored: string): string | null {
+  try {
+    return envelopeKeyId(stored);
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Step 1 + 2 of the startup sequence. Loads the key (EncryptionKeyError
- * KEY_MISSING / KEY_INVALID / KEY_CONFLICT from core.mjs), then:
- * - no key check and no `bv2:` value anywhere: creates the key check;
- * - no key check but `bv2:` values exist: KEY_CHECK_LOST;
+ * The key id this database is already encrypted with — from the key check,
+ * else the first `bv2:` value — or null for a database with no encrypted
+ * data. Read-only (used to word KEY_MISSING).
+ */
+async function existingKeyId(raw: RawClient): Promise<string | null> {
+  const settings = await raw.appSettings.findUnique({ where: { id: SETTINGS_ID }, select: { encryptionKeyCheck: true } });
+  const fromCheck = settings?.encryptionKeyCheck ? idOf(settings.encryptionKeyCheck) : null;
+  if (fromCheck) return fromCheck;
+  for (const d of ENCRYPTED_FIELDS) {
+    const hit = await delegateOf(raw, d).findFirst({
+      where: { [d.field]: { startsWith: "bv2:" } },
+      select: { [d.field]: true },
+    });
+    const id = hit ? idOf(String(hit[d.field])) : null;
+    if (id) return id;
+  }
+  return null;
+}
+
+/** Loads the key; on KEY_MISSING against an already-encrypted database, says to restore the original key instead of generating one. */
+async function loadKeys(raw: RawClient): Promise<FieldKeys> {
+  try {
+    return getFieldKeys();
+  } catch (e) {
+    if (!(e instanceof EncryptionKeyError) || e.code !== "KEY_MISSING") throw e;
+    const id = await existingKeyId(raw);
+    if (!id) throw e;
+    throw new EncryptionKeyError(
+      "KEY_MISSING",
+      `${e.message.replace(/\s*Generate one with:.*$/, "")} This database is already encrypted: ` +
+        `restore the original key file (key id ${id}). Do not generate a new key; it cannot read this data.`,
+    );
+  }
+}
+
+function mismatch(expected: string, provided: string): EncryptionKeyError {
+  return new EncryptionKeyError(
+    "KEY_MISMATCH",
+    `Wrong encryption key: this database was encrypted with key ${expected}, but the provided key is ${provided}. ` +
+      "Start with the key this database was encrypted with.",
+  );
+}
+
+/**
+ * Steps 1 + 2 of the startup sequence. READ-ONLY: the key check itself is
+ * created inside the encryption migration's transaction
+ * (runEncryptionMigration), so it can never exist unless encryption
+ * succeeded with that key.
+ *
+ * Loads the key (EncryptionKeyError KEY_MISSING / KEY_INVALID / KEY_CONFLICT
+ * from core.mjs), then:
  * - a key check that does not open with this key: KEY_MISMATCH, naming the
- *   expected and the provided key id.
+ *   expected and the provided key id;
+ * - no key check, and `bv2:` values exist (e.g. a database filled by
+ *   `prisma db seed` before its first start):
+ *   - any value under another key id: KEY_MISMATCH naming that id;
+ *   - else one of them decrypts with this key: the key is proven, and the
+ *     migration creates the check (self-heal);
+ *   - else nothing can be verified: KEY_CHECK_LOST.
  */
 export async function assertEncryptionKey(raw: RawClient): Promise<void> {
-  const keys = getFieldKeys();
+  const keys = await loadKeys(raw);
   const settings = await raw.appSettings.findUnique({
     where: { id: SETTINGS_ID },
     select: { encryptionKeyCheck: true },
   });
   const check = settings?.encryptionKeyCheck ?? null;
 
-  if (check === null) {
-    if (await anyEncryptedValue(raw)) {
-      throw new EncryptionKeyError(
-        "KEY_CHECK_LOST",
-        "The encryption key check (AppSettings.encryptionKeyCheck) is missing, but the database holds encrypted values. " +
-          "Refusing to start: restore the database or its settings row from a backup taken with this key.",
-      );
+  if (check !== null) {
+    try {
+      if (decryptValue(keys, KEY_CHECK_AAD, check) === KEY_CHECK_PLAINTEXT) return;
+    } catch {
+      // Falls through to the mismatch error below.
     }
-    const created = encryptValue(keys, KEY_CHECK_AAD, KEY_CHECK_PLAINTEXT);
-    await raw.appSettings.upsert({
-      where: { id: SETTINGS_ID },
-      create: { id: SETTINGS_ID, encryptionKeyCheck: created },
-      update: { encryptionKeyCheck: created },
-    });
-    return;
+    throw mismatch(idOf(check) ?? "unknown", keys.id);
   }
 
-  let expected = "unknown";
-  try {
-    expected = envelopeKeyId(check);
-    if (decryptValue(keys, KEY_CHECK_AAD, check) === KEY_CHECK_PLAINTEXT) return;
-  } catch {
-    // Falls through to the mismatch error below.
+  const values = await encryptedValues(raw);
+  if (values.length === 0) return;
+  const foreign = values.map((v) => idOf(v.stored)).find((id) => id !== null && id !== keys.id);
+  if (foreign) throw mismatch(foreign, keys.id);
+  for (const v of values) {
+    try {
+      decryptValue(keys, v.aad, v.stored);
+      return; // proven; the migration recreates the check
+    } catch {
+      // try the next one
+    }
   }
   throw new EncryptionKeyError(
-    "KEY_MISMATCH",
-    `Wrong encryption key: this database was encrypted with key ${expected}, but the provided key is ${keys.id}. ` +
-      "Start with the key this database was encrypted with.",
+    "KEY_CHECK_LOST",
+    `The encryption key check (AppSettings.encryptionKeyCheck) is missing, and none of the database's encrypted ` +
+      `values can be read with the provided key (${keys.id}). Refusing to start: start with the key this database ` +
+      "was encrypted with, or restore the pre-upgrade database snapshot in backups/.",
   );
 }
 
@@ -222,6 +285,31 @@ function encryptRow(model: string, fields: ReadonlyArray<EncryptedFieldDescripto
   return Object.keys(data).length ? data : null;
 }
 
+/**
+ * Firearm serials are unique (by fingerprint). Two legacy `enc:` values have
+ * different ciphertext for the same serial, so the old unique index never
+ * saw such a pair; it surfaces here. Refuses naming both rows (never the
+ * serial itself), before anything is written.
+ */
+function assertNoDuplicateSerial(rows: Row[], updates: Array<{ row: Row; data: Record<string, string | null> }>) {
+  const newHash = new Map(updates.filter((u) => "serialNumberHash" in u.data).map((u) => [u.row.id, u.data.serialNumberHash]));
+  const owner = new Map<string, string>();
+  for (const row of rows) {
+    const hash = newHash.has(row.id) ? newHash.get(row.id) : (row.serialNumberHash as string | null);
+    if (!hash) continue;
+    const first = owner.get(hash);
+    if (first) {
+      throw new EncryptionMigrationError(
+        `Firearms ${first} and ${row.id} have the same serial number once their legacy encrypted serials are read, ` +
+          "and serial numbers must be unique. Refusing to start: run the previous BlackVault version, edit the serial " +
+          "of one of them or remove the duplicate, then upgrade again.",
+        { model: "Firearm", id: row.id, field: "serialNumber" },
+      );
+    }
+    owner.set(hash, row.id);
+  }
+}
+
 /** Long enough for a large inventory on slow storage; the server is not serving yet. */
 const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
 
@@ -232,6 +320,11 @@ const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
  * when anything changed — all in ONE transaction on the raw client, so any
  * failure leaves every row as it was. Legacy `enc:` values are decrypted with
  * VAULT_ENCRYPTION_KEY first.
+ *
+ * In the same transaction it creates the key check when absent (never
+ * before: a failed first run must not pin the database to its key), and
+ * deletes DateNormalizationAudit rows for the encrypted NFA dates (plaintext
+ * copies). A duplicate firearm serial is refused before any write.
  *
  * Idempotent: a second run finds nothing to convert and writes nothing.
  *
@@ -251,12 +344,25 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
     const counts: Record<string, number> = {};
 
     for (const { model, fields } of ENCRYPTED_MODELS) {
-      const select = Object.fromEntries([["id", true], ["updatedAt", true], ...fields.map((d) => [d.field, true])]);
+      const hasFingerprint = fields.some((d) => d.fingerprint);
+      const select = Object.fromEntries([
+        ["id", true],
+        ["updatedAt", true],
+        ...(hasFingerprint ? [["serialNumberHash", true]] : []),
+        ...fields.map((d) => [d.field, true]),
+      ]);
       const rows = await delegateOf(tx, fields[0]).findMany({ select, orderBy: { id: "asc" } });
-      let changed = 0;
+
+      // Convert everything first, write after: a duplicate serial is found
+      // before any write, not as a unique-index error halfway through.
+      const updates: Array<{ row: Row; data: Record<string, string | null> }> = [];
       for (const row of rows) {
         const data = encryptRow(model, fields, row, zone);
-        if (!data) continue;
+        if (data) updates.push({ row, data });
+      }
+      if (model === "Firearm") assertNoDuplicateSerial(rows, updates);
+
+      for (const { row, data } of updates) {
         try {
           // updatedAt kept: encrypting a row is not an edit, and "recently
           // updated" lists must not all jump to the upgrade time.
@@ -268,9 +374,8 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
             e,
           );
         }
-        changed++;
       }
-      counts[model] = changed;
+      counts[model] = updates.length;
     }
 
     for (const { model, fields } of ENCRYPTED_MODELS) {
@@ -285,12 +390,35 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
       ).filter((r) => r.serialNumber !== null).length;
       if (missing > 0) {
         throw new EncryptionMigrationError(
-          `${missing} ${model} row(s) have a serial number but no serialNumberHash fingerprint. ` +
-            "Refusing to start: restore from a backup, or re-save those serials with the current key.",
+          `${missing} ${model} row(s) have a serial number but no fingerprint (serialNumberHash). ` +
+            "This indicates a bug. Refusing to start: restore the pre-upgrade database snapshot in backups/ and report it.",
           { model, field: "serialNumberHash" },
         );
       }
     }
+
+    // The key check, created only here — inside the transaction that
+    // encrypted the data — so a failed first migration never pins the
+    // database to a key nothing was encrypted with (assertEncryptionKey has
+    // already proven the key whenever encrypted values exist).
+    const settings = await tx.appSettings.findUnique({ where: { id: SETTINGS_ID }, select: { encryptionKeyCheck: true } });
+    if (!settings?.encryptionKeyCheck) {
+      const created = encryptValue(keys, KEY_CHECK_AAD, KEY_CHECK_PLAINTEXT);
+      await tx.appSettings.upsert({
+        where: { id: SETTINGS_ID },
+        create: { id: SETTINGS_ID, encryptionKeyCheck: created },
+        update: { encryptionKeyCheck: created },
+      });
+    }
+
+    // Earlier date-migration runs recorded NFA approval dates in
+    // DateNormalizationAudit's plaintext DateTime columns. Those columns are
+    // non-nullable DateTime, so they cannot hold a "[redacted]" marker; the
+    // rows are deleted instead. Nothing reads them any more: the date
+    // migration skips the encrypted dates.
+    await tx.dateNormalizationAudit.deleteMany({
+      where: { OR: ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => ({ model: d.model, field: d.field })) },
+    });
 
     if (Object.values(counts).some((n) => n > 0)) {
       await writeAuditEvent(tx, {
