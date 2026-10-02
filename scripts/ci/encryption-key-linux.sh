@@ -300,7 +300,8 @@ sudo sqlite3 "$APP/data/db/vault.db" "INSERT INTO Document (id, name, type, file
 sudo docker cp blackvault:/app/storage/uploads/documents "$UPLOADS/"
 echo "after docker cp: $(sudo stat -c '%n %U:%G %a' "$UPLOADS/documents" "$UPLOADS/documents/$SEED_DOC" | tr '\n' ' ')"
 # docker cp gives the copies to the user who ran it; the app (uid 1001) must own them.
-sudo chown -R 1001:1001 "$UPLOADS/documents"
+# The README's Linux rescue (final review FIX 2) gives it the whole uploads folder.
+sudo chown -R 1001:1001 "$UPLOADS"
 [ "$(sha_of "$UPLOADS/documents/$SEED_DOC")" = "$SEED_PDF_SHA" ] || fail "the rescued document differs from the seed"
 as_user "docker compose up -d"
 wait_healthy

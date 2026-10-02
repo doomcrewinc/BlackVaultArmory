@@ -976,34 +976,57 @@ cannot open them.
 - **No browser caching.** Photos and documents are sent with `Cache-Control: private,
   no-store`, so the browser keeps no copy and photos reload on every visit.
 
-### Before upgrading to this release: rescue your documents (Linux and Mac)
+### Before upgrading to this release: rescue your documents (Linux, Mac and Windows)
 
-> ⚠️ **Do this BEFORE you run `update.sh` (or `git pull`).** Before this release, uploaded
-> **documents** (not photos) were written inside the container itself, at
+> ⚠️ **Do this BEFORE you run `update.sh` / `update.bat` (or `git pull`).** Before this
+> release, uploaded **documents** (not photos) were written inside the container itself, at
 > `/app/storage/uploads/documents`, which is not on any volume. Recreating the container —
 > which every update does — deletes them. Copy them out while the old container still exists.
 
-**Check whether you have any**, with the old version still running:
+In each command below, replace `<DATA_DIR>` with your data folder (`./data` unless you changed
+`DATA_DIR` in `.env`).
+
+**Linux.** Check whether you have any, with the old version still running:
 
 ```bash
 sudo docker exec blackvault ls -la /app/storage/uploads/documents
 ```
 
 If it says `No such file or directory`, or lists no files, there is nothing to rescue — skip
-to the update. If it lists files, copy them onto the volume and give them to the app's user
-(uid 1001), replacing `<DATA_DIR>` with your data folder (`./data` unless you changed
-`DATA_DIR` in `.env`):
+to the update. If it lists files, copy them onto the volume and give the uploads folder to the
+app's user (uid 1001):
 
 ```bash
 sudo docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>/uploads/
-sudo chown -R 1001:1001 <DATA_DIR>/uploads/documents
+sudo chown -R 1001:1001 <DATA_DIR>/uploads
 ```
 
-`docker cp` gives the copies to the user who ran it; the app runs as uid 1001 and must own them
-to encrypt them. Then update as usual: the first start encrypts the rescued documents in place.
+`docker cp` gives the copies to the user who ran it; the app runs as uid 1001 and must own the
+documents to encrypt them, and the uploads folder itself to write its snapshot there. This
+rescue is proven on Linux in CI.
 
-This rescue is proven on Linux in CI. It has not yet been tested on Docker Desktop for Mac, or
-on Windows (where the `docker cp` line would run without `sudo`, into `<DATA_DIR>\uploads\`).
+**Mac (Docker Desktop or OrbStack).** The same steps, with no `sudo` and **no `chown`**:
+
+```bash
+docker exec blackvault ls -la /app/storage/uploads/documents
+docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>/uploads/
+```
+
+Docker Desktop and OrbStack read and write the files in your data folder as your own Mac user,
+so the copies are already usable by the app. A `chown` to 1001 would hand them to a user other
+than the one Docker writes as, and the app could then no longer encrypt them. This is expected
+to work but has not been tested yet; verify after the update that your documents open.
+
+**Windows (Docker Desktop).** In PowerShell or Command Prompt, with no `sudo` and no `chown`:
+
+```
+docker exec blackvault ls -la /app/storage/uploads/documents
+docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>\uploads\
+```
+
+This has not been tested yet either; verify after the update that your documents open.
+
+Then update as usual: the first start encrypts the rescued documents in place.
 
 If you already updated once since you uploaded a document, its file is probably gone; see
 **Missing documents** below.
@@ -1149,8 +1172,8 @@ Re-encrypting files from another key into the current one is not supported yet (
 - **The first upgrade can take minutes** with many files: every file is copied, then encrypted
   and synced to disk one at a time. Progress is logged every 250 files
   (`[files] snapshot 250/…`, `[files] encrypted 250/…`).
-- **Docker Desktop (Mac and Windows):** the in-container uploads snapshot is proven on Linux
-  only.
+- **Docker Desktop and OrbStack on Mac:** the in-container uploads snapshot is proven on Linux
+  only. (Windows copies on the host instead.)
 
 ---
 
