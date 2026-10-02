@@ -56,10 +56,20 @@ export async function GET(
       file = await readDecryptedFile(filePath);
     } catch (error) {
       if (error instanceof FileAtRestError) {
-        console.error(`[uploads] ${error.code} for ${error.path}`);
+        console.error(`[uploads] ${error.code}${error.causeCode ? ` (${error.causeCode})` : ""} for ${error.path}`);
         return NextResponse.json({ error: "File unavailable" }, { status: 500 });
       }
-      throw error;
+      // Fix round 1, m4: this used to rethrow into the outer catch, which
+      // returns a silent, unlogged 404 for EVERY failure — indistinguishable
+      // from a genuinely missing file. Only a real ENOENT (the file vanished
+      // between the lstat check above and this read) is still a 404; any
+      // other failure (e.g. getFieldKeys() throwing) is logged and a 500,
+      // never swallowed.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return NextResponse.json({ error: "File not found" }, { status: 404 });
+      }
+      console.error("GET /uploads/[...path] error:", error);
+      return NextResponse.json({ error: "File unavailable" }, { status: 500 });
     }
 
     return new NextResponse(new Uint8Array(file), {

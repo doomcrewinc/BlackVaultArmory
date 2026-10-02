@@ -86,16 +86,6 @@ export function validateUploadBuffer(
 
 const SAFE_FILE_NAME = /^[a-zA-Z0-9._-]+$/;
 
-/**
- * Documents now live under the shared uploads root (spec 3b §1, "Location"):
- * `<uploadsRoot>/documents`, via src/lib/files/storage.ts's `documentsRoot()`.
- * The pre-3b location (`<cwd>/storage/uploads`) is kept ONLY as
- * `legacyDocumentsRoot()` in that module, read by the startup move step.
- */
-export function getCanonicalUploadsRoot(): string {
-  return documentsRoot();
-}
-
 export function isSafeDocumentUrl(fileUrl: string): boolean {
   if (!fileUrl.startsWith("/api/files/documents/") && !fileUrl.startsWith("/uploads/documents/")) {
     return false;

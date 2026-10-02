@@ -37,7 +37,7 @@ export async function GET(
     });
   } catch (error: unknown) {
     if (error instanceof FileAtRestError) {
-      console.error(`[documents] ${error.code} for ${error.path}`);
+      console.error(`[documents] ${error.code}${error.causeCode ? ` (${error.causeCode})` : ""} for ${error.path}`);
       return NextResponse.json({ error: "Failed to read file" }, { status: 500 });
     }
 

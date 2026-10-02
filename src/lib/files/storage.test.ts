@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
 import { resetFieldKeysForTests } from "@/lib/encryption/keys";
+import * as keysModule from "@/lib/encryption/keys";
+import * as core from "@/lib/encryption/core.mjs";
 import {
   FileAtRestError,
   documentsRoot,
@@ -94,6 +96,12 @@ describe("uploadsRoot / documentsRoot / legacyDocumentsRoot", () => {
   });
 });
 
+// A tmp file for `target` now has the shape `<target>.<8 hex>.tmp` (fix
+// round 1, I2). This matches it without assuming any particular hex suffix.
+function isTmpFor(candidate: string, target: string): boolean {
+  return candidate.startsWith(`${target}.`) && candidate.endsWith(".tmp");
+}
+
 describe("writeAtomic / writeEncryptedFile", () => {
   it("writeEncryptedFile writes a BVF1 file with mode 600 and leaves no .tmp file", async () => {
     const dir = documentsRoot();
@@ -122,7 +130,7 @@ describe("writeAtomic / writeEncryptedFile", () => {
     const realOpen = fsp.open.bind(fsp);
     const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
       const handle = await realOpen(...args);
-      if (args[0] === `${target}.tmp`) {
+      if (isTmpFor(String(args[0]), target)) {
         vi.spyOn(handle, "write").mockRejectedValue(new Error("simulated disk full"));
       }
       return handle;
@@ -139,6 +147,319 @@ describe("writeAtomic / writeEncryptedFile", () => {
 
     const entries = await fsp.readdir(dir);
     expect(entries).toEqual(["existing.pdf"]);
+  });
+
+  // Fix round 1, I1: a single handle.write() issues one write(2), which can
+  // return fewer bytes than asked without throwing — the old code treated
+  // that as success and renamed a truncated file over the original. Two
+  // regression tests: a short write that never errors must still land
+  // every byte (no silent truncation), and a short write immediately
+  // followed by a hard error (the realistic ENOSPC shape) must still throw,
+  // keep the original, and leave no temp file — mirroring the reviewer's
+  // own "real partial write then failure" experiment, which already passed,
+  // to pin it permanently.
+  it("a short write that never errors is retried until every byte lands, not silently truncated (I1)", async () => {
+    const dir = path.join(tmpRoot, "short-write-retry");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "existing.bin");
+    const original = Buffer.from("ORIGINAL-CONTENT");
+    await fsp.writeFile(target, original);
+
+    const realOpen = fsp.open.bind(fsp);
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (isTmpFor(String(args[0]), target)) {
+        const realWrite = handle.write.bind(handle);
+        vi.spyOn(handle, "write").mockImplementation((async (buf: Buffer) => realWrite(buf.subarray(0, 10))) as never);
+      }
+      return handle;
+    }) as unknown as typeof fsp.open);
+
+    try {
+      await writeAtomic(target, Buffer.alloc(1000, 7));
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    const after = await fsp.readFile(target);
+    expect(after.length).toBe(1000);
+    expect(after.every((b) => b === 7)).toBe(true);
+
+    const entries = await fsp.readdir(dir);
+    expect(entries).toEqual(["existing.bin"]);
+  });
+
+  it("a short write immediately followed by ENOSPC throws, keeps the original, and leaves no temp file (I1)", async () => {
+    const dir = path.join(tmpRoot, "short-write-enospc");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "existing.bin");
+    const original = Buffer.from("ORIGINAL-CONTENT");
+    await fsp.writeFile(target, original);
+
+    const realOpen = fsp.open.bind(fsp);
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (isTmpFor(String(args[0]), target)) {
+        const realWrite = handle.write.bind(handle);
+        vi.spyOn(handle, "write").mockImplementation((async (buf: Buffer) => {
+          await realWrite(buf.subarray(0, 5)); // genuinely put 5 bytes on disk
+          const e = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
+          e.code = "ENOSPC";
+          throw e;
+        }) as never);
+      }
+      return handle;
+    }) as unknown as typeof fsp.open);
+
+    try {
+      await expect(writeAtomic(target, Buffer.alloc(1000, 7))).rejects.toThrow(/ENOSPC/);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    const after = await fsp.readFile(target);
+    expect(after.equals(original)).toBe(true);
+
+    const entries = await fsp.readdir(dir);
+    expect(entries).toEqual(["existing.bin"]);
+  });
+
+  // Fix round 1, I2: a fixed `<name>.tmp` opened with "w" let two concurrent
+  // writers to the same target corrupt each other, and let a pre-planted
+  // `.tmp` symlink be followed.
+  it("20 rounds of concurrent writes to the same target: no corruption, no orphan temp files (I2)", async () => {
+    const dir = path.join(tmpRoot, "concurrent");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "c.bin");
+
+    for (let i = 0; i < 20; i++) {
+      const a = Buffer.alloc(4 * 1024 * 1024 + (i % 3), 0x61);
+      const b = Buffer.alloc(2 * 1024 * 1024, 0x62);
+      const settled = await Promise.allSettled([writeAtomic(target, a), writeAtomic(target, b)]);
+      expect(settled.map((s) => s.status)).toEqual(["fulfilled", "fulfilled"]);
+
+      const after = await fsp.readFile(target);
+      // One writer's rename lands last; the file is always wholly one or
+      // the other, never a mix of both.
+      expect(after.equals(a) || after.equals(b)).toBe(true);
+
+      const entries = await fsp.readdir(dir);
+      expect(entries).toEqual(["c.bin"]);
+    }
+  });
+
+  it("20 rounds of concurrent encrypted writes to the same target: always decryptable, no orphan temp files (I2)", async () => {
+    const dir = path.join(tmpRoot, "concurrent-enc");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "e.bin");
+
+    for (let i = 0; i < 20; i++) {
+      const a = Buffer.alloc(3 * 1024 * 1024, 1);
+      const b = Buffer.alloc(1 * 1024 * 1024, 2);
+      const settled = await Promise.allSettled([writeEncryptedFile(target, a), writeEncryptedFile(target, b)]);
+      expect(settled.map((s) => s.status)).toEqual(["fulfilled", "fulfilled"]);
+
+      const decrypted = await readDecryptedFile(target);
+      expect(decrypted.equals(a) || decrypted.equals(b)).toBe(true);
+
+      const entries = await fsp.readdir(dir);
+      expect(entries).toEqual(["e.bin"]);
+    }
+  });
+
+  it("a pre-existing symlink at the generated temp path is refused, not followed (I2)", async () => {
+    const dir = path.join(tmpRoot, "symlink-tmp");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "s.bin");
+    const victim = path.join(dir, "victim.txt");
+    await fsp.writeFile(victim, "VICTIM");
+
+    // Simulate an attacker who — despite the random suffix — managed to
+    // pre-create a symlink at the exact path writeAtomic is about to open.
+    // "wx" must refuse it (EEXIST: the path already exists) rather than
+    // open and write through the symlink.
+    const realOpen = fsp.open.bind(fsp);
+    let planted = false;
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const p = String(args[0]);
+      if (!planted && p.endsWith(".tmp") && p !== target) {
+        planted = true;
+        await fsp.symlink(victim, p);
+      }
+      return realOpen(...args);
+    }) as unknown as typeof fsp.open);
+
+    try {
+      await expect(writeAtomic(target, Buffer.from("ATTACK"))).rejects.toMatchObject({ code: "EEXIST" });
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(await fsp.readFile(victim, "utf8")).toBe("VICTIM");
+    await expect(fsp.access(target)).rejects.toThrow();
+  });
+
+  it("the unique temp file name still ends in .tmp (matches Task 3's startup *.tmp sweep) (I2)", async () => {
+    const dir = path.join(tmpRoot, "glob-match");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "g.bin");
+
+    const realOpen = fsp.open.bind(fsp);
+    let capturedTmpPath = "";
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const p = String(args[0]);
+      if (isTmpFor(p, target)) capturedTmpPath = p;
+      return realOpen(...args);
+    }) as unknown as typeof fsp.open);
+
+    try {
+      await writeAtomic(target, Buffer.from("hello"));
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(capturedTmpPath).not.toBe("");
+    expect(capturedTmpPath.endsWith(".tmp")).toBe(true);
+    expect(path.basename(capturedTmpPath)).toMatch(/^g\.bin\.[0-9a-f]{8}\.tmp$/);
+  });
+
+  // Fix round 1, m1: nothing pinned the fsync order, so a mutant dropping
+  // either fsync survived the suite. Spy on every fs call writeAtomic makes
+  // and assert the exact order.
+  it("writes in order: chmod, write, file-fsync, close, rename, dir-open, dir-fsync, dir-close (m1)", async () => {
+    const dir = documentsRoot();
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "order.pdf");
+    const order: string[] = [];
+
+    const realOpen = fsp.open.bind(fsp);
+    const realRename = fsp.rename.bind(fsp);
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (isTmpFor(String(args[0]), target)) {
+        const realChmod = handle.chmod.bind(handle);
+        const realWrite = handle.write.bind(handle);
+        const realSync = handle.sync.bind(handle);
+        const realClose = handle.close.bind(handle);
+        vi.spyOn(handle, "chmod").mockImplementation((async (...a: Parameters<typeof realChmod>) => {
+          order.push("chmod");
+          return realChmod(...a);
+        }) as never);
+        vi.spyOn(handle, "write").mockImplementation((async (...a: Parameters<typeof realWrite>) => {
+          order.push("write");
+          return realWrite(...a);
+        }) as never);
+        vi.spyOn(handle, "sync").mockImplementation(async () => {
+          order.push("file-sync");
+          return realSync();
+        });
+        vi.spyOn(handle, "close").mockImplementation(async () => {
+          order.push("close");
+          return realClose();
+        });
+      } else {
+        order.push("dir-open");
+        const realSync = handle.sync.bind(handle);
+        const realClose = handle.close.bind(handle);
+        vi.spyOn(handle, "sync").mockImplementation(async () => {
+          order.push("dir-sync");
+          return realSync();
+        });
+        vi.spyOn(handle, "close").mockImplementation(async () => {
+          order.push("dir-close");
+          return realClose();
+        });
+      }
+      return handle;
+    }) as unknown as typeof fsp.open);
+    const renameSpy = vi.spyOn(fsp, "rename").mockImplementation((async (...a: Parameters<typeof realRename>) => {
+      order.push("rename");
+      return realRename(...a);
+    }) as never);
+
+    try {
+      await writeAtomic(target, Buffer.from("hello order"));
+    } finally {
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+
+    expect(order).toEqual(["chmod", "write", "file-sync", "close", "rename", "dir-open", "dir-sync", "dir-close"]);
+  });
+
+  // Fix round 1, m2: a failed rename used to leave the .tmp file behind.
+  it("a rename failure removes the temp file and leaves the original intact (m2)", async () => {
+    const dir = path.join(tmpRoot, "rename-fail");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "z.bin");
+    const original = Buffer.from("ORIG");
+    await fsp.writeFile(target, original);
+
+    const renameSpy = vi
+      .spyOn(fsp, "rename")
+      .mockRejectedValue(Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" }));
+
+    try {
+      await expect(writeAtomic(target, Buffer.from("new"))).rejects.toMatchObject({ code: "EXDEV" });
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    const entries = await fsp.readdir(dir);
+    expect(entries).toEqual(["z.bin"]);
+    expect((await fsp.readFile(target)).equals(original)).toBe(true);
+  });
+
+  // Fix round 1, m8: Windows can raise these from fsyncing a directory
+  // handle; the write itself already landed (the rename succeeded), so
+  // writeAtomic must not fail the whole operation over it.
+  it.each(["EPERM", "EISDIR", "EINVAL"])(
+    "tolerates a directory-fsync failure coded %s (m8)",
+    async (code) => {
+      const dir = path.join(tmpRoot, `dirfsync-${code}`);
+      await fsp.mkdir(dir, { recursive: true });
+      const target = path.join(dir, "d.bin");
+
+      const realOpen = fsp.open.bind(fsp);
+      const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+        if (!isTmpFor(String(args[0]), target) && String(args[0]) === dir) {
+          const e = new Error(`simulated ${code}`) as NodeJS.ErrnoException;
+          e.code = code;
+          throw e;
+        }
+        return realOpen(...args);
+      }) as unknown as typeof fsp.open);
+
+      try {
+        await expect(writeAtomic(target, Buffer.from("payload"))).resolves.toBeUndefined();
+      } finally {
+        openSpy.mockRestore();
+      }
+
+      expect((await fsp.readFile(target)).toString()).toBe("payload");
+    },
+  );
+
+  it("does not tolerate an unrelated directory-fsync failure code (m8)", async () => {
+    const dir = path.join(tmpRoot, "dirfsync-other");
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "d.bin");
+
+    const realOpen = fsp.open.bind(fsp);
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      if (!isTmpFor(String(args[0]), target) && String(args[0]) === dir) {
+        const e = new Error("simulated EACCES") as NodeJS.ErrnoException;
+        e.code = "EACCES";
+        throw e;
+      }
+      return realOpen(...args);
+    }) as unknown as typeof fsp.open);
+
+    try {
+      await expect(writeAtomic(target, Buffer.from("payload"))).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });
 
@@ -187,6 +508,24 @@ describe("fileResponseHeaders", () => {
     expect(headers.get("Content-Disposition")).toBe("inline");
     expect(headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+  });
+});
+
+describe("FileAtRestError.causeCode (m3)", () => {
+  it("is undefined for PLAINTEXT_AT_REST — there is no decrypt failure to name", () => {
+    const err = new FileAtRestError("PLAINTEXT_AT_REST", "/x");
+    expect(err.causeCode).toBeUndefined();
+  });
+
+  it("carries the underlying EncryptionKeyError code for DECRYPT_FAILED", () => {
+    const cause = Object.assign(new Error("bad"), { code: "KEY_MISMATCH" });
+    const err = new FileAtRestError("DECRYPT_FAILED", "/x", cause);
+    expect(err.causeCode).toBe("KEY_MISMATCH");
+  });
+
+  it("falls back to AUTH_FAILED for a plain, code-less GCM auth failure (M6)", () => {
+    const err = new FileAtRestError("DECRYPT_FAILED", "/x", new Error("Unsupported state or unable to authenticate data"));
+    expect(err.causeCode).toBe("AUTH_FAILED");
   });
 });
 
@@ -324,5 +663,124 @@ describe("end-to-end: upload then serve, real filesystem", () => {
     const delRes = await deleteImageFresh(delReq);
     expect(delRes.status).toBe(200);
     await expect(fsp.access(onDiskPath)).rejects.toThrow();
+  });
+});
+
+describe("serving routes: logged code and error mapping (fix round 1, m3/m4)", () => {
+  it("documents: logs the underlying code for KEY_MISMATCH and a GCM auth failure (m3)", async () => {
+    const dir = documentsRoot();
+    await fsp.mkdir(dir, { recursive: true });
+
+    const other = core.deriveKeys(core.parseKeyHex("b".repeat(64)));
+    const mismatchName = "mismatch.pdf";
+    await fsp.writeFile(
+      path.join(dir, mismatchName),
+      core.encryptFile(other, mismatchName, Buffer.from(PDF_TEXT)),
+    );
+
+    const tamperedName = "tampered.pdf";
+    await writeEncryptedFile(path.join(dir, tamperedName), Buffer.from(PDF_TEXT));
+    const tampered = Buffer.from(await fsp.readFile(path.join(dir, tamperedName)));
+    tampered[tampered.length - 1] ^= 1; // flip a tag byte -> GCM auth failure, no .code
+    await fsp.writeFile(path.join(dir, tamperedName), tampered);
+
+    const errs: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errs.push(a.map(String).join(" "));
+    });
+
+    try {
+      const r1 = await serveDocument(new NextRequest(`http://localhost/api/files/documents/${mismatchName}`), {
+        params: Promise.resolve({ fileName: mismatchName }),
+      });
+      expect(r1.status).toBe(500);
+
+      const r2 = await serveDocument(new NextRequest(`http://localhost/api/files/documents/${tamperedName}`), {
+        params: Promise.resolve({ fileName: tamperedName }),
+      });
+      expect(r2.status).toBe(500);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(errs.some((l) => l.includes("DECRYPT_FAILED") && l.includes("KEY_MISMATCH"))).toBe(true);
+    expect(errs.some((l) => l.includes("DECRYPT_FAILED") && l.includes("AUTH_FAILED"))).toBe(true);
+  });
+
+  it("uploads: logs the underlying code for KEY_MISMATCH and a GCM auth failure (m3)", async () => {
+    const dir = path.join(uploadsRoot(), "images", "firearms");
+    await fsp.mkdir(dir, { recursive: true });
+
+    const other = core.deriveKeys(core.parseKeyHex("b".repeat(64)));
+    const mismatchName = "mismatch.png";
+    await fsp.writeFile(path.join(dir, mismatchName), core.encryptFile(other, mismatchName, PNG_BYTES));
+
+    const tamperedName = "tampered.png";
+    await writeEncryptedFile(path.join(dir, tamperedName), PNG_BYTES);
+    const tampered = Buffer.from(await fsp.readFile(path.join(dir, tamperedName)));
+    tampered[tampered.length - 1] ^= 1;
+    await fsp.writeFile(path.join(dir, tamperedName), tampered);
+
+    const errs: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errs.push(a.map(String).join(" "));
+    });
+
+    try {
+      const r1 = await serveUpload(new NextRequest("http://localhost/x"), {
+        params: Promise.resolve({ path: ["images", "firearms", mismatchName] }),
+      });
+      expect(r1.status).toBe(500);
+
+      const r2 = await serveUpload(new NextRequest("http://localhost/x"), {
+        params: Promise.resolve({ path: ["images", "firearms", tamperedName] }),
+      });
+      expect(r2.status).toBe(500);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(errs.some((l) => l.includes("DECRYPT_FAILED") && l.includes("KEY_MISMATCH"))).toBe(true);
+    expect(errs.some((l) => l.includes("DECRYPT_FAILED") && l.includes("AUTH_FAILED"))).toBe(true);
+  });
+
+  it("uploads: a non-FileAtRestError (getFieldKeys throwing) is logged and returns 500, not a silent 404 (m4)", async () => {
+    const dir = path.join(uploadsRoot(), "images", "firearms");
+    await fsp.mkdir(dir, { recursive: true });
+    const fileName = "g.png";
+    await writeEncryptedFile(path.join(dir, fileName), PNG_BYTES);
+
+    const errs: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errs.push(a.map(String).join(" "));
+    });
+    const keysSpy = vi.spyOn(keysModule, "getFieldKeys").mockImplementation(() => {
+      throw new Error("no key loaded");
+    });
+
+    let res: Response;
+    try {
+      res = await serveUpload(new NextRequest("http://localhost/x"), {
+        params: Promise.resolve({ path: ["images", "firearms", fileName] }),
+      });
+    } finally {
+      keysSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.error).toBeTruthy();
+    expect(errs.length).toBeGreaterThan(0);
+  });
+
+  it("uploads: a genuinely missing file still returns 404 (m4)", async () => {
+    const dir = path.join(uploadsRoot(), "images", "firearms");
+    await fsp.mkdir(dir, { recursive: true });
+
+    const res = await serveUpload(new NextRequest("http://localhost/x"), {
+      params: Promise.resolve({ path: ["images", "firearms", "does-not-exist.png"] }),
+    });
+    expect(res.status).toBe(404);
   });
 });

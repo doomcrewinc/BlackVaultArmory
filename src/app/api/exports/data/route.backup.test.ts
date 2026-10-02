@@ -94,8 +94,9 @@ describe("/api/exports/data backup metadata", () => {
     expect(csv).toContain("true");
     expect(csv).toContain("uploadedAssetReferences");
     expect(csv).toContain("backupStorageGuidance");
-    expect(csv).toMatch(/storage\/uploads/i);
-    expect(csv).toMatch(/\/app\/storage/i);
+    expect(csv).toMatch(/\buploads\//i);
+    expect(csv).toMatch(/\/app\/uploads/i);
+    expect(csv).toMatch(/encrypted at rest/i);
   });
 
   it("omits upload references and guidance in CSV when disabled", async () => {

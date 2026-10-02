@@ -1,7 +1,41 @@
+import { randomBytes } from "node:crypto";
 import { promises as fsp } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { decryptFile, encryptFile, isEncryptedFile } from "../encryption/core.mjs";
 import { getFieldKeys } from "../encryption/keys";
+
+/** Directory-fsync failures that Windows raises instead of succeeding. The
+ * rename has already landed by the time this runs, so these are tolerated:
+ * the write is durable at the file level even when the directory entry's
+ * own durability can't be confirmed on that platform. */
+const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
+
+/**
+ * Writes every byte of `bytes` to `handle`, looping on `write(2)`'s own
+ * short-write behaviour (fix round 1, I1). A single `handle.write(bytes)`
+ * issues exactly one `write(2)`, which POSIX allows to return fewer bytes
+ * than asked for without raising an error — most realistically when a disk
+ * genuinely runs out of space partway through. The old code trusted that
+ * one call to have written everything, fsynced and renamed the short
+ * result over the original, and reported success. `handle.writeFile()`
+ * also loops internally, but it calls into Node's C++ binding directly
+ * rather than through `handle.write()`, so nothing here can observe or
+ * inject a short write through it in a test — hence the explicit loop. A
+ * call that makes no forward progress (`bytesWritten === 0`) throws rather
+ * than spin forever; a real full disk raises an error (commonly `ENOSPC`)
+ * on the next attempt well before that could happen.
+ */
+async function writeFull(handle: FileHandle, bytes: Buffer): Promise<void> {
+  let written = 0;
+  while (written < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, written, bytes.length - written);
+    if (bytesWritten <= 0) {
+      throw new Error("writeAtomic: write() made no forward progress (0 bytes written)");
+    }
+    written += bytesWritten;
+  }
+}
 
 /**
  * Encrypted files at rest (spec 3b,
@@ -44,23 +78,35 @@ export function legacyDocumentsRoot(cwd: string = process.cwd()): string {
 
 /**
  * The shared tmp/fsync/rename/dir-fsync primitive (spec §1, "Atomic writes").
- * Creates `<absPath>.tmp` empty with mode 0600, writes `bytes`, fsyncs the
- * file, renames it over `absPath`, then fsyncs the directory. On any failure
- * the `.tmp` file is removed and the original at `absPath` (if any) is left
- * untouched — the rename only happens once the write below it has fully
- * succeeded.
+ * Creates `<absPath>.<8 random hex>.tmp` empty with mode 0600 (fix round 1,
+ * I2: a FIXED `<absPath>.tmp` name let two concurrent writers to the same
+ * target corrupt each other, and let a pre-planted `.tmp` symlink be
+ * followed; the random suffix plus `"wx"` — create-exclusive, refuses an
+ * existing path including a symlink — close both. The name still ends in
+ * `.tmp`, so Task 3's startup sweep for leftover `*.tmp` files still matches
+ * it), writes `bytes` (fully — fix round 1, I1: `writeFull` above retries
+ * until every byte lands, since a single `handle.write` only issues one
+ * `write(2)` and can silently install a short/truncated file when the
+ * underlying write returns fewer bytes than asked without erroring), fsyncs
+ * the file, renames it over `absPath`, then fsyncs the directory. On any
+ * failure up to and including the rename, the `.tmp` file is removed (fix
+ * round 1, m2: a failed rename used to leave an orphaned `.tmp`) and the
+ * original at `absPath` (if any) is left untouched. A directory-fsync
+ * failure with a code Windows is known to raise instead of succeeding (fix
+ * round 1, m8) is tolerated: the rename already landed, so the write itself
+ * is not lost.
  */
 export async function writeAtomic(absPath: string, bytes: Buffer): Promise<void> {
   const dir = path.dirname(absPath);
-  const tmpPath = `${absPath}.tmp`;
+  const tmpPath = `${absPath}.${randomBytes(4).toString("hex")}.tmp`;
 
-  const handle = await fsp.open(tmpPath, "w", 0o600);
+  const handle = await fsp.open(tmpPath, "wx", 0o600);
   try {
     try {
       // Created empty then chmodded then written — a lesson from 3a about
       // default ACLs overriding the creation mode (pre-encryption-snapshot.ts).
       await handle.chmod(0o600);
-      await handle.write(bytes);
+      await writeFull(handle, bytes);
       await handle.sync();
     } finally {
       await handle.close();
@@ -70,13 +116,25 @@ export async function writeAtomic(absPath: string, bytes: Buffer): Promise<void>
     throw e;
   }
 
-  await fsp.rename(tmpPath, absPath);
-
-  const dirHandle = await fsp.open(dir, "r");
   try {
-    await dirHandle.sync();
-  } finally {
-    await dirHandle.close();
+    await fsp.rename(tmpPath, absPath);
+  } catch (e) {
+    await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw e;
+  }
+
+  try {
+    const dirHandle = await fsp.open(dir, "r");
+    try {
+      await dirHandle.sync();
+    } finally {
+      await dirHandle.close();
+    }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (!code || !DIR_FSYNC_TOLERATED_CODES.has(code)) {
+      throw e;
+    }
   }
 }
 
@@ -107,12 +165,29 @@ export async function writeEncryptedFile(absPath: string, plaintext: Buffer): Pr
 export class FileAtRestError extends Error {
   readonly code: "PLAINTEXT_AT_REST" | "DECRYPT_FAILED";
   readonly path: string;
+  /**
+   * The underlying decryptFile failure's own code — `KEY_MISMATCH` or
+   * `MALFORMED` (EncryptionKeyError) — or `AUTH_FAILED` for a GCM
+   * authentication failure, which throws a plain, code-less `Error` (M6).
+   * Fix round 1, m3: the serving routes' log line used to name only
+   * `DECRYPT_FAILED`, dropping exactly the detail that would tell Task 5
+   * apart an interrupted rotation (KEY_MISMATCH) from tampering
+   * (AUTH_FAILED). `undefined` when `code` is `PLAINTEXT_AT_REST`, since
+   * that case has no decrypt failure to name.
+   */
+  readonly causeCode: string | undefined;
 
   constructor(code: "PLAINTEXT_AT_REST" | "DECRYPT_FAILED", filePath: string, cause?: unknown) {
     super(`Cannot read ${filePath}: ${code}`, cause !== undefined ? { cause } : undefined);
     this.name = "FileAtRestError";
     this.code = code;
     this.path = filePath;
+    this.causeCode =
+      code === "DECRYPT_FAILED"
+        ? typeof cause === "object" && cause !== null && typeof (cause as { code?: unknown }).code === "string"
+          ? (cause as { code: string }).code
+          : "AUTH_FAILED"
+        : undefined;
   }
 }
 
