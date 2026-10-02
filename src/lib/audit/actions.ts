@@ -22,6 +22,7 @@ export const AUDIT_ACTIONS = [
   "RESTORE",
   "ENCRYPTION_ENABLED",
   "KEY_ROTATED",
+  "FILES_ENCRYPTED",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

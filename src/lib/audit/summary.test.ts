@@ -296,6 +296,29 @@ describe("summarize — encryption events", () => {
   it("KEY_ROTATED without ids", () => {
     expect(summarize(event({ action: "KEY_ROTATED", changes: null }))).toBe("Encryption key rotated");
   });
+
+  it("FILES_ENCRYPTED lists encrypted images and documents, moved documents and missing documents", () => {
+    const e = event({
+      action: "FILES_ENCRYPTED",
+      changes: { counts: { images: 3, documents: 1 }, moved: 2, missing: [{ id: "d1", name: "x" }], missingTotal: 1, keyId: "abcd1234", snapshot: "/s" },
+    });
+    expect(summarize(e)).toBe("Files encrypted: 3 photos, 1 document; 2 documents moved; 1 document missing");
+  });
+
+  it("FILES_ENCRYPTED singular/plural, zero parts left out, missingTotal preferred over the capped list", () => {
+    const e = event({
+      action: "FILES_ENCRYPTED",
+      changes: { counts: { images: 1, documents: 0 }, moved: 0, missing: [{ id: "d1", name: "x" }], missingTotal: 250 },
+    });
+    expect(summarize(e)).toBe("Files encrypted: 1 photo; 250 documents missing");
+  });
+
+  it("FILES_ENCRYPTED with only missing documents, or no changes at all, still reads as a sentence", () => {
+    expect(summarize(event({ action: "FILES_ENCRYPTED", changes: { counts: { images: 0, documents: 0 }, moved: 0, missing: [], missingTotal: 2 } }))).toBe(
+      "Uploaded files checked: 2 documents missing",
+    );
+    expect(summarize(event({ action: "FILES_ENCRYPTED", changes: null }))).toBe("Uploaded files encrypted");
+  });
 });
 
 describe("summarize — exhaustiveness (Fix round 1, item 6)", () => {

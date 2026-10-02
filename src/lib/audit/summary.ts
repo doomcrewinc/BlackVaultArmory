@@ -282,6 +282,29 @@ export function summarize(event: AuditEventDto): string {
       return from && to ? `Encryption key rotated (${from} → ${to})` : "Encryption key rotated";
     }
 
+    case "FILES_ENCRYPTED": {
+      // Written by the startup file step (src/lib/files/startup.ts):
+      // `changes: { counts: { images, documents }, moved, missing: [{ id, name }]
+      // (capped at 200), missingTotal, keyId, snapshot }`.
+      const c = isRecord(event.changes) ? event.changes : {};
+      const counts = isRecord(c.counts) ? c.counts : {};
+      const n = (v: unknown) => (typeof v === "number" && v > 0 ? v : 0);
+      const plural = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+      const encrypted = [
+        n(counts.images) ? plural(n(counts.images), "photo", "photos") : null,
+        n(counts.documents) ? plural(n(counts.documents), "document", "documents") : null,
+      ].filter((p): p is string => p !== null);
+      const moved = n(c.moved);
+      const missing = typeof c.missingTotal === "number" ? n(c.missingTotal) : Array.isArray(c.missing) ? c.missing.length : 0;
+      const tail = [
+        moved ? `${plural(moved, "document", "documents")} moved` : null,
+        missing ? `${plural(missing, "document", "documents")} missing` : null,
+      ].filter((p): p is string => p !== null);
+      if (encrypted.length) return [`Files encrypted: ${encrypted.join(", ")}`, ...tail].join("; ");
+      if (tail.length) return `Uploaded files checked: ${tail.join("; ")}`;
+      return "Uploaded files encrypted";
+    }
+
     default:
       // A future action added to actions.ts without a branch here — never
       // throw; still say who did what to which item.

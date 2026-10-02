@@ -36,6 +36,7 @@ const SECURITY_ACTIONS: readonly AuditAction[] = [
   "RESTORE",
   "ENCRYPTION_ENABLED",
   "KEY_ROTATED",
+  "FILES_ENCRYPTED",
 ];
 
 export const ACTION_GROUPS: Readonly<Record<AuditActionGroup, readonly AuditAction[]>> = {
