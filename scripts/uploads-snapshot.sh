@@ -8,8 +8,11 @@
 #
 # As root it creates BACKUPS/NAME.partial (owner 1001, mode 700) and does the
 # copy as 1001 with su-exec, so everything in the snapshot belongs to the app
-# user; it then renames the folder to NAME. As any other user (the POSIX
-# tests run it on the host) it does the copy itself.
+# user; it then renames the folder to NAME. Root reads this script and hands
+# its TEXT to `sh -c` for the 1001 stage, so uid 1001 never has to open the
+# file: the host checkout may have made it 0600 or 0640 (umask 077/027, final
+# review FIX 3). As any other user (the POSIX tests run it on the host) it
+# does the copy itself.
 #
 # Copied: regular files only. Never followed or copied: symbolic links
 # (reported). Skipped: the app's own .pre-encryption-* snapshot folders and
@@ -91,7 +94,9 @@ failed() {
 chmod 700 "$PARTIAL" || failed "could not restrict $PARTIAL"
 if [ "$(id -u)" = "0" ]; then
   chown "$APP_UID:$APP_GID" "$PARTIAL" || failed "could not give $PARTIAL to uid $APP_UID"
-  (cd "$PARTIAL" && su-exec "$APP_UID:$APP_GID" sh "$SELF" --copy "$SRC") || failed "copying $SRC failed"
+  # $0 is "uploads-snapshot", $1 "--copy", $2 SRC; the --copy stage never uses $0.
+  SCRIPT=$(cat "$SELF") || failed "could not read $SELF"
+  (cd "$PARTIAL" && su-exec "$APP_UID:$APP_GID" sh -c "$SCRIPT" uploads-snapshot --copy "$SRC") || failed "copying $SRC failed"
 else
   (cd "$PARTIAL" && sh "$SELF" --copy "$SRC") || failed "copying $SRC failed"
 fi

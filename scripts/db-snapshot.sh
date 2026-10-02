@@ -144,7 +144,9 @@ rm -f "$UPLOADS_MARKER_FILE"
 # root in the container only to create backups/uploads-<TS>.partial for uid
 # 1001 and rename it; the copy itself runs as 1001 (su-exec). The script is
 # mounted from this checkout, not taken from the image, so an older image
-# still runs the current copy rules. The snapshot belongs to uid 1001: delete
+# still runs the current copy rules. Only root reads the mounted file (it
+# passes the text on to the 1001 stage), so a checkout made under umask 027
+# or 077, where the file is 0640/0600 and owned by the host user, still works. The snapshot belongs to uid 1001: delete
 # it with sudo. It skips .pre-encryption-* folders and *.tmp / *.rot files,
 # and never follows a symbolic link. Exit 3 from it means "nothing to copy".
 UPLOADS_SRC="$DATA_DIR/uploads"
