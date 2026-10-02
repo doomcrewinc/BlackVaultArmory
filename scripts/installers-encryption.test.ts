@@ -578,6 +578,8 @@ describe("update.sh — uploads snapshot (Task 4)", () => {
       expect(r.out).toContain("ERROR: database snapshot failed");
       expect(r.out).toContain("ERROR: could not snapshot the uploads folder");
       expect(r.out).toContain("could not snapshot the uploads folder");
+      // Final review FIX 6: the hint also names the PostgreSQL upload-during-copy case.
+      expect(r.out).toContain("on PostgreSQL, a file uploaded during the copy also causes this: run the update again");
       expect(r.calls).not.toContain("AT-APP-START");
       expect(callLines(r.calls)).not.toContain("compose up -d");
       expect(callLines(r.calls).at(-1)).toBe("compose start blackvault");

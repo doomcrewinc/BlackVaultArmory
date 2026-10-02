@@ -82,7 +82,7 @@ FIRST=$(find "$SRC" -name '.pre-encryption-*' -type d -prune -o -type f ! -name 
 
 failed() {
   rm -rf "$PARTIAL"
-  echo "ERROR: could not snapshot the uploads folder: $* (permissions? free disk space?). Nothing was kept."
+  echo "ERROR: could not snapshot the uploads folder: $* (permissions? free disk space? on PostgreSQL, a file uploaded during the copy also causes this: run the update again). Nothing was kept."
   exit 1
 }
 
