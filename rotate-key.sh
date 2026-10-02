@@ -191,8 +191,13 @@ restart_unchanged() {
 # OLD, NEW or NEITHER on success (always exit 0), or exits non-zero (fix
 # round 1, C1) when it cannot tell. Sets PROBE_ANSWER and PROBE_STATUS;
 # never trips `set -e` itself (the whole call is the condition of the `if`).
+# Spec 3b: the probe prints a SECOND line, `FILES old=<n> new=<n> rot=<n>`.
+# Only the FIRST line is the answer (stripping whitespace from the whole
+# output, as before, glued the two lines into one unknown word). PROBE_ROT is
+# the staged .rot count from that second line, empty when it is absent.
 run_probe() {
-  if PROBE_ANSWER=$($COMPOSE run --rm blackvault \
+  local out
+  if out=$($COMPOSE run --rm blackvault \
     node scripts/rotate-encryption-key.mjs --probe \
     --old-key-file /run/secrets/blackvault_encryption_key \
     --new-key-file /run/secrets/blackvault_encryption_key.new); then
@@ -200,7 +205,8 @@ run_probe() {
   else
     PROBE_STATUS=$?
   fi
-  PROBE_ANSWER=$(printf '%s' "$PROBE_ANSWER" | tr -d '[:space:]')
+  PROBE_ANSWER=$(printf '%s\n' "$out" | head -n 1 | tr -d '[:space:]')
+  PROBE_ROT=$(printf '%s\n' "$out" | sed -n 's/^FILES .*rot=\([0-9][0-9]*\).*$/\1/p' | head -n 1)
 }
 
 # Finishes a confirmed-successful rotation: renames the key files and
@@ -298,9 +304,12 @@ elif ROTATE_STATUS=$?; [ "$ROTATE_STATUS" -eq 3 ]; then
   # so no probe is needed (it would only answer NEITHER). The unused new key
   # is set aside, never deleted (N2), and the app is NOT restarted: with a
   # key file that is not this database's key it would refuse to start anyway.
+  # Spec 3b: exit 3 also means an uploaded file is under neither key (or
+  # damaged, or behind a symlinked folder); the app would refuse to start on
+  # that file too, so it is not restarted either way.
   PHASE="refused"
   echo ""
-  echo "ERROR: $KEY_FILE does not open this database (wrong or replaced key)."
+  echo "ERROR: the rotation refused before changing anything; the reason is printed above."
   echo "       Nothing was changed. BlackVault was NOT restarted."
   if mv "$NEW_KEY_FILE" "$UNUSED_KEY_FILE"; then
     echo "       The unused new key was set aside as $UNUSED_KEY_FILE; it can be deleted."
@@ -308,9 +317,14 @@ elif ROTATE_STATUS=$?; [ "$ROTATE_STATUS" -eq 3 ]; then
     echo "       WARNING: could not rename $NEW_KEY_FILE to $UNUSED_KEY_FILE."
     echo "       Move it out of secrets/ by hand before the next rotation."
   fi
-  echo "       Restore the key this database was encrypted with as $KEY_FILE"
-  echo "       (BlackVault's startup log names its key id: $COMPOSE logs blackvault),"
-  echo "       start BlackVault, then run ./rotate-key.sh again."
+  echo "       If it says the old key does not match:"
+  echo "         $KEY_FILE does not open this database (wrong or replaced key)."
+  echo "         Restore the key this database was encrypted with as $KEY_FILE"
+  echo "         (BlackVault's startup log names its key id: $COMPOSE logs blackvault),"
+  echo "         start BlackVault, then run ./rotate-key.sh again."
+  echo "       If it names an uploaded file or folder: restore that file from a backup,"
+  echo "         or move it out of the uploads folder (or follow the hint above), then"
+  echo "         start BlackVault and run ./rotate-key.sh again."
   exit 1
 else
   # The rotation command itself exited non-zero. That does NOT mean nothing
@@ -325,6 +339,15 @@ else
   case "$PROBE_ANSWER:$PROBE_STATUS" in
     NEW:0)
       echo "Confirmed: the database is already encrypted with the NEW key."
+      # Spec 3b: a crash after the commit can leave re-encrypted uploads
+      # staged as <name>.rot. They are left to BlackVault's startup, which
+      # runs before it serves anything and renames every .rot under its
+      # current key into place, after proving it decrypts (src/lib/files/
+      # startup.ts). The swap below makes the new key current, so the restart
+      # finishes them; the wrapper doing the same renames would only repeat it.
+      if [ -n "${PROBE_ROT:-}" ] && [ "$PROBE_ROT" -gt 0 ]; then
+        echo "$PROBE_ROT re-encrypted uploaded files are staged as .rot files; BlackVault puts them in place when it starts with the new key."
+      fi
       echo "Completing the key-file swap..."
       do_swap_and_restart
       ;;

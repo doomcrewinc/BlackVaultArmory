@@ -536,7 +536,11 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
       BV_STUB_ROTATE_STDERR: "The old key does not match this database's encryption key check; refusing to rotate. Nothing was changed.",
     });
     expect(r.code).toBe(1);
-    expect(r.out).toContain("ERROR: secrets/blackvault_encryption_key does not open this database (wrong or replaced key).");
+    // Spec 3b: exit 3 also covers "an uploaded file is under neither key", so the headline is generic
+    // and the wrong-key case is one of two named reasons.
+    expect(r.out).toContain("ERROR: the rotation refused before changing anything; the reason is printed above.");
+    expect(r.out).toContain("secrets/blackvault_encryption_key does not open this database (wrong or replaced key).");
+    expect(r.out).toContain("If it names an uploaded file");
     expect(r.out).toContain("Nothing was changed. BlackVault was NOT restarted.");
     expect(r.out).toContain("BlackVault's startup log names its key id");
     expect(r.out).not.toContain("Checking which key the database");
@@ -574,6 +578,47 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
     expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
     expect(r.calls).toBe(""); // docker never invoked
     expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
+  // Spec 3b Task 5: the probe prints a SECOND line, `FILES old=<n> new=<n> rot=<n>`. The wrapper must
+  // read only the first line as the answer (it used to strip ALL whitespace from the whole output, which
+  // turned "NEW\nFILES ..." into "NEWFILES..." and the ambiguous branch).
+  it("spec 3b: exit 1 and the two-line probe answers NEW: the first line decides, the swap completes, and the staged .rot files are reported as finished by the app's startup", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", { BV_STUB_ROTATE_EXIT: "1", BV_STUB_PROBE: "NEW\nFILES old=3 new=0 rot=3" });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Confirmed: the database is already encrypted with the NEW key.");
+    expect(r.out).toContain("3 re-encrypted uploaded files are staged as .rot files; BlackVault puts them in place when it starts with the new key.");
+    expect(r.out).toContain("Key rotation complete.");
+    expect(r.calls).toContain("compose start blackvault");
+    const files = secrets(dir);
+    expect(files[0]).toBe("blackvault_encryption_key");
+    expect(files[1]).toMatch(/^blackvault_encryption_key\.old-\d{8}-\d{6}$/);
+  });
+
+  it("spec 3b: exit 1 and the two-line probe answers NEW with no staged files: no .rot line", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", { BV_STUB_ROTATE_EXIT: "1", BV_STUB_PROBE: "NEW\r\nFILES old=0 new=3 rot=0\r" });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Key rotation complete.");
+    expect(r.out).not.toContain(".rot files");
+  });
+
+  it.each(["OLD", "NEITHER"])("spec 3b: exit 1 and the two-line probe answers %s: the first line alone picks the branch", (answer) => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", { BV_STUB_ROTATE_EXIT: "1", BV_STUB_PROBE: `${answer}\nFILES old=3 new=0 rot=3` });
+    expect(r.code).toBe(1);
+    if (answer === "OLD") {
+      expect(r.out).toContain("still encrypted with the OLD key");
+      expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
+      expect(r.calls).toContain("compose start blackvault");
+    } else {
+      expect(r.out).toContain("probe answered 'NEITHER'");
+      expect(r.calls).not.toContain("compose start");
+    }
   });
 
   it("exit 1 and the probe answers NEITHER: nothing touched, not restarted, and the recovery text has the NEITHER step", () => {
