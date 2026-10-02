@@ -271,6 +271,27 @@ describe("file encryption", () => {
     expect(() => core.decryptFile(other, name, enc)).toThrow(expect.objectContaining({ code: "KEY_MISMATCH" }));
     expect(() => core.decryptFile(keys, name, Buffer.from("BVF1"))).toThrow(expect.objectContaining({ code: "MALFORMED" }));
   });
+  it("basename must be a non-empty string (M2)", () => {
+    expect(() => core.encryptFile(keys, "", Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.encryptFile(keys, null as unknown as string, Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.encryptFile(keys, 5 as unknown as string, Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+
+    const enc = core.encryptFile(keys, name, Buffer.from("x"));
+    expect(() => core.decryptFile(keys, "", enc))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.decryptFile(keys, undefined as unknown as string, enc))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
+  it("fileKeyId rejects a key id that is not 8 lowercase hex chars (M3)", () => {
+    const enc = core.encryptFile(keys, name, Buffer.from("x"));
+    const bad = Buffer.from(enc);
+    bad.write("ZZZZZZZZ", 5, "ascii"); // same length, not hex — must not reach log/compare as a key id
+    expect(() => core.fileKeyId(bad)).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.decryptFile(keys, name, bad)).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
   it("file subkey is independent and pinned (known answer)", () => {
     expect(keys.file.equals(keys.enc)).toBe(false);
     expect(keys.file.equals(keys.idx)).toBe(false);

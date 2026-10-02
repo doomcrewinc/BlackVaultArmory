@@ -137,6 +137,7 @@ function fileHeader(id) {
 function fileAad(header, basename) {
   return Buffer.concat([header, Buffer.from(String(basename), "utf8")]);
 }
+const FILE_KEY_ID_RE = /^[0-9a-f]{8}$/;
 export function isEncryptedFile(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 4 && buf.subarray(0, 4).toString("ascii") === FILE_MAGIC;
 }
@@ -144,9 +145,21 @@ export function fileKeyId(buf) {
   if (!isEncryptedFile(buf) || buf.length < FILE_HEADER_LEN + FILE_IV_LEN + FILE_TAG_LEN || buf[4] !== FILE_VERSION) {
     throw new EncryptionKeyError("MALFORMED", "Not a BVF1 encrypted file.");
   }
-  return buf.subarray(5, FILE_HEADER_LEN).toString("ascii");
+  const id = buf.subarray(5, FILE_HEADER_LEN).toString("ascii");
+  // M3: untrusted header bytes must never reach a log message or a key
+  // comparison unless they are actually a key id (8 lowercase hex chars).
+  if (!FILE_KEY_ID_RE.test(id)) {
+    throw new EncryptionKeyError("MALFORMED", "Not a BVF1 encrypted file.");
+  }
+  return id;
+}
+function requireBasename(basename) {
+  if (typeof basename !== "string" || basename.length === 0) {
+    throw new EncryptionKeyError("MALFORMED", "basename must be a non-empty string.");
+  }
 }
 export function encryptFile(keys, basename, plaintext) {
+  requireBasename(basename);
   const header = fileHeader(keys.id);
   const iv = randomBytes(FILE_IV_LEN);
   const c = createCipheriv("aes-256-gcm", keys.file, iv, { authTagLength: FILE_TAG_LEN });
@@ -155,6 +168,7 @@ export function encryptFile(keys, basename, plaintext) {
   return Buffer.concat([header, iv, ct, c.getAuthTag()]);
 }
 export function decryptFile(keys, basename, stored) {
+  requireBasename(basename);
   const id = fileKeyId(stored);
   if (id !== keys.id) {
     throw new EncryptionKeyError("KEY_MISMATCH", `File was encrypted with key ${id}, current key is ${keys.id}.`);
