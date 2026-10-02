@@ -175,3 +175,32 @@ The rule from 3a still holds: no step ever deletes a key file, or the only valid
 - **No per-item access control.** Any signed-in user can open any file, as today.
 - **Files are not in backups.** Uploaded files are still not inside sealed backups (spec 3c).
 - **No browser caching.** Photos reload on every visit.
+
+## Changes during implementation
+
+Each item is a shipped deviation from the text above, with the reason. Sources: the rulings in `.superpowers/sdd/2026-10-01-encrypted-files/progress.md` and the code.
+
+- **Temp name `<name>.<8 random hex>.tmp`, opened `"wx"`** (§1 said `<name>.tmp`). A fixed name let two concurrent writers to one file corrupt each other and followed a planted symlink. `src/lib/files/storage.ts` `writeAtomic`.
+- **`writeFull` loop.** One `handle.write` can write fewer bytes than asked without an error; the short file would have been renamed over the original. `writeAtomic` now loops until every byte is written and throws on no progress.
+- **The startup sweep deletes only `/\.[0-9a-f]{8}\.tmp$/`** (§1 said every `*.tmp`). Otherwise a user's own file ending in `.tmp` would be deleted.
+- **Foreign-key refusal moved earlier.** The check for files under another key runs before the move, snapshot and encryption (§3 step 4 listed it after the key check only), so a refusal leaves the uploads exactly as they were and never encrypts and then refuses.
+- **A foreign-key `.rot` whose original is missing is kept** and warned about, not deleted (§3 step 4 said delete). It may be the only copy of that file.
+- **A current-key `.rot` with no original is renamed into place** and logged. It is the only copy.
+- **Audit trigger and first-event recovery.** While no `FILES_ENCRYPTED` event exists, the first one carries the totals of every `BVF1` file, so an event lost to a failed write or a crash is recovered on the next start; it is also written once when only missing documents exist. Later, only a start that encrypted or moved files writes one. Finishing a rotation is only logged. `missing` is capped at 200 entries, with `missingTotal` holding the full count, to keep the row bounded.
+- **A `BVF1` file with a damaged header refuses start**, named. It cannot be classified as current or foreign.
+- **Symlinked folders refuse start** (the walk and `documents/`). Whatever they point at would be scanned, moved into or left plaintext outside the uploads root. Symlinked files are skipped and logged.
+- **Hidden folders are skipped**, not only hidden files. A file inside a hidden folder is hidden too; this also keeps `.pre-encryption-*` out of the scan.
+- **Legacy documents named `*.tmp` or `*.rot` are not moved** (left and logged). After a move they would never be encrypted and the next sweep could delete them.
+- **EXDEV copy is read back and removed on mismatch**, so a bad copy is never later taken for a collision; the source stays.
+- **Raw filesystem errors become `FileStartupError`** naming the path and a fix; the snapshot error keeps "needs N bytes".
+- **Progress logged every 250 files** during the snapshot and the encryption. 10,000 files took about 190 s in review (fsync-bound).
+- **Legacy documents are snapshotted under the marker.** The update script's snapshot copies only the host uploads folder, never the in-container old documents folder, so the app snapshots documents it is about to move even when the marker is set.
+- **`BLACKVAULT_HOST_UPLOADS_DIR`** (compose: `${DATA_DIR:-./data}/uploads`) lets the app log the snapshot's host path, like 3a's `BLACKVAULT_HOST_DB_DIR`.
+- **The marker is `BLACKVAULT_UPLOADS_SNAPSHOT`, passed only on the `up` that follows** the update script's snapshot (read from `backups/.uploads-snapshot-marker`, never written to `.env`). Because `up` bakes it into the container's config, it persists across restarts until the container is recreated. `rotate-key.sh` removes the marker file without passing it (its uploads are already encrypted, so the app takes no snapshot).
+- **The probe's `FILES old=<n> new=<n> rot=<n>` is a second line.** The first line, `OLD`/`NEW`/`NEITHER`, stays exactly as in 3a. Both wrappers were found reading more than the first line (sh joined lines, bat took the last) and now read only line 1.
+- **Leftover `.rot` after a `NEW` probe are left to app startup**, not renamed by the wrapper (§3 step 5 said the wrapper finishes them). Startup verifies each by decrypting before the rename and runs before serving; the wrapper prints the count.
+- **Exit codes.** Exit 1: a failure before commit, including a full disk while staging — every `.rot` deleted, the probe answers `OLD`, restart on the old key. Exit 3: files that cannot be rotated — under neither key, malformed, behind a symlinked folder, or a leftover old-key `.rot` — nothing changed, no restart.
+- **Export route paths.** `/api/exports/data` now reports `storagePath` as `uploads/documents/...` instead of the old `storage/uploads/...`; the files there are ciphertext.
+- **Uploads snapshot runs inside the container.** `scripts/db-snapshot.sh` copies the uploads through `scripts/uploads-snapshot.sh` in a one-off container of the app image (root creates `backups/uploads-<ts>.partial` for uid 1001, then `su-exec 1001` copies). The host-side copy failed in CI on every update after the first: the host user cannot read the 0600 uid-1001 `BVF1` files or the 0700 `.pre-encryption-*` folders. The snapshot is owned by uid 1001 (needs `sudo` to delete), skips `.pre-encryption-*`, `*.tmp`, `*.rot` and links, and a failure stops the update. Windows `db-snapshot.bat` still copies on the host.
+- **Document rescue needs `chown`.** The release-note command is `docker cp` of `/app/storage/uploads/documents` into `<DATA_DIR>/uploads/`, then `sudo chown -R 1001:1001 <DATA_DIR>/uploads/documents`: `docker cp` gives the copies to the caller, and the app (uid 1001) must own them to encrypt them. Proven in CI on Linux.
+- **Guard test.** `src/lib/files/no-plaintext-route-io.test.ts` fails if any `route.ts` calls `writeFile`/`readFile` (or the `Sync` forms) outside a self-checking allow-list, so a new route cannot bypass `writeEncryptedFile`/`readDecryptedFile`.
