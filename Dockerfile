@@ -69,10 +69,11 @@ COPY --from=builder /app/gate ./gate
 COPY --from=builder /app/scripts/admin-reset-link.mjs ./scripts/admin-reset-link.mjs
 
 # Key rotation (rotate-key.sh / rotate-key.bat run it with `docker compose
-# run`). Plain JS; it imports the one crypto module directly, so that file
-# ships too.
+# run`). Plain JS; it imports the one crypto module and the shared
+# post-rotation compaction module directly, so those files ship too.
 COPY --from=builder /app/scripts/rotate-encryption-key.mjs ./scripts/rotate-encryption-key.mjs
 COPY --from=builder /app/src/lib/encryption/core.mjs ./src/lib/encryption/core.mjs
+COPY --from=builder /app/src/lib/encryption/compaction.mjs ./src/lib/encryption/compaction.mjs
 
 # Copies the encryption key from the host's secrets/ folder to a tmpfs
 # readable by nextjs, then drops to nextjs (see the script's header).

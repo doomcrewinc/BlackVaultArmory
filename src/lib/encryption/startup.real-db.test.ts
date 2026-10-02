@@ -50,10 +50,12 @@ import { ENCRYPTED_FIELDS } from "@/lib/encryption/fields";
 import { parsePlaintextValue } from "@/lib/encryption/extension";
 import {
   assertEncryptionKey,
+  compactIfPending,
   decryptLegacyEnc,
   EncryptionMigrationError,
   LegacyDecryptError,
   runEncryptionMigration,
+  runEncryptionStartup,
 } from "@/lib/encryption/startup";
 import { normalizeInstant, runLegacyDateMigration } from "@/lib/date-migration";
 import { register } from "@/instrumentation";
@@ -285,7 +287,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
   it("fresh empty DB with a key: the key check is created (by the migration); a second start is a no-op", async () => {
     await within(10_000, assertEncryptionKey(raw));
     expect(await checkOf()).toBeNull(); // the key check is read-only (I2)
-    expect(await within(10_000, runEncryptionMigration(raw))).toEqual({ counts: { Firearm: 0, Accessory: 0, Gear: 0 } });
+    expect(await within(10_000, runEncryptionMigration(raw))).toEqual({ counts: { Firearm: 0, Accessory: 0, Gear: 0 }, scrubbedAuditRows: 0 });
     const settings = await raw.appSettings.findUnique({ where: { id: "singleton" } });
     expect(isEncrypted(settings?.encryptionKeyCheck)).toBe(true);
     expect(settings?.encryptionKeyCheck).toMatch(new RegExp(`^bv2:${keyId(Buffer.from(TEST_KEY, "hex"))}:`));
@@ -718,6 +720,156 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       const rows = await raw.auditEvent.findMany({ where: { action: "CREATE" } });
       expect(rows.some((r) => String(r.changes).includes("Trust Three"))).toBe(true);
     });
+  });
+
+  // ── final review F1: compaction after the encryption migration ──
+  describe("F1: the database is compacted after a committed encryption migration", () => {
+    let n = 0;
+    /** Unique per test, so residue from earlier tests in this file cannot satisfy or spoil an assertion. */
+    function needles() {
+      n++;
+      const tag = `${Date.now().toString(36)}${n}`;
+      return {
+        serial: `F1SERIAL${tag}`,
+        ctrl: `F1CTRL${tag}`,
+        trust: `F1TRUST${tag}`,
+        acc: `F1ACC${tag}`,
+        gear: `F1GEAR${tag}`,
+        audit: `F1AUDIT${tag}`,
+      };
+    }
+
+    /**
+     * Enough rows that the rewrite splits and frees whole pages (as a real
+     * inventory does): on a page or two SQLite's own defragmentation happens
+     * to zero the gaps, which would hide the residue this guards against.
+     */
+    const BULK = 400;
+    async function seedNeedles(k: ReturnType<typeof needles>) {
+      await raw.firearm.create({ data: firearm({ serialNumber: k.serial, nfaControlNumber: k.ctrl, nfaRegisteredTo: k.trust }) });
+      await raw.firearm.createMany({
+        data: Array.from({ length: BULK }, (_, i) => firearm({ id: `f1-${n}-row-${i}`, serialNumber: `${k.serial}-${i}`, nfaControlNumber: `${k.ctrl}-${i}` })),
+      });
+      await raw.accessory.create({ data: { name: "Can", manufacturer: "S", type: "SUPPRESSOR", serialNumber: k.acc } });
+      await raw.gear.create({ data: { name: "Plate", category: "ARMOR", serialNumber: k.gear } });
+      await raw.auditEvent.create({
+        data: { actorName: "system", action: "CREATE", entityType: "Firearm", changes: JSON.stringify({ nfaControlNumber: k.audit }) },
+      });
+    }
+
+    const fileHits = (k: ReturnType<typeof needles>) => {
+      const bytes = readFileSync(ctx.file);
+      return Object.values(k).filter((v) => bytes.includes(Buffer.from(v)));
+    };
+    const pending = async () =>
+      (await raw.appSettings.findUnique({ where: { id: "singleton" }, select: { encryptionCompactionPending: true } }))
+        ?.encryptionCompactionPending ?? null;
+    const removeSnapshots = () => {
+      if (ctx.pg) return;
+      for (const f of readdirSync(ctx.dir).filter((x) => x.startsWith("pre-encryption-"))) rmSync(join(ctx.dir, f));
+    };
+    afterEach(removeSnapshots);
+
+    it.skipIf(!!ctx.pg)("SQLite: the migration alone leaves the plaintext in the file (the residue), and marks the compaction pending", async () => {
+      const k = needles();
+      await seedNeedles(k);
+      expect(fileHits(k)).toEqual(Object.values(k));
+      await start();
+      expect((await raw.firearm.findFirst({ where: { nfaControlNumber: { startsWith: "bv2:" } } }))?.serialNumber).toMatch(/^bv2:/);
+      expect(fileHits(k).length).toBeGreaterThan(0); // every column is bv2:, yet the old bytes are still in free pages
+      expect(await pending()).toBe(true);
+    });
+
+    it.skipIf(!!ctx.pg)("SQLite: runEncryptionStartup compacts after the commit — no seeded plaintext anywhere in the database file, marker cleared, one log line", async () => {
+      const k = needles();
+      await seedNeedles(k);
+      expect(fileHits(k)).toEqual(Object.values(k));
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await within(60_000, runEncryptionStartup());
+      expect(fileHits(k)).toEqual([]);
+      expect(readdirSync(ctx.dir).filter((f) => /-journal$|-wal$/.test(f))).toEqual([]);
+      expect(await pending()).toBe(false);
+      const lines = log.mock.calls.flat().join("\n");
+      expect(lines).toContain("[encryption] Compacted the database (removed leftover plaintext from free space).");
+      expect(lines).toContain("[encryption] Redacted NFA values in 1 existing audit entries.");
+      // A second start: nothing pending, nothing compacted again.
+      log.mockClear();
+      await within(60_000, runEncryptionStartup());
+      expect(log.mock.calls.flat().join("\n")).not.toContain("Compacted the database");
+    }, 90_000);
+
+    it("a failed compaction is a warning, never a refusal: the marker stays and the next start compacts", async () => {
+      const k = needles();
+      await seedNeedles(k);
+      await start();
+      expect(await pending()).toBe(true);
+      const warn = vi.fn();
+      const log = vi.fn();
+      const failing = {
+        appSettings: raw.appSettings,
+        $queryRawUnsafe: raw.$queryRawUnsafe.bind(raw),
+        $executeRawUnsafe: async () => {
+          throw new Error("database or disk is full");
+        },
+      } as unknown as Parameters<typeof compactIfPending>[0];
+      await expect(within(30_000, compactIfPending(failing, { warn, log }))).resolves.toBe("failed");
+      expect(warn.mock.calls.flat().join("\n")).toContain(
+        "[encryption] WARNING: could not compact the database after encrypting (database or disk is full); plaintext copies of the old values may remain in free space until you run VACUUM (SQLite) / VACUUM FULL (PostgreSQL). BlackVault will try again on its next start.",
+      );
+      expect(log).not.toHaveBeenCalled();
+      expect(await pending()).toBe(true);
+      if (!ctx.pg) expect(fileHits(k).length).toBeGreaterThan(0);
+
+      await expect(within(60_000, compactIfPending(raw, { warn, log }))).resolves.toBe("compacted");
+      expect(await pending()).toBe(false);
+      if (!ctx.pg) expect(fileHits(k)).toEqual([]);
+      await expect(within(30_000, compactIfPending(raw, { warn, log }))).resolves.toBe("none");
+    }, 120_000);
+
+    it("a start with nothing to encrypt or scrub does not mark (or run) a compaction", async () => {
+      await start();
+      expect(await pending()).toBe(false);
+      await start();
+      expect(await pending()).toBe(false);
+      await expect(compactIfPending(raw, { log: vi.fn(), warn: vi.fn() })).resolves.toBe("none");
+    });
+
+    it("a scrub-only start (already-encrypted data, old audit rows) marks and compacts too", async () => {
+      await start();
+      await raw.auditEvent.create({
+        data: { actorName: "system", action: "CREATE", entityType: "Firearm", changes: JSON.stringify({ nfaRegisteredTo: "F1 scrub only" }) },
+      });
+      const result = await start();
+      expect(result).toMatchObject({ scrubbedAuditRows: 1 });
+      expect(await pending()).toBe(true);
+      await expect(compactIfPending(raw, { log: vi.fn(), warn: vi.fn() })).resolves.toBe("compacted");
+      expect(await pending()).toBe(false);
+    });
+
+    it.skipIf(!ctx.pg)("PostgreSQL: VACUUM FULL rewrote all five tables and pg_statistic (new file nodes), ANALYZE ran, marker cleared", async () => {
+      const k = needles();
+      await seedNeedles(k);
+      await start();
+      const rels = ["Firearm", "Accessory", "Gear", "AuditEvent", "DateNormalizationAudit"].map((t) => `"${t}"`).concat(["pg_statistic"]);
+      const nodes = async () =>
+        Object.fromEntries(
+          await Promise.all(
+            rels.map(async (r) => [r, String(((await raw.$queryRawUnsafe(`SELECT pg_relation_filenode('${r}')::text AS n`)) as Row[])[0].n)]),
+          ),
+        );
+      const before = await nodes();
+      const warn = vi.fn();
+      await expect(within(60_000, compactIfPending(raw, { provider: "postgres", log: vi.fn(), warn }))).resolves.toBe("compacted");
+      const after = await nodes();
+      for (const r of rels) expect(after[r], r).not.toBe(before[r]);
+      expect(warn).not.toHaveBeenCalled();
+      const dead = (await raw.$queryRawUnsafe(
+        `SELECT relname, n_dead_tup::int AS d FROM pg_stat_user_tables WHERE relname IN ('Firearm','Accessory','Gear','AuditEvent','DateNormalizationAudit') AND n_dead_tup > 0`,
+      )) as Row[];
+      expect(dead).toEqual([]);
+      expect(await pending()).toBe(false);
+    }, 120_000);
   });
 
   // ── fix round 1, I4 ──

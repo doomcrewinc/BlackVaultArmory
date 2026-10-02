@@ -11,6 +11,8 @@ import { writeAuditEvent } from "../audit/record";
 import { redactStoredChanges } from "../audit/redact";
 import { isValidTimeZone, normalizeInstant } from "../date-migration";
 import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
+import { clearCompactionPending, compactDatabase, compactionPending } from "./compaction.mjs";
+import { resolveProvider, type DbProvider } from "../db/provider";
 
 /**
  * Startup steps for field encryption at rest
@@ -20,6 +22,9 @@ import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
  * 1. assertEncryptionKey: load the key and verify it (read-only).
  * 2. runEncryptionMigration: encrypt every pre-encryption value, once, in one
  *    transaction.
+ * 3. compactIfPending: after a committed migration (or key rotation), erase
+ *    the old values left in the database's free space (final review F1).
+ *    Best-effort: a failure is a warning, retried on the next start.
  *
  * Both take a RAW client (createRawPrismaClient in src/lib/prisma.ts, ruling
  * R1): they read and write the stored form itself, which the app client's
@@ -451,7 +456,9 @@ const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
  * Uses only the transaction client while the transaction is open: on SQLite
  * `connection_limit=1` a second connection would wait on the write lock.
  */
-export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: Record<string, number> }> {
+export type MigrationResult = { counts: Record<string, number>; scrubbedAuditRows: number };
+
+export async function runEncryptionMigration(raw: RawClient): Promise<MigrationResult> {
   const keys = getFieldKeys();
   return raw.$transaction(async (txClient) => {
     const tx = txClient as unknown as RawClient & RawTx;
@@ -531,9 +538,9 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
     // non-nullable DateTime, so they cannot hold a "[redacted]" marker; the
     // rows are deleted instead. Nothing reads them any more: the date
     // migration skips the encrypted dates.
-    await tx.dateNormalizationAudit.deleteMany({
+    const { count: deletedDateAudits } = (await tx.dateNormalizationAudit.deleteMany({
       where: { OR: ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => ({ model: d.model, field: d.field })) },
-    });
+    })) as { count: number };
 
     // Task 4b: scrub plaintext NFA values out of existing audit entries.
     // Unconditional — this must happen even when there is no plaintext
@@ -541,14 +548,22 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
     // hold pre-redaction audit rows from spec 2b).
     const scrubbedAuditRows = await scrubAuditEvents(tx);
 
-    if (Object.values(counts).some((n) => n > 0) || scrubbedAuditRows > 0) {
+    const changed = Object.values(counts).some((n) => n > 0) || scrubbedAuditRows > 0;
+    if (changed) {
       await writeAuditEvent(tx, {
         action: "ENCRYPTION_ENABLED",
         actor: SYSTEM_ACTOR,
         changes: { counts, keyId: keys.id, scrubbedAuditRows },
       });
     }
-    return { counts };
+    // Final review F1: the old (plaintext) bytes of every row rewritten or
+    // deleted above are still in the database's free space. Marked here, in
+    // the same transaction, so a compaction that fails — or a process killed
+    // before it runs — is retried by the next start (compactIfPending).
+    if (changed || deletedDateAudits > 0) {
+      await tx.appSettings.update({ where: { id: SETTINGS_ID }, data: { encryptionCompactionPending: true } });
+    }
+    return { counts, scrubbedAuditRows };
   }, MIGRATION_TX);
 }
 
@@ -560,7 +575,7 @@ export async function runEncryptionMigration(raw: RawClient): Promise<{ counts: 
  * extra connection outlives startup). Throws on any failure; the caller
  * refuses to start.
  */
-export async function runEncryptionStartup(): Promise<{ counts: Record<string, number> }> {
+export async function runEncryptionStartup(): Promise<MigrationResult> {
   const { createRawPrismaClient } = await import("../prisma");
   const raw = createRawPrismaClient();
   try {
@@ -574,9 +589,52 @@ export async function runEncryptionStartup(): Promise<{ counts: Record<string, n
     if (changed.length) {
       console.log(`[encryption] Encrypted existing data: ${changed.map(([m, n]) => `${m} ${n}`).join(", ")}`);
     }
+    if (result.scrubbedAuditRows > 0) {
+      console.log(`[encryption] Redacted NFA values in ${result.scrubbedAuditRows} existing audit entries.`);
+    }
+    // After the commit, before $disconnect, on the same connection.
+    await compactIfPending(raw);
     return result;
   } finally {
     await raw.$disconnect();
+  }
+}
+
+/**
+ * Final review F1: when AppSettings.encryptionCompactionPending says a
+ * committed migration or key rotation has not been compacted yet, erases the
+ * old values from the database's free space (./compaction.mjs) and clears
+ * the marker. NEVER throws (controller ruling): the data is already
+ * encrypted, so a failure is logged loudly, the marker stays, and the next
+ * start tries again.
+ */
+export async function compactIfPending(
+  raw: Pick<RawClient, "appSettings" | "$executeRawUnsafe" | "$queryRawUnsafe">,
+  options: { provider?: DbProvider; log?: (line: string) => void; warn?: (line: string) => void } = {},
+): Promise<"none" | "compacted" | "failed"> {
+  const provider = options.provider ?? resolveProvider(process.env.DB_PROVIDER, process.env.DATABASE_URL);
+  const log = options.log ?? ((line: string) => console.log(line));
+  const warn = options.warn ?? ((line: string) => console.error(line));
+  try {
+    if (!(await compactionPending(raw))) return "none";
+    const result = await compactDatabase(raw, provider);
+    await clearCompactionPending(raw);
+    log("[encryption] Compacted the database (removed leftover plaintext from free space).");
+    if (!result.statisticsCompacted) {
+      warn(
+        "[encryption] WARNING: PostgreSQL did not let this database role rewrite pg_statistic, so old sample " +
+          'values may remain there. As a superuser, run: VACUUM FULL pg_statistic; (docker compose exec db psql -U blackvault -d blackvault -c "VACUUM FULL pg_statistic")',
+      );
+    }
+    return "compacted";
+  } catch (e) {
+    const reason = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ");
+    warn(
+      `[encryption] WARNING: could not compact the database after encrypting (${reason}); plaintext copies of the old ` +
+        "values may remain in free space until you run VACUUM (SQLite) / VACUUM FULL (PostgreSQL). " +
+        "BlackVault will try again on its next start. Continuing: your data is encrypted.",
+    );
+    return "failed";
   }
 }
 

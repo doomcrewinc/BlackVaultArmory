@@ -550,6 +550,12 @@ model AppSettings {
   // key. Lets startup detect a wrong or lost encryption key before touching
   // any encrypted row. null = encryption not yet enabled on this install.
   encryptionKeyCheck      String?
+  // true = a committed encryption migration or key rotation left old values
+  // (plaintext, or old-key ciphertext) in the database's free space, and the
+  // compaction that erases them (VACUUM / VACUUM FULL) has not succeeded yet.
+  // Set in the same transaction as the rewrite; every start retries the
+  // compaction while it is true, then clears it (src/lib/encryption/startup.ts).
+  encryptionCompactionPending Boolean @default(false)
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 }
