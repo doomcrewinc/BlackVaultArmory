@@ -24,6 +24,7 @@ const KEY_FILE = "secrets/blackvault_encryption_key";
 const TREE = [
   "install.sh",
   "update.sh",
+  "rotate-key.sh",
   "docker-compose.yml",
   "secrets/.gitignore",
   "scripts/compose-provider.sh",
@@ -46,7 +47,9 @@ function copyTree(dest: string, files = TREE) {
 
 /**
  * The docker stub. `compose version --short` → 2.30.1; `compose ps` →
- * healthy; `compose exec -T db pg_dump` → a fake dump; BV_STUB_FAIL_ON=<word>
+ * healthy; `compose exec -T db pg_dump` → a fake dump; the rotation CLI
+ * (rotate-key.sh) exits BV_STUB_ROTATE_EXIT (default 0) and its --probe
+ * prints BV_STUB_PROBE (default OLD); BV_STUB_FAIL_ON=<word>
  * fails any call containing that word. `compose up -d` with no service (the
  * app start) also logs which backups and key file existed at that moment.
  */
@@ -59,6 +62,8 @@ if [ -n "$BV_STUB_FAIL_ON" ]; then
   case " $* " in *" $BV_STUB_FAIL_ON "*) echo "[stub] failing on purpose: $*" >&2; exit 1 ;; esac
 fi
 case "$*" in
+  *"rotate-encryption-key.mjs --probe"*) echo "\${BV_STUB_PROBE:-OLD}" ;;
+  *"rotate-encryption-key.mjs"*) [ -n "$BV_STUB_ROTATE_STDERR" ] && echo "$BV_STUB_ROTATE_STDERR" >&2; exit "\${BV_STUB_ROTATE_EXIT:-0}" ;;
   "compose version --short") echo 2.30.1 ;;
   "compose ps"*) echo "Up 3 seconds (healthy)" ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
@@ -338,6 +343,78 @@ describe("scripts/db-snapshot.sh on its own (the rotate-key.sh contract, R4)", (
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("nothing to snapshot");
     expect(backups(dir)).toEqual([]);
+  });
+});
+
+// ─── rotate-key.sh (final review F5) ────────────────────────────────────
+
+describe("rotate-key.sh, with the rotation CLI stubbed", () => {
+  const OLD_KEY = "ab".repeat(32);
+
+  function rotateInstall(dir: string) {
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.chmodSync(path.join(dir, "secrets"), 0o700);
+    fs.writeFileSync(path.join(dir, KEY_FILE), OLD_KEY, { mode: 0o600 });
+  }
+  const secrets = (dir: string) => fs.readdirSync(path.join(dir, "secrets")).filter((f) => f !== ".gitignore").sort();
+
+  it("success: the key files are swapped (old kept as .old-<ts>) and the app restarts", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Key rotation complete.");
+    const files = secrets(dir);
+    expect(files).toHaveLength(2);
+    expect(files[0]).toBe("blackvault_encryption_key");
+    expect(files[1]).toMatch(/^blackvault_encryption_key\.old-\d{8}-\d{6}$/);
+    expect(fs.readFileSync(path.join(dir, "secrets", files[1]), "utf8")).toBe(OLD_KEY);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.calls).toContain("compose start blackvault");
+  });
+
+  it("exit 3 (refused up front: the key file does not open this database): no probe, .new set aside, key untouched, NOT restarted", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", {
+      BV_STUB_ROTATE_EXIT: "3",
+      BV_STUB_ROTATE_STDERR: "The old key does not match this database's encryption key check; refusing to rotate. Nothing was changed.",
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("ERROR: secrets/blackvault_encryption_key does not open this database (wrong or replaced key).");
+    expect(r.out).toContain("Nothing was changed. BlackVault was NOT restarted.");
+    expect(r.out).toContain("BlackVault's startup log names its key id");
+    expect(r.out).not.toContain("Checking which key the database");
+    expect(r.calls).not.toContain("--probe");
+    expect(r.calls).not.toContain("compose start");
+    const files = secrets(dir);
+    expect(files[0]).toBe("blackvault_encryption_key");
+    expect(files[1]).toMatch(/^blackvault_encryption_key\.new\.unused-\d{8}-\d{6}$/);
+    expect(files).toHaveLength(2);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
+  });
+
+  it("exit 1 and the probe answers OLD: .new set aside, app restarted on the old key", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", { BV_STUB_ROTATE_EXIT: "1", BV_STUB_PROBE: "OLD" });
+    expect(r.code).toBe(1);
+    expect(r.calls).toContain("--probe");
+    expect(r.out).toContain("still encrypted with the OLD key");
+    expect(r.calls).toContain("compose start blackvault");
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
+  });
+
+  it("exit 1 and the probe answers NEITHER: nothing touched, not restarted, and the recovery text has the NEITHER step", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const r = run(dir, "rotate-key.sh", "", { BV_STUB_ROTATE_EXIT: "1", BV_STUB_PROBE: "NEITHER" });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("4. If it answers NEITHER: secrets/blackvault_encryption_key is not this database's key.");
+    expect(r.out).toContain("Restore the right key file as secrets/blackvault_encryption_key, then run the probe again.");
+    expect(r.calls).not.toContain("compose start");
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key", "blackvault_encryption_key.new"]);
   });
 });
 

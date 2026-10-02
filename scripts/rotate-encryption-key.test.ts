@@ -309,7 +309,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     const newKeyFile = keyFile("new-2", newHex);
     const result = runScript(["--old-key-file", wrongKeyFile, "--new-key-file", newKeyFile]);
 
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(3); // F5: refused before any transaction, distinct from a failed rotation (1)
     expect(result.stderr).toMatch(/does not match this database's encryption key check/);
     expect(result.stdout).toBe("");
     expect(await rawSnapshot()).toBe(before);
@@ -362,7 +362,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     const thirdKeyFile = keyFile("new-4b", thirdHex);
     const second = runScript(["--old-key-file", oldKeyFile, "--new-key-file", thirdKeyFile]);
 
-    expect(second.status).toBe(1);
+    expect(second.status).toBe(3);
     expect(second.stderr).toMatch(/does not match this database's encryption key check/);
     expect(await rawSnapshot()).toBe(afterFirst);
     expect(await raw.auditEvent.count()).toBe(1); // still just the first run's event
@@ -374,7 +374,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     const newKeyFile = keyFile("new-5", generateKeyHex());
     const result = runScript(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
 
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(3);
     expect(result.stderr).toMatch(/No encryption key check found/);
     expect(await raw.auditEvent.count()).toBe(0);
   }, 60_000);

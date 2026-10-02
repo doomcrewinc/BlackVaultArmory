@@ -31,8 +31,12 @@
 //           warning, never turns a committed rotation into a non-zero exit — the wrapper's
 //           --probe mode, not this exit code, is what tells a caller "did it commit?" when
 //           something fails around the edges of a run.
-//   exit 1  refusal, or a failure BEFORE commit — one line on stderr; nothing changed
+//   exit 1  a failure BEFORE commit — one line on stderr; nothing changed
 //   exit 2  usage error
+//   exit 3  refused UP FRONT, before any transaction opened (final review F5): the
+//           database has no key check, or --old-key-file does not open it (it is not
+//           this database's key). Nothing changed and nothing could have; the wrappers
+//           skip the probe (it would answer NEITHER) and say which key is wrong.
 //
 // Probe mode: node scripts/rotate-encryption-key.mjs --probe --old-key-file <path> --new-key-file <path>
 //   Read-only. Prints exactly one of OLD, NEW or NEITHER (which key currently opens
@@ -148,6 +152,9 @@ function readKeyFile(label, filePath) {
 }
 
 class RotationError extends Error {}
+
+/** A refusal raised before the rotation transaction opens: exit 3 (final review F5). */
+class RotationRefusedError extends RotationError {}
 
 // Mirrors resolveProvider in src/lib/db/provider.ts exactly.
 function resolveProvider(rawProvider, databaseUrl) {
@@ -323,13 +330,13 @@ async function rotate(oldKeys, newKeys) {
     });
     const check = settings?.encryptionKeyCheck ?? null;
     if (!check) {
-      throw new RotationError(
+      throw new RotationRefusedError(
         "No encryption key check found (AppSettings.encryptionKeyCheck is empty); refusing to rotate. " +
           "Has BlackVault been started at least once with a key?",
       );
     }
     if (!opensKeyCheck(oldKeys, check)) {
-      throw new RotationError(
+      throw new RotationRefusedError(
         "The old key does not match this database's encryption key check; refusing to rotate. Nothing was changed.",
       );
     }
@@ -386,7 +393,7 @@ async function rotate(oldKeys, newKeys) {
       console.error(`Warning: rotation committed, but a post-commit step failed: ${describeFailure(e)}`);
     } else {
       console.error(describeFailure(e));
-      process.exitCode = 1;
+      process.exitCode = e instanceof RotationRefusedError ? 3 : 1;
     }
   } finally {
     try {
@@ -396,7 +403,7 @@ async function rotate(oldKeys, newKeys) {
         console.error(`Warning: rotation committed, but disconnecting from the database afterwards failed: ${describeFailure(e)}`);
       } else {
         console.error(describeFailure(e));
-        process.exitCode = 1;
+        if (process.exitCode !== 3) process.exitCode = 1; // an up-front refusal stays a refusal
       }
     }
   }

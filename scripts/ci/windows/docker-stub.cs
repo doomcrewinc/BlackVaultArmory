@@ -42,6 +42,9 @@
 //                            scenario can fail the real rotation run while
 //                            still controlling what the recovery probe says.
 //   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
+//   BV_STUB_RUN_EXIT         final review F5: exit code of the (non-probe)
+//                            rotation `compose run`, e.g. 3 = the CLI refused
+//                            up front. Unset/"0" => normal handling.
 //   BV_STUB_RUN_HANDSHAKE    fix round 2 (N5): a path prefix. The (non-probe)
 //                            rotation `compose run` writes PREFIX.ready, then
 //                            waits up to 60 s for PREFIX.ack before returning.
@@ -119,6 +122,14 @@ internal static class DockerStub
                     Console.WriteLine(answer);
                 }
                 return 0;
+            }
+
+            string runExit = Environment.GetEnvironmentVariable("BV_STUB_RUN_EXIT");
+            if (!string.IsNullOrEmpty(runExit) && runExit != "0")
+            {
+                int code;
+                Console.Error.WriteLine("[stub] rotation run exiting " + runExit + " (BV_STUB_RUN_EXIT)");
+                return int.TryParse(runExit, out code) ? code : 1;
             }
 
             string handshake = Environment.GetEnvironmentVariable("BV_STUB_RUN_HANDSHAKE");

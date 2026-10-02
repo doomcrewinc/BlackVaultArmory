@@ -267,6 +267,27 @@ if $COMPOSE run --rm blackvault \
 then
   # ── 6. Success: swap the key files and restart ──────────────
   do_swap_and_restart
+elif ROTATE_STATUS=$?; [ "$ROTATE_STATUS" -eq 3 ]; then
+  # Exit 3 (final review F5): the rotation refused UP FRONT, before any
+  # transaction opened — the current key file does not open this database's
+  # key check (or there is none). Nothing changed, and nothing could have,
+  # so no probe is needed (it would only answer NEITHER). The unused new key
+  # is set aside, never deleted (N2), and the app is NOT restarted: with a
+  # key file that is not this database's key it would refuse to start anyway.
+  PHASE="refused"
+  echo ""
+  echo "ERROR: $KEY_FILE does not open this database (wrong or replaced key)."
+  echo "       Nothing was changed. BlackVault was NOT restarted."
+  if mv "$NEW_KEY_FILE" "$UNUSED_KEY_FILE"; then
+    echo "       The unused new key was set aside as $UNUSED_KEY_FILE; it can be deleted."
+  else
+    echo "       WARNING: could not rename $NEW_KEY_FILE to $UNUSED_KEY_FILE."
+    echo "       Move it out of secrets/ by hand before the next rotation."
+  fi
+  echo "       Restore the key this database was encrypted with as $KEY_FILE"
+  echo "       (BlackVault's startup log names its key id: $COMPOSE logs blackvault),"
+  echo "       start BlackVault, then run ./rotate-key.sh again."
+  exit 1
 else
   # The rotation command itself exited non-zero. That does NOT mean nothing
   # changed (fix round 1, C1): the transaction may already have committed
@@ -324,6 +345,8 @@ else
       echo "         3. If it answers OLD:"
       echo "              mv $NEW_KEY_FILE $UNUSED_KEY_FILE"
       echo "              $COMPOSE start blackvault"
+      echo "         4. If it answers NEITHER: $KEY_FILE is not this database's key."
+      echo "            Restore the right key file as $KEY_FILE, then run the probe again."
       exit 1
       ;;
   esac

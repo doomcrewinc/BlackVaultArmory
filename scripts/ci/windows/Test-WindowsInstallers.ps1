@@ -1117,6 +1117,26 @@ Assert ($mOld.Success -and $mNew.Success -and $mOld.Index -lt $mNew.Index) "NEW 
 # N2: step 3 renames, never deletes.
 Assert ($r.Output -match '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\.new\.unused-\d{8}-\d{6}\r?$') "OLD recovery: renames .new to .new.unused-<ts>"
 Assert ($r.Output -notmatch '(?m)^\s*del ') "no recovery line deletes a key file"
+# Final review F5: the NEITHER answer has its own recovery step.
+Assert ($r.Output -match "4\. If it answers NEITHER: secrets\\blackvault_encryption_key is not this database's key\.") "recovery text has step 4 for a NEITHER answer"
+Assert ($r.Output -match "Restore the right key file as secrets\\blackvault_encryption_key, then run the probe again\.") "step 4 says to restore the right key file and probe again"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK6e
+Write-Scenario "rotate-key.bat - the rotation refuses up front (exit 3, wrong key file): no probe, .new set aside, key untouched, NOT restarted (final review F5)"
+$d = New-RotateSandbox "rotate-refused-exit3" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_EXIT" = "3"; "BV_STUB_PROBE_ANSWER" = "NEITHER" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "says the current key file is not this database's key"
+Assert ($r.Output -match "Nothing was changed\. BlackVault was NOT restarted\.") "says nothing changed and the app was not restarted"
+Assert ($r.Output -match "startup log names its key id") "points at the startup log's key id"
+Assert ($r.StubLog -notmatch "--probe") "did NOT run the probe (it would only answer NEITHER)"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
+$unused = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*")
+Assert ($unused.Count -eq 1) "the unused .new was set aside as .new.unused-<ts> (got $($unused.Count))"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new name is free again"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is byte-for-byte unchanged"
 Show-EvidenceIfFailed $r
 
 # -------------------------------------------------------------- scenario RK6d

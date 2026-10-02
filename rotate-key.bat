@@ -20,6 +20,9 @@
 :: round 2, N2) and restarts on the old one, and anything else (NEITHER,
 :: or the probe producing no answer at all) keeps every key file untouched,
 :: does NOT start the app, and prints exact recovery commands.
+:: Exit 3 from the rotation (final review F5) is an up-front refusal: the
+:: current key file does not open this database, nothing changed, so no
+:: probe; .new is set aside and the app is NOT restarted.
 ::
 :: Run from the folder this script lives in, even when launched with
 :: "Run as administrator" (which starts in C:\Windows\System32).
@@ -118,6 +121,9 @@ echo.
 echo Rotating encryption key (this may take a while on a large inventory)...
 %COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new
 if not errorlevel 1 goto :do_swap
+:: Exit 3 exactly (errorlevel N means "N or more"): refused before any
+:: transaction opened (final review F5).
+if errorlevel 3 if not errorlevel 4 goto :rotate_refused
 
 :: The rotation command itself exited non-zero. That does NOT mean nothing
 :: changed (fix round 1, C1): the transaction may already have committed and
@@ -203,6 +209,30 @@ echo             Keep %OLD_KEY_FILE% for as long as you keep the pre-rotation sn
 echo          3. If it answers OLD:
 echo               move /y %NEW_KEY_FILE% %UNUSED_KEY_FILE%
 echo               %COMPOSE% start blackvault
+echo          4. If it answers NEITHER: %KEY_FILE% is not this database's key.
+echo             Restore the right key file as %KEY_FILE%, then run the probe again.
+pause
+exit /b 1
+
+:: Final review F5: the rotation refused up front (exit 3). Nothing changed
+:: and nothing could have, so no probe. The unused .new is set aside, never
+:: deleted (N2), and the app is NOT restarted: with a key file that is not
+:: this database's key it would refuse to start anyway.
+:rotate_refused
+echo.
+echo ERROR: %KEY_FILE% does not open this database (wrong or replaced key).
+echo        Nothing was changed. BlackVault was NOT restarted.
+move /y "%NEW_KEY_FILE%" "%UNUSED_KEY_FILE%" >nul
+if errorlevel 1 goto :rotate_refused_rename_failed
+echo        The unused new key was set aside as %UNUSED_KEY_FILE%; it can be deleted.
+goto :rotate_refused_hint
+:rotate_refused_rename_failed
+echo        WARNING: could not rename %NEW_KEY_FILE% to %UNUSED_KEY_FILE%.
+echo        Move it out of secrets\ by hand before the next rotation.
+:rotate_refused_hint
+echo        Restore the key this database was encrypted with as %KEY_FILE%
+echo        (BlackVault's startup log names its key id: %COMPOSE% logs blackvault),
+echo        start BlackVault, then run rotate-key.bat again.
 pause
 exit /b 1
 
