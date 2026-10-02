@@ -1056,8 +1056,9 @@ working.
 
 Neither snapshot copies symbolic links. Both skip `.tmp` and `.rot` work files, and the update
 snapshot skips `.pre-encryption-*` folders — except on Windows, where `update.bat` /
-`rotate-key.bat` still copy those too (so a plain-text `.pre-encryption-*` folder left in
-uploads is copied again on every Windows update until you delete it).
+`rotate-key.bat` copy every file, including `.tmp` / `.rot` files and `.pre-encryption-*`
+folders (so a plain-text `.pre-encryption-*` folder left in uploads is copied again on every
+Windows update until you delete it).
 
 ### Rotation covers files
 
