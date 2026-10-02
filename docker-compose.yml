@@ -86,8 +86,9 @@ services:
       - BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db
       # Same, for the uploads folder (/app/uploads inside).
       - BLACKVAULT_HOST_UPLOADS_DIR=${DATA_DIR:-./data}/uploads
-      # Set only by update.sh/.bat and rotate-key.sh/.bat, for the one `up`
-      # right after they already snapshotted the uploads folder into
+      # Set only by update.sh / update.bat (rotate-key clears the marker
+      # without passing it: its uploads are already encrypted), for the one
+      # `up` right after they already snapshotted the uploads folder into
       # backups/ — so the app's own startup step does not take a second
       # one. Empty by default, and never written to .env: a stale value
       # could suppress a snapshot a later, unrelated start genuinely needs.

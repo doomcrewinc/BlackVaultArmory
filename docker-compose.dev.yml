@@ -42,8 +42,9 @@ services:
       - BLACKVAULT_HOST_DB_DIR=volume blackvault-dev-data
       # Same, for /app/uploads (also a named volume here, not a host folder).
       - BLACKVAULT_HOST_UPLOADS_DIR=volume blackvault-dev-uploads
-      # See docker-compose.yml: set only by the update/rotation scripts, for
-      # one `up`, never written to .env.
+      # See docker-compose.yml: set only by update.sh / update.bat (rotate-key
+      # clears the marker without passing it: its uploads are already
+      # encrypted), for one `up`, never written to .env.
       - BLACKVAULT_UPLOADS_SNAPSHOT=${BLACKVAULT_UPLOADS_SNAPSHOT:-}
     volumes:
       - blackvault-dev-data:/app/data
