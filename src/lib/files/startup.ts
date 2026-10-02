@@ -566,7 +566,11 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
     throw new FileStartupError(
       `The uploaded file ${first.entry.abs} is encrypted with key ${first.keyId}, not the current key ${keys.id}` +
         `${before.foreign.length > 1 ? ` (and ${before.foreign.length - 1} more files)` : ""}. ` +
-        "A key rotation may not have finished: start with the key that encrypted it, or run the rotation again.",
+        "These files were encrypted by another BlackVault install or before a key rotation (for example, uploads " +
+        "copied from another machine or restored from backups/uploads-*), and BlackVault cannot open them with " +
+        "this key. Move them out of the uploads folder and start again; keep them, because they open only with the " +
+        "key that encrypted them. On a new install that has no data yet, put that key in place instead and start " +
+        'over (see the README, "Files encrypted with a different key").',
     );
   }
 

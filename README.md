@@ -1095,6 +1095,41 @@ When the rotation itself fails:
 - **It failed before the commit** (exit 1) — a full disk while staging, for example: every
   staged `.rot` is deleted, the probe answers `OLD`, and BlackVault restarts on the old key.
 
+### Files encrypted with a different key
+
+Every uploaded file opens only with the key that encrypted it. This happens when files from
+another key end up in `<DATA_DIR>/uploads`:
+
+- uploads copied from another machine, or from another BlackVault install, whose key you did
+  not bring along (see **Moving to a new machine**);
+- an old `backups/uploads-<timestamp>/` restored after a key rotation. A snapshot that
+  `rotate-key` takes is under the **old** key: keep it together with
+  `secrets/blackvault_encryption_key.old-<timestamp>`, the old key the wrapper set aside.
+
+**BlackVault then refuses to start — the whole app, not just those files.** The log names the
+first such file and its key id (`… is encrypted with key <id>, not the current key <id>`).
+Restarting, or running the rotation again, does not help: the database is already bound to the
+current key, and the rotation only accepts files under the current or the new key.
+
+To recover:
+
+- **Move the files aside.** Move every file the log names out of `<DATA_DIR>/uploads` (on
+  Linux with `sudo`: they belong to uid 1001) and start again; repeat until it starts. Keep
+  them: they open only with the key that encrypted them.
+- **On a new install that holds no data yet**, use the original key instead:
+  1. Stop BlackVault (see *Stopping and Starting*).
+  2. Put the original install's key in `secrets/blackvault_encryption_key`. Keep the new
+     install's key file somewhere safe until BlackVault starts.
+  3. Delete the database the new install just created, and **only** if it holds nothing you
+     need: `<DATA_DIR>/db/vault.db` on SQLite, or the `<DATA_DIR>/postgres` folder on PostgreSQL (with
+     `sudo` on Linux).
+  4. Start BlackVault. It binds the fresh database to the original key and the files open.
+  5. Restore your backup (**Settings → Backup**). If you want a new key, rotate afterwards
+     (see **Rotation**).
+
+Re-encrypting files from another key into the current one is not supported yet (planned: spec
+3c). Without the key that encrypted them, those files cannot be opened.
+
 ### Known limitations of file encryption
 
 - **Plaintext traces stay on disk.** The bytes of the original files may remain in free blocks

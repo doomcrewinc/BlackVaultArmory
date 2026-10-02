@@ -342,6 +342,11 @@ describe("runFileStartup", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err?.message).toContain(foreign);
     expect(err?.message).toContain(OTHER_KEYS.id);
+    // Final review FIX 1: the hint names the real causes and the fixes that work.
+    expect(err?.message).toContain("encrypted by another BlackVault install or before a key rotation");
+    expect(err?.message).toContain("Move them out of the uploads folder and start again");
+    expect(err?.message).toContain('"Files encrypted with a different key"');
+    expect(err?.message).not.toContain("run the rotation again");
     // Refused before anything changed.
     expect(readFileSync(p, "utf8")).toBe("jpeg-plain");
     expect(await events()).toEqual([]);
