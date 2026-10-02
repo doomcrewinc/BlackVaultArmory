@@ -1502,6 +1502,87 @@ Assert ($r.Output -match "RC=1") "errorlevel 1 when the app cannot be stopped"
 Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's folder is unchanged on failure too"
 Show-EvidenceIfFailed $r
 
+# =============================================================================
+#                   Task 4: update scripts snapshot the uploads folder
+# =============================================================================
+# scripts\db-snapshot.bat also copies DATA_DIR\uploads into
+# backups\uploads-<TS>\ before update.bat starts the new image, and leaves
+# the path in backups\.uploads-snapshot-marker for update.bat to pass through
+# as BLACKVAULT_UPLOADS_SNAPSHOT. docker-stub.cs logs that env var on its own
+# "ENV BLACKVAULT_UPLOADS_SNAPSHOT=[...]" line right after "compose up -d",
+# which is how UP1 below proves the marker actually reached the container's
+# environment, not just that update.bat computed it.
+
+function Add-UploadsSeed([string]$Dir) {
+  $uploads = Join-Path $Dir "data\uploads"
+  New-Item -ItemType Directory -Force -Path (Join-Path $uploads "documents") | Out-Null
+  Set-Content -Path (Join-Path $uploads "photo1.jpg") -Value "fake jpeg bytes" -NoNewline -Encoding Ascii
+  Set-Content -Path (Join-Path $uploads "documents\doc1.pdf") -Value "fake pdf bytes" -NoNewline -Encoding Ascii
+}
+
+function Get-UploadsBackups([string]$Dir) {
+  $b = Join-Path $Dir "backups"
+  if (-not (Test-Path $b)) { return @() }
+  return @(Get-ChildItem $b -Directory | Where-Object { $_.Name -like "uploads-*" } | Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+# ---------------------------------------------------------------- scenario UP1
+Write-Scenario "update.bat - Task 4: snapshots the uploads folder byte-for-byte before the new image starts, ACL-restricted, and the marker reaches the container's environment"
+$origin = New-GitRemote "uploads-up1" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up1"
+Set-SqliteInstall $work "7040"
+Add-UploadsSeed $work
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$ups = @(Get-UploadsBackups $work)
+Assert (($ups.Count -eq 1) -and ($ups[0] -match "^uploads-\d{8}-\d{6}$")) "one uploads snapshot backups\uploads-<ts> (got: $($ups -join ', '))"
+if ($ups.Count -eq 1) {
+  $snapDir = Join-Path $work "backups\$($ups[0])"
+  Assert (Test-UserOnlyAcl $snapDir) "the uploads snapshot folder is restricted to the current user"
+  Assert ((Get-Content (Join-Path $snapDir "photo1.jpg") -Raw) -eq "fake jpeg bytes") "photo1.jpg copied byte-for-byte"
+  Assert ((Get-Content (Join-Path $snapDir "documents\doc1.pdf") -Raw) -eq "fake pdf bytes") "documents\doc1.pdf copied byte-for-byte (nested folder preserved)"
+  Assert ($r.Output -match [regex]::Escape("Uploads snapshot saved: backups\$($ups[0])")) "prints the snapshot path"
+  Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[backups\$($ups[0])]")) "the marker reached the container's environment at the 'up' that starts the new image"
+}
+Assert (-not (Test-Path (Join-Path $work "backups\.uploads-snapshot-marker"))) "the marker file was read once and removed, not left lying around"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP2
+Write-Scenario "update.bat - Task 4: an empty uploads folder still succeeds, takes no snapshot, and passes no marker"
+$origin = New-GitRemote "uploads-up2" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up2"
+Set-SqliteInstall $work "7041" # data\uploads exists (Set-SqliteInstall creates it) and is empty
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (@(Get-UploadsBackups $work).Count -eq 0) "no uploads snapshot directory was created"
+Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[]")) "no marker was passed through (empty value)"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP3
+Write-Scenario "update.bat - Task 4: a failed uploads copy (a locked file) exits non-zero, stops the update, restarts the OLD container, and never starts the new image"
+$origin = New-GitRemote "uploads-up3" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up3"
+Set-SqliteInstall $work "7042"
+Add-UploadsSeed $work
+$lockedFile = Join-Path $work "data\uploads\photo1.jpg"
+$lockFlag = Join-Path $Sandboxes "uploads-up3-locked.flag"
+Remove-Item -Force $lockFlag -ErrorAction SilentlyContinue
+Remove-Item -Force "$lockFlag.release" -ErrorAction SilentlyContinue
+$lockJob = Start-FileLockJob $lockedFile $lockFlag
+try {
+  if (-not (Wait-ForFile $lockFlag 30)) { throw "the lock job never reported it held the lock on $lockedFile" }
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+} finally {
+  Stop-FileLockJob $lockJob $lockFlag
+}
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed") "update.bat says the snapshot failed"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started (no 'compose up -d')"
+Assert ((Get-CallIndex $r.StubLog "compose start blackvault") -ge 0) "the old container was started again"
+Assert (@(Get-UploadsBackups $work).Count -eq 0) "no uploads snapshot directory was left behind"
+Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "uploads-*.partial" -ErrorAction SilentlyContinue).Count -eq 0) "no partial uploads directory left behind"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------- scenario E1
 # Fix round 1 (I4). Releases before this one stored install.bat/update.bat
 # with CRLF IN THE INDEX under `*.bat text eol=crlf`, so Git reports them

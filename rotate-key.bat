@@ -101,6 +101,11 @@ echo.
 echo Snapshotting database...
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
+:: Task 4: db-snapshot.bat also snapshotted the uploads folder. This script
+:: restarts with `compose start`, which does not recreate the container, so
+:: the marker would never reach the app anyway - and is not needed: a
+:: rotation never leaves plaintext uploads for the app to snapshot again.
+del /f /q "backups\.uploads-snapshot-marker" >nul 2>&1
 
 :: ── 4. Generate the new key ─────────────────────────────────────
 :: 64 hex characters (32 bytes) from the OS CSPRNG, same approach as
