@@ -12,8 +12,14 @@
 //     to parse it back to a Date/number, only move the same plaintext
 //     string to a new envelope;
 //   - recomputes every serialNumberHash with the new key's index subkey;
-//   - replaces AppSettings.encryptionKeyCheck;
+//   - replaces AppSettings.encryptionKeyCheck and sets
+//     AppSettings.encryptionCompactionPending;
 //   - writes one KEY_ROTATED audit event.
+// After the commit it compacts the database (final review F1: VACUUM on
+// SQLite, VACUUM FULL + ANALYZE on PostgreSQL, src/lib/encryption/compaction.mjs)
+// so the OLD-key ciphertext does not linger in free space, then clears the
+// marker. Best-effort: a failure is a warning (exit stays 0) and the app's
+// next start retries it, because the marker is still set.
 // A failure anywhere rolls the whole transaction back: no row and no key
 // file changes. The script itself never touches the key files on disk —
 // that is rotate-key.sh/.bat's job (step 6 of the spec's rotation list).
@@ -56,6 +62,7 @@ import path from "node:path";
 import {
   parseKeyHex, deriveKeys, encryptValue, decryptValue, fingerprint, EncryptionKeyError,
 } from "../src/lib/encryption/core.mjs";
+import { clearCompactionPending, compactDatabase } from "../src/lib/encryption/compaction.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -228,6 +235,30 @@ async function rotateModel(tx, model, delegate, fields, oldKeys, newKeys) {
   return updated;
 }
 
+/**
+ * Final review F1: erases the OLD-key ciphertext the rotation left in the
+ * database's free space, then clears AppSettings.encryptionCompactionPending.
+ * Runs only after the commit, and NEVER fails the run (C1 ruling): any error
+ * is a warning, and the still-set marker makes the app's next start retry.
+ */
+async function compactAfterRotation(raw) {
+  try {
+    const result = await compactDatabase(raw, resolveProvider(process.env.DB_PROVIDER, process.env.DATABASE_URL));
+    await clearCompactionPending(raw);
+    console.log("Compacted the database (removed old-key ciphertext from free space).");
+    if (!result.statisticsCompacted) {
+      console.error(
+        "Warning: PostgreSQL did not let this database role rewrite pg_statistic; run VACUUM FULL pg_statistic as a superuser.",
+      );
+    }
+  } catch (e) {
+    console.error(
+      `Warning: rotation committed, but compacting the database failed: ${describeFailure(e)}. ` +
+        "Old-key ciphertext may remain in free space; BlackVault retries the compaction on its next start.",
+    );
+  }
+}
+
 /** One line describing any failure — never the key material, never a stack trace (callers of this CLI see one line). */
 function describeFailure(e) {
   const message = e instanceof Error ? e.message : String(e);
@@ -310,7 +341,13 @@ async function rotate(oldKeys, newKeys) {
       }
 
       const newCheck = encryptValue(newKeys, KEY_CHECK_AAD, KEY_CHECK_PLAINTEXT);
-      await tx.appSettings.update({ where: { id: SETTINGS_ID }, data: { encryptionKeyCheck: newCheck } });
+      // encryptionCompactionPending: set in the same transaction, so a
+      // compaction that fails below (or never runs) is retried by the app's
+      // next start (src/lib/encryption/startup.ts compactIfPending).
+      await tx.appSettings.update({
+        where: { id: SETTINGS_ID },
+        data: { encryptionKeyCheck: newCheck, encryptionCompactionPending: true },
+      });
 
       // KEY_ROTATED, written directly on the raw transaction client — this
       // plain-JS script cannot import src/lib/audit/record.ts's
@@ -343,6 +380,7 @@ async function rotate(oldKeys, newKeys) {
     } catch (e) {
       console.error(`Warning: rotation committed, but printing the summary failed: ${describeFailure(e)}`);
     }
+    await compactAfterRotation(raw);
   } catch (e) {
     if (committed) {
       console.error(`Warning: rotation committed, but a post-commit step failed: ${describeFailure(e)}`);

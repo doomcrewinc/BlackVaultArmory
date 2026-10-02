@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -490,6 +490,72 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     expect(result.stdout).toBe("");
     expect(result.stderr).toMatch(/cannot determine which key/);
   });
+
+  // ── final review F1: post-rotation compaction ────────────────────
+
+  const VACUUM_THROWS_PRELOAD = path.join(process.cwd(), "scripts", "rotate-encryption-key.vacuum-throws.preload.cjs");
+  const pendingFlag = async () =>
+    (await raw.appSettings.findUniqueOrThrow({ where: { id: "singleton" }, select: { encryptionCompactionPending: true } }))
+      .encryptionCompactionPending;
+
+  /** Enough rows that the rewrite frees whole pages (on a page or two SQLite's defragmentation zeroes the gaps by itself). */
+  async function seedBulk(keys: FieldKeysLike, n = 400) {
+    await raw.gear.createMany({
+      data: Array.from({ length: n }, (_, i) => ({
+        id: `g-bulk-${i}`,
+        name: `Bulk ${i}`,
+        category: "ARMOR",
+        serialNumber: enc(keys, "Gear", "serialNumber", `BULK-${i}`),
+        serialNumberHash: fingerprint(keys, `BULK-${i}`),
+      })),
+    });
+  }
+
+  const fileHolds = (needle: string) => !ctx.pg && readFileSync(ctx.file).includes(Buffer.from(needle));
+
+  it("F1: after a committed rotation the database is compacted — no OLD-key envelope left in the SQLite file — and the marker is cleared", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+    await seedBulk(oldKeys);
+    if (!ctx.pg) expect(fileHolds(`bv2:${oldKeys.id}:`)).toBe(true);
+
+    const result = runScript(["--old-key-file", keyFile("old-f1", oldHex), "--new-key-file", keyFile("new-f1", newHex)]);
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(`Rotated encryption key ${oldKeys.id} -> ${newKeys.id}`);
+    expect(result.stdout).toContain("Compacted the database (removed old-key ciphertext from free space).");
+    expect(result.stderr).toBe("");
+    expect(await pendingFlag()).toBe(false);
+    if (!ctx.pg) {
+      expect(fileHolds(`bv2:${oldKeys.id}:`)).toBe(false);
+      expect(fileHolds(`bv2:${newKeys.id}:`)).toBe(true);
+    }
+  }, 60_000);
+
+  it("F1: a failed post-rotation compaction is a warning: exit 0, rotation committed, marker left set for the app's next start", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+    await seedBulk(oldKeys);
+
+    const result = runScriptWithPreload(
+      ["--old-key-file", keyFile("old-f1b", oldHex), "--new-key-file", keyFile("new-f1b", newHex)],
+      VACUUM_THROWS_PRELOAD,
+    );
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(`Rotated encryption key ${oldKeys.id} -> ${newKeys.id}`);
+    expect(result.stderr).toContain(
+      "Warning: rotation committed, but compacting the database failed: simulated compaction failure: database or disk is full (test fixture). Old-key ciphertext may remain in free space; BlackVault retries the compaction on its next start.",
+    );
+    const settings = await raw.appSettings.findUniqueOrThrow({ where: { id: "singleton" } });
+    expect(decryptValue(newKeys, KEY_CHECK_AAD, settings.encryptionKeyCheck as string)).toBe(KEY_CHECK_PLAINTEXT);
+    expect(await pendingFlag()).toBe(true);
+    if (!ctx.pg) expect(fileHolds(`bv2:${oldKeys.id}:`)).toBe(true); // the residue the next start removes
+  }, 60_000);
 
   // ── C1: the reviewer's post-commit injection ─────────────────────
 
