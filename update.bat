@@ -264,7 +264,6 @@ if errorlevel 1 goto :snapshot_failed
 :: write it to .env - and pass it to the ONE `up` below, so the app's own
 :: startup step does not take a second snapshot of the same files.
 :: Final review FIX 5: never let a value inherited from the caller reach `up`.
-set "BLACKVAULT_UPLOADS_SNAPSHOT="
 set "UPLOADS_SNAPSHOT_MARKER="
 if exist "backups\.uploads-snapshot-marker" (
   for /f "usebackq delims=" %%M in ("backups\.uploads-snapshot-marker") do set "UPLOADS_SNAPSHOT_MARKER=%%M"
