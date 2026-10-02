@@ -40,6 +40,11 @@ services:
       # pre-encryption snapshot log names it as "volume blackvault-dev-data/…"
       # (Compose prefixes the real volume name with the project name).
       - BLACKVAULT_HOST_DB_DIR=volume blackvault-dev-data
+      # Same, for /app/uploads (also a named volume here, not a host folder).
+      - BLACKVAULT_HOST_UPLOADS_DIR=volume blackvault-dev-uploads
+      # See docker-compose.yml: set only by the update/rotation scripts, for
+      # one `up`, never written to .env.
+      - BLACKVAULT_UPLOADS_SNAPSHOT=${BLACKVAULT_UPLOADS_SNAPSHOT:-}
     volumes:
       - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads

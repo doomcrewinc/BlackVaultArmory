@@ -84,6 +84,14 @@ services:
       # Lets the app print the HOST path of the snapshot it takes before its
       # first encryption (/app/data inside = this folder outside).
       - BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db
+      # Same, for the uploads folder (/app/uploads inside).
+      - BLACKVAULT_HOST_UPLOADS_DIR=${DATA_DIR:-./data}/uploads
+      # Set only by update.sh/.bat and rotate-key.sh/.bat, for the one `up`
+      # right after they already snapshotted the uploads folder into
+      # backups/ — so the app's own startup step does not take a second
+      # one. Empty by default, and never written to .env: a stale value
+      # could suppress a snapshot a later, unrelated start genuinely needs.
+      - BLACKVAULT_UPLOADS_SNAPSHOT=${BLACKVAULT_UPLOADS_SNAPSHOT:-}
       # Required: the address people open BlackVault at, normally your reverse
       # proxy's HTTPS URL. The app will not start without it.
       - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-}

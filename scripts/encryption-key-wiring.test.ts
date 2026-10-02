@@ -52,6 +52,10 @@ describe.each(["docker-compose.yml", "docker-compose.dev.yml"])("%s", (file) => 
     expect(app).toContain("- BLACKVAULT_ENCRYPTION_KEY=${BLACKVAULT_ENCRYPTION_KEY:-}");
   });
 
+  it("Task 4: passes BLACKVAULT_UPLOADS_SNAPSHOT through, empty by default", () => {
+    expect(app).toContain("- BLACKVAULT_UPLOADS_SNAPSHOT=${BLACKVAULT_UPLOADS_SNAPSHOT:-}");
+  });
+
   it("does not use a Compose `secrets:` file entry (a bind mount keeping host owner and mode: unreadable by uid 1001 on Linux)", () => {
     expect(read(file)).not.toMatch(/^secrets:/m);
     expect(app).not.toMatch(/^ {4}secrets:/m);
@@ -73,6 +77,18 @@ describe("docker-compose.yml", () => {
     const dev = serviceBlock(read("docker-compose.dev.yml"), "blackvault");
     expect(dev).toContain("- BLACKVAULT_HOST_DB_DIR=volume blackvault-dev-data");
     expect(dev).toContain("- blackvault-dev-data:/app/data");
+  });
+
+  it("Task 4: tells the app the host folder behind /app/uploads, for the snapshot-skip log line", () => {
+    const app = serviceBlock(read("docker-compose.yml"), "blackvault");
+    expect(app).toContain("- BLACKVAULT_HOST_UPLOADS_DIR=${DATA_DIR:-./data}/uploads");
+    expect(app).toContain("- ${DATA_DIR:-./data}/uploads:/app/uploads");
+  });
+
+  it("Task 4: docker-compose.dev.yml also sets BLACKVAULT_HOST_UPLOADS_DIR (its /app/uploads is a named volume)", () => {
+    const dev = serviceBlock(read("docker-compose.dev.yml"), "blackvault");
+    expect(dev).toContain("- BLACKVAULT_HOST_UPLOADS_DIR=volume blackvault-dev-uploads");
+    expect(dev).toContain("- blackvault-dev-uploads:/app/uploads");
   });
 });
 
