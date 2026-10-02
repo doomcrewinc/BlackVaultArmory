@@ -534,6 +534,39 @@ function rewriteArgs(model: string, operation: string, args: Row): Row {
   return out;
 }
 
+/**
+ * Every operation this file handles (final review FIX 9). On a model with an
+ * encrypted field anything else throws: an operation added by a later Prisma
+ * (e.g. Prisma 6's `updateManyAndReturn`) would otherwise pass through
+ * untouched, writing plaintext and returning ciphertext. Fail closed.
+ */
+const KNOWN_OPERATIONS: ReadonlySet<string> = new Set([
+  "findUnique",
+  "findUniqueOrThrow",
+  "findFirst",
+  "findFirstOrThrow",
+  "findMany",
+  "create",
+  "createMany",
+  "createManyAndReturn",
+  "update",
+  "updateMany",
+  "upsert",
+  "delete",
+  "deleteMany",
+  "count",
+  "aggregate",
+  "groupBy",
+]);
+
+function assertKnownOperation(model: string, operation: string) {
+  if (KNOWN_OPERATIONS.has(operation) || encryptedFieldsFor(model).length === 0) return;
+  throw new EncryptedFieldQueryError(
+    `The Prisma operation ${operation} is not supported on ${model}, a model with encrypted fields ` +
+      `(src/lib/encryption/extension.ts handles only: ${[...KNOWN_OPERATIONS].join(", ")}).`,
+  );
+}
+
 /** Results that are rows of `model` (counts, aggregates and batch payloads carry no encrypted values). */
 const ROW_RESULTS: ReadonlySet<string> = new Set([
   "findUnique",
@@ -587,6 +620,7 @@ export function withEncryption<C extends PrismaClient>(base: C): C {
             // the args are already encrypted, and the outer call decodes.
             return inFlight.run(undefined, async () => await query(args));
           }
+          assertKnownOperation(model, operation);
           const rewritten = isPlainObject(args) ? rewriteArgs(model, operation, args) : args;
           const result = await inFlight.run({ model, operation }, async () => await query(rewritten));
           return ROW_RESULTS.has(operation) ? decodeResult(model, result) : result;
