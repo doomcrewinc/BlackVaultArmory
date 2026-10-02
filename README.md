@@ -1014,8 +1014,9 @@ docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>/uploads/
 
 Docker Desktop and OrbStack read and write the files in your data folder as your own Mac user,
 so the copies are already usable by the app. A `chown` to 1001 would hand them to a user other
-than the one Docker writes as, and the app could then no longer encrypt them. This is expected
-to work but has not been tested yet; verify after the update that your documents open.
+than the one Docker writes as, and the app could then probably no longer encrypt them. This
+rescue is tested on OrbStack (the documents were encrypted and open after the update); it has
+not been tested on Docker Desktop yet, so there verify after the update that your documents open.
 
 **Windows (Docker Desktop).** In PowerShell or Command Prompt, with no `sudo` and no `chown`:
 
@@ -1024,7 +1025,7 @@ docker exec blackvault ls -la /app/storage/uploads/documents
 docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>\uploads\
 ```
 
-This has not been tested yet either; verify after the update that your documents open.
+This has not been tested yet; verify after the update that your documents open.
 
 Then update as usual: the first start encrypts the rescued documents in place.
 
@@ -1061,6 +1062,7 @@ Two kinds of copy are taken before your files change:
   of the BlackVault image, as the app's user: the encrypted files are mode 600 and owned by
   uid 1001, so your own user cannot read them. The snapshot is owned by uid 1001 too (folders
   mode 700, files mode 600), so deleting it on Linux needs `sudo rm -r backups/uploads-<timestamp>`.
+  On Mac (OrbStack), the snapshot shows as owned by your own user and needs no `sudo`.
   On Windows, `update.bat` / `rotate-key.bat` copy on the host and restrict the folder to your
   user account. If the copy fails, the update stops and the new version is not started.
 - **`<DATA_DIR>/uploads/.pre-encryption-<timestamp>/`** — taken by BlackVault itself on the
@@ -1169,8 +1171,8 @@ Re-encrypting files from another key into the current one is not supported yet (
 - **The first upgrade can take minutes** with many files: every file is copied, then encrypted
   and synced to disk one at a time. Progress is logged every 250 files
   (`[files] snapshot 250/…`, `[files] encrypted 250/…`).
-- **Docker Desktop and OrbStack on Mac:** the in-container uploads snapshot is proven on Linux
-  only. (Windows copies on the host instead.)
+- **Docker Desktop on Mac:** the in-container uploads snapshot is proven on Linux and on
+  OrbStack, not yet on Docker Desktop. (Windows copies on the host instead.)
 
 ---
 
