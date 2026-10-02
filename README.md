@@ -832,8 +832,11 @@ data before encrypting it — it only logs a warning, by which point the data is
 encrypted. Run this yourself first, with the OLD version still running:
 
 ```bash
-docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql
+mkdir -p backups && (umask 077 && docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql)
 ```
+
+(`mkdir -p backups` is needed: versions before this one never create a `backups/` folder,
+and the dump is written readable by you only, like the update scripts' own snapshots.)
 
 The update scripts (`update.sh` / `update.bat`) also snapshot your database into
 `backups/` before starting the new image — new in this release, not something earlier
