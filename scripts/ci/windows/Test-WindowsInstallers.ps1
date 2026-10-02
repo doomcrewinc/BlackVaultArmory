@@ -1623,6 +1623,50 @@ Assert (@(Get-UploadsBackups $work).Count -eq 0) "no uploads snapshot directory 
 Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "uploads-*.partial" -ErrorAction SilentlyContinue).Count -eq 0) "no partial uploads directory left behind"
 Show-EvidenceIfFailed $r
 
+# ---------------------------------------------------------------- scenario UP4
+# Final review FIX 7: like scripts/uploads-snapshot.sh, the Windows copy leaves
+# out the app's own plain-text .pre-encryption-* folders and the *.tmp / *.rot
+# work files, so they are not copied again on every update.
+Write-Scenario "update.bat - final review FIX 7: the uploads snapshot skips .pre-encryption-* folders and *.tmp / *.rot files"
+$origin = New-GitRemote "uploads-up4" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up4"
+Set-SqliteInstall $work "7043"
+Add-UploadsSeed $work
+$up4 = Join-Path $work "data\uploads"
+New-Item -ItemType Directory -Force -Path (Join-Path $up4 ".pre-encryption-x") | Out-Null
+Set-Content -Path (Join-Path $up4 ".pre-encryption-x\a.jpg") -Value "plain snapshot" -NoNewline -Encoding Ascii
+Set-Content -Path (Join-Path $up4 "a.jpg.rot") -Value "staged rotation" -NoNewline -Encoding Ascii
+Set-Content -Path (Join-Path $up4 "a.jpg.0123abcd.tmp") -Value "half written" -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$ups = @(Get-UploadsBackups $work)
+Assert ($ups.Count -eq 1) "one uploads snapshot (got: $($ups -join ', '))"
+if ($ups.Count -eq 1) {
+  $snapDir = Join-Path $work "backups\$($ups[0])"
+  Assert (Test-Path (Join-Path $snapDir "photo1.jpg")) "photo1.jpg is in the snapshot"
+  Assert (Test-Path (Join-Path $snapDir "documents\doc1.pdf")) "documents\doc1.pdf is in the snapshot"
+  Assert (-not (Test-Path (Join-Path $snapDir ".pre-encryption-x"))) "the .pre-encryption-x folder was not copied"
+  Assert (-not (Test-Path (Join-Path $snapDir "a.jpg.rot"))) "a.jpg.rot was not copied"
+  Assert (-not (Test-Path (Join-Path $snapDir "a.jpg.0123abcd.tmp"))) "a.jpg.0123abcd.tmp was not copied"
+  $snapFiles = @(Get-ChildItem -LiteralPath $snapDir -Recurse -Force -File)
+  Assert ($snapFiles.Count -eq 2) "exactly 2 files in the snapshot (got $($snapFiles.Count): $(($snapFiles | ForEach-Object { $_.Name }) -join ', '))"
+}
+Assert (Test-Path (Join-Path $up4 ".pre-encryption-x\a.jpg")) "the skipped files stay where they were in uploads"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP5
+# Final review FIX 5: a BLACKVAULT_UPLOADS_SNAPSHOT inherited from the caller
+# never reaches the `up` that starts the new image.
+Write-Scenario "update.bat - final review FIX 5: an inherited BLACKVAULT_UPLOADS_SNAPSHOT is cleared before 'up'"
+$origin = New-GitRemote "uploads-up5" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up5"
+Set-SqliteInstall $work "7044" # empty uploads: no marker of its own
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "") -EnvVars @{ "BLACKVAULT_UPLOADS_SNAPSHOT" = "backups\uploads-stale" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[]")) "the 'up' saw an empty value"
+Assert (-not ($r.StubLog -match "uploads-stale")) "the inherited value never reached the stub"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------- scenario E1
 # Fix round 1 (I4). Releases before this one stored install.bat/update.bat
 # with CRLF IN THE INDEX under `*.bat text eol=crlf`, so Git reports them
