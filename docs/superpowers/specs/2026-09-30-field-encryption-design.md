@@ -579,7 +579,8 @@ applies.
     SQLite free pages (Prisma's engine runs `secure_delete=0`) and PostgreSQL dead tuples plus
     `pg_statistic` samples. After the encryption migration (step 3) commits, startup now compacts
     on the same raw connection, outside any transaction: SQLite `VACUUM`; PostgreSQL `VACUUM FULL`
-    + `ANALYZE` on `Firearm`, `Accessory`, `Gear`, `AuditEvent`, `DateNormalizationAudit`, then
+    + `ANALYZE` on `Firearm`, `Accessory`, `Gear`, `AuditEvent`, `DateNormalizationAudit`, `AppSettings`
+    (a rotation leaves the old-key key check in a dead tuple), then
     `VACUUM FULL pg_statistic` and a best-effort `CHECKPOINT` (`src/lib/encryption/compaction.mjs`,
     shared with the rotation CLI). It is best-effort: a failure logs a WARNING and the app still
     starts, because the data is already encrypted. `AppSettings.encryptionCompactionPending` (new

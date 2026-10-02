@@ -23,8 +23,12 @@
 // already encrypted and committed. AppSettings.encryptionCompactionPending
 // (set inside the rewriting transaction) makes the next start retry.
 
-/** Tables whose rows the encryption migration, the audit scrub or a rotation rewrites or deletes. */
-export const COMPACTED_TABLES = ["Firearm", "Accessory", "Gear", "AuditEvent", "DateNormalizationAudit"];
+/**
+ * Tables whose rows the encryption migration, the audit scrub or a rotation
+ * rewrites or deletes. AppSettings too: a rotation leaves the OLD-key key
+ * check in a dead tuple (found by the real-Docker check of this fix wave).
+ */
+export const COMPACTED_TABLES = ["Firearm", "Accessory", "Gear", "AuditEvent", "DateNormalizationAudit", "AppSettings"];
 
 const SETTINGS_ID = "singleton";
 

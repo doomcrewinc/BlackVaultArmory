@@ -847,11 +847,11 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       expect(await pending()).toBe(false);
     });
 
-    it.skipIf(!ctx.pg)("PostgreSQL: VACUUM FULL rewrote all five tables and pg_statistic (new file nodes), ANALYZE ran, marker cleared", async () => {
+    it.skipIf(!ctx.pg)("PostgreSQL: VACUUM FULL rewrote all six tables (AppSettings too: old key checks) and pg_statistic (new file nodes), ANALYZE ran, marker cleared", async () => {
       const k = needles();
       await seedNeedles(k);
       await start();
-      const rels = ["Firearm", "Accessory", "Gear", "AuditEvent", "DateNormalizationAudit"].map((t) => `"${t}"`).concat(["pg_statistic"]);
+      const rels = ["Firearm", "Accessory", "Gear", "AuditEvent", "DateNormalizationAudit", "AppSettings"].map((t) => `"${t}"`).concat(["pg_statistic"]);
       const nodes = async () =>
         Object.fromEntries(
           await Promise.all(
