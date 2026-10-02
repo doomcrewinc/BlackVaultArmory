@@ -912,6 +912,31 @@ update.bat
 bytes Git already has, so Git still reports them modified. The commands above instead
 make Git re-check the two files byte-for-byte against what's already committed.)
 
+### What encryption at rest does not erase
+
+- **Leftover copies of the old values.** Rewriting a row leaves its old bytes in the
+  database's free space. So right after it encrypts your existing data — and after every key
+  rotation — BlackVault compacts the database: `VACUUM` on SQLite (it needs free disk space
+  about the size of the database, briefly), `VACUUM FULL` + `ANALYZE` on PostgreSQL, including
+  PostgreSQL's statistics table. If that compaction fails, BlackVault logs a
+  `[encryption] WARNING: could not compact the database…` line, **still starts** (your data is
+  already encrypted), and tries again on every start until it succeeds.
+- What no compaction can reach: **PostgreSQL's write-ahead log** (`pg_wal/` in the
+  PostgreSQL data folder) keeps old values until PostgreSQL recycles those files, and **free
+  blocks of the filesystem** can still hold deleted files — an old SQLite journal, the copy
+  `VACUUM` replaced, PostgreSQL's pre-`VACUUM FULL` table files — until they are overwritten.
+  Only an encrypted disk or filesystem under the data folder protects against someone reading
+  those raw blocks.
+- **Server-side backups written by earlier versions are plain text.** If you had a backup
+  destination folder set in Settings, earlier versions wrote unencrypted
+  `blackvault-backup-<timestamp>.json` files there (the setting is a path inside the
+  container: `/app/data/backups`, for example, is `data/db/backups` on the host). This release
+  writes only sealed `….sealed.json` files. Take a sealed backup, then delete the old
+  `.json` ones.
+- **The pre-upgrade snapshots** (above) are plain text until you delete them.
+- **A key kept in `BLACKVAULT_ENCRYPTION_KEY`** cannot be rotated by the scripts; move it into
+  the key file first (see **The key** above).
+
 ### Admin commands now need `-u nextjs`
 
 The container's entrypoint drops from root to the `nextjs` user before the app itself

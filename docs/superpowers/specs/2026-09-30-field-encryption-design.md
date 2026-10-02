@@ -232,7 +232,14 @@ migration's own read throw. See "Changes during implementation" below.)*
    and field. *(Added during implementation, M8.)* A duplicate is possible here specifically
    because two legacy `enc:` ciphertexts can encode the same plaintext serial without the old
    unique index ever noticing — the migration refuses, naming both row ids (never the serial
-   itself), before writing anything.
+   itself), before writing anything. *(Final review FIX 8.)* The refusal says to restore the
+   pre-upgrade snapshot before running the previous version: the schema migration has already
+   run, so the previous version cannot open this database.
+
+   *(Added in the final review, F1.)* When the transaction changed anything, it also sets
+   `AppSettings.encryptionCompactionPending`; after it commits, startup compacts the database to
+   erase the old plaintext from free space, then clears the marker. Best-effort: a failure is a
+   WARNING, never a refusal, and the marker makes the next start retry (Changes item 10).
 4. **Date migration.** The existing `runStartupDateMigration` runs last, after encryption. It
    skips the now-encrypted `nfaApprovalDate` entirely — step 3 already normalises a legacy NFA
    date to its calendar day before encrypting it, so there is nothing left for the date migration
@@ -347,7 +354,10 @@ The wrappers **never delete a key file** in any of these paths. Before any of th
 leftover `secrets/blackvault_encryption_key.new` from an earlier, unresolved rotation makes the
 wrapper **refuse to run at all** — it may be the only remaining copy of the key the database is
 encrypted with — until it is moved out of `secrets/` by hand. The script also refuses to run if
-the stored key check does not match the current key.
+the stored key check does not match the current key — *(final review F5)* with exit code 3, on
+which the wrappers skip the probe, set `.new` aside and do not restart. *(Final review F1.)* After
+the commit the script compacts the database (Changes item 10). *(Final review N1.)* The wrappers
+refuse before stopping anything when the key is held in `BLACKVAULT_ENCRYPTION_KEY`.
 
 ### Installers
 
@@ -565,11 +575,54 @@ applies.
    "Restore" above); the encryption migration's refusal on two legacy `enc:` serials that decrypt
    to the same plaintext (see "Encryption migration" above); and `core.mjs`'s type declaration
    file shipping as `core.d.mts`, not `core.d.ts` (see "Shared crypto core" above).
+10. **Post-migration compaction (final review F1).** Rewriting a row leaves its old bytes behind:
+    SQLite free pages (Prisma's engine runs `secure_delete=0`) and PostgreSQL dead tuples plus
+    `pg_statistic` samples. After the encryption migration (step 3) commits, startup now compacts
+    on the same raw connection, outside any transaction: SQLite `VACUUM`; PostgreSQL `VACUUM FULL`
+    + `ANALYZE` on `Firearm`, `Accessory`, `Gear`, `AuditEvent`, `DateNormalizationAudit`, then
+    `VACUUM FULL pg_statistic` and a best-effort `CHECKPOINT` (`src/lib/encryption/compaction.mjs`,
+    shared with the rotation CLI). It is best-effort: a failure logs a WARNING and the app still
+    starts, because the data is already encrypted. `AppSettings.encryptionCompactionPending` (new
+    column, migration `20261001000000_encryption_compaction_pending`) is set **inside** the
+    migration/rotation transaction and cleared after a successful compaction, so a failed or
+    interrupted compaction is retried on every start. A scrub-only start logs its count too.
+11. **`serialNumberHash` never leaves the app client (final review F2).** The extension removes it
+    from every result row, nested ones included; it is an internal index, written on every serial
+    write and compared in `where`, never read back. API responses, exports, sealed backups and
+    audit before/after rows therefore no longer carry it (restore recomputes it from the serial).
+    Raw clients (startup, rotation, migrator) still see it. In the same review, an **unknown Prisma
+    operation** on a model with an encrypted field now throws `EncryptedFieldQueryError` (fail
+    closed: e.g. Prisma 6's `updateManyAndReturn` would otherwise write plaintext).
+12. **PostgreSQL pre-encryption log (final review F3/F4).** Step 2 on PostgreSQL no longer prints a
+    `pg_dump` command (by then the data is being encrypted) and no longer claims no snapshot
+    exists: it says the app cannot snapshot PostgreSQL and that `./update.sh` / `update.bat` save
+    `backups/blackvault-<timestamp>.sql` first when they started this version.
+13. **Rotation exit code 3 and post-rotation compaction (final review F5, F1).**
+    `rotate-encryption-key.mjs` exits **3** when it refuses before any transaction opens (no key
+    check, or the old key does not open it); the wrappers then skip the probe, set `.new` aside as
+    `.new.unused-<timestamp>`, do not restart, and say the current key file is not this database's
+    key. Their manual-recovery text gained a NEITHER step. After a committed rotation the CLI runs
+    the same compaction as item 10 (a failure is a warning; exit stays 0).
+14. **An env-held key (final review N1).** When `BLACKVAULT_ENCRYPTION_KEY` is set (non-empty in
+    `.env`, or in the shell/console), the installers and updaters create **no** key file — a second,
+    different key would make the app refuse to start (`KEY_CONFLICT`) — and the rotation wrappers
+    refuse up front, because rotation works on the key file.
 
 ## Known limitations
 
 - Anyone controlling the running server, or holding both the key file and the data, can read
   everything.
+- *(Final review F1.)* The startup encryption migration and every key rotation compact the
+  database afterwards (Changes item 10), but **PostgreSQL WAL segments** (`pg_wal/`) keep old
+  values until PostgreSQL recycles them, and **free filesystem blocks** may still hold unlinked
+  files: the SQLite rollback journal, the database file `VACUUM` replaced, PostgreSQL's
+  pre-`VACUUM FULL` relation files. These can only be documented, not erased by the app; an
+  encrypted filesystem under the data folder is the mitigation.
+- Server-side backups written by **earlier versions** to `AppSettings.backupDestinationPath`
+  (`blackvault-backup-<timestamp>.json`) are plaintext and stay where they are after the upgrade
+  (threats 1 and 4); the README tells users to take a sealed backup and delete them.
+- A key held in `BLACKVAULT_ENCRYPTION_KEY` cannot be rotated by `rotate-key.sh` / `.bat`
+  (Changes item 14); it must be moved into the key file first.
 - Encrypted fields cannot be searched, sorted or filtered, apart from exact serial match.
 - Exports (CSV, PDF, full armory) contain plaintext by design. The export page says so.
 - The update script's pre-upgrade snapshot is plaintext until the user deletes it.
