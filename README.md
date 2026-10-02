@@ -1048,7 +1048,9 @@ Two kinds of copy are taken before your files change:
   with `sudo rm -r`. If it cannot be written — a full disk, for example — BlackVault refuses to
   start before encrypting anything, and says how much space it needs.
 
-Both need free disk space equal to the size of the uploads folder. **Both are plain text:**
+`backups/uploads-*` needs free disk space equal to the size of the uploads folder.
+`.pre-encryption-*` needs space only for the files that are still plain text: on the first
+upgrade that is roughly the whole folder, on later starts much less. **Both are plain text:**
 `.pre-encryption-*` always; `backups/uploads-*` only when it was taken before the first
 encryption — later ones copy files that are already encrypted (and need the key to open). Every
 update takes another `backups/uploads-*` copy, so delete old ones once BlackVault is confirmed
@@ -1079,7 +1081,8 @@ copy. Startup then refuses to start if any file is still under a key other than 
 one, naming the file and its key id.
 
 The wrapper's probe (which key does the database answer to?) prints a second line,
-`FILES old=<n> new=<n> rot=<n>`; the first line, `OLD` / `NEW` / `NEITHER`, is unchanged. On a
+`FILES old=<n> new=<n> rot=<n>` (the `rot` count can include stale `.rot` files left over from
+an earlier interrupted rotation; startup tidies those up); the first line, `OLD` / `NEW` / `NEITHER`, is unchanged. On a
 `NEW` answer the wrapper says how many `.rot` files are staged and restarts BlackVault, whose
 startup puts them in place.
 
