@@ -954,6 +954,167 @@ docker compose exec -u nextjs blackvault node scripts/admin-reset-link.mjs <user
 
 ---
 
+## Encrypted Files
+
+Uploaded photos and documents are encrypted at rest too. Signed-in users see and download
+them exactly as before; anyone who only has the disk, the uploads folder or a copy of it
+cannot open them.
+
+### What is encrypted
+
+- **Every uploaded photo and document.** Each one is stored as an encrypted `BVF1` file
+  (AES-256-GCM, one file at a time) under a file key that is derived from the same key as
+  **Field Encryption** above. There is no second key to keep — but **BACK UP THE KEY** now
+  protects your photos and documents as well as your serial numbers.
+- **Documents now live in the uploads folder:** `<DATA_DIR>/uploads/documents/` on the host
+  (`/app/uploads/documents` in the container), next to your photos. Document links
+  (`/api/files/documents/<name>`) are unchanged, so nothing in the database is rewritten.
+- On the first start after the upgrade, BlackVault encrypts every existing plain file in the
+  uploads folder in place, once. It leaves alone hidden files and anything inside a hidden
+  folder, `.tmp` and `.rot` work files, and symbolic links (a linked file is logged and
+  skipped; a linked **folder** stops the start — replace it with a real folder).
+- **No browser caching.** Photos and documents are sent with `Cache-Control: private,
+  no-store`, so the browser keeps no copy and photos reload on every visit.
+
+### Before upgrading to this release: rescue your documents (Linux and Mac)
+
+> ⚠️ **Do this BEFORE you run `update.sh` (or `git pull`).** Before this release, uploaded
+> **documents** (not photos) were written inside the container itself, at
+> `/app/storage/uploads/documents`, which is not on any volume. Recreating the container —
+> which every update does — deletes them. Copy them out while the old container still exists.
+
+**Check whether you have any**, with the old version still running:
+
+```bash
+sudo docker exec blackvault ls -la /app/storage/uploads/documents
+```
+
+If it says `No such file or directory`, or lists no files, there is nothing to rescue — skip
+to the update. If it lists files, copy them onto the volume and give them to the app's user
+(uid 1001), replacing `<DATA_DIR>` with your data folder (`./data` unless you changed
+`DATA_DIR` in `.env`):
+
+```bash
+sudo docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>/uploads/
+sudo chown -R 1001:1001 <DATA_DIR>/uploads/documents
+```
+
+`docker cp` gives the copies to the user who ran it; the app runs as uid 1001 and must own them
+to encrypt them. Then update as usual: the first start encrypts the rescued documents in place.
+
+This rescue is proven on Linux in CI. It has not yet been tested on Docker Desktop for Mac, or
+on Windows (where the `docker cp` line would run without `sudo`, into `<DATA_DIR>\uploads\`).
+
+If you already updated once since you uploaded a document, its file is probably gone; see
+**Missing documents** below.
+
+### Missing documents
+
+On every start, BlackVault checks that each uploaded document in the database still has its
+file in `<DATA_DIR>/uploads/documents/`. Each one that does not is logged as one line:
+
+```
+[files] Missing document file: id=<id> name="<name>" item=firearm <id> file=/app/uploads/documents/<file>
+```
+
+Find them with `docker compose logs blackvault | grep "Missing document file"`. BlackVault
+**still starts**; the document entry stays, and opening it returns *File not found*.
+
+They are also recorded in the `FILES_ENCRYPTED` entry of the **Audit log** (actor `system`):
+`changes.missing` lists `{ id, name }` for the first 200, and `changes.missingTotal` has the full
+count. That entry is written on the first start after the upgrade, and again on any later start
+that encrypts or moves files — so a start that changes nothing logs the missing documents but
+adds no audit entry.
+
+If you still have a missing file, put it back at the `file=` path (owned by uid 1001 on Linux)
+and restart: BlackVault encrypts it on that start.
+
+### Snapshots of the uploads folder
+
+Two kinds of copy are taken before your files change:
+
+- **`backups/uploads-<timestamp>/`** — taken by `update.sh` and `rotate-key.sh` before the new
+  version starts or the key changes. On Mac/Linux the copy runs **inside a one-off container**
+  of the BlackVault image, as the app's user: the encrypted files are mode 600 and owned by
+  uid 1001, so your own user cannot read them. The snapshot is owned by uid 1001 too (folders
+  mode 700, files mode 600), so deleting it on Linux needs `sudo rm -r backups/uploads-<timestamp>`.
+  On Windows, `update.bat` / `rotate-key.bat` copy on the host and restrict the folder to your
+  user account. If the copy fails, the update stops and the new version is not started.
+- **`<DATA_DIR>/uploads/.pre-encryption-<timestamp>/`** — taken by BlackVault itself on the
+  first start that finds plain files, before it encrypts anything. It is skipped when the update
+  script's snapshot already covers that start (the log then says *The update script already
+  saved a snapshot of the uploads folder*), except for documents the app moves from the old
+  in-container folder, which it always copies here first. It is owned by uid 1001: delete it
+  with `sudo rm -r`. If it cannot be written — a full disk, for example — BlackVault refuses to
+  start before encrypting anything, and says how much space it needs.
+
+Both need free disk space equal to the size of the uploads folder. **Both are plain text:**
+`.pre-encryption-*` always; `backups/uploads-*` only when it was taken before the first
+encryption — later ones copy files that are already encrypted (and need the key to open). Every
+update takes another `backups/uploads-*` copy, so delete old ones once BlackVault is confirmed
+working.
+
+Neither snapshot copies symbolic links. Both skip `.tmp` and `.rot` work files, and the update
+snapshot skips `.pre-encryption-*` folders — except on Windows, where `update.bat` /
+`rotate-key.bat` still copy those too (so a plain-text `.pre-encryption-*` folder left in
+uploads is copied again on every Windows update until you delete it).
+
+### Rotation covers files
+
+`rotate-key.sh` / `rotate-key.bat` (see **Rotation** above) now re-encrypt every uploaded file
+too, around the same single database transaction:
+
+1. **Stage.** Before the transaction, every file under the old key is re-encrypted under the
+   new key into `<name>.rot`, next to the original. Originals are not touched.
+2. **Database.** The transaction runs as before. If it does not commit, every `.rot` is
+   deleted and nothing else changes.
+3. **Finalise.** Only after the commit is each `.rot` renamed over its original.
+
+If a rotation is interrupted after the commit, the next start on the new key finishes it:
+startup renames each `.rot` under the current key into place, after checking that it decrypts.
+A `.rot` under any other key is staging that never committed and is deleted — unless its
+original is missing, in which case it is kept and a warning is logged, since it may be the only
+copy. Startup then refuses to start if any file is still under a key other than the current
+one, naming the file and its key id.
+
+The wrapper's probe (which key does the database answer to?) prints a second line,
+`FILES old=<n> new=<n> rot=<n>`; the first line, `OLD` / `NEW` / `NEITHER`, is unchanged. On a
+`NEW` answer the wrapper says how many `.rot` files are staged and restarts BlackVault, whose
+startup puts them in place.
+
+When the rotation itself fails:
+
+- **It refused up front** (the rotation command exits 3): an uploaded file is under neither key,
+  has a damaged header, sits behind a symlinked folder, or a `.rot` from an earlier run is under
+  the old key. Nothing changed. The wrapper sets the unused new key aside, does **not** restart
+  BlackVault, and the message above it names the file.
+- **It failed before the commit** (exit 1) — a full disk while staging, for example: every
+  staged `.rot` is deleted, the probe answers `OLD`, and BlackVault restarts on the old key.
+
+### Known limitations of file encryption
+
+- **Plaintext traces stay on disk.** The bytes of the original files may remain in free blocks
+  of the filesystem after they are encrypted. BlackVault cannot wipe them reliably; only an
+  encrypted disk under the data folder protects against that.
+- **A plain file that happens to start with the four bytes `BVF1`** is treated as encrypted and is
+  never encrypted. Its "header" is almost never a valid one, so BlackVault then refuses to start
+  and names the file as damaged: move it out of the uploads folder and start again.
+- **Files are not in backups yet.** **Settings → Backup** still holds only file paths, not the
+  files themselves (planned: spec 3c). Copy `<DATA_DIR>/uploads` yourself — on Linux with `sudo`,
+  since the files belong to uid 1001 — and keep the key with it: the copy cannot be read without
+  it, and a BlackVault started with a different key refuses to start on those files.
+- **No per-item access control.** Any signed-in user can open any photo or document, as before.
+- **PostgreSQL: the app keeps running while the update copies the uploads folder.** An upload
+  made during that copy makes the snapshot's file count disagree, and the update stops before
+  starting the new version (it fails safe). Run the update again.
+- **The first upgrade can take minutes** with many files: every file is copied, then encrypted
+  and synced to disk one at a time. Progress is logged every 250 files
+  (`[files] snapshot 250/…`, `[files] encrypted 250/…`).
+- **Docker Desktop (Mac and Windows):** the in-container uploads snapshot is proven on Linux
+  only.
+
+---
+
 ## Data & Backups
 
 ### Where your data lives
@@ -980,7 +1141,9 @@ You can change this by editing `DATA_DIR` in the `.env` file before first run.
 
 **Easiest, works for both databases, safe while running:** in BlackVault go to
 **Settings → Backup** and save a backup. It downloads a JSON file with every record. Keep it
-together with a copy of `data/uploads` (your images and documents) and `.env`.
+together with a copy of `data/uploads` (your images and documents), `.env` and the encryption
+key file — the uploaded files are encrypted and cannot be read without that key (see
+**Encrypted Files** above).
 
 This backup does **not** include accounts (users, passwords, sessions or invite/reset links)
 — only inventory data. Restoring a backup never touches accounts either way, so restoring an
@@ -996,7 +1159,7 @@ and `.env` to another drive or location in File Explorer.
 
 ```bash
 docker compose down
-cp -r ./data ~/blackvault-backup-$(date +%Y%m%d)
+sudo cp -a ./data ~/blackvault-backup-$(date +%Y%m%d)
 cp .env ~/blackvault-backup-$(date +%Y%m%d)/
 docker compose up -d
 ```
@@ -1012,6 +1175,8 @@ docker compose up -d
 
 On Linux, `data/postgres` is owned by the database container, so a plain `cp -r` fails with
 *permission denied*; `sudo cp -a` copies it and keeps its ownership, which PostgreSQL needs.
+The same goes for `data/uploads` on both databases: since this release its files are mode 600
+and owned by the app's user (uid 1001), which is why the SQLite commands use `sudo cp -a` too.
 
 ---
 
@@ -1039,7 +1204,9 @@ On Linux, `data/postgres` is owned by the database container, so a plain `cp -r`
 > and prompts for nothing; use the log command above. Your inventory data is unchanged; only
 > accounts are new.
 
-Your data folder is never touched during an update.
+An update never deletes anything in your data folder. (The first start of this release does
+encrypt the uploaded files in it, in place — see **Encrypted Files** above, and rescue your
+documents first.)
 
 **Windows:** Double-click `update.bat` (for the update to this release: run `git pull` in the
 BlackVault folder first, see above)
@@ -1176,7 +1343,11 @@ exactly as you left it, but anything added while on PostgreSQL is not in it. Del
 your `data` folder **and `.env`** to the new machine (USB drive, network share, etc.). On Linux
 with PostgreSQL, use `sudo cp -a` (see *Backing up your data*): `data/postgres` is owned by the
 database container. Alternatively, save an in-app backup (**Settings → Backup**) and restore it
-on the new machine after installing, copying `data/uploads` across for your images.
+on the new machine after installing, copying `data/uploads` across for your images and
+documents. Copy `secrets/blackvault_encryption_key` across too, into the new folder's
+`secrets/` before running the installer (an existing key file is kept as it is):
+the uploaded files are encrypted with it, and BlackVault refuses to start on files encrypted
+with a different key.
 
 **Step 2 —** Download and extract BlackVault on the new machine
 
