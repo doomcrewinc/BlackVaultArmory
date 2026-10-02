@@ -30,7 +30,12 @@ import { toDateOnlyUTC } from "../date";
  * - reads: decrypts every registered field in the result in place, including
  *   nested `include`/`select` results; `nfaApprovalDate` comes back as a Date
  *   and `nfaTaxPaid` as a number. A value that fails to decrypt throws
- *   EncryptedFieldDecryptError; ciphertext is never returned.
+ *   EncryptedFieldDecryptError; ciphertext is never returned. The
+ *   `serialNumberHash` fingerprint is removed from every result row (it is
+ *   an internal index, never returned to the app);
+ * - operations: an operation this file does not know, on a model with an
+ *   encrypted field, throws EncryptedFieldQueryError (fail closed: a future
+ *   Prisma operation would otherwise write plaintext or return ciphertext).
  *
  * Prisma calls the hook only for top-level operations, never for nested
  * writes or includes, which is why everything below recurses by the schema's
@@ -475,7 +480,19 @@ function rewriteSelection(model: string, selection: Row): Row {
 
 // ─── Reads ──────────────────────────────────────────────────────
 
-/** Decrypts every registered field of `model` in a result row (or rows), recursing into included relations. */
+/** Models with a fingerprint column (`serialNumberHash`). */
+const FINGERPRINTED: ReadonlySet<string> = new Set(
+  [...RELATIONS.keys()].filter((m) => encryptedFieldsFor(m).some((d) => d.fingerprint)),
+);
+
+/**
+ * Decrypts every registered field of `model` in a result row (or rows),
+ * recursing into included relations, and removes `serialNumberHash` (final
+ * review F2): the fingerprint is an internal index — it is only ever written
+ * by encodeData and compared in `where` (rewriteEncryptedCondition), never
+ * read back by the app, so it must not reach API responses, exports, sealed
+ * backups or audit rows. Raw clients (startup, rotation, migrator) still see it.
+ */
 function decodeResult(model: string, result: unknown): unknown {
   if (Array.isArray(result)) {
     for (const r of result) decodeResult(model, r);
@@ -486,6 +503,7 @@ function decodeResult(model: string, result: unknown): unknown {
   for (const d of encryptedFieldsFor(model)) {
     if (d.field in result) result[d.field] = decodeFromStorage(model, d.field, result[d.field], id);
   }
+  if (FINGERPRINTED.has(model)) delete result[HASH_FIELD];
   for (const [field, target] of relationsOf(model)) {
     if (result[field] !== undefined && result[field] !== null) decodeResult(target, result[field]);
   }

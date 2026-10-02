@@ -193,10 +193,8 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       );
       const events = (await prisma.auditEvent.findMany()).filter((e) => !before.has(e.id));
       expect(events).toHaveLength(1);
-      expect(JSON.parse(events[0].changes ?? "null")).toEqual({
-        serialNumber: [REDACTED, REDACTED],
-        serialNumberHash: [REDACTED, REDACTED],
-      });
+      // F2: the fingerprint is not in the audit layer's before/after rows any more.
+      expect(JSON.parse(events[0].changes ?? "null")).toEqual({ serialNumber: [REDACTED, REDACTED] });
       expect(events[0].changes).not.toContain("bv2:");
       expect(events[0].changes).not.toContain(MARK);
     });
@@ -543,6 +541,102 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       ));
       expect(put.status).toBe(409);
       expect(await put.json()).toEqual({ error: "A firearm with that serial number already exists" });
+    });
+  });
+
+  // ─── Final review F2: the fingerprint never leaves the app client ──
+
+  describe("F2: serialNumberHash is never returned by the app client", () => {
+    /** Every key, at any depth, of a JSON-able value. */
+    function keysDeep(v: unknown, out = new Set<string>()): Set<string> {
+      if (Array.isArray(v)) for (const x of v) keysDeep(x, out);
+      else if (v && typeof v === "object" && !(v instanceof Date)) {
+        for (const [k, x] of Object.entries(v)) {
+          out.add(k);
+          keysDeep(x, out);
+        }
+      }
+      return out;
+    }
+    const noHash = (v: unknown, what: string) => expect(keysDeep(v).has("serialNumberHash"), what).toBe(false);
+
+    it("rows from every read and write operation, top level and nested, carry no serialNumberHash", async () => {
+      const serial = `${MARK}f2-${seq}`;
+      const f = await within(8_000, prisma.firearm.create({ data: firearmData({ serialNumber: serial }) }));
+      noHash(f, "create");
+      const a = await within(8_000, prisma.accessory.create({ data: accessoryData() }));
+      noHash(a, "accessory create");
+      const g = await within(8_000, prisma.gear.create({ data: { name: "F2 gear", category: "ARMOR", serialNumber: `${MARK}f2g-${seq}` } }));
+      noHash(g, "gear create");
+      // The raw row still has it: only the app client's results drop it.
+      expect((await rawRow("Firearm", f.id)).serialNumberHash).toBe(hashOf(serial));
+
+      noHash(await prisma.firearm.findMany(), "findMany");
+      noHash(await prisma.firearm.findUnique({ where: { id: f.id } }), "findUnique");
+      noHash(await prisma.firearm.findFirst({ where: { serialNumber: serial } }), "findFirst by serial");
+      noHash(await prisma.accessory.findUniqueOrThrow({ where: { id: a.id } }), "findUniqueOrThrow");
+      noHash(await prisma.gear.findFirstOrThrow({ where: { id: g.id } }), "findFirstOrThrow");
+      noHash(await prisma.firearm.update({ where: { id: f.id }, data: { notes: "f2" } }), "update");
+      noHash(
+        await prisma.firearm.upsert({ where: { id: f.id }, create: firearmData(), update: { notes: "f2b" } }),
+        "upsert",
+      );
+      noHash(await prisma.gear.createManyAndReturn({ data: [{ name: "F2 cmr", category: "ARMOR", serialNumber: `${MARK}f2cmr-${seq}` }] }), "createManyAndReturn");
+
+      const kit = await within(8_000, prisma.kit.create({
+        data: { name: "F2 kit", category: "GO_BAG", items: { create: [{ firearmId: f.id }, { accessoryId: a.id }, { gearId: g.id }] } },
+        include: { items: { include: { firearm: true, accessory: true, gear: true } } },
+      }));
+      expect(kit.items.map((i) => i.firearm?.serialNumber ?? i.accessory?.serialNumber ?? i.gear?.serialNumber)).toContain(serial);
+      noHash(kit, "nested kit include");
+      const sel = await prisma.firearm.findUnique({ where: { id: f.id }, select: { serialNumber: true, serialNumberHash: true } });
+      noHash(sel, "explicit select of the hash");
+      expect(sel?.serialNumber).toBe(serial);
+    });
+
+    it("exact-serial lookups still work (bare equality, { equals }, Accessory and Gear)", async () => {
+      const serial = `${MARK}f2-lookup-${seq}`;
+      const f = await within(8_000, prisma.firearm.create({ data: firearmData({ serialNumber: serial }) }));
+      expect((await prisma.firearm.findFirst({ where: { serialNumber: serial } }))?.id).toBe(f.id);
+      expect((await prisma.firearm.findFirst({ where: { serialNumber: { equals: serial } } }))?.id).toBe(f.id);
+      expect((await prisma.firearm.findUnique({ where: { serialNumberHash: hashOf(serial) } }))?.id).toBe(f.id);
+      const g = await within(8_000, prisma.gear.create({ data: { name: "F2 lookup", category: "ARMOR", serialNumber: serial } }));
+      expect((await prisma.gear.findFirst({ where: { serialNumber: serial } }))?.id).toBe(g.id);
+    });
+
+    it("the API responses (firearm list + detail, accessory, gear, kit) and the data CSV export carry no serialNumberHash", async () => {
+      const serial = `${MARK}f2-api-${seq}`;
+      const f = await within(8_000, prisma.firearm.create({ data: firearmData({ serialNumber: serial }) }));
+      const a = await within(8_000, prisma.accessory.create({ data: accessoryData() }));
+      const g = await within(8_000, prisma.gear.create({ data: { name: "F2 api gear", category: "ARMOR", serialNumber: `${MARK}f2ag-${seq}` } }));
+      const kit = await within(8_000, prisma.kit.create({
+        data: { name: "F2 api kit", category: "GO_BAG", items: { create: [{ firearmId: f.id }, { accessoryId: a.id }, { gearId: g.id }] } },
+      }));
+      const { GET: listFirearms } = await import("@/app/api/firearms/route");
+      const { GET: getFirearm } = await import("@/app/api/firearms/[id]/route");
+      const { GET: getAccessory } = await import("@/app/api/accessories/[id]/route");
+      const { GET: getGear } = await import("@/app/api/gear/[id]/route");
+      const { GET: getKit } = await import("@/app/api/kits/[id]/route");
+      const { GET: exportData } = await import("@/app/api/exports/data/route");
+      const req = (u: string) => new NextRequest(`http://localhost${u}`);
+      const p = (id: string) => ({ params: Promise.resolve({ id }) });
+
+      const bodies: Array<[string, Response]> = [
+        ["GET /api/firearms", await within(8_000, listFirearms(req("/api/firearms")))],
+        ["GET /api/firearms/[id]", await within(8_000, getFirearm(req(`/api/firearms/${f.id}`), p(f.id)))],
+        ["GET /api/accessories/[id]", await within(8_000, getAccessory(req(`/api/accessories/${a.id}`), p(a.id)))],
+        ["GET /api/gear/[id]", await within(8_000, getGear(req(`/api/gear/${g.id}`), p(g.id)))],
+        ["GET /api/kits/[id]", await within(8_000, getKit(req(`/api/kits/${kit.id}`), p(kit.id)))],
+        ["export csv, no serials", await within(15_000, exportData(req("/api/exports/data?format=csv&includeSerialNumbers=false")))],
+        ["export csv, serials", await within(15_000, exportData(req("/api/exports/data?format=csv&includeSerialNumbers=true")))],
+      ];
+      for (const [what, res] of bodies) {
+        expect(res.status, what).toBe(200);
+        const text = await res.text();
+        expect(text, what).not.toContain("serialNumberHash");
+        expect(text, what).not.toContain(hashOf(serial));
+        expect(text, what).not.toContain("bv2:");
+      }
     });
   });
 
