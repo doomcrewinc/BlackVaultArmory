@@ -40,7 +40,7 @@ import { aadFor, ENCRYPTED_FIELDS } from "@/lib/encryption/fields";
 import { ENCRYPTED_FIELDS as ROTATION_FIELDS } from "./rotate-encryption-key.mjs";
 
 type Row = Record<string, unknown>;
-type FieldKeysLike = { id: string; enc: Buffer; idx: Buffer };
+type FieldKeysLike = { id: string; enc: Buffer; idx: Buffer; file: Buffer };
 
 const KEY_CHECK_AAD = "AppSettings.encryptionKeyCheck";
 const KEY_CHECK_PLAINTEXT = "blackvault-key-check";

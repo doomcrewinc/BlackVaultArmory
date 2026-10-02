@@ -78,6 +78,7 @@ export function deriveKeys(key) {
     id: keyId(key),
     enc: subkey(key, "blackvault/field-encryption/v1"),
     idx: subkey(key, "blackvault/serial-index/v1"),
+    file: subkey(key, "blackvault/file-encryption/v1"),
   };
 }
 
@@ -121,6 +122,51 @@ export function decryptValue(keys, aad, stored) {
 
 export function fingerprint(keys, value) {
   return createHmac("sha256", keys.idx).update(String(value), "utf8").digest("hex");
+}
+
+// ---- file encryption (BVF1) ----
+export const FILE_MAGIC = "BVF1";
+const FILE_VERSION = 1;
+const FILE_HEADER_LEN = 13; // magic(4) + version(1) + keyId(8)
+const FILE_IV_LEN = 12;
+const FILE_TAG_LEN = 16;
+
+function fileHeader(id) {
+  return Buffer.concat([Buffer.from(FILE_MAGIC, "ascii"), Buffer.from([FILE_VERSION]), Buffer.from(id, "ascii")]);
+}
+function fileAad(header, basename) {
+  return Buffer.concat([header, Buffer.from(String(basename), "utf8")]);
+}
+export function isEncryptedFile(buf) {
+  return Buffer.isBuffer(buf) && buf.length >= 4 && buf.subarray(0, 4).toString("ascii") === FILE_MAGIC;
+}
+export function fileKeyId(buf) {
+  if (!isEncryptedFile(buf) || buf.length < FILE_HEADER_LEN + FILE_IV_LEN + FILE_TAG_LEN || buf[4] !== FILE_VERSION) {
+    throw new EncryptionKeyError("MALFORMED", "Not a BVF1 encrypted file.");
+  }
+  return buf.subarray(5, FILE_HEADER_LEN).toString("ascii");
+}
+export function encryptFile(keys, basename, plaintext) {
+  const header = fileHeader(keys.id);
+  const iv = randomBytes(FILE_IV_LEN);
+  const c = createCipheriv("aes-256-gcm", keys.file, iv, { authTagLength: FILE_TAG_LEN });
+  c.setAAD(fileAad(header, basename));
+  const ct = Buffer.concat([c.update(plaintext), c.final()]);
+  return Buffer.concat([header, iv, ct, c.getAuthTag()]);
+}
+export function decryptFile(keys, basename, stored) {
+  const id = fileKeyId(stored);
+  if (id !== keys.id) {
+    throw new EncryptionKeyError("KEY_MISMATCH", `File was encrypted with key ${id}, current key is ${keys.id}.`);
+  }
+  const header = stored.subarray(0, FILE_HEADER_LEN);
+  const iv = stored.subarray(FILE_HEADER_LEN, FILE_HEADER_LEN + FILE_IV_LEN);
+  const tag = stored.subarray(stored.length - FILE_TAG_LEN);
+  const ct = stored.subarray(FILE_HEADER_LEN + FILE_IV_LEN, stored.length - FILE_TAG_LEN);
+  const d = createDecipheriv("aes-256-gcm", keys.file, iv, { authTagLength: FILE_TAG_LEN });
+  d.setAAD(fileAad(header, basename));
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]);
 }
 
 // ---- sealed backups ----
