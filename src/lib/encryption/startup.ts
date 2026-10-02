@@ -363,8 +363,11 @@ function assertNoDuplicateSerial(rows: Row[], updates: Array<{ row: Row; data: R
     if (first) {
       throw new EncryptionMigrationError(
         `Firearms ${first} and ${row.id} have the same serial number once their legacy encrypted serials are read, ` +
-          "and serial numbers must be unique. Refusing to start: run the previous BlackVault version, edit the serial " +
-          "of one of them or remove the duplicate, then upgrade again.",
+          // Final review FIX 8: the schema migration has already run (NFA
+          // dates are TEXT now), so the previous version can only open the
+          // pre-upgrade snapshot, not this database.
+          `and serial numbers must be unique. Refusing to start: restore ${SNAPSHOT_HINT}, run the previous BlackVault ` +
+          "version, edit the serial of one of them or remove the duplicate, then upgrade again.",
         { model: "Firearm", id: row.id, field: "serialNumber" },
       );
     }

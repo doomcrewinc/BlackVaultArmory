@@ -864,10 +864,11 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       const after = await nodes();
       for (const r of rels) expect(after[r], r).not.toBe(before[r]);
       expect(warn).not.toHaveBeenCalled();
-      const dead = (await raw.$queryRawUnsafe(
-        `SELECT relname, n_dead_tup::int AS d FROM pg_stat_user_tables WHERE relname IN ('Firearm','Accessory','Gear','AuditEvent','DateNormalizationAudit') AND n_dead_tup > 0`,
-      )) as Row[];
-      expect(dead).toEqual([]);
+      // Not asserted: pg_stat_user_tables.n_dead_tup (the review's suggestion).
+      // VACUUM FULL does not report dead tuples to the cumulative statistics the
+      // way plain VACUUM does, so the counter can still show the pre-rewrite
+      // value — measured: 2 of 3 runs failed on it. A new file node is the
+      // deterministic proof: VACUUM FULL copies only the live tuples into it.
       expect(await pending()).toBe(false);
     }, 120_000);
   });
@@ -886,6 +887,12 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
     expect(err).toBeInstanceOf(EncryptionMigrationError);
     expect(err.message).toContain("Firearms f-dup-a and f-dup-b have the same serial number");
     expect(err.message).toContain("edit the serial of one of them or remove the duplicate");
+    // Final review FIX 8: the schema migration has already run, so the previous version needs the pre-upgrade snapshot first.
+    expect(err.message).toContain(
+      "Refusing to start: restore the pre-upgrade database snapshot (backups/blackvault-<timestamp>.db or .sql next to docker-compose.yml, " +
+        "or pre-encryption-<timestamp>.db next to the database), run the previous BlackVault version, edit the serial of one of them " +
+        "or remove the duplicate, then upgrade again.",
+    );
     expect(err.message).not.toContain("SN-DUP");
     expect(err.message).not.toMatch(/prisma|Unique constraint/i);
     expect(await rawSnapshot()).toBe(before);
@@ -1008,6 +1015,11 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       // …and the live database no longer holds it.
       expect((await raw.firearm.findUnique({ where: { id: "f-sqlite-form" } }))?.serialNumber).toMatch(/^bv2:/);
       expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toMatch(new RegExp(`Snapshot taken before encrypting existing data: \\S*/${taken[0].replace(/\./g, "\\.")}\\n`));
+      // Final review FIX 10 (ledger ruling): the log says who owns the file on Linux and how to delete it.
+      expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
+        "[encryption] It is a PLAINTEXT copy of your database. Delete it once BlackVault is confirmed working. " +
+          "On Linux it is owned by the container user (uid 1001): delete it with sudo rm.",
+      );
 
       // Second start: nothing left to encrypt, so no new snapshot.
       await within(60_000, register());
@@ -1076,14 +1088,20 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       expect(snapshotsInDbDir()).toEqual([]);
     }, 120_000);
 
-    it.skipIf(!ctx.pg)("PostgreSQL: a start that encrypts plaintext logs loudly that no snapshot was taken, with the pg_dump command, and continues", async () => {
+    it.skipIf(!ctx.pg)("PostgreSQL: a start that encrypts plaintext says honestly where a snapshot may be (update.sh/update.bat), prints NO after-the-fact pg_dump command, and continues (final review F3 + F4)", async () => {
       await seedPlaintext();
       const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
       await within(60_000, register());
       expect(exit).not.toHaveBeenCalled();
       const errors = vi.mocked(console.error).mock.calls.flat().join("\n");
-      expect(errors).toContain("NO database");
-      expect(errors).toContain("docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql");
+      expect(errors).toContain(
+        "[encryption] Encrypting existing serial numbers and NFA records now. The app cannot snapshot its own PostgreSQL server. " +
+          "If this version was started by ./update.sh or update.bat, they saved a plaintext snapshot in backups/ " +
+          "(blackvault-<timestamp>.sql) first; otherwise no snapshot exists, and a dump taken from now on holds only encrypted values.",
+      );
+      expect(errors).not.toContain("pg_dump");
+      expect(errors).not.toContain("did not come");
+      expect(errors).not.toContain("NO database");
       expect((await raw.firearm.findUnique({ where: { id: "f-sqlite-form" } }))?.serialNumber).toMatch(/^bv2:/);
     }, 90_000);
   });

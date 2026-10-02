@@ -18,8 +18,11 @@ import { resolveProvider, type DbProvider } from "../db/provider";
  *   run inside a transaction, and with `connection_limit=1` there is only
  *   the one connection). A snapshot failure refuses to start: nothing is
  *   encrypted without a copy to go back to.
- * - PostgreSQL: the app cannot dump its own server, so it logs loudly that no
- *   snapshot was taken and prints the exact pg_dump command, then continues.
+ * - PostgreSQL: the app cannot dump its own server. It says so, and that
+ *   ./update.sh / update.bat take one in backups/ before starting a new
+ *   version — the app cannot tell whether they did — then continues. No
+ *   pg_dump command is printed (final review F3/F4): by the time anyone could
+ *   run it, the data is already encrypted.
  *
  * The copy is PLAINTEXT and stays on the data volume until deleted; the log
  * says so. Imports stay relative (no `@/`), as in startup.ts.
@@ -34,10 +37,6 @@ export const SNAPSHOT_PREFIX = "pre-encryption-";
  * and fill the disk.
  */
 export const SNAPSHOT_REUSE_MS = 24 * 60 * 60 * 1000;
-
-/** The exact command printed for PostgreSQL, run on the host next to docker-compose.yml. */
-export const PG_DUMP_COMMAND =
-  "docker compose exec -T db pg_dump -U blackvault -d blackvault > backups/blackvault-pre-encryption.sql";
 
 type SnapshotClient = Pick<PrismaClient, "$queryRawUnsafe" | "$executeRawUnsafe">;
 
@@ -174,12 +173,14 @@ export async function takePreEncryptionSnapshot(
   if (!(await hasPlaintextValues(raw))) return { kind: "none" };
 
   if (provider === "postgres") {
-    warn("[encryption] WARNING: existing serial numbers and NFA records are about to be encrypted, and NO database");
-    warn("[encryption] snapshot was taken first: the app cannot dump its own PostgreSQL server. ./update.sh and");
-    warn("[encryption] update.bat take one in backups/ before starting a new version; this start did not come");
-    warn("[encryption] through them. To keep a copy, run this on the host next to docker-compose.yml:");
-    warn(`[encryption]   ${PG_DUMP_COMMAND}`);
-    warn("[encryption] Continuing.");
+    // Final review F3 + F4: the app cannot know whether update.sh/update.bat
+    // took a snapshot, so it says both cases honestly, and prints no pg_dump
+    // command — a dump taken after this line would hold only ciphertext.
+    warn(
+      "[encryption] Encrypting existing serial numbers and NFA records now. The app cannot snapshot its own PostgreSQL server. " +
+        "If this version was started by ./update.sh or update.bat, they saved a plaintext snapshot in backups/ " +
+        "(blackvault-<timestamp>.sql) first; otherwise no snapshot exists, and a dump taken from now on holds only encrypted values.",
+    );
     return { kind: "postgres-not-taken" };
   }
 
@@ -219,6 +220,9 @@ export async function takePreEncryptionSnapshot(
     );
   }
   log(`[encryption] Snapshot taken before encrypting existing data: ${hostPathOf(target)}`);
-  log("[encryption] It is a PLAINTEXT copy of your database. Delete it once BlackVault is confirmed working.");
+  log(
+    "[encryption] It is a PLAINTEXT copy of your database. Delete it once BlackVault is confirmed working. " +
+      "On Linux it is owned by the container user (uid 1001): delete it with sudo rm.",
+  );
   return { kind: "taken", file: target };
 }

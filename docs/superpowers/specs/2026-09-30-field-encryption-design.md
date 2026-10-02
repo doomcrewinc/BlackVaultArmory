@@ -203,7 +203,10 @@ migration's own read throw. See "Changes during implementation" below.)*
 2. **Pre-encryption snapshot**, only when the database holds plaintext values to encrypt: on
    SQLite, `VACUUM INTO` a plaintext copy next to the database before the migration transaction
    opens (`VACUUM` cannot run inside a transaction). On PostgreSQL, the app cannot dump its own
-   server, so it logs the exact `pg_dump` command to run by hand instead of taking a copy itself.
+   server. It logs that, and that `./update.sh` / `update.bat` save a plaintext snapshot in
+   `backups/` (`blackvault-<timestamp>.sql`) before starting a new version — the app cannot tell
+   whether this start came through them — then continues. It prints no `pg_dump` command: by the
+   time anyone could run it, the dump would hold only encrypted values (final review F3/F4).
    A failed SQLite snapshot refuses to start; nothing is encrypted without a copy to go back to.
 3. **Encryption migration**, in one transaction:
    - Select every row where a listed field is non-null and does not start with `bv2:`.
