@@ -7,7 +7,7 @@ import type { AuditEventDto } from "./query";
 /**
  * `summarize()` turns one AuditEventDto into the one-line description the
  * audit list and item-history views render — one case per AUDIT_ACTIONS
- * entry (16), plus redaction and pluralisation of DELETE's `_children`
+ * entry (18), plus redaction and pluralisation of DELETE's `_children`
  * counts. docs/superpowers/specs/2026-09-29-audit-log-design.md, "UI".
  */
 
@@ -231,6 +231,70 @@ describe("summarize — security events", () => {
   it("RESTORE with the backup file name", () => {
     const e = event({ action: "RESTORE", changes: { file: "blackvault-backup-2026-09-29.json", counts: { Firearm: 3 } } });
     expect(summarize(e)).toBe("Restored the database from backup blackvault-backup-2026-09-29.json");
+  });
+
+  // field-encryption spec §Restore: RESTORE's `changes` gains `sealed`.
+  it("RESTORE flags an unsealed (plain) backup file", () => {
+    const e = event({ action: "RESTORE", changes: { file: "old-backup.json", counts: { Firearm: 3 }, sealed: false } });
+    expect(summarize(e)).toBe("Restored the database from backup old-backup.json (unsealed backup)");
+  });
+
+  it("RESTORE from a sealed backup reads the same as before — nothing to flag", () => {
+    const e = event({ action: "RESTORE", changes: { file: "backup.sealed.json", counts: { Firearm: 3 }, sealed: true } });
+    expect(summarize(e)).toBe("Restored the database from backup backup.sealed.json");
+  });
+});
+
+describe("summarize — encryption events", () => {
+  it("ENCRYPTION_ENABLED lists the per-model counts, pluralised", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      actorName: "system",
+      changes: { counts: { Firearm: 42, Accessory: 7, Gear: 1 }, keyId: "abcd1234" },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 42 firearms, 7 accessories, 1 gear item");
+  });
+
+  it("ENCRYPTION_ENABLED singular forms, zero counts left out", () => {
+    const e = event({ action: "ENCRYPTION_ENABLED", changes: { counts: { Firearm: 1, Accessory: 1, Gear: 0 } } });
+    expect(summarize(e)).toBe("Encryption enabled: 1 firearm, 1 accessory");
+  });
+
+  it("ENCRYPTION_ENABLED without counts still reads as a sentence", () => {
+    expect(summarize(event({ action: "ENCRYPTION_ENABLED", changes: null }))).toBe("Encryption enabled");
+  });
+
+  it("ENCRYPTION_ENABLED mentions scrubbed audit rows alongside the counts (Task 4b)", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 1, Accessory: 0, Gear: 0 }, keyId: "abcd1234", scrubbedAuditRows: 3 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 firearm, 3 audit entries scrubbed");
+  });
+
+  it("ENCRYPTION_ENABLED: scrubbed audit rows alone, with every count at 0, still reads as a sentence (Task 4b)", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 0, Accessory: 0, Gear: 0 }, keyId: "abcd1234", scrubbedAuditRows: 1 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 audit entry scrubbed");
+  });
+
+  it("ENCRYPTION_ENABLED: scrubbedAuditRows of 0 is left out, same as an absent field", () => {
+    const e = event({
+      action: "ENCRYPTION_ENABLED",
+      changes: { counts: { Firearm: 1 }, keyId: "abcd1234", scrubbedAuditRows: 0 },
+    });
+    expect(summarize(e)).toBe("Encryption enabled: 1 firearm");
+  });
+
+  it("KEY_ROTATED names both key ids", () => {
+    const e = event({ action: "KEY_ROTATED", changes: { from: "abcd1234", to: "ef567890", counts: { Firearm: 3 } } });
+    expect(summarize(e)).toBe("Encryption key rotated (abcd1234 → ef567890)");
+  });
+
+  it("KEY_ROTATED without ids", () => {
+    expect(summarize(event({ action: "KEY_ROTATED", changes: null }))).toBe("Encryption key rotated");
   });
 });
 

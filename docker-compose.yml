@@ -73,8 +73,17 @@ services:
       - NODE_ENV=production
       - DB_PROVIDER=${BLACKVAULT_DB_PROVIDER:-sqlite}
       - DATABASE_URL=${BLACKVAULT_DATABASE_URL:-file:/app/data/vault.db?connection_limit=1}
-      # Only needed to read legacy enc: serial numbers; new data is plain text.
+      # Field encryption. The key normally comes from the file
+      # secrets/blackvault_encryption_key (mounted below). This variable is the
+      # alternative, empty by default; if both are set and differ, BlackVault
+      # refuses to start.
+      - BLACKVAULT_ENCRYPTION_KEY=${BLACKVAULT_ENCRYPTION_KEY:-}
+      # Only for upgrades from very old versions: reads legacy enc: serial
+      # numbers once, while the first start re-encrypts them.
       - VAULT_ENCRYPTION_KEY=${VAULT_ENCRYPTION_KEY:-}
+      # Lets the app print the HOST path of the snapshot it takes before its
+      # first encryption (/app/data inside = this folder outside).
+      - BLACKVAULT_HOST_DB_DIR=${DATA_DIR:-./data}/db
       # Required: the address people open BlackVault at, normally your reverse
       # proxy's HTTPS URL. The app will not start without it.
       - PUBLIC_URL=${BLACKVAULT_PUBLIC_URL:-}
@@ -90,6 +99,27 @@ services:
       # saved under /app/data/backups vanish when the container is recreated.
       - ${DATA_DIR:-./data}/db:/app/data
       - ${DATA_DIR:-./data}/uploads:/app/uploads
+      # The field-encryption key: secrets/blackvault_encryption_key next to this
+      # file (install.sh / update.sh and the .bat twins create it; back it up).
+      # The whole folder is mounted read-only, and the image's entrypoint
+      # copies ONLY blackvault_encryption_key (and .new during a key rotation)
+      # into /run/secrets, the in-memory tmpfs below, where the app user can
+      # read it. That is what lets the file stay mode 600, owned by you, on
+      # the host. A Compose `secrets:` entry cannot do this: outside Swarm it
+      # is a plain bind mount that keeps the host owner and mode (its uid/gid/
+      # mode options are ignored), so on Linux the app user (uid 1001) could
+      # not read it; and a missing key file would stop the container from
+      # being created at all, instead of BlackVault saying how to create it.
+      # The folder itself always exists: it is in git (secrets/.gitignore).
+      - type: bind
+        source: ./secrets
+        target: /run/blackvault-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      # In memory only; no setuid, devices or executables on it.
+      - /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 30s

@@ -21,7 +21,21 @@ export default {
     // on the default leg, and "" is not nullish. `TZ=""` is not Denver — it is
     // whatever the host falls back to — so `??` would silently un-pin the
     // default leg. `||` treats "" as "not set".
-    env: { TZ: process.env.TZ_OVERRIDE || "America/Denver" },
+    //
+    // BLACKVAULT_ENCRYPTION_KEY (field encryption, ruling R3): a FIXED test-only
+    // key, so every test that writes through the app client (src/lib/prisma.ts →
+    // the encryption extension) has a key without each one setting it up. It is
+    // pinned unconditionally for the same reason TZ is: a key exported in the
+    // shell must not silently change what the suite encrypts with. It protects
+    // nothing — never use it for real data.
+    // BLACKVAULT_ENCRYPTION_KEY_FILE points at a path that does not exist, so a
+    // real key file at the default /run/secrets path (a dev container, a CI
+    // runner) can neither override the test key nor conflict with it.
+    env: {
+      TZ: process.env.TZ_OVERRIDE || "America/Denver",
+      BLACKVAULT_ENCRYPTION_KEY: "7c3e91a05f2d48b6e19a0c74d5f36b82a4e07d19c6b3f58e2d90a1c7b4e65f03",
+      BLACKVAULT_ENCRYPTION_KEY_FILE: "/nonexistent/blackvault-test/no-key-file",
+    },
     // `next build` copies src/ into .next/standalone, tests included, so
     // without this the suite runs each copied test file twice: once from
     // source and once from build output. The copies are stale by construction

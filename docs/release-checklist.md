@@ -13,7 +13,11 @@ This checklist is for **self-hosted** V1 release readiness only.
 - [ ] Linux/macOS setup tested with `./install.sh`.
 - [ ] Windows setup tested with `install.bat`.
 - [ ] Update path documented with `./update.sh` (and `update.bat` on Windows).
-- [ ] Generated `.blackvault.env` includes `DATA_DIR`, `PORT`, and `VAULT_ENCRYPTION_KEY`.
+- [ ] Generated `.env` includes `DATA_DIR` and `PORT`. The field-encryption key is a
+      separate file, `secrets/blackvault_encryption_key`, created by the installers —
+      not an `.env` line. `VAULT_ENCRYPTION_KEY` only matters for the legacy `enc:`
+      upgrade path (pre-V1 data); `BLACKVAULT_ENCRYPTION_KEY` is the current key's
+      optional env-var alternative to the key file.
 
 ## 3) Containerization
 

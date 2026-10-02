@@ -1,5 +1,20 @@
 import { prisma } from "../src/lib/prisma";
 
+type FirearmSeed = Parameters<typeof prisma.firearm.create>[0]["data"] & { serialNumber: string };
+
+/**
+ * Idempotent firearm seed: the existing row with this serial, or a new one.
+ * Not an upsert: `serialNumber` is no longer a unique key (it is ciphertext at
+ * rest; uniqueness moved to `serialNumberHash`), so it is looked up with
+ * findFirst — which the encryption extension rewrites to the fingerprint —
+ * and created through the app client, so the seed's data is encrypted. An
+ * existing row is left as it is, as the old `upsert({ update: {} })` did.
+ */
+async function ensureFirearm(data: FirearmSeed) {
+  const existing = await prisma.firearm.findFirst({ where: { serialNumber: data.serialNumber } });
+  return existing ?? (await prisma.firearm.create({ data }));
+}
+
 async function main() {
   console.log("Seeding database...");
 
@@ -16,64 +31,48 @@ async function main() {
   console.log("  AppSettings created");
 
   // ─── FIREARMS ─────────────────────────────────────────────────
-  const ddMk18 = await prisma.firearm.upsert({
-    where: { serialNumber: "DD-001" },
-    update: {},
-    create: {
-      name: "Daniel Defense MK18",
-      manufacturer: "Daniel Defense",
-      model: "MK18",
-      caliber: "5.56x45mm NATO",
-      serialNumber: "DD-001",
-      type: "RIFLE",
-      acquisitionDate: new Date("2023-01-15"),
-      purchasePrice: 2400,
-    },
+  const ddMk18 = await ensureFirearm({
+    name: "Daniel Defense MK18",
+    manufacturer: "Daniel Defense",
+    model: "MK18",
+    caliber: "5.56x45mm NATO",
+    serialNumber: "DD-001",
+    type: "RIFLE",
+    acquisitionDate: new Date("2023-01-15"),
+    purchasePrice: 2400,
   });
 
-  const glock19 = await prisma.firearm.upsert({
-    where: { serialNumber: "GL-001" },
-    update: {},
-    create: {
-      name: "Glock 19 Gen5",
-      manufacturer: "Glock",
-      model: "19 Gen5",
-      caliber: "9mm Luger",
-      serialNumber: "GL-001",
-      type: "PISTOL",
-      acquisitionDate: new Date("2022-06-10"),
-      purchasePrice: 650,
-    },
+  const glock19 = await ensureFirearm({
+    name: "Glock 19 Gen5",
+    manufacturer: "Glock",
+    model: "19 Gen5",
+    caliber: "9mm Luger",
+    serialNumber: "GL-001",
+    type: "PISTOL",
+    acquisitionDate: new Date("2022-06-10"),
+    purchasePrice: 650,
   });
 
-  const rem870 = await prisma.firearm.upsert({
-    where: { serialNumber: "REM-001" },
-    update: {},
-    create: {
-      name: "Remington 870",
-      manufacturer: "Remington",
-      model: "870",
-      caliber: "12 Gauge",
-      serialNumber: "REM-001",
-      type: "SHOTGUN",
-      acquisitionDate: new Date("2021-03-20"),
-      purchasePrice: 450,
-    },
+  const rem870 = await ensureFirearm({
+    name: "Remington 870",
+    manufacturer: "Remington",
+    model: "870",
+    caliber: "12 Gauge",
+    serialNumber: "REM-001",
+    type: "SHOTGUN",
+    acquisitionDate: new Date("2021-03-20"),
+    purchasePrice: 450,
   });
 
-  const ruger1022 = await prisma.firearm.upsert({
-    where: { serialNumber: "RUG-001" },
-    update: {},
-    create: {
-      name: "Ruger 10/22",
-      manufacturer: "Ruger",
-      model: "10/22",
-      caliber: ".22 LR",
-      serialNumber: "RUG-001",
-      type: "RIFLE",
-      acquisitionDate: new Date("2020-08-05"),
-      purchasePrice: 300,
-    },
+  const ruger1022 = await ensureFirearm({
+    name: "Ruger 10/22",
+    manufacturer: "Ruger",
+    model: "10/22",
+    caliber: ".22 LR",
+    serialNumber: "RUG-001",
+    type: "RIFLE",
+    acquisitionDate: new Date("2020-08-05"),
+    purchasePrice: 300,
   });
 
   console.log(`  Firearms created: ${ddMk18.name}, ${glock19.name}, ${rem870.name}, ${ruger1022.name}`);

@@ -18,7 +18,13 @@ model Firearm {
   model           String
   caliber             String
   compatibleCalibers  String?
-  serialNumber    String   @unique
+  // No longer @unique: uniqueness lives on serialNumberHash below, because
+  // this column holds ciphertext once field encryption (Task 3) is wired up.
+  // See src/lib/encryption/fields.ts (ENCRYPTED_FIELDS).
+  serialNumber    String
+  // HMAC-SHA256 fingerprint of the plaintext serial, for equality lookups
+  // without decrypting every row. null until the encryption migration runs.
+  serialNumberHash String?  @unique
   // FirearmType: PISTOL | RIFLE | SHOTGUN | SMG | PCC | PDW | REVOLVER | BOLT_ACTION | LEVER_ACTION
   type            String
   // NfaClass: NONE | SBR | SBS | MACHINE_GUN | AOW | DESTRUCTIVE_DEVICE
@@ -32,10 +38,13 @@ model Firearm {
   // NFA paperwork. All nullable, and cleared server-side when nfaClass is NONE
   // or the transfer method is FORM_4473 (a 4473 transfer has no stamp).
   // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
+  // Encrypted at rest (ENCRYPTED_FIELDS). nfaApprovalDate/nfaTaxPaid are
+  // type-changed from DateTime/Float to String so ciphertext can live in
+  // them; the encryption extension (Task 3) restores Date/number to app code.
   nfaTransferMethod String?
   nfaControlNumber  String?
-  nfaApprovalDate   DateTime?
-  nfaTaxPaid        Float?
+  nfaApprovalDate   String?
+  nfaTaxPaid        String?
   nfaRegisteredTo   String?
   acquisitionDate DateTime
   purchasePrice   Float?
@@ -115,6 +124,9 @@ model Accessory {
   manufacturer           String
   model                  String?
   serialNumber           String?
+  // HMAC-SHA256 fingerprint of the plaintext serial (see Firearm.serialNumberHash).
+  // Accessory keeps allowing duplicate serials, so this is indexed, not unique.
+  serialNumberHash       String?
   // type matches SlotType values above
   type                   String
   caliber                String?
@@ -150,10 +162,11 @@ model Accessory {
 
   // NFA paperwork. Applies when type = SUPPRESSOR; cleared server-side otherwise.
   // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
+  // Encrypted at rest (ENCRYPTED_FIELDS), same type change as on Firearm.
   nfaTransferMethod      String?
   nfaControlNumber       String?
-  nfaApprovalDate        DateTime?
-  nfaTaxPaid             Float?
+  nfaApprovalDate        String?
+  nfaTaxPaid             String?
   nfaRegisteredTo        String?
 
   createdAt              DateTime        @default(now())
@@ -161,6 +174,7 @@ model Accessory {
 
   @@index([type])
   @@index([roundCount])
+  @@index([serialNumberHash])
 }
 
 // Standalone kit — never mounts on a firearm, so no build slots, no round
@@ -172,6 +186,8 @@ model Gear {
   manufacturer    String?
   model           String?
   serialNumber    String?
+  // HMAC-SHA256 fingerprint of the plaintext serial (see Firearm.serialNumberHash).
+  serialNumberHash String?
   // GearCategory: KNIFE | CASE | ARMOR | MEDICAL_KIT | WATER_TREATMENT | POWER |
   //               COMMS | LIGHT | FIRE | SHELTER | CLOTHING | TOOL | SANITATION |
   //               CBRN | NAVIGATION | SIGNALING | DOCUMENTS | SAFETY | BUGOUT | OTHER
@@ -202,6 +218,7 @@ model Gear {
 
   @@index([category])
   @@index([expirationDate])
+  @@index([serialNumberHash])
 }
 
 // Consumable stores: cleaning, medical, food, water, batteries. One model
@@ -528,6 +545,17 @@ model AppSettings {
   // (installers write it) and a fresh install lands on false. See
   // docs/superpowers/specs/2026-09-26-public-url-and-direct-access-design.md.
   allowDirectAccess       Boolean?
+  // Ciphertext of the fixed string "blackvault-key-check" (AAD
+  // "AppSettings.encryptionKeyCheck"), created on the first run that has a
+  // key. Lets startup detect a wrong or lost encryption key before touching
+  // any encrypted row. null = encryption not yet enabled on this install.
+  encryptionKeyCheck      String?
+  // true = a committed encryption migration or key rotation left old values
+  // (plaintext, or old-key ciphertext) in the database's free space, and the
+  // compaction that erases them (VACUUM / VACUUM FULL) has not succeeded yet.
+  // Set in the same transaction as the rewrite; every start retries the
+  // compaction while it is true, then clears it (src/lib/encryption/startup.ts).
+  encryptionCompactionPending Boolean @default(false)
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 }

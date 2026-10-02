@@ -4,3 +4,12 @@
 # converting these to LF would shift every offset and land execution somewhere
 # other than the pad. Pin the line endings rather than relying on nobody doing it.
 *.bat text eol=crlf
+
+# Runs inside the Linux container, built from whatever checkout the user has.
+# A CRLF copy (core.autocrlf=true on Windows) would break the #!/bin/sh line
+# and the container would not start.
+scripts/docker-entrypoint.sh text eol=lf
+
+# The pre-release (develop 663523c) update.bat, kept byte for byte (CRLF) for the
+# README-recovery scenarios: no end-of-line conversion on any platform.
+scripts/fixtures/update.bat.develop-663523c -text

@@ -13,6 +13,32 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: ["@prisma/client", "sharp"],
+  experimental: {
+    // Next 16's proxy (src/proxy.ts has no matcher, so it runs on every
+    // request, for EVERY route — not just /api/backup/restore) clones the
+    // request body and TRUNCATES it at this limit before the route handler
+    // ever sees it — default 10 MB (node_modules/next/dist/server/
+    // config-shared.js). A sealed backup envelope is plaintext size + ~33%
+    // (base64), and a large inventory (e.g. 20,000 firearms with notes)
+    // comfortably exceeds 10 MB. Without raising this, POST
+    // /api/backup/restore silently truncates the body and fails with a
+    // misleading "Invalid JSON body" instead of restoring.
+    //
+    // Review round 2 (critical): a 256 MB cap is itself a problem, because
+    // it applies to every route, including unauthenticated ones — 4
+    // concurrent 200 MB POSTs to /api/auth/login drove this process's RSS
+    // to ~2.6 GB before any route handler, admin check, or body-size logic
+    // of our own ever ran. 64 MB is the trade-off: comfortably covers the
+    // backup/restore case (measured ~37,000 firearms with notes at the
+    // sealed-envelope size ratio above). It does NOT bound memory: measured,
+    // Next buffers the WHOLE incoming body before it checks this cap (even
+    // with the old 10 MB default a 624 MB body was buffered, per the Task 5 review).
+    // The real control for oversized or hostile request bodies is the
+    // reverse proxy's body limit (Caddy / Nginx Proxy Manager), which the
+    // README tells users to set. A household with a larger inventory than
+    // that needs a CLI restore path instead of the browser UI (not built yet).
+    proxyClientMaxBodySize: "64mb",
+  },
 };
 
 export default nextConfig;

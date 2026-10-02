@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
+import { ENCRYPTED_FIELDS } from "./encryption/fields";
 import {
   DATE_ONLY_EXCLUDED_FIELDS,
   DATE_ONLY_FIELDS,
@@ -72,6 +73,10 @@ describe("DATE_ONLY_FIELDS", () => {
       .map((field) => `${model.name}.${field.name}`)
   );
   const registered = DATE_ONLY_FIELDS.map((f) => `${f.model}.${f.field}`);
+  // Field encryption (D1) type-changed the NFA approval dates from DateTime to
+  // String so ciphertext fits; they are still calendar days, so they stay in
+  // DATE_ONLY_FIELDS, and the registry's `kind: "date"` is what marks them.
+  const encryptedDateFields = ENCRYPTED_FIELDS.filter((f) => f.kind === "date").map((f) => `${f.model}.${f.field}`);
 
   it("sees the schema it is asserting against", () => {
     // Guards the guard: an empty DMMF read would make every assertion below
@@ -80,10 +85,18 @@ describe("DATE_ONLY_FIELDS", () => {
     expect(schemaDateFields).toContain("Supply.expirationDate");
   });
 
-  it("accounts for every DateTime column, as date-only or explicitly excluded", () => {
+  it("accounts for every DateTime column (and every encrypted date), as date-only or explicitly excluded", () => {
     expect([...registered, ...DATE_ONLY_EXCLUDED_FIELDS].sort()).toEqual(
-      [...schemaDateFields].sort()
+      [...schemaDateFields, ...encryptedDateFields].sort()
     );
+  });
+
+  it("knows the encrypted dates are no longer DateTime columns", () => {
+    expect(encryptedDateFields.sort()).toEqual(["Accessory.nfaApprovalDate", "Firearm.nfaApprovalDate"]);
+    for (const f of encryptedDateFields) {
+      expect(schemaDateFields).not.toContain(f);
+      expect(registered).toContain(f);
+    }
   });
 
   it("registers the columns the hand-maintained list had dropped", () => {
@@ -329,6 +342,19 @@ describe("runLegacyDateMigration", () => {
     expect(iso(tables.firearm[0].acquisitionDate as Date)).toBe(iso(edit));
     expect(tables.dateNormalizationAudit[0].appliedZone).toBe("UTC"); // audit untouched
     expect(summary).toMatchObject({ reconverted: 0, skippedConcurrent: 1 });
+  });
+
+  it("never reads, writes or audits an encrypted date (the encryption migration owns those)", async () => {
+    const { client, tables } = fakePrisma({
+      firearm: [{ id: "f1", nfaApprovalDate: LEGACY, acquisitionDate: LEGACY }],
+      accessory: [{ id: "a1", nfaApprovalDate: "bv2:abcd1234:x:y:z" }],
+    });
+    const summary = await runLegacyDateMigration(client, "UTC");
+
+    expect(tables.firearm[0].nfaApprovalDate).toBe(LEGACY); // same object: untouched
+    expect(tables.accessory[0].nfaApprovalDate).toBe("bv2:abcd1234:x:y:z");
+    expect(tables.dateNormalizationAudit.map((a) => a.field)).toEqual(["acquisitionDate"]);
+    expect(summary).toMatchObject({ normalized: 1, failed: 0 });
   });
 
   it("isolates a failing row and keeps processing the rest", async () => {

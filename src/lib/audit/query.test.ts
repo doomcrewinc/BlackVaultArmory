@@ -237,6 +237,8 @@ describe("ACTION_GROUPS", () => {
       "DIRECT_ACCESS_CHANGED",
       "BACKUP_CREATED",
       "RESTORE",
+      "ENCRYPTION_ENABLED",
+      "KEY_ROTATED",
     ]);
   });
 

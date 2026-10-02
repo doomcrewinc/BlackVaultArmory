@@ -3,7 +3,6 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { decryptField } from "@/lib/crypto";
 import { getCurrentUser } from "@/lib/server/auth";
 import { ItemHistory } from "@/components/audit/ItemHistory";
 import {
@@ -288,7 +287,7 @@ export default async function FirearmDetailPage({
               </p>
             </div>
             <p className="text-sm font-mono text-vault-text">
-              {decryptField(firearm.serialNumber) ?? "—"}
+              {firearm.serialNumber ?? "—"}
             </p>
           </div>
 

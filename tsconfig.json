@@ -30,5 +30,11 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules"],
+  "ts-node": {
+    "moduleTypes": {
+      "src/lib/encryption/core.mjs": "cjs",
+      "src/lib/encryption/compaction.mjs": "cjs"
+    }
+  }
 }

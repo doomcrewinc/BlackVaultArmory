@@ -67,6 +67,10 @@ if /i "!DB_PROVIDER!"=="sqlite" (
 if not defined EXISTING_OK goto :check_legacy_env
 echo Your data is at: !ENV_DATA_DIR! (!DB_PROVIDER!)
 if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
+:: This image refuses to start without the field-encryption key; an
+:: existing key is never touched.
+call :ensure_encryption_key
+if errorlevel 1 goto :key_failed
 echo Starting with existing configuration...
 %COMPOSE% up -d
 if errorlevel 1 goto :compose_failed
@@ -94,6 +98,8 @@ if not exist "!ENV_DATA_DIR!\db\vault.db" goto :detect_legacy_data
 :: .env with no COMPOSE_PROFILES line runs SQLite on the one compose file.
 set "DB_PROVIDER=sqlite"
 echo Found your existing database at: !ENV_DATA_DIR!
+call :ensure_encryption_key
+if errorlevel 1 goto :key_failed
 echo Rebuilding with existing configuration (SQLite)...
 %COMPOSE% build
 if errorlevel 1 goto :compose_failed
@@ -294,6 +300,13 @@ if defined ENV_ACL_FAILED (
   echo          Other accounts on this PC may be able to read it.
 )
 
+:: ── Field-encryption key ───────────────────────────────────────
+:: secrets\blackvault_encryption_key, restricted to this user; never
+:: overwritten if it is already there. Mirrors install.sh.
+echo.
+call :ensure_encryption_key
+if errorlevel 1 goto :key_failed
+
 :: ── Build and start ───────────────────────────────────────────
 echo.
 echo Building BlackVault image (this may take a few minutes)...
@@ -398,6 +411,11 @@ exit /b 1
 :compose_failed
 echo.
 echo ERROR: docker compose failed. See the output above.
+pause
+exit /b 1
+
+:key_failed
+echo        BlackVault was not started.
 pause
 exit /b 1
 
@@ -632,3 +650,76 @@ echo    First-time setup: open !_ST_URL!/setup
 echo    and enter the setup token: !_ST_CODE!
 echo   ============================================================
 goto :eof
+
+:: :ensure_encryption_key - mirrors ensure_encryption_key in
+:: scripts/encryption-key.sh; install.bat and update.bat carry identical
+:: copies (scripts/bat-shared-subroutines.test.ts): change all three together.
+:: Creates secrets\blackvault_encryption_key (64 lowercase hex characters from
+:: the OS CSPRNG; PowerShell's random cmdlet is NOT used, it is not
+:: cryptographically secure) only when it does not exist: an existing key
+:: is never touched, it may be the only key the database is encrypted with.
+:: The ACL is restricted to the current user on the EMPTY file before any
+:: key material is written (as rotate-key.bat does); a failed icacls aborts.
+:: errorlevel 0 when the key file exists afterwards, 1 with a message when it
+:: could not be created. Never echoes the key.
+:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: non-empty line in .env, or set in this console) no key file is created -
+:: a second, different key would make the app refuse to start (KEY_CONFLICT).
+:ensure_encryption_key
+set "_EK=secrets\blackvault_encryption_key"
+if exist "!_EK!" (
+  echo Encryption key: secrets\blackvault_encryption_key ^(existing, unchanged^)
+  exit /b 0
+)
+if defined BLACKVAULT_ENCRYPTION_KEY (
+  echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from the console environment^) - no key file created
+  if not exist "secrets\" mkdir "secrets" 2>nul
+  exit /b 0
+)
+if not exist ".env" goto :ensure_key_no_env_key
+findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
+if errorlevel 1 goto :ensure_key_no_env_key
+echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
+:: docker-compose.yml mounts secrets\ with create_host_path: false.
+if not exist "secrets\" mkdir "secrets" 2>nul
+exit /b 0
+:ensure_key_no_env_key
+if not exist "secrets\" mkdir "secrets" 2>nul
+if not exist "secrets\" goto :ensure_key_failed
+set "_KEY="
+for /f "usebackq delims=" %%K in (`powershell -NoProfile -NonInteractive -Command "$b = New-Object byte[] 32; [Security.Cryptography.RNGCryptoServiceProvider]::new().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })" 2^>nul`) do set "_KEY=%%K"
+if not defined _KEY goto :ensure_key_failed
+if "!_KEY:~63,1!"=="" goto :ensure_key_failed
+if not "!_KEY:~64!"=="" goto :ensure_key_failed
+for /f "delims=0123456789abcdef" %%X in ("!_KEY!") do goto :ensure_key_failed
+type nul > "!_EK!"
+if errorlevel 1 goto :ensure_key_failed
+set "_SID="
+for /f "tokens=2 delims=," %%S in ('whoami /user /fo csv /nh 2^>nul') do set "_SID=%%~S"
+if not defined _SID goto :ensure_key_acl_failed
+icacls "!_EK!" /grant:r "*!_SID!:F" >nul 2>&1
+if errorlevel 1 goto :ensure_key_acl_failed
+icacls "!_EK!" /inheritance:r >nul 2>&1
+if errorlevel 1 goto :ensure_key_acl_failed
+(echo !_KEY!)>"!_EK!"
+if errorlevel 1 goto :ensure_key_failed
+set "_KEY="
+echo.
+echo ==========================================================================
+echo   Encryption key created: !CD!\secrets\blackvault_encryption_key
+echo.
+echo   BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered.
+echo.
+echo   Keep a copy somewhere other than this machine ^(a password manager, a USB
+echo   drive^). Anyone with this file AND your database can read those records.
+echo ==========================================================================
+echo.
+exit /b 0
+:ensure_key_acl_failed
+echo ERROR: could not restrict the key file to your user account with icacls.
+echo        Refusing to write key material to an unhardened file.
+:ensure_key_failed
+set "_KEY="
+if exist "!_EK!" for %%F in ("!_EK!") do if %%~zF EQU 0 del /f /q "!_EK!"
+echo ERROR: could not create the encryption key file secrets\blackvault_encryption_key.
+exit /b 1

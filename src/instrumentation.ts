@@ -12,6 +12,22 @@ export async function register() {
       process.exit(1);
       return;
     }
+
+    // Field encryption at rest (docs/superpowers/specs/2026-09-30-field-encryption-design.md
+    // §2): load and verify the key, then encrypt any pre-encryption data in
+    // one transaction. Refuses to start on ANY failure, in every NODE_ENV
+    // (ruling R3) — same mechanism as the public-URL check above. Runs
+    // BEFORE the date migration: reads through the app client are strict
+    // (plaintext at rest throws), so nothing may use it on Firearm /
+    // Accessory / Gear until this has run.
+    const { runEncryptionStartup, startupFailureLine } = await import("./lib/encryption/startup");
+    try {
+      await runEncryptionStartup();
+    } catch (error) {
+      console.error(startupFailureLine(error));
+      process.exit(1);
+      return;
+    }
   }
 
   // Next awaits register() before serving and rethrows anything it throws, so

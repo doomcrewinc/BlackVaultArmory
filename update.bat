@@ -138,7 +138,7 @@ echo.
 echo.
 
 :: Byte pad (these 2 lines)
-:: explained after git pull
+call :clear_eol_only_change
 :: ── Pull latest code ──────────────────────────────────────────
 git rev-parse --git-dir >nul 2>&1
 if errorlevel 1 goto :rebuild
@@ -150,6 +150,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
+:: The second of the two "byte pad" lines above is a real command (fix round 1,
+:: I4: `call :clear_eol_only_change`, same length as the comment it replaced).
 :: The two-line byte pad above `git pull` is for the e570bd8 update.bat
 :: (what develop shipped before this release). It runs `git pull` as a
 :: top-level line, so once the pull replaces this file cmd.exe resumes here
@@ -233,9 +235,28 @@ echo.
 :: here, right before the first compose command.
 call :require_compose
 if not defined COMPOSE goto :compose_too_old
+
+:: ── Field-encryption key ───────────────────────────────────────
+:: Created only if missing; an existing key is never touched. The new image
+:: refuses to start without one. Like everything after `git pull`, this also
+:: runs when an OLDER update.bat pulled this file and resumed into it (see the
+:: landing pads above), so the first upgrade into field encryption gets the
+:: key and the snapshot below too. update.sh re-executes itself instead.
+echo.
+call :ensure_encryption_key
+if errorlevel 1 goto :key_failed
+
 echo Rebuilding BlackVault image...
 %COMPOSE% build --pull
 if errorlevel 1 goto :compose_failed
+
+:: ── Snapshot the database, BEFORE the new image starts ─────────
+:: Mirrors update.sh. On SQLite scripts\db-snapshot.bat stops the app; if it
+:: fails, the old container is started again and the update stops.
+echo.
+echo Snapshotting the database...
+call scripts\db-snapshot.bat
+if errorlevel 1 goto :snapshot_failed
 
 echo.
 echo Restarting...
@@ -326,6 +347,19 @@ exit /b 1
 :compose_failed
 echo.
 echo ERROR: docker compose failed. See the output above.
+pause
+exit /b 1
+
+:key_failed
+echo        Nothing was rebuilt or restarted.
+pause
+exit /b 1
+
+:snapshot_failed
+echo.
+echo ERROR: the database snapshot failed, so the update stopped here. See above.
+echo        The new version was NOT started.
+%COMPOSE% start blackvault >nul 2>&1
 pause
 exit /b 1
 
@@ -572,4 +606,165 @@ echo   ============================================================
 echo    First-time setup: open !_ST_URL!/setup
 echo    and enter the setup token: !_ST_CODE!
 echo   ============================================================
+goto :eof
+
+:: :ensure_encryption_key - mirrors ensure_encryption_key in
+:: scripts/encryption-key.sh; install.bat and update.bat carry identical
+:: copies (scripts/bat-shared-subroutines.test.ts): change all three together.
+:: Creates secrets\blackvault_encryption_key (64 lowercase hex characters from
+:: the OS CSPRNG; PowerShell's random cmdlet is NOT used, it is not
+:: cryptographically secure) only when it does not exist: an existing key
+:: is never touched, it may be the only key the database is encrypted with.
+:: The ACL is restricted to the current user on the EMPTY file before any
+:: key material is written (as rotate-key.bat does); a failed icacls aborts.
+:: errorlevel 0 when the key file exists afterwards, 1 with a message when it
+:: could not be created. Never echoes the key.
+:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: non-empty line in .env, or set in this console) no key file is created -
+:: a second, different key would make the app refuse to start (KEY_CONFLICT).
+:ensure_encryption_key
+set "_EK=secrets\blackvault_encryption_key"
+if exist "!_EK!" (
+  echo Encryption key: secrets\blackvault_encryption_key ^(existing, unchanged^)
+  exit /b 0
+)
+if defined BLACKVAULT_ENCRYPTION_KEY (
+  echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from the console environment^) - no key file created
+  if not exist "secrets\" mkdir "secrets" 2>nul
+  exit /b 0
+)
+if not exist ".env" goto :ensure_key_no_env_key
+findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
+if errorlevel 1 goto :ensure_key_no_env_key
+echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
+:: docker-compose.yml mounts secrets\ with create_host_path: false.
+if not exist "secrets\" mkdir "secrets" 2>nul
+exit /b 0
+:ensure_key_no_env_key
+if not exist "secrets\" mkdir "secrets" 2>nul
+if not exist "secrets\" goto :ensure_key_failed
+set "_KEY="
+for /f "usebackq delims=" %%K in (`powershell -NoProfile -NonInteractive -Command "$b = New-Object byte[] 32; [Security.Cryptography.RNGCryptoServiceProvider]::new().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })" 2^>nul`) do set "_KEY=%%K"
+if not defined _KEY goto :ensure_key_failed
+if "!_KEY:~63,1!"=="" goto :ensure_key_failed
+if not "!_KEY:~64!"=="" goto :ensure_key_failed
+for /f "delims=0123456789abcdef" %%X in ("!_KEY!") do goto :ensure_key_failed
+type nul > "!_EK!"
+if errorlevel 1 goto :ensure_key_failed
+set "_SID="
+for /f "tokens=2 delims=," %%S in ('whoami /user /fo csv /nh 2^>nul') do set "_SID=%%~S"
+if not defined _SID goto :ensure_key_acl_failed
+icacls "!_EK!" /grant:r "*!_SID!:F" >nul 2>&1
+if errorlevel 1 goto :ensure_key_acl_failed
+icacls "!_EK!" /inheritance:r >nul 2>&1
+if errorlevel 1 goto :ensure_key_acl_failed
+(echo !_KEY!)>"!_EK!"
+if errorlevel 1 goto :ensure_key_failed
+set "_KEY="
+echo.
+echo ==========================================================================
+echo   Encryption key created: !CD!\secrets\blackvault_encryption_key
+echo.
+echo   BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered.
+echo.
+echo   Keep a copy somewhere other than this machine ^(a password manager, a USB
+echo   drive^). Anyone with this file AND your database can read those records.
+echo ==========================================================================
+echo.
+exit /b 0
+:ensure_key_acl_failed
+echo ERROR: could not restrict the key file to your user account with icacls.
+echo        Refusing to write key material to an unhardened file.
+:ensure_key_failed
+set "_KEY="
+if exist "!_EK!" for %%F in ("!_EK!") do if %%~zF EQU 0 del /f /q "!_EK!"
+echo ERROR: could not create the encryption key file secrets\blackvault_encryption_key.
+exit /b 1
+
+:: :clear_eol_only_change - mirrors clear_bat_eol_only_changes in update.sh
+:: (change them together). Runs right before `git pull` (fix rounds 1-2, I4).
+:: Releases before this one stored install.bat and update.bat with CRLF in
+:: the index while .gitattributes says `text eol=crlf`, so Git reports both
+:: as modified on every checkout and a pull that changes them aborts with
+:: "Your local changes ... would be overwritten". When the ONLY difference is
+:: line endings (`git diff --ignore-cr-at-eol` finds none), Git is made to
+:: re-check the two files byte for byte (a temporary `-text` in
+:: .git\info\attributes, then `git update-index --refresh`), which records
+:: them as unchanged: they ARE the committed bytes. No file is rewritten -
+:: cmd.exe is reading this one. Real local edits are left alone.
+::
+:: The override must never outlive this run (left behind, every later
+:: checkout writes the .bat files with LF). Each added line carries the
+:: marker attribute `blackvault-update` (Git rejects a line with a trailing
+:: `#` comment and ignores it whole); every copy/move is checked and a
+:: failure restores; and every run first strips marked lines left by a run
+:: that could not restore (Ctrl-C answered Y at "Terminate batch job").
+:clear_eol_only_change
+git rev-parse --git-dir >nul 2>&1
+if errorlevel 1 goto :eof
+set "_GA="
+for /f "usebackq delims=" %%P in (`git rev-parse --git-path info/attributes`) do set "_GA=%%P"
+if not defined _GA goto :eof
+set "_GA=!_GA:/=\!"
+call :heal_eol_override
+git diff --quiet -- install.bat update.bat >nul 2>&1
+if not errorlevel 1 goto :eof
+git diff --ignore-cr-at-eol --quiet -- install.bat update.bat >nul 2>&1
+if errorlevel 1 (
+  echo Note: install.bat or update.bat has local edits; they are left alone.
+  goto :eof
+)
+echo Clearing a line-ending-only difference in install.bat / update.bat before pulling...
+for %%D in ("!_GA!") do if not exist "%%~dpD" mkdir "%%~dpD" 2>nul
+set "_GA_BAK="
+if not exist "!_GA!" goto :eol_override_add
+copy /y "!_GA!" "!_GA!.blackvault-update" >nul 2>&1
+if errorlevel 1 (
+  echo WARNING: could not back up .git\info\attributes, so the line-ending fix is skipped.
+  if exist "!_GA!.blackvault-update" del /f /q "!_GA!.blackvault-update" >nul 2>&1
+  goto :eof
+)
+set "_GA_BAK=!_GA!.blackvault-update"
+:: An existing file without a final newline: start our lines on a new one.
+set "_GA_NL=0"
+set "BV_GA_PATH=!_GA!"
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -NonInteractive -Command "$b = [IO.File]::ReadAllBytes($env:BV_GA_PATH); if ($b.Length -gt 0 -and $b[-1] -ne 10) { '1' } else { '0' }" 2^>nul`) do set "_GA_NL=%%L"
+set "BV_GA_PATH="
+if "!_GA_NL!"=="1" (
+  (echo.)>>"!_GA!" || goto :eol_override_restore
+)
+:eol_override_add
+(echo install.bat -text blackvault-update)>>"!_GA!" || goto :eol_override_restore
+(echo update.bat -text blackvault-update)>>"!_GA!" || goto :eol_override_restore
+:: The file must be older than the index Git writes next, or Git treats it
+:: as "racily clean" and compares it again with the normal attributes.
+ping -n 2 127.0.0.1 >nul
+git update-index -q --refresh >nul 2>&1
+:eol_override_restore
+if defined _GA_BAK (
+  move /y "!_GA_BAK!" "!_GA!" >nul 2>&1
+  if errorlevel 1 echo WARNING: could not restore .git\info\attributes from its backup.
+) else (
+  if exist "!_GA!" del /f /q "!_GA!" >nul 2>&1
+)
+:: Whatever happened above, no marked line may survive.
+call :heal_eol_override
+goto :eof
+
+:: :heal_eol_override - removes override lines (marked blackvault-update)
+:: and backups that an interrupted run left behind. Needs _GA.
+:heal_eol_override
+if exist "!_GA!.blackvault-update" del /f /q "!_GA!.blackvault-update" >nul 2>&1
+if not exist "!_GA!" goto :eof
+findstr /l /c:" blackvault-update" "!_GA!" >nul 2>&1
+if errorlevel 1 goto :eof
+echo Removing a line-ending override left in .git\info\attributes by an interrupted update...
+findstr /v /l /c:" blackvault-update" "!_GA!" > "!_GA!.blackvault-heal" 2>nul
+for %%F in ("!_GA!.blackvault-heal") do if %%~zF EQU 0 (
+  del /f /q "!_GA!.blackvault-heal" >nul 2>&1
+  del /f /q "!_GA!" >nul 2>&1
+  goto :eof
+)
+move /y "!_GA!.blackvault-heal" "!_GA!" >nul 2>&1
+if errorlevel 1 echo WARNING: could not clean .git\info\attributes; delete its lines ending in blackvault-update by hand.
 goto :eof

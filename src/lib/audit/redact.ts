@@ -5,8 +5,27 @@
  */
 export const REDACTED = "[redacted]";
 
-/** Sensitive field names that don't otherwise match the pattern below. */
-const EXPLICIT_REDACTED_FIELDS: ReadonlySet<string> = new Set(["serialNumber"]);
+/**
+ * Sensitive field names that don't otherwise match the pattern below.
+ * `serialNumber`, `nfaControlNumber`, `nfaRegisteredTo`, `nfaTransferMethod`,
+ * `nfaApprovalDate` and `nfaTaxPaid` are also the encrypted-at-rest fields
+ * (field-encryption spec, D1; see src/lib/encryption/fields.ts) — redacted
+ * here independently of that, because the audit log must never show an NFA
+ * owner, control number, transfer method, approval date or tax amount even
+ * to someone who can read the decrypted row.
+ * `serialNumberHash` is the keyed fingerprint of the serial (field-encryption
+ * Task 3): not the serial, but a stable per-serial identifier that changes
+ * exactly when the serial does, so it is redacted like the serial itself.
+ */
+const EXPLICIT_REDACTED_FIELDS: ReadonlySet<string> = new Set([
+  "serialNumber",
+  "serialNumberHash",
+  "nfaControlNumber",
+  "nfaRegisteredTo",
+  "nfaTransferMethod",
+  "nfaApprovalDate",
+  "nfaTaxPaid",
+]);
 
 /** Anything that looks like a secret, token, password or API key, by name. */
 const REDACTED_FIELD_PATTERN = /secret|token|password|apikey/i;

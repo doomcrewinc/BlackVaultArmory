@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { decryptField } from "@/lib/crypto";
 import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
@@ -770,9 +769,7 @@ export async function GET(request: NextRequest) {
         const itemDocs = documents.filter((doc) => doc.firearmId === firearm.id);
         const receiptCount = itemDocs.filter((doc) => doc.type === "RECEIPT").length;
         const hasPhoto = exportOptions.includeImages && !!firearm.imageUrl;
-        const resolvedSerial = exportOptions.includeSerialNumbers
-          ? (decryptField(firearm.serialNumber) ?? firearm.serialNumber ?? "")
-          : "";
+        const resolvedSerial = exportOptions.includeSerialNumbers ? (firearm.serialNumber ?? "") : "";
 
         return {
           itemId: firearm.id,

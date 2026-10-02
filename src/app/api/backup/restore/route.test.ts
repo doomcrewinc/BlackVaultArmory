@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { createCipheriv, randomBytes } from "node:crypto";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
+import { sealBackup } from "@/lib/encryption/core.mjs";
 
 // The real requireAdmin, driven by the session lookup: ADMIN by default, USER/null per test.
 const auth = vi.hoisted(() => ({ validateSession: vi.fn() }));
@@ -24,12 +26,16 @@ const mocks = vi.hoisted(() => ({
     createMany: vi.fn(),
     upsert: vi.fn(),
     update: vi.fn(),
+    // Read by configuredZone (review I1) before the write transaction opens,
+    // on the OUTER prisma client — null timezone means "UTC", which keeps
+    // every existing UTC-midnight fixture in this file unaffected.
+    findUnique: vi.fn(async () => ({ timezone: null })),
   },
   recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { $transaction: mocks.transaction },
+  prisma: { $transaction: mocks.transaction, appSettings: mocks.appSettings },
 }));
 
 vi.mock("@/lib/date-migration", () => ({
@@ -63,6 +69,15 @@ function makeTx() {
       }),
     };
   }
+  return tx;
+}
+
+/** Like makeTx(), but `deleteMany` on `delegate` throws `err` — simulates a failure partway through the real transaction, with a real delegate name attached (review M1's "model" tag). */
+function makeTxFailingAt(delegate: string, err: unknown) {
+  const tx = makeTx();
+  (tx[delegate] as { deleteMany: () => Promise<unknown> }).deleteMany = vi.fn(async () => {
+    throw err;
+  });
   return tx;
 }
 
@@ -157,7 +172,7 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
       action: "RESTORE",
       entityLabel: "Backup restore",
-      changes: { counts: json.counts },
+      changes: { counts: json.counts, sealed: false },
     });
   });
 
@@ -172,7 +187,7 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
       action: "RESTORE",
       entityLabel: name,
-      changes: { file: name, counts: json.counts },
+      changes: { file: name, counts: json.counts, sealed: false },
     });
   });
 
@@ -192,7 +207,7 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
       action: "RESTORE",
       entityLabel: expected,
-      changes: { file: expected, counts: json.counts },
+      changes: { file: expected, counts: json.counts, sealed: false },
     });
   });
 
@@ -210,7 +225,7 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
       action: "RESTORE",
       entityLabel: "Backup restore",
-      changes: { counts: json.counts },
+      changes: { counts: json.counts, sealed: false },
     });
   });
 
@@ -426,8 +441,13 @@ describe("POST /api/backup/restore", () => {
     expect(row.nfaControlNumber).toBe("12345");
     expect(row.nfaTaxPaid).toBe(200);
     expect(row.nfaRegisteredTo).toBe("Doe Family Trust");
-    // Verbatim, not re-derived: the date is still the string from the file.
-    expect(row.nfaApprovalDate).toBe("2024-03-12T00:00:00.000Z");
+    // Not re-derived by the NFA-classification normalizer (the rule under
+    // test here). It DOES pass through the shared legacy-date zone-check
+    // (review I1, applied to every row regardless of class — the same way
+    // the startup migration applies it unconditionally), which reads this
+    // already-UTC-midnight value as a Date instead of leaving the original
+    // string — same calendar day, same instant, just the app-facing type.
+    expect((row.nfaApprovalDate as Date).toISOString()).toBe("2024-03-12T00:00:00.000Z");
   });
 
   // Same rule, the armor group. normalizeGearArmorFields' own docblock names
@@ -682,13 +702,15 @@ describe("POST /api/backup/restore", () => {
     );
   });
 
-  it("never touches AppSettings", async () => {
+  it("never WRITES AppSettings (read-only findUnique for the configured zone is expected)", async () => {
     await POST(
       restoreRequest({ ...v11Payload(), appSettings: [{ id: "singleton" }] }),
     );
 
-    for (const fn of Object.values(mocks.appSettings))
-      expect(fn).not.toHaveBeenCalled();
+    expect(mocks.appSettings.deleteMany).not.toHaveBeenCalled();
+    expect(mocks.appSettings.createMany).not.toHaveBeenCalled();
+    expect(mocks.appSettings.upsert).not.toHaveBeenCalled();
+    expect(mocks.appSettings.update).not.toHaveBeenCalled();
   });
 
   it("runs the post-restore date migration after a successful restore", async () => {
@@ -725,4 +747,306 @@ describe("POST /api/backup/restore", () => {
     expect(mocks.runConfiguredDateMigration).not.toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  // --- Review M1/M2: content errors vs genuine server faults ---------------
+
+  it("M2: our own TypeError (encryption extension validation) is 400 with a safe message, not 500", async () => {
+    const err = new TypeError("Firearm.serialNumber must be a string");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).not.toMatch(/has not been modified/); // the 500-path message
+    expect(json.error).not.toContain("serialNumber"); // safe/generic, not the raw error text
+    spy.mockRestore();
+  });
+
+  it("M2: a PrismaClientKnownRequestError (e.g. P2002 duplicate serial) is 400, not 500", async () => {
+    const err = Object.assign(new Error("Unique constraint failed on the fields: (`serialNumberHash`)"), {
+      name: "PrismaClientKnownRequestError",
+      code: "P2002",
+      meta: { modelName: "Firearm", target: ["serialNumberHash"] },
+    });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+
+    expect(response.status).toBe(400);
+    expect(mocks.runConfiguredDateMigration).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("M2: an unclassified error stays 500 (not every transaction failure is a content error)", async () => {
+    const err = new Error("ECONNRESET");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(500);
+    spy.mockRestore();
+  });
+
+  // Review round 2, M2 follow-up: the P2xxx match was too broad and also
+  // caught infrastructure codes. P2028 ("transaction API error") is the
+  // review's own example — it must stay 500, not become a false "your
+  // backup file is bad" 400.
+  it("M2 follow-up: P2028 (a transaction API error — infrastructure, not content) stays 500", async () => {
+    const err = Object.assign(new Error("Transaction API error: Transaction already closed"), {
+      name: "PrismaClientKnownRequestError",
+      code: "P2028",
+    });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status, JSON.stringify(json)).toBe(500);
+    expect(json.error).toMatch(/has not been modified/);
+    spy.mockRestore();
+  });
+
+  it.each(["P2024", "P2034"])("M2 follow-up: %s (connection timeout / write conflict — infrastructure) stays 500", async (code) => {
+    const err = Object.assign(new Error("infra"), { name: "PrismaClientKnownRequestError", code });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(500);
+    spy.mockRestore();
+  });
+
+  it.each(["P2002", "P2000", "P2003", "P2011", "P2020"])("M2 follow-up: %s (a content/constraint code) is 400", async (code) => {
+    const err = Object.assign(new Error("content"), { name: "PrismaClientKnownRequestError", code });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    expect(response.status).toBe(400);
+    spy.mockRestore();
+  });
+
+  it("M1: a PrismaClientValidationError's row-dumping message is never logged; code/name/model are", async () => {
+    const dump = `Invalid \`prisma.firearm.create()\` invocation:\n{ data: { name: "SecretRifleName", notes: "SUPER SECRET NOTE", manufacturer: 12345 } }`;
+    const err = Object.assign(new Error(dump), { name: "PrismaClientValidationError" });
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(restoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).not.toContain("SecretRifleName");
+    expect(json.error).not.toContain("SUPER SECRET NOTE");
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).not.toContain("SecretRifleName");
+    expect(logged).not.toContain("SUPER SECRET NOTE");
+    expect(logged).toContain("PrismaClientValidationError");
+    expect(logged).toContain("firearm"); // the model being written when it failed
+    spy.mockRestore();
+  });
+
+  it("M1: a plain TypeError's (safe, templated) message IS logged, with the model", async () => {
+    const err = new TypeError("Firearm.serialNumber must be a string");
+    mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(makeTxFailingAt("firearm", err)));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await POST(restoreRequest(v11Payload()));
+
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("Firearm.serialNumber must be a string");
+    expect(logged).toContain("firearm");
+    spy.mockRestore();
+  });
+
+  // --- Sealed restore (field-encryption spec §Restore) ---------------------
+
+  const PASSPHRASE = "correct horse battery staple";
+
+  /** Seals `body` with `sealPassphrase` and submits it with `submitPassphrase` (defaults to the same one — the happy path). */
+  function sealedRestoreRequest(body: unknown, sealPassphrase = PASSPHRASE, submitPassphrase = sealPassphrase) {
+    const envelope = JSON.parse(sealBackup(sealPassphrase, JSON.stringify(body)));
+    return restoreRequest({ sealed: envelope, passphrase: submitPassphrase });
+  }
+
+  it("opens a sealed envelope with its passphrase and restores it, recording sealed: true", async () => {
+    const response = await POST(sealedRestoreRequest(v11Payload()));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(created("firearm")).toMatchObject([{ id: "firearms-1" }]);
+    expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
+      action: "RESTORE",
+      entityLabel: "Backup restore",
+      changes: { counts: json.counts, sealed: true },
+    });
+  });
+
+  it("a wrong passphrase returns 400 and changes nothing", async () => {
+    const response = await POST(sealedRestoreRequest(v11Payload(), PASSPHRASE, "a completely different passphrase"));
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error).toBe("Wrong passphrase or damaged file.");
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.calls).toEqual([]);
+    expect(mocks.recordEvent).not.toHaveBeenCalled();
+  });
+
+  it("a damaged sealed envelope returns 400 and changes nothing", async () => {
+    const envelope = JSON.parse(sealBackup(PASSPHRASE, JSON.stringify(v11Payload())));
+    envelope.kdf.N = 2 ** 30; // also covers the "huge scrypt parameters" guard (Review Focus 2)
+    const response = await POST(restoreRequest({ sealed: envelope, passphrase: PASSPHRASE }));
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("requires a passphrase when the body carries a sealed envelope", async () => {
+    const envelope = JSON.parse(sealBackup(PASSPHRASE, JSON.stringify(v11Payload())));
+    const response = await POST(restoreRequest({ sealed: envelope, passphrase: 42 }));
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  // --- Carry M6: legacy enc: values in an old backup ------------------------
+
+  function legacyEncrypt(hex: string, value: string): string {
+    const iv = randomBytes(12);
+    const c = createCipheriv("aes-256-gcm", Buffer.from(hex, "hex"), iv);
+    const ct = Buffer.concat([c.update(value, "utf8"), c.final()]);
+    return `enc:${iv.toString("base64")}:${ct.toString("base64")}:${c.getAuthTag().toString("base64")}`;
+  }
+
+  const LEGACY_KEY = "a5".repeat(32);
+
+  it("decrypts a pre-V1 enc: serial with VAULT_ENCRYPTION_KEY before writing it, so the extension encrypts the real plaintext", async () => {
+    process.env.VAULT_ENCRYPTION_KEY = LEGACY_KEY;
+    try {
+      const response = await POST(
+        restoreRequest({
+          ...v11Payload(),
+          firearms: [
+            {
+              id: "firearms-1",
+              name: "Old Encrypted Rifle",
+              type: "RIFLE",
+              serialNumber: legacyEncrypt(LEGACY_KEY, "REAL-SERIAL-123"),
+            },
+          ],
+        }),
+      );
+      const json = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(json.success).toBe(true);
+      const [row] = created("firearm") as Record<string, unknown>[];
+      // Decrypted to the real plaintext, never the literal "enc:..." string.
+      expect(row.serialNumber).toBe("REAL-SERIAL-123");
+    } finally {
+      delete process.env.VAULT_ENCRYPTION_KEY;
+    }
+  });
+
+  it("fails the whole restore with 400 when a legacy enc: value exists but VAULT_ENCRYPTION_KEY is missing, writing nothing", async () => {
+    delete process.env.VAULT_ENCRYPTION_KEY;
+    const response = await POST(
+      restoreRequest({
+        ...v11Payload(),
+        firearms: [
+          {
+            id: "firearms-1",
+            name: "Old Encrypted Rifle",
+            type: "RIFLE",
+            serialNumber: legacyEncrypt(LEGACY_KEY, "REAL-SERIAL-123"),
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.calls).toEqual([]);
+  });
+
+  it("fails the whole restore with 400 when VAULT_ENCRYPTION_KEY is wrong for a legacy enc: value, writing nothing", async () => {
+    process.env.VAULT_ENCRYPTION_KEY = "b6".repeat(32);
+    try {
+      const response = await POST(
+        restoreRequest({
+          ...v11Payload(),
+          firearms: [
+            {
+              id: "firearms-1",
+              name: "Old Encrypted Rifle",
+              type: "RIFLE",
+              serialNumber: legacyEncrypt(LEGACY_KEY, "REAL-SERIAL-123"),
+            },
+          ],
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(mocks.transaction).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.VAULT_ENCRYPTION_KEY;
+    }
+  });
+
+  // --- Carry: DateNormalizationAudit rows for the now-encrypted NFA date ----
+
+  it("drops DateNormalizationAudit rows for nfaApprovalDate, but keeps rows for other fields", async () => {
+    const response = await POST(
+      restoreRequest({
+        ...v11Payload(),
+        dateNormalizationAudits: [
+          { id: "dna-1", model: "Firearm", field: "nfaApprovalDate", before: "x", after: "y" },
+          { id: "dna-2", model: "Accessory", field: "nfaApprovalDate", before: "x", after: "y" },
+          { id: "dna-3", model: "Firearm", field: "acquisitionDate", before: "x", after: "y" },
+        ],
+      }),
+    );
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(created("dateNormalizationAudit")).toEqual([
+      { id: "dna-3", model: "Firearm", field: "acquisitionDate", before: "x", after: "y" },
+    ]);
+    expect(json.counts.dateNormalizationAudits).toBe(1);
+  });
+
+  // --- Body size (brief's "check and test the limit") -----------------------
+
+  it("accepts a ~50 MB sealed-envelope body without a body-size error (real NextRequest, no mocked parser)", async () => {
+    // A well-formed envelope shape with a large `data` field: large enough to
+    // exercise the route's body handling, regardless of how it ultimately
+    // fails (wrong passphrase — there is no real ciphertext here, only size).
+    const bigEnvelope = {
+      format: "blackvault-sealed-backup",
+      version: 1,
+      kdf: { name: "scrypt", N: 65536, r: 8, p: 1, salt: Buffer.alloc(16).toString("base64url") },
+      cipher: "aes-256-gcm",
+      iv: Buffer.alloc(12).toString("base64url"),
+      tag: Buffer.alloc(16).toString("base64url"),
+      data: "A".repeat(50 * 1024 * 1024),
+    };
+    const response = await POST(
+      new NextRequest("http://localhost/api/backup/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sealed: bigEnvelope, passphrase: PASSPHRASE }),
+      }),
+    );
+    // The body parsed and reached application logic (a 400 for a bad
+    // ciphertext), not a framework-level body-too-large failure (413/500).
+    expect(response.status).toBe(400);
+    const json = await response.json();
+    expect(json.error).toBe("Wrong passphrase or damaged file.");
+  }, 30_000);
 });

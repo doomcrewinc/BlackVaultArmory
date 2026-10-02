@@ -160,6 +160,13 @@ function childFragments(changes: unknown): string[] {
   return childEntries(changes).map((e) => `${e.count} ${e.label} ${e.count === 1 ? "entry" : "entries"}`);
 }
 
+/** Singular / plural nouns for the models ENCRYPTION_ENABLED counts, in display order. */
+const ENCRYPTED_MODEL_NOUNS: Record<string, [string, string]> = {
+  Firearm: ["firearm", "firearms"],
+  Accessory: ["accessory", "accessories"],
+  Gear: ["gear item", "gear items"],
+};
+
 function quoted(label: string | null): string {
   return `"${label ?? "item"}"`;
 }
@@ -239,7 +246,40 @@ export function summarize(event: AuditEventDto): string {
 
     case "RESTORE": {
       const file = isRecord(event.changes) ? asString(event.changes.file) : undefined;
-      return `Restored the database from backup${file ? ` ${file}` : ""}`;
+      // `sealed` (field-encryption spec §Restore) is absent on events recorded
+      // before this shipped, and `true` for every sealed restore going
+      // forward — both read the same as "nothing to flag". Only an explicit
+      // `false` (a plain, unencrypted backup file) is worth calling out in
+      // the one-line summary: it is the security-relevant case.
+      const unsealed = isRecord(event.changes) && event.changes.sealed === false;
+      return `Restored the database from backup${file ? ` ${file}` : ""}${unsealed ? " (unsealed backup)" : ""}`;
+    }
+
+    case "ENCRYPTION_ENABLED": {
+      // Written once by the startup encryption migration (src/lib/encryption/startup.ts):
+      // `changes: { counts: { Firearm, Accessory, Gear }, keyId, scrubbedAuditRows }`.
+      // `scrubbedAuditRows` (Task 4b) is absent on events written before that
+      // task, and 0 whenever nothing needed scrubbing — both read the same as
+      // "nothing to mention", so only a positive count adds a fragment.
+      const counts = isRecord(event.changes) && isRecord(event.changes.counts) ? event.changes.counts : {};
+      const parts = Object.entries(ENCRYPTED_MODEL_NOUNS)
+        .map(([model, [one, many]]) => {
+          const n = counts[model];
+          return typeof n === "number" && n > 0 ? `${n} ${n === 1 ? one : many}` : null;
+        })
+        .filter((p): p is string => p !== null);
+      const scrubbed = isRecord(event.changes) ? event.changes.scrubbedAuditRows : undefined;
+      if (typeof scrubbed === "number" && scrubbed > 0) {
+        parts.push(`${scrubbed} ${scrubbed === 1 ? "audit entry" : "audit entries"} scrubbed`);
+      }
+      return parts.length ? `Encryption enabled: ${parts.join(", ")}` : "Encryption enabled";
+    }
+
+    case "KEY_ROTATED": {
+      // `changes: { from, to, counts }` (the key-rotation script, Task 6).
+      const from = isRecord(event.changes) ? asString(event.changes.from) : undefined;
+      const to = isRecord(event.changes) ? asString(event.changes.to) : undefined;
+      return from && to ? `Encryption key rotated (${from} → ${to})` : "Encryption key rotated";
     }
 
     default:

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 import { BACKUP_MODELS } from "@/lib/backup/models";
+import { openBackup } from "@/lib/encryption/core.mjs";
 
 // The real requireAdmin, driven by the session lookup: ADMIN by default, USER/null per test.
 const auth = vi.hoisted(() => ({ validateSession: vi.fn() }));
@@ -51,6 +53,22 @@ vi.mock("@/lib/prisma", async () => {
 
 import { POST } from "./route";
 
+const PASSPHRASE = "correct horse battery staple";
+
+function backupRequest(body: unknown = { passphrase: PASSPHRASE }) {
+  return new NextRequest("http://localhost/api/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Opens the sealed response body with the test passphrase and parses the plaintext backup JSON. */
+async function openedBody(response: Response, passphrase = PASSPHRASE) {
+  const envelope = JSON.parse(await response.text());
+  return JSON.parse(openBackup(passphrase, envelope));
+}
+
 describe("POST /api/backup", () => {
   beforeEach(() => {
     mocks.findManyCalls.length = 0;
@@ -63,7 +81,7 @@ describe("POST /api/backup", () => {
 
   it("401 when signed out, nothing exported", async () => {
     auth.validateSession.mockResolvedValue(null);
-    const response = await POST();
+    const response = await POST(backupRequest());
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Authentication required" });
     expect(mocks.findManyCalls).toEqual([]);
@@ -71,61 +89,102 @@ describe("POST /api/backup", () => {
 
   it("403 Admins only for a USER, nothing exported", async () => {
     auth.validateSession.mockResolvedValue(USER_SESSION);
-    const response = await POST();
+    const response = await POST(backupRequest());
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: "Admins only" });
     expect(mocks.findManyCalls).toEqual([]);
   });
 
-  it("exports every registered model, including the ones restore used to destroy", async () => {
-    const response = await POST();
-    const json = await response.json();
+  it("400 when the passphrase is under 12 characters, nothing exported", async () => {
+    const response = await POST(backupRequest({ passphrase: "tooshort" }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Passphrase must be at least 12 characters." });
+    expect(mocks.findManyCalls).toEqual([]);
+  });
+
+  it("400 when the passphrase is missing or not a string", async () => {
+    const response = await POST(backupRequest({}));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Passphrase must be at least 12 characters." });
+  });
+
+  it("returns 200 with the sealed envelope as an attachment, never plaintext JSON", async () => {
+    const response = await POST(backupRequest());
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    expect(disposition).toContain("attachment");
+    expect(disposition).toMatch(/filename="blackvault-backup-\d{8}-\d{6}\.sealed\.json"/);
+
+    const envelope = JSON.parse(await response.text());
+    expect(envelope.format).toBe("blackvault-sealed-backup");
+    // Not readable without the passphrase: no field of the plaintext backup
+    // (e.g. a BACKUP_MODELS key) appears in the raw envelope text.
+    expect(JSON.stringify(envelope)).not.toContain("firearms");
+  });
+
+  it("the opened envelope exports every registered model, including the ones restore used to destroy", async () => {
+    const response = await POST(backupRequest());
+    const json = await openedBody(response);
+
     for (const { key, delegate } of BACKUP_MODELS) {
-      expect(json.data[key], key).toEqual([{ id: `${delegate}-1` }]);
+      expect(json[key], key).toEqual([{ id: `${delegate}-1` }]);
     }
-    expect(json.data.maintenanceLogs).toHaveLength(1);
-    expect(json.data.batteryChangeLogs).toHaveLength(1);
-    expect(json.data.dateNormalizationAudits).toHaveLength(1);
-    expect(Object.keys(json.data).sort()).toEqual(BACKUP_MODELS.map((m) => m.key).sort());
+    expect(json.maintenanceLogs).toHaveLength(1);
+    expect(json.batteryChangeLogs).toHaveLength(1);
+    expect(json.dateNormalizationAudits).toHaveLength(1);
+    expect(
+      Object.keys(json)
+        .filter((k) => k !== "meta")
+        .sort(),
+    ).toEqual(BACKUP_MODELS.map((m) => m.key).sort());
   });
 
   it("stamps version 1.1 and counts every key", async () => {
-    const json = await (await POST()).json();
+    const json = await openedBody(await POST(backupRequest()));
 
     expect(json.meta.version).toBe("1.1");
     expect(Object.keys(json.meta.counts).sort()).toEqual(BACKUP_MODELS.map((m) => m.key).sort());
     for (const { key } of BACKUP_MODELS) expect(json.meta.counts[key]).toBe(1);
   });
 
-  it("records a BACKUP_CREATED event naming the file", async () => {
-    const json = await (await POST()).json();
+  it("a wrong passphrase cannot open another backup's envelope", async () => {
+    const response = await POST(backupRequest());
+    const envelope = JSON.parse(await response.text());
+    expect(() => openBackup("a different passphrase entirely", envelope)).toThrow(/Wrong passphrase/);
+  });
+
+  it("records a BACKUP_CREATED event naming the file and sealed: true", async () => {
+    const response = await POST(backupRequest());
+    const filename = response.headers.get("X-Backup-Filename");
     expect(mocks.recordEvent).toHaveBeenCalledWith(null, {
       action: "BACKUP_CREATED",
-      entityLabel: json.filename,
-      changes: { file: json.filename },
+      entityLabel: filename,
+      changes: { file: filename, sealed: true },
     });
   });
 
-  it("records no event when signed out or not an admin", async () => {
+  it("records no event when signed out, not an admin, or the passphrase is rejected", async () => {
     auth.validateSession.mockResolvedValue(null);
-    await POST();
+    await POST(backupRequest());
     auth.validateSession.mockResolvedValue(USER_SESSION);
-    await POST();
+    await POST(backupRequest());
+    auth.validateSession.mockResolvedValue(ADMIN_SESSION);
+    await POST(backupRequest({ passphrase: "short" }));
     expect(mocks.recordEvent).not.toHaveBeenCalled();
   });
 
   it("queries sequentially, never concurrently (SQLite connection_limit=1)", async () => {
-    await POST();
+    await POST(backupRequest());
 
     expect(mocks.findManyCalls).toHaveLength(BACKUP_MODELS.length);
     expect(mocks.maxInFlight).toBe(1);
   });
 
   it("never exports AppSettings", async () => {
-    const json = await (await POST()).json();
-    expect(json.data.appSettings).toBeUndefined();
-    expect(json.data.settings).toBeUndefined();
+    const json = await openedBody(await POST(backupRequest()));
+    expect(json.appSettings).toBeUndefined();
+    expect(json.settings).toBeUndefined();
   });
 });

@@ -36,6 +36,21 @@
 //                            for the container log the scripts read the
 //                            first-time setup token from. Unset => the generic
 //                            "[stub] ..." line, which holds no token.
+//   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
+//                            ...` prints on stdout (OLD / NEW / NEITHER).
+//                            Checked independently of BV_STUB_FAIL_ON, so a
+//                            scenario can fail the real rotation run while
+//                            still controlling what the recovery probe says.
+//   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
+//   BV_STUB_RUN_EXIT         final review F5: exit code of the (non-probe)
+//                            rotation `compose run`, e.g. 3 = the CLI refused
+//                            up front. Unset/"0" => normal handling.
+//   BV_STUB_RUN_HANDSHAKE    fix round 2 (N5): a path prefix. The (non-probe)
+//                            rotation `compose run` writes PREFIX.ready, then
+//                            waits up to 60 s for PREFIX.ack before returning.
+//                            Lets a scenario act at an exact point — after the
+//                            .bat has written .new, before the key-file swap
+//                            (e.g. lock .new so the SECOND move fails).
 
 using System;
 using System.IO;
@@ -81,6 +96,57 @@ internal static class DockerStub
             Console.WriteLine("NAME                STATUS");
             Console.WriteLine("blackvault-app      Up 4 seconds (healthy)");
             return 0;
+        }
+
+        if (string.Equals(sub, "run", StringComparison.OrdinalIgnoreCase))
+        {
+            bool isProbe = false;
+            foreach (string a in args)
+            {
+                if (a == "--probe") { isProbe = true; break; }
+            }
+            if (isProbe)
+            {
+                // Independent of BV_STUB_FAIL_ON on purpose: a scenario fails
+                // the real rotation run via BV_STUB_FAIL_ON=run and separately
+                // controls what the recovery probe reports via these two.
+                string probeStatus = Environment.GetEnvironmentVariable("BV_STUB_PROBE_STATUS");
+                if (!string.IsNullOrEmpty(probeStatus) && probeStatus != "0")
+                {
+                    int code;
+                    return int.TryParse(probeStatus, out code) ? code : 1;
+                }
+                string answer = Environment.GetEnvironmentVariable("BV_STUB_PROBE_ANSWER");
+                if (!string.IsNullOrEmpty(answer))
+                {
+                    Console.WriteLine(answer);
+                }
+                return 0;
+            }
+
+            string runExit = Environment.GetEnvironmentVariable("BV_STUB_RUN_EXIT");
+            if (!string.IsNullOrEmpty(runExit) && runExit != "0")
+            {
+                int code;
+                Console.Error.WriteLine("[stub] rotation run exiting " + runExit + " (BV_STUB_RUN_EXIT)");
+                return int.TryParse(runExit, out code) ? code : 1;
+            }
+
+            string handshake = Environment.GetEnvironmentVariable("BV_STUB_RUN_HANDSHAKE");
+            if (!string.IsNullOrEmpty(handshake))
+            {
+                File.WriteAllText(handshake + ".ready", "");
+                DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+                while (!File.Exists(handshake + ".ack"))
+                {
+                    if (DateTime.UtcNow > deadline)
+                    {
+                        Console.Error.WriteLine("[stub] BV_STUB_RUN_HANDSHAKE: no .ack within 60 s");
+                        return 1;
+                    }
+                    System.Threading.Thread.Sleep(100);
+                }
+            }
         }
 
         string failOn = Environment.GetEnvironmentVariable("BV_STUB_FAIL_ON");

@@ -11,6 +11,9 @@ import {
   normalizeFirearmNfaFields,
 } from "@/lib/nfa";
 import { normalizeGearArmorFields } from "@/lib/gear";
+import { openBackup, SealError } from "@/lib/encryption/core.mjs";
+import { ENCRYPTED_FIELDS, encryptedFieldsFor } from "@/lib/encryption/fields";
+import { configuredZone, decryptLegacyEnc, LegacyDecryptError, normalizeLegacyNfaDate } from "@/lib/encryption/startup";
 
 type WriteDelegate = {
   deleteMany: () => Promise<unknown>;
@@ -35,6 +38,109 @@ function isValidBackup(body: unknown): body is BackupBody {
 
 function isRowObject(row: unknown): row is Record<string, unknown> {
   return typeof row === "object" && row !== null && !Array.isArray(row);
+}
+
+/** `model` -> its backup payload key ("Firearm" -> "firearms"), for the models that hold an encrypted field. */
+const ENCRYPTED_MODEL_KEYS: ReadonlyArray<{ model: string; key: string }> = [
+  ...new Set(ENCRYPTED_FIELDS.map((f) => f.model)),
+].map((model) => ({ model, key: BACKUP_MODELS.find((m) => m.model === model)!.key }));
+
+/**
+ * Carry M6 ("Old backups with pre-V1 values"): a backup written before the
+ * field-encryption epic can still hold a pre-V1 `enc:...` value (the OLD,
+ * now-removed `src/lib/crypto.ts` scheme) in an encrypted field — historically
+ * only `serialNumber`. Restore writes go through the app Prisma client
+ * (@/lib/prisma), whose encryption extension would otherwise encrypt the
+ * literal string `"enc:..."` as if it were the serial. This decrypts every
+ * such value with VAULT_ENCRYPTION_KEY FIRST, in place, so the extension then
+ * encrypts the real plaintext with the CURRENT key.
+ *
+ * Mutates `rows` in place. Throws LegacyDecryptError (missing/wrong
+ * VAULT_ENCRYPTION_KEY, or a damaged value) before any row is touched by the
+ * caller's transaction — the restore must fail clean and change nothing.
+ */
+function decryptLegacyEncInRows(rows: Record<string, unknown[]>): void {
+  for (const { model, key } of ENCRYPTED_MODEL_KEYS) {
+    const fields = encryptedFieldsFor(model);
+    rows[key] = rows[key].map((row) => {
+      if (!isRowObject(row)) return row;
+      let out: Record<string, unknown> | null = null;
+      for (const d of fields) {
+        const value = row[d.field];
+        if (typeof value !== "string" || !value.startsWith("enc:")) continue;
+        const plain = decryptLegacyEnc(value);
+        out = { ...(out ?? row), [d.field]: plain };
+      }
+      return out ?? row;
+    });
+  }
+}
+
+/**
+ * Carry ("DateNormalizationAudit rows"): an old backup can carry
+ * DateNormalizationAudit rows the pre-encryption date migration wrote for
+ * `nfaApprovalDate` (Firearm/Accessory) — plaintext copies of a column that
+ * is now encrypted. The startup encryption migration
+ * (src/lib/encryption/startup.ts, runEncryptionMigration) deliberately
+ * deletes exactly these rows for the same reason; restore must not bring them
+ * back. Rows for every OTHER model/field (e.g. a date-only inventory field)
+ * are left alone.
+ */
+function dropLegacyNfaDateAudits(rows: Record<string, unknown[]>): void {
+  const dropped = new Set(
+    ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => `${d.model}:${d.field}`),
+  );
+  rows.dateNormalizationAudits = (rows.dateNormalizationAudits ?? []).filter((row) => {
+    if (!isRowObject(row)) return true;
+    return !dropped.has(`${row.model}:${row.field}`);
+  });
+}
+
+/** The models/keys/fields with a "date"-kind encrypted field (today: just Firearm.nfaApprovalDate and Accessory.nfaApprovalDate). */
+const NFA_DATE_FIELDS = ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => ({
+  model: d.model,
+  field: d.field,
+  key: BACKUP_MODELS.find((m) => m.model === d.model)!.key,
+}));
+
+/**
+ * Review I1: an old backup's `nfaApprovalDate` can be a legacy instant that
+ * is not at UTC midnight (a pre-normalisation value, from before the
+ * date-only rule existed). Restoring it used to take the encryption
+ * extension's lexical UTC-day read, which silently drops a day in any
+ * UTC-ahead zone. This instead applies the exact same rule the startup
+ * encryption migration uses (`normalizeLegacyNfaDate`, shared — see its
+ * docblock) — the owner's configured zone, defaulting to UTC — BEFORE
+ * `normalizeNfaGroups` runs, so the NFA-paperwork normaliser then sees an
+ * already-correct value (its own `toDateOnlyUTC` call becomes a no-op).
+ *
+ * Replaces the row's value with a `Date` object (the app-facing shape for
+ * this field) only when present and in a recognised form; `null`/`undefined`
+ * and anything already a non-string-non-number (shouldn't occur from JSON,
+ * handled defensively) pass through untouched.
+ */
+async function normalizeLegacyNfaDatesInRows(rows: Record<string, unknown[]>): Promise<void> {
+  const zone = await configuredZone(prisma);
+  for (const { model, field, key } of NFA_DATE_FIELDS) {
+    rows[key] = rows[key].map((row) => {
+      if (!isRowObject(row)) return row;
+      const value = row[field];
+      if (value === null || value === undefined) return row;
+      if (typeof value !== "string" && typeof value !== "number") return row;
+      return { ...row, [field]: normalizeLegacyNfaDate(model, field, value, zone) };
+    });
+  }
+}
+
+/**
+ * Detects the sealed-restore shape on `sealed` alone (review M7): requiring
+ * `passphrase` too meant `{ sealed }` with no passphrase fell through to the
+ * plain-backup path and failed as "Invalid backup file…" — a sealed envelope
+ * is never a valid PLAIN backup body, so that was always a misleading error.
+ * The passphrase-presence check right below gives the specific message.
+ */
+function isSealedRequest(body: unknown): body is { sealed: unknown; passphrase?: unknown } {
+  return typeof body === "object" && body !== null && !Array.isArray(body) && "sealed" in body;
 }
 
 /**
@@ -154,15 +260,142 @@ function backupFileName(request: NextRequest): string | undefined {
   return capped === "" ? undefined : capped;
 }
 
+/**
+ * Review round 2, M2 follow-up: the original `/^P2\d{3}$/` match was too
+ * broad. It also matched P2024 (timed out fetching a connection from the
+ * pool), P2028 (a transaction API error — e.g. the transaction already
+ * closed) and P2034 (a transaction failed due to a write conflict or
+ * deadlock, safe to retry) — none of those are about the uploaded FILE's
+ * content, and calling them 400 would misreport a real infrastructure
+ * problem as "your backup file is bad."
+ *
+ * This is an explicit ALLOW-list instead: only Prisma Client error codes
+ * that mean "the data itself doesn't fit the schema" (Prisma 5.22 error
+ * reference, https://www.prisma.io/docs/orm/reference/error-reference).
+ * Restore only ever calls `deleteMany`/`createMany` with no relational
+ * connects or raw queries, so not every content code below is reachable in
+ * practice today, but each is still a genuine "bad data" code, never an
+ * infra one, so including it is safe:
+ *
+ * - P2000  The provided value for a column is too long for the column's type.
+ * - P2001  The record searched for does not exist (a `where` target is missing).
+ * - P2002  Unique constraint failed (e.g. a duplicate serial's fingerprint).
+ * - P2003  Foreign key constraint failed on a field.
+ * - P2004  A constraint failed on the database.
+ * - P2005  The stored value is invalid for the field's type.
+ * - P2006  The provided value is not valid for the field.
+ * - P2007  Data validation error.
+ * - P2011  Null constraint violation on a field.
+ * - P2012  Missing a required value.
+ * - P2013  Missing a required argument.
+ * - P2014  The change would violate a required relation between two records.
+ * - P2019  Input error (a nested write's input doesn't satisfy a constraint).
+ * - P2020  Value out of range for the field's type.
+ *
+ * Deliberately EXCLUDED: P2008/P2009/P2010/P2016 (query building/parsing —
+ * a bug, not file content), P2015/P2017/P2018 (relation lookups — restore
+ * does no relational connects), P2021/P2022 (schema/column mismatch — a
+ * real schema-drift bug), P2024/P2028/P2034 (connection pool timeout,
+ * transaction API error, write conflict — infrastructure, not content; the
+ * review's own example, P2028, is proven to stay 500 below), P2025 (a record
+ * an update/delete/connect depends on was not found — restore only calls
+ * deleteMany and createMany, which never raise it, so it could only mean a
+ * concurrent change or a bug, never file content), and anything outside
+ * P2xxx entirely.
+ */
+const RESTORE_CONTENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "P2000", "P2001", "P2002", "P2003", "P2004", "P2005", "P2006", "P2007",
+  "P2011", "P2012", "P2013", "P2014", "P2019", "P2020",
+]);
+
+/**
+ * Whether `error` is a CONTENT problem with the uploaded file — a duplicate
+ * serial, a wrong type on a column, a non-string serial (review M2) — rather
+ * than a genuine server fault. These shapes are everything the write
+ * transaction below can throw for bad file content:
+ * - our own `TypeError` (the encryption extension's `serialize()`, or
+ *   `normalizeLegacyNfaDate` above, both throw a templated TypeError for a
+ *   value of the wrong shape);
+ * - `PrismaClientValidationError` (a non-encrypted column typed wrong —
+ *   `.name` only, duck-typed like the code check below: the SQLite and
+ *   Postgres clients each ship their own error classes, so `instanceof`
+ *   against one would miss the other);
+ * - a Prisma "known request" error whose `.code` is in the allow-list above
+ *   (the pattern `@/lib/auth/route-helpers.ts`'s `isUniqueViolation`
+ *   already uses for P2002 alone, generalised here to the rest of the
+ *   content-error family — and ONLY that family).
+ * Anything else (a real outage, a timeout, a bug) is left to stay a 500.
+ */
+function isRestoreContentError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const e = error as { name?: unknown; code?: unknown };
+  if (e.name === "PrismaClientValidationError") return true;
+  return typeof e.code === "string" && RESTORE_CONTENT_ERROR_CODES.has(e.code);
+}
+
+/**
+ * Logs a restore write failure WITHOUT the failing row's data (review M1):
+ * error name, code (when present) and which model was being written when it
+ * happened — never the error's own `.message` for a `PrismaClientValidationError`,
+ * whose message IS the full pretty-printed invocation (every field of every
+ * row in the failing write — proven by reproducing it directly against the
+ * SQLite client). Every other shape reaching here (our own TypeError, or a
+ * PrismaClientKnownRequestError like P2002) has a templated message that
+ * names a field or column, never a value, so logging it is safe.
+ */
+function logRestoreError(error: unknown, model: string | null): void {
+  const e = error as { name?: unknown; code?: unknown };
+  const name = typeof e?.name === "string" ? e.name : error instanceof Error ? error.constructor.name : typeof error;
+  const code = typeof e?.code === "string" ? e.code : undefined;
+  const message =
+    name === "PrismaClientValidationError"
+      ? "(message omitted: a PrismaClientValidationError's message embeds the failing row's full data)"
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  console.error(`POST /api/backup/restore error: ${name}${code ? ` ${code}` : ""} on ${model ?? "(unknown model)"}: ${message}`);
+}
+
 export async function POST(request: NextRequest) {
   const auth = await requireAdmin();
   if (auth) return auth;
 
-  let body: unknown;
+  let rawBody: unknown;
   try {
-    body = await request.json();
+    rawBody = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Sealed restore (spec §Restore): `{ sealed: <envelope>, passphrase }`. The
+  // plain-backup path below is unchanged for everything else, including an
+  // old v1.1 (or earlier) file that was never sealed.
+  let body: unknown;
+  let sealed: boolean;
+  if (isSealedRequest(rawBody)) {
+    const { sealed: envelope, passphrase } = rawBody;
+    if (typeof passphrase !== "string") {
+      return NextResponse.json({ error: "Passphrase is required." }, { status: 400 });
+    }
+    let opened: string;
+    try {
+      opened = openBackup(passphrase, envelope);
+    } catch (error) {
+      if (error instanceof SealError) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    try {
+      body = JSON.parse(opened);
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    sealed = true;
+  } else {
+    body = rawBody;
+    sealed = false;
   }
 
   if (!isValidBackup(body)) {
@@ -175,15 +408,48 @@ export async function POST(request: NextRequest) {
   const rows: Record<string, unknown[]> = Object.fromEntries(
     BACKUP_MODELS.map(({ key }) => [key, (body[key] as unknown[] | undefined) ?? []])
   );
+
+  // Carry M6: a legacy enc: serial must be decrypted BEFORE anything is
+  // written — this throws (and writes nothing) when VAULT_ENCRYPTION_KEY is
+  // missing or wrong for a value that needs it.
+  try {
+    decryptLegacyEncInRows(rows);
+  } catch (error) {
+    if (error instanceof LegacyDecryptError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+
+  // Review I1: zone-correct a legacy non-midnight NFA date BEFORE the NFA
+  // group is (re)normalised below, which reads whatever value is already
+  // there. An unparseable date here is a content problem with the file, not
+  // a server fault — 400, and nothing has been written yet.
+  try {
+    await normalizeLegacyNfaDatesInRows(rows);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      return NextResponse.json(
+        { error: "Invalid backup file. An NFA approval date could not be read." },
+        { status: 400 },
+      );
+    }
+    throw error;
+  }
+
   normalizeNfaGroups(rows);
   normalizeGearArmorGroups(rows);
+  dropLegacyNfaDateAudits(rows);
 
   // Row-level auditing is off for the whole restore — the replace AND the
   // post-restore date migration — or every restored row (and every normalised
   // legacy date) would be logged as the admin's own edit. The restore is
   // recorded as one RESTORE event instead (spike, "Restore: suppression covers
   // the whole handler").
-  const restored = await withoutRowAudit(async () => {
+  type RestoreOutcome = { ok: true } | { ok: false; status: 400 | 500; error: string };
+
+  const restored = await withoutRowAudit(async (): Promise<RestoreOutcome> => {
+    let failingModel: string | null = null;
     try {
       await prisma.$transaction(
         async (tx) => {
@@ -192,17 +458,30 @@ export async function POST(request: NextRequest) {
           // Delete children before parents (registry reversed), then insert parent-first.
           // AppSettings is not in the registry, so it is never touched — preserves LAN/path config.
           for (const { delegate } of [...BACKUP_MODELS].reverse()) {
+            failingModel = delegate;
             await delegates[delegate].deleteMany();
           }
           for (const { delegate, key } of BACKUP_MODELS) {
+            failingModel = delegate;
             if (rows[key].length) await delegates[delegate].createMany({ data: rows[key] });
           }
         },
         { timeout: 30000 }
       );
     } catch (error) {
-      console.error("POST /api/backup/restore error:", error);
-      return false;
+      logRestoreError(error, failingModel);
+      // Review M2: a content problem with the uploaded file (a duplicate
+      // serial, a wrong type on a column) is a 400 with a safe, generic
+      // message — the transaction already rolled back, same as the 500
+      // case, so "nothing was modified" holds either way. Anything else
+      // (unclassified) stays a 500: it may be a genuine server fault.
+      return isRestoreContentError(error)
+        ? {
+            ok: false,
+            status: 400,
+            error: "The backup file's data could not be restored: it does not match what this version of BlackVault expects.",
+          }
+        : { ok: false, status: 500, error: "Restore failed. Your data has not been modified." };
     }
 
     // A pre-upgrade backup brings legacy date-only values back; normalize them now
@@ -213,14 +492,11 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       console.error("[date-migration] failed after restore:", error);
     }
-    return true;
+    return { ok: true };
   });
 
-  if (!restored) {
-    return NextResponse.json(
-      { error: "Restore failed. Your data has not been modified." },
-      { status: 500 }
-    );
+  if (!restored.ok) {
+    return NextResponse.json({ error: restored.error }, { status: restored.status });
   }
 
   const counts = Object.fromEntries(BACKUP_MODELS.map(({ key }) => [key, rows[key].length]));
@@ -231,7 +507,7 @@ export async function POST(request: NextRequest) {
   await recordEventBestEffort(null, {
     action: "RESTORE",
     entityLabel: file ?? "Backup restore",
-    changes: file ? { file, counts } : { counts },
+    changes: file ? { file, counts, sealed } : { counts, sealed },
   });
 
   return NextResponse.json({

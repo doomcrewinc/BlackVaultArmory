@@ -203,6 +203,7 @@ describe(`audit capture against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     const events = await eventsFrom(() =>
       prisma.firearm.update({ where: { id: f.id }, data: { serialNumber: `${SERIAL_MARK}changed` } }),
     );
+    // The fingerprint never leaves the encryption extension (final review F2), so only the serial is listed.
     expect(changesOf(events[0])).toEqual({ serialNumber: [REDACTED, REDACTED] });
   });
 

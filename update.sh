@@ -15,6 +15,91 @@ echo ""
 . ./scripts/public-url-prompts.sh
 # shellcheck source=scripts/setup-token.sh
 . ./scripts/setup-token.sh
+# shellcheck source=scripts/encryption-key.sh
+. ./scripts/encryption-key.sh
+
+# ── install.bat / update.bat line endings (fix rounds 1-2, I4) ──
+# Releases before this one stored install.bat and update.bat with CRLF in
+# the index while .gitattributes says `text eol=crlf`, so Git reports both as
+# modified on every checkout, and a pull that changes them aborts ("Your
+# local changes ... would be overwritten"). When the ONLY difference is line
+# endings, Git is made to re-check the two files byte for byte (a temporary
+# `-text` in .git/info/attributes, then `git update-index --refresh`), which
+# records them as unchanged: they ARE the committed bytes. `git checkout --
+# <file>` does not help (it rewrites the same bytes and Git still reports them
+# modified), and no file is rewritten. Real local edits are left alone.
+# update.bat mirrors this in :clear_eol_only_change.
+#
+# The override must never outlive this script: left behind, every later
+# checkout would write the .bat files with LF on Windows. So each added line
+# carries the marker attribute `blackvault-update` (a `# comment` cannot be
+# used: Git rejects a line with a trailing `#` token and ignores the whole
+# line), EXIT/INT/TERM restore the file, and every run first strips marked
+# lines left by a run that could not restore (SIGKILL, power loss).
+BV_EOL_MARK="blackvault-update"
+BV_EOL_ATTRS=""
+BV_EOL_BACKUP=""
+BV_EOL_ACTIVE=""
+
+# Self-heal: removes override lines (and backups) left by an interrupted run.
+heal_bat_eol_override() {
+  local attrs tmp b
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  attrs=$(git rev-parse --git-path info/attributes 2>/dev/null) || return 0
+  for b in "$attrs".blackvault-update.*; do
+    if [ -e "$b" ]; then rm -f "$b"; fi
+  done
+  [ -f "$attrs" ] || return 0
+  grep -q " $BV_EOL_MARK\$" "$attrs" || return 0
+  echo "Removing a line-ending override left in .git/info/attributes by an interrupted update..."
+  tmp="$attrs.blackvault-heal.$$"
+  grep -v " $BV_EOL_MARK\$" "$attrs" > "$tmp" || true
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$attrs"; else rm -f "$tmp" "$attrs"; fi
+}
+
+# Puts .git/info/attributes back exactly as it was. Safe to call twice.
+restore_bat_eol_override() {
+  [ -n "$BV_EOL_ACTIVE" ] || return 0
+  BV_EOL_ACTIVE=""
+  if [ -n "$BV_EOL_BACKUP" ]; then mv -f "$BV_EOL_BACKUP" "$BV_EOL_ATTRS"; else rm -f "$BV_EOL_ATTRS"; fi
+  # Whatever happened, no marked line may survive.
+  heal_bat_eol_override >/dev/null 2>&1 || true
+}
+
+clear_bat_eol_only_changes() {
+  git diff --quiet -- install.bat update.bat 2>/dev/null && return 0
+  if ! git diff --ignore-cr-at-eol --quiet -- install.bat update.bat 2>/dev/null; then
+    echo "Note: install.bat or update.bat has local edits; they are left alone."
+    return 0
+  fi
+  echo "Clearing a line-ending-only difference in install.bat / update.bat before pulling..."
+  BV_EOL_ATTRS=$(git rev-parse --git-path info/attributes) || return 0
+  mkdir -p "$(dirname "$BV_EOL_ATTRS")" || return 0
+  BV_EOL_BACKUP=""
+  if [ -f "$BV_EOL_ATTRS" ]; then
+    BV_EOL_BACKUP="$BV_EOL_ATTRS.blackvault-update.$$"
+    cp -p "$BV_EOL_ATTRS" "$BV_EOL_BACKUP" || return 0
+  fi
+  BV_EOL_ACTIVE=1
+  trap 'restore_bat_eol_override' EXIT
+  trap 'restore_bat_eol_override; exit 130' INT
+  trap 'restore_bat_eol_override; exit 143' TERM
+  # An existing file without a final newline: start our lines on a new one.
+  if [ -s "$BV_EOL_ATTRS" ] && [ -n "$(tail -c 1 "$BV_EOL_ATTRS")" ]; then
+    printf '\n' >> "$BV_EOL_ATTRS"
+  fi
+  printf 'install.bat -text %s\nupdate.bat -text %s\n' "$BV_EOL_MARK" "$BV_EOL_MARK" >> "$BV_EOL_ATTRS"
+  # The files must be older than the index Git writes next, or Git treats
+  # them as "racily clean" and compares them again with the normal attributes.
+  sleep 1
+  git update-index -q --refresh >/dev/null 2>&1 || true
+  restore_bat_eol_override
+  trap - EXIT INT TERM
+}
+
+# Every run, before anything else.
+heal_bat_eol_override
+
 
 # ── Docker Compose v2.20+ ─────────────────────────────────────
 # docker-compose.yml needs it. Exits before anything is touched (no .env
@@ -100,11 +185,29 @@ fi
 echo ""
 
 # ── Pull latest code ──────────────────────────────────────────
+# `git pull` replaces this file, but bash keeps running the copy it already
+# opened: everything below would be the OLD script's steps. So when the pull
+# brought anything new, start over with the new update.sh. The pull is
+# skipped on that second run (BLACKVAULT_UPDATE_REEXEC=1); everything before
+# this point is safe to run twice.
 if git rev-parse --git-dir > /dev/null 2>&1; then
-  echo "Pulling latest updates from GitHub..."
-  git pull
-  echo ""
+  if [ -n "${BLACKVAULT_UPDATE_REEXEC:-}" ]; then
+    echo "Running the updated update.sh."
+    echo ""
+  else
+    clear_bat_eol_only_changes
+    echo "Pulling latest updates from GitHub..."
+    HEAD_BEFORE=$(git rev-parse HEAD 2>/dev/null || true)
+    git pull
+    echo ""
+    if [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$HEAD_BEFORE" ]; then
+      echo "Restarting the update with the new update.sh..."
+      echo ""
+      BLACKVAULT_UPDATE_REEXEC=1 exec bash ./update.sh "$@"
+    fi
+  fi
 fi
+unset BLACKVAULT_UPDATE_REEXEC
 
 # ── Public URL, trusted proxies, direct access ────────────────
 # BLACKVAULT_PUBLIC_URL is required from this release on: the container will
@@ -137,10 +240,34 @@ if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
   set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
 fi
 
-# ── Rebuild and restart ───────────────────────────────────────
+# ── Field-encryption key ──────────────────────────────────────
+# Created only if missing (scripts/encryption-key.sh); an existing key is
+# never touched. The new image refuses to start without one.
+echo ""
+ensure_encryption_key || {
+  echo "       Nothing was rebuilt or restarted."
+  exit 1
+}
+
+# ── Rebuild ───────────────────────────────────────────────────
 echo "Rebuilding BlackVault image..."
 $COMPOSE build --pull
 
+# ── Snapshot the database, BEFORE the new image starts ────────
+# The first start of a new version can change the stored data (this release
+# encrypts serial numbers and NFA records). On SQLite the snapshot stops the
+# app; if it fails, the old container is started again and the update stops.
+echo ""
+echo "Snapshotting the database..."
+if ! ./scripts/db-snapshot.sh; then
+  echo ""
+  echo "ERROR: the database snapshot failed, so the update stopped here. See above."
+  echo "       The new version was NOT started."
+  $COMPOSE start blackvault >/dev/null 2>&1 || true
+  exit 1
+fi
+
+# ── Restart ───────────────────────────────────────────────────
 echo ""
 echo "Restarting..."
 $COMPOSE up -d

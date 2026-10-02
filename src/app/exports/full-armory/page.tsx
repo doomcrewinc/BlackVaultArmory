@@ -87,6 +87,11 @@ export default function FullArmoryExportPage() {
     <div className="min-h-full">
       <PageHeader title="FULL ARMORY EXPORT" subtitle="CSV + PDF export with explicit include controls" />
       <div className="p-4 sm:p-6 space-y-6">
+        <p className="rounded border border-[#F5A623]/30 bg-[#F5A623]/10 px-3 py-2 text-sm text-vault-text">
+          Exports contain serial numbers in plain text. Fields are encrypted at rest in the database;
+          a CSV or PDF export decrypts them so the file can be read without BlackVault.
+        </p>
+
         <div className="bg-vault-surface border border-vault-border rounded-lg p-4 space-y-4">
           <div>
             <p className="text-xs uppercase tracking-widest text-vault-text-faint mb-2">Preset</p>

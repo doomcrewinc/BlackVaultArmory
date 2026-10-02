@@ -56,7 +56,13 @@ async function renderLoaded(isAdmin: boolean) {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  Object.defineProperty(window, "isSecureContext", { value: undefined, configurable: true });
 });
+
+/** jsdom doesn't implement isSecureContext (always undefined); stub it directly to test the M5 signal. */
+function stubSecureContext(value: boolean) {
+  Object.defineProperty(window, "isSecureContext", { value, configurable: true });
+}
 
 describe("SettingsView — direct-access control", () => {
   it("an admin sees a toggle", async () => {
@@ -194,6 +200,22 @@ describe("SettingsView — admin-only sections", () => {
   });
 });
 
+describe("SettingsView — plain-HTTP warning (review M5)", () => {
+  it("shows the warning when the page is not a secure context", async () => {
+    stubSecureContext(false);
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(screen.getAllByText(/not using HTTPS/i).length).toBeGreaterThan(0);
+  });
+
+  it("hides the warning on a secure context (e.g. localhost, which the brief's own signal — isSecureContext — already treats as secure)", async () => {
+    stubSecureContext(true);
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(screen.queryByText(/not using HTTPS/i)).toBeNull();
+  });
+});
+
 describe("SettingsView — restore", () => {
   // Spec §Restore: the RESTORE audit event names the backup file. The file
   // name travels URI-encoded in X-Backup-Filename; the body is unchanged.
@@ -215,6 +237,7 @@ describe("SettingsView — restore", () => {
     const backup = { meta: { version: "1.1" } };
     const file = new File([JSON.stringify(backup)], "my backup (é).json", { type: "application/json" });
     fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /^restore$/i })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
     fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
 
@@ -249,6 +272,7 @@ describe("SettingsView — restore", () => {
     const backup = { meta: { version: "1.1" } };
     const file = new File([JSON.stringify(backup)], "backup.json", { type: "application/json" });
     fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /^restore$/i })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
     fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
 
@@ -256,5 +280,222 @@ describe("SettingsView — restore", () => {
     const headers = restoreCalls[0].headers as Record<string, string>;
     expect(headers).not.toHaveProperty("X-Backup-Filename");
     expect(JSON.parse(String(restoreCalls[0].body))).toEqual(backup);
+  });
+
+  // A plain (unsealed) file: the yellow warning shows, no passphrase field,
+  // and the body sent is the plain backup JSON unchanged.
+  it("warns that a plain backup file is unencrypted, and restores it without a passphrase", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const restoreCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup/restore" && init?.method === "POST") {
+          restoreCalls.push(init);
+          return { ok: true, json: async () => ({ success: true, counts: {} }) } as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    const backup = { meta: { version: "1.1" } };
+    const file = new File([JSON.stringify(backup)], "plain-backup.json", { type: "application/json" });
+    fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByText(/not encrypted/i)).toBeTruthy());
+    expect(document.getElementById("restorePassphrase")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
+
+    await waitFor(() => expect(restoreCalls).toHaveLength(1));
+    expect(JSON.parse(String(restoreCalls[0].body))).toEqual(backup);
+  });
+
+  // A sealed envelope: the passphrase field appears instead of the plain-file
+  // warning, and the request wraps it as { sealed, passphrase }.
+  it("detects a sealed backup file, asks for its passphrase, and sends { sealed, passphrase }", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const restoreCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup/restore" && init?.method === "POST") {
+          restoreCalls.push(init);
+          return { ok: true, json: async () => ({ success: true, counts: {} }) } as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    const envelope = {
+      format: "blackvault-sealed-backup",
+      version: 1,
+      kdf: { name: "scrypt", N: 65536, r: 8, p: 1, salt: "AAAA" },
+      cipher: "aes-256-gcm",
+      iv: "AAAA",
+      tag: "AAAA",
+      data: "AAAA",
+    };
+    const file = new File([JSON.stringify(envelope)], "sealed-backup.json", { type: "application/json" });
+    fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+
+    await waitFor(() => expect(document.getElementById("restorePassphrase")).toBeTruthy());
+    expect(screen.queryByText(/not encrypted/i)).toBeNull();
+    // Review M4: never "current-password" — that invites a password manager
+    // to offer the admin's own LOGIN password here. Browsers ignore a bare
+    // autocomplete="off" on password fields, so it needs a distinctive name too.
+    expect(document.getElementById("restorePassphrase")).toHaveAttribute("autocomplete", "off");
+    expect(document.getElementById("restorePassphrase")).not.toHaveAttribute("name", "password");
+    // The Restore button only appears once the file is parsed; disabled
+    // because no passphrase has been entered yet — nothing to send to it.
+    fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+    fireEvent.change(document.getElementById("restorePassphrase")!, { target: { value: "a correct horse battery" } });
+    fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
+
+    await waitFor(() => expect(restoreCalls).toHaveLength(1));
+    expect(JSON.parse(String(restoreCalls[0].body))).toEqual({
+      sealed: envelope,
+      passphrase: "a correct horse battery",
+    });
+  });
+
+  // Found via the manual browser check: after a wrong-passphrase 400 the
+  // Restore button must come back (restoreStatus is "error", not "idle"),
+  // or the only way to retry is re-choosing the file.
+  it("lets the user retry with a different passphrase after a wrong-passphrase error", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const restoreCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup/restore" && init?.method === "POST") {
+          restoreCalls.push(init);
+          const { passphrase } = JSON.parse(String(init.body));
+          if (passphrase !== "the real passphrase") {
+            return { ok: false, json: async () => ({ error: "Wrong passphrase or damaged file." }) } as Response;
+          }
+          return { ok: true, json: async () => ({ success: true, counts: {} }) } as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    const envelope = {
+      format: "blackvault-sealed-backup",
+      version: 1,
+      kdf: { name: "scrypt", N: 65536, r: 8, p: 1, salt: "AAAA" },
+      cipher: "aes-256-gcm",
+      iv: "AAAA",
+      tag: "AAAA",
+      data: "AAAA",
+    };
+    const file = new File([JSON.stringify(envelope)], "sealed-backup.json", { type: "application/json" });
+    fireEvent.change(document.getElementById("restore-file-input")!, { target: { files: [file] } });
+    await waitFor(() => expect(document.getElementById("restorePassphrase")).toBeTruthy());
+
+    fireEvent.change(document.getElementById("restorePassphrase")!, { target: { value: "wrong one" } });
+    fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
+    await waitFor(() => expect(screen.getByText("Wrong passphrase or damaged file.")).toBeTruthy());
+
+    // The Restore button must still be there — no re-upload required.
+    fireEvent.change(document.getElementById("restorePassphrase")!, { target: { value: "the real passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, restore/i }));
+
+    await waitFor(() => expect(restoreCalls).toHaveLength(2));
+    expect(JSON.parse(String(restoreCalls[1].body)).passphrase).toBe("the real passphrase");
+    await waitFor(() => expect(screen.getByText(/Restore complete/i)).toBeTruthy());
+  });
+});
+
+describe("SettingsView — sealed backup creation", () => {
+  it("keeps the backup-creation fields as new-password (review M4 only changes the restore field)", async () => {
+    stubFetch({ allowed: true, source: "setting" });
+    await renderLoaded(true);
+    expect(document.getElementById("backupPassphrase")).toHaveAttribute("autocomplete", "new-password");
+    expect(document.getElementById("backupPassphraseConfirm")).toHaveAttribute("autocomplete", "new-password");
+  });
+
+  it("rejects a passphrase under 12 characters without calling the API", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const backupCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup" && init?.method === "POST") {
+          backupCalls.push(init);
+          return { ok: true, blob: async () => new Blob(["{}"]), headers: new Headers() } as unknown as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    fireEvent.change(document.getElementById("backupPassphrase")!, { target: { value: "short" } });
+    fireEvent.change(document.getElementById("backupPassphraseConfirm")!, { target: { value: "short" } });
+    fireEvent.click(screen.getByRole("button", { name: /backup now/i }));
+
+    expect(screen.getByText("Passphrase must be at least 12 characters.")).toBeTruthy();
+    expect(backupCalls).toHaveLength(0);
+  });
+
+  it("rejects a passphrase/confirmation mismatch without calling the API", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const backupCalls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup" && init?.method === "POST") {
+          backupCalls.push(init);
+          return { ok: true, blob: async () => new Blob(["{}"]), headers: new Headers() } as unknown as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    await renderLoaded(true);
+
+    fireEvent.change(document.getElementById("backupPassphrase")!, { target: { value: "correct horse battery" } });
+    fireEvent.change(document.getElementById("backupPassphraseConfirm")!, { target: { value: "correct horse staple" } });
+    fireEvent.click(screen.getByRole("button", { name: /backup now/i }));
+
+    expect(screen.getByText(/do not match/i)).toBeTruthy();
+    expect(backupCalls).toHaveLength(0);
+  });
+
+  it("sends the passphrase and downloads the sealed envelope the server returns", async () => {
+    const base = stubFetch({ allowed: true, source: "setting" });
+    const backupCalls: RequestInit[] = [];
+    const sealedBody = JSON.stringify({ format: "blackvault-sealed-backup", version: 1 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup" && init?.method === "POST") {
+          backupCalls.push(init);
+          return {
+            ok: true,
+            blob: async () => new Blob([sealedBody]),
+            headers: new Headers({ "X-Backup-Filename": "blackvault-backup-20260930.sealed.json" }),
+          } as unknown as Response;
+        }
+        return base(url, init);
+      }),
+    );
+    // jsdom has no createObjectURL; the download mechanics are not what this
+    // test is about, so they are stubbed rather than left to throw.
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:mock"), revokeObjectURL: vi.fn() });
+    await renderLoaded(true);
+
+    fireEvent.change(document.getElementById("backupPassphrase")!, { target: { value: "correct horse battery" } });
+    fireEvent.change(document.getElementById("backupPassphraseConfirm")!, { target: { value: "correct horse battery" } });
+    fireEvent.click(screen.getByRole("button", { name: /backup now/i }));
+
+    await waitFor(() => expect(backupCalls).toHaveLength(1));
+    expect(JSON.parse(String(backupCalls[0].body))).toEqual({ passphrase: "correct horse battery" });
+    await waitFor(() => expect(screen.getByText("blackvault-backup-20260930.sealed.json")).toBeTruthy());
   });
 });

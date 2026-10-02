@@ -29,6 +29,19 @@
  * checking — passed, which is the exact shape of the hand-maintained list
  * that caused the backup data-loss bug.
  */
+// Firearm.nfaApprovalDate and Accessory.nfaApprovalDate stay registered here
+// even though the field-encryption spec (docs/superpowers/specs/
+// 2026-09-30-field-encryption-design.md, D1) type-changes their schema
+// column from `DateTime` to `String` (src/lib/encryption/fields.ts) so
+// ciphertext can live in it. Both fields are still a calendar day, not an
+// instant, to every reader of this list — the audit summary's
+// isDateOnlyField() (src/lib/audit/summary.ts) still needs to format a
+// decrypted nfaApprovalDate as a date, not a timestamp.
+// - date-migration.test.ts's schema guard counts them through the registry's
+//   `kind: "date"` entries, since the DMMF no longer reports them as DateTime;
+// - runLegacyDateMigration (src/lib/date-migration.ts) skips them: the
+//   startup encryption migration (src/lib/encryption/startup.ts) normalises
+//   them while it encrypts them.
 export const DATE_ONLY_FIELDS = [
   { model: "Firearm", delegate: "firearm", field: "acquisitionDate" },
   { model: "Firearm", delegate: "firearm", field: "lastMaintenanceDate" },

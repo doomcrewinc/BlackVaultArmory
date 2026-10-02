@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-  Runs install.bat and update.bat non-interactively and asserts what they did.
+  Runs install.bat, update.bat and rotate-key.bat non-interactively and
+  asserts what they did.
 
 .DESCRIPTION
-  These two scripts have NEVER been executed on Windows — the maintainer's
+  These scripts have NEVER been executed on Windows — the maintainer's
   machine has no cmd.exe — so this is the only verification that exists for
   them. It is driven by .github/workflows/ci.yml (windows-latest) and can be
   run by hand on any Windows box:
@@ -95,13 +96,24 @@ function Assert([bool]$Condition, [string]$Message) {
   else { Write-Host "    FAIL $Message" -ForegroundColor Red; $script:Failures.Add($Message) }
 }
 
+# Copies one repo file (a path relative to the repo root, sub-folders
+# included) into $DestDir at the same relative path.
+function Copy-RepoFile([string]$Rel, [string]$DestDir) {
+  $src = Join-Path $RepoRoot $Rel
+  if (-not (Test-Path $src)) { return }
+  $dest = Join-Path $DestDir $Rel
+  New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+  Copy-Item $src $dest
+}
+
+# Task 7: update.bat calls scripts\db-snapshot.bat (the REAL one is copied,
+# so every update scenario also exercises it against the docker stub).
+$TreeFiles = @("install.bat", "update.bat", "docker-compose.yml", ".env.example", "scripts\db-snapshot.bat", "secrets\.gitignore")
+
 function New-Sandbox([string]$Name) {
   $dir = Join-Path $Sandboxes $Name
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  foreach ($f in @("install.bat", "update.bat", "docker-compose.yml", ".env.example")) {
-    $src = Join-Path $RepoRoot $f
-    if (Test-Path $src) { Copy-Item $src $dir }
-  }
+  foreach ($f in $TreeFiles) { Copy-RepoFile $f $dir }
   return $dir
 }
 
@@ -409,6 +421,7 @@ Assert ($r.Output -match "Public URL: the address people open BlackVault at") "r
 Assert ($r.Output -match "No input received; BLACKVAULT_PUBLIC_URL is required\. Aborting\.") "says why it stopped"
 Assert (-not (Test-Path (Join-Path $d ".env"))) "wrote NO .env"
 Assert ($r.StubLog -notmatch "compose build") "did NOT build"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "Task 7: wrote NO key file"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario P4b
@@ -426,10 +439,7 @@ Show-EvidenceIfFailed $r
 function New-GitRemote([string]$Name, [string]$UpdateBatSource) {
   $origin = Join-Path $Sandboxes "$Name-origin"
   New-Item -ItemType Directory -Force -Path $origin | Out-Null
-  foreach ($f in @("install.bat", "docker-compose.yml", ".env.example")) {
-    $src = Join-Path $RepoRoot $f
-    if (Test-Path $src) { Copy-Item $src $origin }
-  }
+  foreach ($f in $TreeFiles) { if ($f -ne "update.bat") { Copy-RepoFile $f $origin } }
   Copy-Item $UpdateBatSource (Join-Path $origin "update.bat")
   Set-Content -Path (Join-Path $origin "README.md") -Value "v1" -Encoding Ascii
   & git -C $origin init -q --initial-branch=main | Out-Null
@@ -502,6 +512,8 @@ Show-EvidenceIfFailed $r
 # ---------------------------------------------------------------- scenario P5
 Write-Scenario "update.bat - second run asks only whether the URL is still current"
 $envBefore = [IO.File]::ReadAllBytes((Join-Path $work ".env"))
+$keyPathP5 = Join-Path $work "secrets\blackvault_encryption_key"
+$keyBeforeP5 = if (Test-Path $keyPathP5) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($keyPathP5)) } else { "" }
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.Output -match "Public URL is: https://vault\.example\.com") "showed the current URL"
@@ -511,6 +523,9 @@ Assert ($r.Output -notmatch "Keep allowing direct access") "did NOT ask about di
 Assert ($r.Output -notmatch "Trusted proxies:") "did NOT ask for trusted proxies again"
 Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work ".env"))) -eq [Convert]::ToBase64String($envBefore)) ".env byte-for-byte unchanged"
 Assert ($r.StubLog -match "compose up -d") "still restarted"
+Assert (($keyBeforeP5 -ne "") -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes($keyPathP5)) -eq $keyBeforeP5)) "Task 7: the key file from the first run is kept byte for byte"
+Assert ($r.Output -match "existing, unchanged") "Task 7: says the existing key was kept"
+Assert ($r.Output -notmatch "BACK THIS FILE UP") "Task 7: no new-key message on the second run"
 
 Show-EvidenceIfFailed $r
 
@@ -852,6 +867,875 @@ Assert ($r.StubLog -notmatch "compose logs blackvault") "never read the log"
 Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "no token shown without the call"
 Show-EvidenceIfFailed $r
 
+# =============================================================================
+#                                rotate-key.bat
+# =============================================================================
+# Covers Task 6 of the field-encryption plan: rotate-key.bat has, like
+# install.bat/update.bat, never run on real cmd.exe before this. Docker is
+# stubbed exactly as above. These scenarios supply their OWN stand-in copy of
+# scripts\db-snapshot.bat inside each sandbox — the same boundary the docker
+# stub sits at: proving THIS script's logic. The real scripts\db-snapshot.bat
+# has its own scenarios (DS*, below).
+
+function New-RotateSandbox {
+  param([string]$Name, [switch]$WithSnapshot, [switch]$SnapshotFails)
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("rotate-key.bat", "docker-compose.yml")) {
+    $src = Join-Path $RepoRoot $f
+    if (Test-Path $src) { Copy-Item $src $dir }
+  }
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "secrets") | Out-Null
+  # A fixed, obviously-fake 64-hex-char "key" — never a real one, and never
+  # asserted to be secret in these scenarios (it's test fixture data).
+  Set-Content -Path (Join-Path $dir "secrets\blackvault_encryption_key") -Value ("ab" * 32) -NoNewline -Encoding Ascii
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "scripts") | Out-Null
+  if ($WithSnapshot) {
+    $code = if ($SnapshotFails) { "exit /b 1" } else { "exit /b 0" }
+    Set-Content -Path (Join-Path $dir "scripts\db-snapshot.bat") -Value @("@echo off", "echo [stub snapshot]", $code) -Encoding Ascii
+  }
+  return $dir
+}
+
+# Fix round 2 (N5): poll for a file instead of sleeping a fixed time.
+function Wait-ForFile([string]$Path, [int]$TimeoutSeconds = 60) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while (-not (Test-Path $Path)) {
+    if ((Get-Date) -gt $deadline) { return $false }
+    Start-Sleep -Milliseconds 100
+  }
+  return $true
+}
+
+# Holds an exclusive lock (FileShare.None) on $Path in a background job, so
+# `move /y` on it fails with a real Windows sharing violation. When $WaitFor
+# is given, the job first waits for that file to appear (the docker stub's
+# BV_STUB_RUN_HANDSHAKE .ready file). It writes $Flag once the lock is held;
+# callers wait for $Flag, never for a fixed time (fix round 2, N5). The job
+# closes the handle itself when "$Flag.release" appears, so the lock is
+# provably gone before anything after Stop-FileLockJob touches the file
+# (stopping a job does not run its remaining statements).
+function Start-FileLockJob([string]$Path, [string]$Flag, [string]$WaitFor = "") {
+  return Start-Job -ArgumentList $Path, $Flag, $WaitFor -ScriptBlock {
+    param($p, $flag, $waitFor)
+    if ($waitFor) {
+      $deadline = (Get-Date).AddSeconds(90)
+      while (-not (Test-Path $waitFor)) {
+        if ((Get-Date) -gt $deadline) { return }
+        Start-Sleep -Milliseconds 100
+      }
+    }
+    $fs = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+      Set-Content -Path $flag -Value "locked" -Encoding Ascii
+      $deadline = (Get-Date).AddSeconds(240)
+      while (-not (Test-Path "$flag.release")) {
+        if ((Get-Date) -gt $deadline) { break }
+        Start-Sleep -Milliseconds 100
+      }
+    } finally {
+      $fs.Close()
+    }
+  }
+}
+
+function Stop-FileLockJob($Job, [string]$Flag) {
+  Set-Content -Path "$Flag.release" -Value "release" -Encoding Ascii
+  Wait-Job $Job -Timeout 30 | Out-Null
+  Stop-Job $Job -ErrorAction SilentlyContinue | Out-Null
+  Remove-Job $Job -Force -ErrorAction SilentlyContinue | Out-Null
+}
+
+# Runs, one by one and literally, every printed recovery line that starts
+# with "move /y" (fix round 2, N1: following the text must keep the OLD key).
+# Returns how many it ran.
+function Invoke-PrintedMoves([string]$Dir, [string]$Output) {
+  $moves = @($Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^move /y ' })
+  foreach ($m in $moves) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/d /c $m"
+    $psi.WorkingDirectory = $Dir
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc.WaitForExit(30000)) { $proc.Kill() }
+  }
+  return $moves.Count
+}
+
+# ---------------------------------------------------------------- scenario RK1
+Write-Scenario "rotate-key.bat - no secrets\blackvault_encryption_key: exits 1, touches nothing"
+$d = New-RotateSandbox "rotate-nokey"
+Remove-Item (Join-Path $d "secrets\blackvault_encryption_key") -Force
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "not found\. Nothing to rotate\.") "explains there is no key to rotate"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK2
+Write-Scenario "rotate-key.bat - Docker Compose too old: exits 1 before stopping anything"
+$d = New-RotateSandbox "rotate-old-compose"
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "2\.20 or newer") "explains the v2.20 requirement"
+Assert ($r.StubLog -notmatch "compose stop") "never tried to stop the app"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "key file untouched"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK3
+Write-Scenario "rotate-key.bat - scripts\db-snapshot.bat missing: the call fails, so it refuses, restarts, exits 1 (ruling R4; the explicit missing-file check was removed in Task 7)"
+$d = New-RotateSandbox "rotate-no-snapshot"
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose stop blackvault") "stopped the app first"
+Assert ($r.Output -match "database snapshot failed") "treats the missing snapshot script as a failed snapshot"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert ($r.StubLog -notmatch "compose run") "never attempted the rotation itself"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new key file left behind"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "key file byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK4
+Write-Scenario "rotate-key.bat - snapshot script fails: refuses, restarts, exits 1"
+$d = New-RotateSandbox "rotate-snapshot-fails" -WithSnapshot -SnapshotFails
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "\[stub snapshot\]") "ran the snapshot script"
+Assert ($r.Output -match "database snapshot failed") "says the snapshot failed"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert ($r.StubLog -notmatch "compose run") "never attempted the rotation itself"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "key file byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RK5
+Write-Scenario "rotate-key.bat - full success: snapshot, new key generated, rotation run, key files swapped, restarted"
+$d = New-RotateSandbox "rotate-success" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose stop blackvault") "stopped the app"
+Assert ($r.Output -match "\[stub snapshot\]") "ran the snapshot script"
+# Task 7 (I3): no -v bind of secrets\ - docker-compose.yml mounts it and the
+# image's entrypoint copies both keys into /run/secrets for the app user.
+Assert ($r.StubLog -match [regex]::Escape("compose run --rm blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new")) "ran the rotation with the exact command, keys read from /run/secrets"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no stray .new file after a successful swap"
+# I2: the previous key is kept under a TIMESTAMPED name, never the bare ".old"
+# (a second rotation must never silently overwrite the file the pre-rotation
+# snapshot is sealed under).
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1) "exactly one timestamped .old-<YYYYmmdd-HHMMSS> file was created (got $($oldFiles.Count))"
+Assert ($oldFiles[0].Name -match "^blackvault_encryption_key\.old-\d{8}-\d{6}") "the .old file name matches the YYYYmmdd-HHMMSS pattern"
+Assert ((Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "the timestamped .old file holds the ORIGINAL key"
+$keyAfter = (Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim()
+Assert ($keyAfter -match "^[0-9a-f]{64}$") "the active key file is now 64 lowercase hex chars (real CSPRNG path)"
+Assert ($keyAfter -ne $keyBefore.Trim()) "the active key actually changed"
+Assert ($r.Output -notmatch [regex]::Escape($keyAfter)) "the new key is never echoed to the terminal"
+Assert ($r.Output -match "Key rotation complete") "prints the completion banner"
+Assert ($r.Output -match "Back up secrets\\blackvault_encryption_key now\.") "tells the admin to back up the active key"
+Assert ($r.Output -match [regex]::Escape("now saved as secrets\$($oldFiles[0].Name)")) "names the exact .old file the pre-rotation snapshot needs"
+Assert ($r.Output -match "can only be opened with it") "says the snapshot can only be opened with the .old key, so it must be kept"
+# M5: assert the active key file's ACL was actually restricted (M2: applied
+# to the file BEFORE content was written; `move` preserves it across the rename).
+$acl = Get-Acl (Join-Path $d "secrets\blackvault_encryption_key")
+Assert ($acl.AreAccessRulesProtected) "inheritance is disabled on the active key file (icacls /inheritance:r took effect)"
+# N5: compare SIDs with SIDs. $acl.Access yields NTAccount identities, which
+# never -eq the SecurityIdentifier from WindowsIdentity.
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+$grant = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+  $_.IdentityReference.Value -eq $currentSid -and
+  $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+  -not $_.IsInherited -and
+  (($_.FileSystemRights -band $fullControl) -eq $fullControl)
+})
+Assert ($grant.Count -gt 0) "the current user's SID has an explicit, non-inherited Full Control grant on the active key file"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RK6
+Write-Scenario "rotate-key.bat - rotation run fails, probe confirms OLD: sets .new aside as .new.unused-<ts> (never deleted), restarts on the OLD key, exits 1"
+$d = New-RotateSandbox "rotate-run-fails-old" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "OLD" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose run") "attempted the rotation"
+Assert ($r.Output -match "Confirmed: the database is still encrypted with the OLD key") "reports the probe's OLD answer"
+Assert ($r.StubLog -match "compose start blackvault") "restarted BlackVault on the previous key"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new name is free again for the next rotation"
+# N2 (ruling): the wrappers never delete a key file; the unused one is renamed.
+$unused = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*")
+Assert ($unused.Count -eq 1) "exactly one .new.unused-<ts> file was kept (got $($unused.Count))"
+if ($unused.Count -eq 1) {
+  Assert ($unused[0].Name -match "^blackvault_encryption_key\.new\.unused-\d{8}-\d{6}") "the .new.unused file name matches the YYYYmmdd-HHMMSS pattern"
+  Assert ((Get-Content $unused[0].FullName -Raw).Trim() -match "^[0-9a-f]{64}$") "the .new.unused file holds the generated key (64 hex chars)"
+  Assert ($r.Output -match [regex]::Escape("set aside as secrets\$($unused[0].Name)")) "names the exact .new.unused file"
+}
+Assert ($r.Output -match "can be deleted once BlackVault has run normally") "says when the unused key can be deleted"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file: the original key was never renamed"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK6b
+Write-Scenario "rotate-key.bat - rotation run fails, probe confirms NEW: completes the swap anyway, exits 0 (fix round 1, C1)"
+$d = New-RotateSandbox "rotate-run-fails-new" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEW" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode)) — the transaction had already committed"
+Assert ($r.Output -match "Confirmed: the database is already encrypted with the NEW key") "reports the probe's NEW answer"
+Assert ($r.Output -match "Key rotation complete") "completes the swap exactly like a normal success"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no stray .new file after the swap"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 1) "the original key was kept under a timestamped .old- name"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim() -ne $keyBefore.Trim()) "the active key file now holds the NEW key"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK6c
+Write-Scenario "rotate-key.bat - rotation run fails and the probe cannot tell (NEITHER): keeps every key file, does NOT restart, exits 1 (fix round 1, C1)"
+$d = New-RotateSandbox "rotate-run-fails-ambiguous" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEITHER" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "could not determine whether the database is encrypted with the OLD") "explains it could not tell"
+Assert ($r.Output -match "Nothing was deleted\. BlackVault was NOT restarted\.") "says nothing was deleted and the app was not restarted"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart — an ambiguous state must not be papered over"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new is KEPT (never deleted on an ambiguous failure)"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is untouched"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file: no rename was attempted"
+Assert ($r.Output -match [regex]::Escape("--probe")) "prints the exact recovery command to re-run"
+# N4: the probe command must be ONE copy-pasteable line (a trailing ^ used to
+# join the following echo lines into it, printing literal "echo" words).
+$probeLines = @($r.Output -split "`r?`n" | Where-Object { $_ -match [regex]::Escape("--probe") })
+$probeCmd = "docker compose run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new"
+Assert ($probeLines.Count -eq 1) "the probe command is printed on exactly one line (got $($probeLines.Count))"
+Assert (($probeLines.Count -eq 1) -and ($probeLines[0].Trim() -ceq $probeCmd)) "that line is exactly the runnable probe command, nothing else on it"
+# N1: step 2 moves the OLD key aside BEFORE moving .new into place.
+$mOld = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key secrets\\blackvault_encryption_key\.old-\d{8}-\d{6}\r?$')
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert ($mOld.Success -and $mNew.Success -and $mOld.Index -lt $mNew.Index) "NEW recovery: moves the OLD key to .old-<ts> first, then .new into place"
+# N2: step 3 renames, never deletes.
+Assert ($r.Output -match '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\.new\.unused-\d{8}-\d{6}\r?$') "OLD recovery: renames .new to .new.unused-<ts>"
+Assert ($r.Output -notmatch '(?m)^\s*del ') "no recovery line deletes a key file"
+# Final review F5: the NEITHER answer has its own recovery step.
+Assert ($r.Output -match "4\. If it answers NEITHER: secrets\\blackvault_encryption_key is not this database's key\.") "recovery text has step 4 for a NEITHER answer"
+Assert ($r.Output -match "Restore the right key file as secrets\\blackvault_encryption_key, then run the probe again\.") "step 4 says to restore the right key file and probe again"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK6e
+Write-Scenario "rotate-key.bat - the rotation refuses up front (exit 3, wrong key file): no probe, .new set aside, key untouched, NOT restarted (final review F5)"
+$d = New-RotateSandbox "rotate-refused-exit3" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_EXIT" = "3"; "BV_STUB_PROBE_ANSWER" = "NEITHER" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "says the current key file is not this database's key"
+Assert ($r.Output -match "Nothing was changed\. BlackVault was NOT restarted\.") "says nothing changed and the app was not restarted"
+Assert ($r.Output -match "startup log names its key id") "points at the startup log's key id"
+Assert ($r.StubLog -notmatch "--probe") "did NOT run the probe (it would only answer NEITHER)"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
+$unused = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*")
+Assert ($unused.Count -eq 1) "the unused .new was set aside as .new.unused-<ts> (got $($unused.Count))"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "the .new name is free again"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK6d
+Write-Scenario "rotate-key.bat - the probe itself fails (no answer): same ambiguous handling as NEITHER"
+$d = New-RotateSandbox "rotate-run-fails-probe-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_STATUS" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new is KEPT when the probe itself fails"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is untouched"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RK7
+Write-Scenario "rotate-key.bat - the key-file swap itself fails (locked file): exact recovery text, no restart, exits 1 (I1)"
+$d = New-RotateSandbox "rotate-swap-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+# Holds an exclusive lock on the active key file for the run's duration, so
+# `move /y` on it fails with a real Windows sharing violation — the one
+# Windows failure window task-6-review.md flagged as untested.
+$lockFlag = Join-Path $Sandboxes "rotate-swap-fails.locked"
+$lockJob = Start-FileLockJob -Path $keyPath -Flag $lockFlag
+try {
+  Assert (Wait-ForFile $lockFlag 60) "the lock job holds its lock before the run starts (polled, not a fixed sleep)"
+  $r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+} finally {
+  Stop-FileLockJob $lockJob $lockFlag
+}
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "rotation succeeded, but renaming the key files failed") "names the swap failure precisely (not a generic error)"
+Assert ($r.Output -match "move /y .*blackvault_encryption_key\.new.*blackvault_encryption_key") "prints the exact recovery command (the expanded move /y .new -> active path)"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart on an unresolved swap failure"
+Assert ((Get-Content $keyPath -Raw) -eq $keyBefore) "the active key file still holds the ORIGINAL key (the first move never completed)"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new still holds the key the database is now actually encrypted with"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*").Count -eq 0) "no .old file was created (the first move failed before renaming anything)"
+# N1: the OLD key is moved aside first, then .new into place.
+$mOld = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key secrets\\blackvault_encryption_key\.old-\d{8}-\d{6}\r?$')
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert ($mOld.Success -and $mNew.Success -and $mOld.Index -lt $mNew.Index) "recovery text moves the OLD key to .old-<ts> BEFORE moving .new into place"
+# Follow the printed lines literally (lock released): the OLD key must survive.
+$newKey = (Get-Content (Join-Path $d "secrets\blackvault_encryption_key.new") -Raw).Trim()
+$ran = Invoke-PrintedMoves -Dir $d -Output $r.Output
+Assert ($ran -eq 2) "the recovery text holds exactly two move commands (got $ran)"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "after following the text: .old-<ts> holds the ORIGINAL key (the pre-rotation snapshot stays openable)"
+Assert ((Get-Content $keyPath -Raw).Trim() -eq $newKey) "after following the text: the active key file holds the key the database is encrypted with"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "after following the text: no .new left"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK7b
+Write-Scenario "rotate-key.bat - the SECOND key-file move fails (.new locked): :swap_failed_2 text, no restart, exits 1 (fix round 2, N5)"
+$d = New-RotateSandbox "rotate-swap2-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+$newPath = Join-Path $d "secrets\blackvault_encryption_key.new"
+# The stub's rotation run signals .ready (after the .bat has written .new),
+# the job locks .new and writes .ack, and only then does the run return - so
+# the first move (active -> .old-<ts>) succeeds and the second (.new ->
+# active) hits a sharing violation. No timing guesses.
+$hs = Join-Path $Sandboxes "rotate-swap2-fails.hs"
+$lockJob = Start-FileLockJob -Path $newPath -Flag "$hs.ack" -WaitFor "$hs.ready"
+try {
+  $r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_HANDSHAKE" = $hs }
+} finally {
+  Stop-FileLockJob $lockJob "$hs.ack"
+}
+Assert (Test-Path "$hs.ack") "the lock on .new was taken during the rotation run (handshake completed)"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "rotation succeeded, but finishing the key-file swap failed") "names the second-move failure precisely"
+Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
+Assert (-not (Test-Path $keyPath)) "the active key file is missing (moved to .old-<ts>), as the text says"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "the .old-<ts> file holds the ORIGINAL key"
+Assert (Test-Path $newPath) ".new still holds the key the database is now encrypted with"
+$mNew = [regex]::Match($r.Output, '(?m)^\s*move /y secrets\\blackvault_encryption_key\.new secrets\\blackvault_encryption_key\r?$')
+Assert $mNew.Success "prints the exact recovery move (.new -> active)"
+$newKey = if (Test-Path $newPath) { (Get-Content $newPath -Raw).Trim() } else { "" }
+$ran = Invoke-PrintedMoves -Dir $d -Output $r.Output
+Assert ($ran -eq 1) "the recovery text holds exactly one move command (got $ran)"
+Assert ((Test-Path $keyPath) -and (Get-Content $keyPath -Raw).Trim() -eq $newKey) "after following the text: the active key file holds the database's key"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK7c
+Write-Scenario "rotate-key.bat - rotation and swap succeed but the restart fails: :restart_after_swap_failed, no 'complete' banner, exits 1 (fix round 2, N5)"
+$d = New-RotateSandbox "rotate-restart-fails" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "start" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose start blackvault") "tried to restart"
+Assert ($r.Output -match "Key rotation succeeded and the key files were swapped, but BlackVault") "says the rotation and swap succeeded"
+Assert ($r.Output -match "failed to restart") "says the restart failed"
+Assert ($r.Output -notmatch "Key rotation complete") "no completion banner"
+$oldFiles = @(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.old-*")
+Assert ($oldFiles.Count -eq 1 -and (Get-Content $oldFiles[0].FullName -Raw).Trim() -eq $keyBefore.Trim()) "the .old-<ts> file holds the ORIGINAL key"
+Assert ($oldFiles.Count -eq 1 -and $r.Output -match [regex]::Escape($oldFiles[0].Name)) "names the exact .old-<ts> file to keep"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim() -ne $keyBefore.Trim()) "the active key file holds the NEW key"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new left"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RK8
+Write-Scenario "rotate-key.bat - a stale .new from an earlier run exists: refuses before stopping anything, never touches it (fix round 2, N2)"
+$d = New-RotateSandbox "rotate-stale-new" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$stale = Join-Path $d "secrets\blackvault_encryption_key.new"
+Set-Content -Path $stale -Value ("cd" * 32) -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "already exists, left by an earlier rotation") "explains the stale .new"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Assert ((Get-Content $stale -Raw) -eq ("cd" * 32)) "the stale .new is byte-for-byte unchanged"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is untouched"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RK9
+Write-Scenario "rotate-key.bat - the key is held in BLACKVAULT_ENCRYPTION_KEY (.env): refuses before stopping anything (final review N1)"
+$d = New-RotateSandbox "rotate-envkey-file" -WithSnapshot
+Set-Content -Path (Join-Path $d ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Key rotation works on secrets\\blackvault_encryption_key\. Your key is in") "explains rotation works on the key file"
+Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from \.env\): move it into that file") "names .env as the source"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the key file is untouched"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new written"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK9b
+Write-Scenario "rotate-key.bat - BLACKVAULT_ENCRYPTION_KEY set in the console: refuses the same way (final review N1)"
+$d = New-RotateSandbox "rotate-envkey-console" -WithSnapshot
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BLACKVAULT_ENCRYPTION_KEY" = ("cd" * 32) }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from the console environment\): move it into that file") "names the console as the source"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Show-EvidenceIfFailed $r
+
+# =============================================================================
+#            field encryption (Task 7): key file, pre-upgrade snapshot
+# =============================================================================
+$BoxLine = "BACK THIS FILE UP. Without it your serial numbers and NFA records cannot be recovered."
+
+# True when $Path has inheritance disabled and an explicit, non-inherited
+# Full Control grant for the current user's SID (compared as SIDs, as RK5).
+function Test-UserOnlyAcl([string]$Path) {
+  if (-not (Test-Path $Path)) { return $false }
+  $acl = Get-Acl $Path
+  if (-not $acl.AreAccessRulesProtected) { return $false }
+  $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+  $grant = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+    $_.IdentityReference.Value -eq $sid -and
+    $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+    -not $_.IsInherited -and
+    (($_.FileSystemRights -band $full) -eq $full)
+  })
+  return ($grant.Count -gt 0)
+}
+
+# Index of the first stub-log line equal to (or, with -Prefix, starting
+# with) $Text; -1 when absent. The stub logs one invocation per line.
+function Get-CallIndex([string]$Log, [string]$Text, [switch]$Prefix) {
+  $lines = @($Log -split "`r?`n")
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($Prefix) { if ($lines[$i].StartsWith($Text)) { return $i } }
+    elseif ($lines[$i] -ceq $Text) { return $i }
+  }
+  return -1
+}
+
+function Get-Backups([string]$Dir) {
+  $b = Join-Path $Dir "backups"
+  if (-not (Test-Path $b)) { return @() }
+  return @(Get-ChildItem $b -File | Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+# ---------------------------------------------------------------- scenario K1
+Write-Scenario "install.bat - fresh install creates secrets\blackvault_encryption_key: 64 hex, user-only ACL, boxed message, before the build"
+$d = New-Sandbox "key-install"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path $keyPath) "the key file exists"
+$key = if (Test-Path $keyPath) { (Get-Content $keyPath -Raw).Trim() } else { "" }
+Assert ($key -cmatch "^[0-9a-f]{64}$") "the key is exactly 64 lowercase hex characters (real CSPRNG path)"
+Assert (Test-UserOnlyAcl $keyPath) "the key file is restricted to the current user (inheritance off, explicit Full Control)"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence on one line"
+Assert ($r.Output -match "Encryption key created: .*secrets\\blackvault_encryption_key") "names the key file"
+Assert (($key -ne "") -and ($r.Output -notmatch $key)) "the key is never echoed"
+$iKey = $r.Output.IndexOf("Encryption key created")
+$iBuild = $r.Output.IndexOf("Building BlackVault image")
+Assert (($iKey -ge 0) -and ($iBuild -gt $iKey)) "the key is created before the image is built"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario K2
+Write-Scenario "install.bat - never overwrites an existing key file"
+$d = New-Sandbox "key-install-existing"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "secrets") | Out-Null
+$keyPath = Join-Path $d "secrets\blackvault_encryption_key"
+Set-Content -Path $keyPath -Value ("cd" * 32) -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-Content $keyPath -Raw) -eq ("cd" * 32)) "the key file is byte-for-byte unchanged"
+Assert ($r.Output -match "existing, unchanged") "says the existing key was kept"
+Assert (-not $r.Output.Contains($BoxLine)) "no new-key message"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario K3
+Write-Scenario "install.bat - re-run over a configured install creates the missing key before starting"
+$d = New-Sandbox "key-install-rerun"
+Set-SqliteInstall $d "7030"
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "the key file was created"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence"
+Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario K4
+Write-Scenario "install.bat - re-run with the key in .env (BLACKVAULT_ENCRYPTION_KEY): NO key file is created (final review N1)"
+$d = New-Sandbox "key-install-envkey"
+Set-SqliteInstall $d "7093"
+Add-Content -Path (Join-Path $d ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "no key file was created (a second key would be KEY_CONFLICT)"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "says the .env key is in use"
+Assert (-not $r.Output.Contains($BoxLine)) "no new-key message"
+Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U1
+Write-Scenario "update.bat - SQLite: key created, snapshot copied into backups\ AFTER the build and BEFORE the new image starts"
+$origin = New-GitRemote "key-update-sqlite" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-sqlite"
+Set-SqliteInstall $work "7031"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the key file was created"
+Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1 -and $snaps[0] -match "^blackvault-\d{8}-\d{6}\.db$") "one snapshot backups\blackvault-<ts>.db (got: $($snaps -join ', '))"
+if ($snaps.Count -eq 1) {
+  $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work "backups\$($snaps[0])"))) -eq
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work "data\db\vault.db")))
+  Assert $same "the snapshot is a byte-for-byte copy of vault.db"
+  Assert ($r.Output -match [regex]::Escape("Database snapshot saved: backups\$($snaps[0])")) "prints the snapshot path"
+}
+Assert (Test-UserOnlyAcl (Join-Path $work "backups")) "backups\ is restricted to the current user"
+Assert ($r.Output -match "this snapshot is a plain, unencrypted copy") "prints the plaintext warning"
+$iBuild = Get-CallIndex $r.StubLog "compose build --pull"
+$iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert (($iBuild -ge 0) -and ($iStop -gt $iBuild) -and ($iUp -gt $iStop)) "order: build, stop (snapshot), up -d (got $iBuild, $iStop, $iUp)"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario U1b
+Write-Scenario "update.bat - the key is in .env (BLACKVAULT_ENCRYPTION_KEY): NO key file is created, the update completes (final review N1)"
+$origin = New-GitRemote "key-update-envkey" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-envkey"
+Set-SqliteInstall $work "7094"
+Add-Content -Path (Join-Path $work ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "no key file was created"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "says the .env key is in use"
+Assert ($r.StubLog -match "compose up -d") "started the new image"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U2
+Write-Scenario "update.bat - the snapshot fails: exits 1, never starts the new image, starts the old container again"
+$origin = New-GitRemote "key-update-snapfail" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-snapfail"
+Set-SqliteInstall $work "7032"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "") -EnvVars @{ "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed: could not stop BlackVault") "db-snapshot.bat names the failure"
+Assert ($r.Output -match "the update stopped here") "update.bat says it stopped"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started (no 'compose up -d')"
+Assert ((Get-CallIndex $r.StubLog "compose start blackvault") -ge 0) "the old container was started again"
+Assert (@(Get-Backups $work).Count -eq 0) "no snapshot file left behind"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U3
+Write-Scenario "update.bat - PostgreSQL: pg_dump through the db container into backups\blackvault-<ts>.sql before the start"
+$origin = New-GitRemote "key-update-pg" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-pg"
+New-Item -ItemType Directory -Force -Path (Join-Path $work "data\postgres") | Out-Null
+$pgpw = "ab" * 24
+@("DATA_DIR=$work\data", "PORT=3000", "COMPOSE_PROFILES=postgres", "BLACKVAULT_DB_PROVIDER=postgres",
+  "BLACKVAULT_POSTGRES_PASSWORD=$pgpw", "BLACKVAULT_DATABASE_URL=postgresql://blackvault:$pgpw@db:5432/blackvault",
+  "BLACKVAULT_PUBLIC_URL=https://vault.example.com", "BLACKVAULT_TRUSTED_PROXIES=", "BLACKVAULT_DIRECT_ACCESS_INITIAL=on") |
+  Set-Content -Path (Join-Path $work ".env") -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1 -and $snaps[0] -match "^blackvault-\d{8}-\d{6}\.sql$") "one snapshot backups\blackvault-<ts>.sql (got: $($snaps -join ', '))"
+if ($snaps.Count -eq 1) {
+  Assert ((Get-Content (Join-Path $work "backups\$($snaps[0])") -Raw) -match "compose exec -T db pg_dump") "the .sql holds what pg_dump printed (the stub echoes its command)"
+}
+$iDump = Get-CallIndex $r.StubLog "compose exec -T db pg_dump -U blackvault -d blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert ((Get-CallIndex $r.StubLog "compose up -d --wait db") -ge 0) "made sure the db container is running"
+Assert (($iDump -ge 0) -and ($iUp -gt $iDump)) "pg_dump ran before the app start (got $iDump, $iUp)"
+Assert ((Get-CallIndex $r.StubLog "compose stop blackvault") -eq -1) "PostgreSQL: the app was not stopped for the dump"
+Assert ($r.Output -match "this snapshot is a plain, unencrypted copy") "prints the plaintext warning"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario U4
+Write-Scenario "update.bat - PostgreSQL: pg_dump fails: exits 1, no partial file, never starts the new image"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_FAIL_ON" = "exec" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed: pg_dump failed") "names the failure"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started"
+Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "*.partial" -ErrorAction SilentlyContinue).Count -eq 0) "no .partial file left"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario 10c
+Write-Scenario "update.bat - FIRST HOP: develop's update.bat (663523c) pulls this release and its resumed run creates the key and the snapshot"
+# cmd.exe resumes the NEW file at the byte past the OLD file's `git pull`
+# line (scenario 10b), so everything after the pull is the new code even on
+# the first upgrade. This is the Windows answer to "the old script runs the
+# upgrade" (update.sh re-executes itself instead).
+$oldBat3 = Join-Path $Sandboxes "old-update-663523c.bat"
+& cmd.exe /c "git -C ""$RepoRoot"" show 663523c:update.bat > ""$oldBat3"""
+if ((-not (Test-Path $oldBat3)) -or ((Get-Item $oldBat3).Length -lt 7000)) {
+  throw "Could not extract 663523c:update.bat (the Windows job needs fetch-depth: 0)."
+}
+$origin = New-GitRemote "key-update-first-hop" $oldBat3
+$work = New-WorkingClone $origin "key-update-first-hop"
+Set-SqliteInstall $work "7033"
+Add-RemoteCommit $origin (Join-Path $RepoRoot "update.bat")
+$onDiskBefore = (Get-Content (Join-Path $work "update.bat") -Raw)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+$onDiskAfter = (Get-Content (Join-Path $work "update.bat") -Raw)
+Assert ($onDiskBefore -notmatch "ensure_encryption_key") "the script that started is the old one (premise)"
+Assert ($onDiskAfter -match "ensure_encryption_key") "the pull replaced it with this release's update.bat (premise)"
+Assert ($r.ExitCode -eq 0) "cmd.exe survived the swap and exited 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the key file was created on the first hop"
+$snaps = @(Get-Backups $work)
+Assert ($snaps.Count -eq 1) "a snapshot was taken on the first hop (got: $($snaps -join ', '))"
+$iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
+$iUp = Get-CallIndex $r.StubLog "compose up -d"
+Assert (($iStop -ge 0) -and ($iUp -gt $iStop)) "snapshot before the new image started (got $iStop, $iUp)"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario DS1
+Write-Scenario "scripts\db-snapshot.bat called by another script: returns its errorlevel, leaves the caller's folder and variables alone, never pauses"
+$d = New-Sandbox "db-snapshot-call"
+Set-SqliteInstall $d "7034"
+@("@echo off", "setlocal EnableDelayedExpansion", "set ""DB_PROVIDER=caller-value""", "set ""OUT=caller-out""",
+  "call scripts\db-snapshot.bat", "echo RC=!errorlevel!", "echo CWD=!CD!", "echo VARS=!DB_PROVIDER!/!OUT!") |
+  Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
+Assert ($r.Output -match "RC=0") "errorlevel 0 on success"
+Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's current folder is unchanged"
+Assert ($r.Output -match "VARS=caller-value/caller-out") "the caller's variables are unchanged (setlocal)"
+Assert (@(Get-Backups $d).Count -eq 1) "wrote one snapshot"
+Assert ((Get-CallIndex $r.StubLog "compose start" -Prefix) -eq -1) "did not start the app again (the caller decides)"
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad -EnvVars @{ "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.Output -match "RC=1") "errorlevel 1 when the app cannot be stopped"
+Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's folder is unchanged on failure too"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E1
+# Fix round 1 (I4). Releases before this one stored install.bat/update.bat
+# with CRLF IN THE INDEX under `*.bat text eol=crlf`, so Git reports them
+# modified and a pull that changes them aborts. update.bat's
+# :clear_eol_only_change must let that pull through without rewriting a byte.
+function Set-CrlfIndexedBats([string]$Repo, [string]$Message) {
+  foreach ($f in @("install.bat", "update.bat")) {
+    $sha = (& git -C $Repo hash-object -w --no-filters $f).Trim()
+    & git -C $Repo update-index --add --cacheinfo "100644,$sha,$f" | Out-Null
+  }
+  & git -C $Repo -c user.name=ci -c user.email=ci@example.com commit -q -m $Message | Out-Null
+}
+function Set-PastMtime([string]$Dir) {
+  foreach ($f in @("install.bat", "update.bat")) { (Get-Item (Join-Path $Dir $f)).LastWriteTime = (Get-Date).AddMinutes(-1) }
+}
+function New-CrlfIndexRemote([string]$Name, [string]$UpdateBatSource = (Join-Path $RepoRoot "update.bat")) {
+  $origin = New-GitRemote $Name $UpdateBatSource
+  Set-Content -Path (Join-Path $origin ".gitattributes") -Value "*.bat text eol=crlf" -Encoding Ascii
+  & git -C $origin add .gitattributes | Out-Null
+  Set-CrlfIndexedBats $origin "bat files with CRLF in the index"
+  return $origin
+}
+function Add-CrlfBatChange([string]$Origin) {
+  foreach ($f in @("install.bat", "update.bat")) { Add-Content -Path (Join-Path $Origin $f) -Value ":: a newer release" -Encoding Ascii }
+  Set-CrlfIndexedBats $Origin "a newer release changes both .bat files"
+}
+
+Write-Scenario "update.bat - CRLF in the index, line endings only: the pull of a release changing both .bat files goes through (fix round 1, I4)"
+$origin = New-CrlfIndexRemote "eol-only"
+$work = New-WorkingClone $origin "eol-only"
+Set-SqliteInstall $work "7040"
+Set-PastMtime $work
+$porcelain = (& git -C $work status --porcelain -- install.bat update.bat) -join "`n"
+Assert ($porcelain -match "M install\.bat" -and $porcelain -match "M update\.bat") "premise: Git reports both files modified (got '$porcelain')"
+Add-CrlfBatChange $origin
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.Output -match "Clearing a line-ending-only difference") "says it is clearing the line-ending-only difference"
+Assert ($r.Output -notmatch "would be overwritten") "the pull did not abort"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "git pull advanced HEAD"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert (-not (Test-Path (Join-Path $work ".git\info\attributes"))) "the temporary attributes override is gone"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E2
+Write-Scenario "update.bat - a REAL local edit to install.bat is left alone (fix round 1, I4)"
+$origin = New-CrlfIndexRemote "eol-real-edit"
+$work = New-WorkingClone $origin "eol-real-edit"
+Set-SqliteInstall $work "7041"
+Set-PastMtime $work
+Add-Content -Path (Join-Path $work "install.bat") -Value ":: my local tweak" -Encoding Ascii
+Add-CrlfBatChange $origin
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.Output -match "has local edits; they are left alone") "says the local edits are left alone"
+Assert ($r.Output -notmatch "Clearing a line-ending-only difference") "did not touch Git's view of the files"
+Assert ((Get-Content (Join-Path $work "install.bat") -Raw) -match ":: my local tweak") "the local edit survived"
+Assert ($r.ExitCode -eq 1) "the pull refused, so update.bat stops with 1 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E3
+Write-Scenario "update.bat - self-heal: override lines left by an interrupted run are stripped first, the rest kept (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-heal"
+$work = New-WorkingClone $origin "eol-heal"
+Set-SqliteInstall $work "7042"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`ninstall.bat -text blackvault-update`r`nupdate.bat -text blackvault-update`r`n", [Text.Encoding]::ASCII)
+Set-Content -Path "$attrs.blackvault-update" -Value "stale backup" -Encoding Ascii
+$attrBefore = (& git -C $work check-attr text -- install.bat)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($attrBefore -match "text: unset") "premise: the leftover override was in effect (got '$attrBefore')"
+Assert ($r.Output -match "Removing a line-ending override left in") "says it removed the leftover override"
+Assert ((Test-Path $attrs) -and ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n")) "only the marked lines were removed (got '$(if (Test-Path $attrs) { [IO.File]::ReadAllText($attrs) })')"
+Assert (-not (Test-Path "$attrs.blackvault-update")) "the stale backup is gone"
+Assert ((& git -C $work check-attr text -- install.bat) -match "text: set") "install.bat is text again, so it checks out CRLF"
+# A checkout of an LF blob comes out CRLF again.
+& git -C $work add --renormalize install.bat | Out-Null
+& git -C $work -c user.name=ci -c user.email=ci@example.com commit -q -m "renormalize" | Out-Null
+Remove-Item (Join-Path $work "install.bat")
+& git -C $work checkout -- install.bat | Out-Null
+$ib = [IO.File]::ReadAllBytes((Join-Path $work "install.bat"))
+$crlf = 0; for ($i = 1; $i -lt $ib.Length; $i++) { if ($ib[$i] -eq 10 -and $ib[$i - 1] -eq 13) { $crlf++ } }
+$lf = 0; for ($i = 0; $i -lt $ib.Length; $i++) { if ($ib[$i] -eq 10) { $lf++ } }
+Assert (($lf -gt 0) -and ($crlf -eq $lf)) "a fresh checkout of install.bat is all CRLF ($crlf of $lf line ends)"
+Show-EvidenceIfFailed $r
+
+Write-Scenario "update.bat - self-heal: a file holding ONLY override lines is removed (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-heal-only"
+$work = New-WorkingClone $origin "eol-heal-only"
+Set-SqliteInstall $work "7043"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "install.bat -text blackvault-update`r`nupdate.bat -text blackvault-update`r`n", [Text.Encoding]::ASCII)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert (-not (Test-Path $attrs)) "the attributes file, which only held our lines, is gone"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E4
+Write-Scenario "update.bat - the attributes backup cannot be written (backup path locked): skips the fix, leaves the file untouched, no override left (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-copy-fails"
+$work = New-WorkingClone $origin "eol-copy-fails"
+Set-SqliteInstall $work "7044"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`n", [Text.Encoding]::ASCII)
+Set-PastMtime $work
+Add-CrlfBatChange $origin
+# Lock the BACKUP path (a leftover file the self-heal cannot delete while it
+# is locked), so `copy /y` onto it fails; Git can still read the real file.
+Set-Content -Path "$attrs.blackvault-update" -Value "locked leftover" -Encoding Ascii
+$flag = Join-Path $Sandboxes "eol-copy-fails.lock"
+$job = Start-FileLockJob "$attrs.blackvault-update" $flag
+if (-not (Wait-ForFile $flag 60)) { throw "the lock job never took the lock" }
+try {
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+} finally {
+  Stop-FileLockJob $job $flag
+}
+Assert ($r.Output -match "could not back up \.git\\info\\attributes, so the line-ending fix is skipped") "says the fix is skipped"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n") "the attributes file is byte-for-byte unchanged (no override line in it)"
+Assert ($r.ExitCode -eq 1) "the pull then refuses as before, exit 1 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario E5
+Write-Scenario "update.bat - an attributes file without a final newline: the override still applies and the file is restored byte for byte (fix round 2)"
+$origin = New-CrlfIndexRemote "eol-no-newline"
+$work = New-WorkingClone $origin "eol-no-newline"
+Set-SqliteInstall $work "7045"
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary", [Text.Encoding]::ASCII)
+Set-PastMtime $work
+Add-CrlfBatChange $origin
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the override took effect: the pull went through"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary") "restored byte for byte (no newline added)"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# ──────────────────────────────────────────────────────────────────────────
+# README one-time recovery command (fix round 1, I2): the README documents
+# TWO commands (POSIX in README.md, and this Windows one), each wrapped in
+# `<!-- readme-recovery-<platform>:start/end -->` HTML comments so a test can
+# pull the ACTUAL documented text out of README.md and run it, instead of a
+# hand-copied approximation that could silently drift from what a reader
+# actually sees. scripts/installers-encryption.test.ts does the same for the
+# POSIX block, from the same markers.
+# ──────────────────────────────────────────────────────────────────────────
+function Get-ReadmeBlock([string]$Marker) {
+  $readme = Get-Content -Raw -Path (Join-Path $RepoRoot "README.md")
+  $startTag = "<!-- readme-recovery-${Marker}:start -->"
+  $endTag = "<!-- readme-recovery-${Marker}:end -->"
+  $si = $readme.IndexOf($startTag)
+  $ei = $readme.IndexOf($endTag)
+  if ($si -lt 0 -or $ei -lt 0 -or $ei -le $si) {
+    throw "README.md markers for '$Marker' not found or out of order (si=$si ei=$ei)"
+  }
+  $block = $readme.Substring($si + $startTag.Length, $ei - $si - $startTag.Length)
+  $m = [regex]::Match($block, '```[a-z]*\r?\n(.*?)```', [Text.RegularExpressions.RegexOptions]::Singleline)
+  if (-not $m.Success) { throw "No fenced code block found between the '$Marker' markers" }
+  return $m.Groups[1].Value
+}
+
+# NOTE: uses $RepoRoot's REAL README.md, not New-GitRemote's placeholder one
+# (New-GitRemote writes a one-line "v1"/"v2" README.md into the sandbox
+# origin purely so the pull scenarios above have something trivial to
+# change — the documented recovery command comes from this checkout's own
+# README.md, same as a real reader would copy it from GitHub).
+$windowsRecoveryBlock = Get-ReadmeBlock "windows"
+
+# Final review FIX 5 (Task 8 MUST-FIX): E6/E7 start from the PRE-RELEASE
+# update.bat (develop 663523c, kept byte for byte in scripts\fixtures), as
+# every real reader's clone does. With the CURRENT update.bat in the clone a
+# broken README block still passed: its failed `git pull` fell through to
+# update.bat, which self-heals the line endings and pulls by itself. The
+# 663523c update.bat cannot (its failed pull exits 1), so only a README block
+# that really works gets the pull through. The pulled release is THIS tree's
+# update.bat and install.bat, so the block's last line runs the new updater.
+$PreReleaseUpdateBat = Join-Path $RepoRoot "scripts\fixtures\update.bat.develop-663523c"
+function Add-ThisReleaseBats([string]$Origin) {
+  foreach ($f in @("install.bat", "update.bat")) { Copy-Item (Join-Path $RepoRoot $f) (Join-Path $Origin $f) -Force }
+  & git -C $Origin -c user.name=ci -c user.email=ci@example.com add install.bat update.bat | Out-Null
+  & git -C $Origin -c user.name=ci -c user.email=ci@example.com commit -q -m "this release" | Out-Null
+}
+Assert ($windowsRecoveryBlock -match "git pull") "premise: the extracted Windows block contains a git pull (markers found real content)"
+Assert ($windowsRecoveryBlock -match "update\.bat") "premise: the extracted Windows block runs update.bat"
+
+# -------------------------------------------------------------- scenario E6
+Write-Scenario "README recovery command (Windows block, extracted verbatim from README.md) - CRLF-dirty clone: the pull succeeds (fix round 1, I2)"
+$origin = New-CrlfIndexRemote "readme-recovery-windows" $PreReleaseUpdateBat
+$work = New-WorkingClone $origin "readme-recovery-windows"
+Set-SqliteInstall $work "7046"
+Set-PastMtime $work
+$porcelain = (& git -C $work status --porcelain -- install.bat update.bat) -join "`n"
+Assert ($porcelain -match "M install\.bat" -and $porcelain -match "M update\.bat") "premise: Git reports both files modified (got '$porcelain')"
+Assert ((Get-FileHash (Join-Path $work "update.bat")).Hash -eq (Get-FileHash $PreReleaseUpdateBat).Hash) "premise: the clone's update.bat is the pre-release (663523c) one, byte for byte"
+Add-ThisReleaseBats $origin
+[IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
+$headBefore = (& git -C $work rev-parse HEAD)
+# Same answers as every other update.bat scenario here: this .env (from
+# Set-SqliteInstall) predates BLACKVAULT_PUBLIC_URL, so the update.bat the
+# recovery command ends by running prompts for it, then direct access
+# (Enter = keep it on), then trusted proxies (Enter = none).
+$r = Invoke-Bat -Dir $work -Script "recovery.cmd" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "cmd.exe ran the recovery command through to update.bat, which exited 0 (got $($r.ExitCode))"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the pull succeeded"
+Assert (-not (Test-Path (Join-Path $work ".git\info\attributes"))) "the temporary attributes override is gone (none existed before)"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Assert ($r.StubLog -match "compose up -d") "update.bat (reached via the recovery command) ran to completion"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the updater the block ran was THIS release's (it created the key file)"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario E7
+Write-Scenario "README recovery command (Windows block) - restores an EXISTING .git\info\attributes byte for byte (fix round 1, I2)"
+$origin = New-CrlfIndexRemote "readme-recovery-windows-attrs" $PreReleaseUpdateBat
+$work = New-WorkingClone $origin "readme-recovery-windows-attrs"
+Set-SqliteInstall $work "7047"
+Set-PastMtime $work
+$attrs = Join-Path $work ".git\info\attributes"
+New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
+[IO.File]::WriteAllText($attrs, "*.png binary`r`n", [Text.Encoding]::ASCII)
+Add-ThisReleaseBats $origin
+[IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
+$headBefore = (& git -C $work rev-parse HEAD)
+$r = Invoke-Bat -Dir $work -Script "recovery.cmd" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the pull succeeded"
+Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n") "the pre-existing attributes file was restored byte for byte"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
@@ -859,5 +1743,5 @@ if ($script:Failures.Count -gt 0) {
   foreach ($f in $script:Failures) { Write-Host "  FAILED: $f" -ForegroundColor Red }
   exit 1
 }
-Write-Host "install.bat and update.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
+Write-Host "install.bat, update.bat, rotate-key.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
 exit 0

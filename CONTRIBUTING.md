@@ -99,6 +99,90 @@ that queries columns the PostgreSQL database does not have: runtime errors for e
 PostgreSQL user (and the reverse for SQLite users). The drift check fails when a provider's
 migration history does not produce its schema.
 
+## Field encryption
+
+`src/lib/encryption/fields.ts` (`ENCRYPTED_FIELDS`) is the **one** registry of which
+columns are encrypted at rest (field-encryption spec, `docs/superpowers/specs/2026-09-30-field-encryption-design.md`,
+D1). Making a new field sensitive — or adding a new sensitive field — needs **all** of:
+
+1. A registry entry in `ENCRYPTED_FIELDS`.
+2. A `String` column in `prisma/schema.base.prisma` (ciphertext is always text, even for
+   a field that is logically a date or a number — see the `kind` discussion in
+   `fields.ts`'s own comment).
+3. A migration for both providers (see **Changing the schema** above).
+4. The **same** entry mirrored into `ENCRYPTED_FIELDS` in `scripts/rotate-encryption-key.mjs`
+   (it cannot import from `src/` — it runs as plain ESM, no bundler, inside the
+   container). `scripts/rotate-encryption-key.test.ts` asserts byte-for-byte that the two
+   lists are identical; forgetting the mirror fails that test, not the rotation itself.
+
+A guard test in `src/lib/encryption/fields.test.ts` also fails if a registered field's
+schema column is not `String`.
+
+**Client order.** The app's Prisma client is assembled in exactly one place,
+`src/lib/prisma.ts`: `withAudit(withEncryption(base))`. Prisma runs query hooks in the
+order the extensions were added, so the **encryption** hook runs first/outermost, and
+the **audit** hook runs nested inside it (`src/lib/encryption/extension.ts`'s REDISPATCH
+comment has the full mechanism). One consequence of that nesting: when audit re-dispatches
+its own before/after reads for a row (fresh calls that re-enter the whole chain from the
+top), those calls pass through the encryption hook's decrypt-on-read, so audit sees them
+decrypted. But audit's own *write capture* — the raw args/result of the create/update it
+is auditing — sees whatever the encryption hook already did to them on the way in, i.e.
+**ciphertext, not plaintext**. Either way, the stored audit `changes` are redacted (serial
+numbers and NFA fields never appear even decrypted — see **Audit log** below). Get the
+nesting backwards in a change here and a third extension added later would inherit the
+wrong assumption about what it sees.
+
+**No raw SQL on an encrypted column.** `$queryRaw`/`$executeRaw` (and their `*Unsafe`
+variants) bypass both extensions entirely, so a raw query naming an encrypted column
+would read ciphertext as if it were plaintext, or write plaintext where the extension
+would have encrypted it. A guard test in `fields.test.ts` scans all of `src/` and
+`scripts/` for a registered field name within 10 lines of a raw SQL call and fails if it
+finds one. The one-time startup migration (`src/lib/encryption/startup.ts`) and the
+rotation script are the deliberate, reviewed exceptions — they use a **raw, unextended**
+Prisma client (`createRawPrismaClient()` in `src/lib/prisma.ts`) precisely because they
+must read and write the stored form itself.
+
+**`core.mjs` is the only crypto code.** `src/lib/encryption/core.mjs` (plain ESM, with
+`core.d.mts` beside it) holds every piece of actual cryptography: key parsing/loading,
+HKDF subkey derivation, field encrypt/decrypt, the fingerprint, and backup seal/open.
+The app (`allowJs` is on) and every CLI script (`scripts/rotate-encryption-key.mjs`,
+test files) import this one file. Never add a second implementation of any of this —
+not even a "simpler" version for a script.
+
+**Reads are strict.** A non-null value in a registered column that does **not** start
+with `bv2:` throws `EncryptedFieldDecryptError` with cause `PLAINTEXT_AT_REST`
+(`src/lib/encryption/extension.ts`). The one-time startup migration runs on the raw
+client before the app serves any request, so in practice nothing legitimate ever hits
+this — a value that does is a bug (a missed write path), and it is meant to surface as
+an error page, not silently store or return plaintext.
+
+**The gated `RUN_SERVER_TESTS` test.** `src/app/api/backup/restore/route.c1.proxy-body-size.test.ts`
+builds and starts a real server process to prove the request-body size cap actually
+works end to end through Next's own proxy layer — too slow and heavy for the default
+`npm test` run, so it's `describe.skipIf(!process.env.RUN_SERVER_TESTS)`, not a bare
+`it.skip` (skipping the whole `describe` skips its expensive `beforeAll` too, not just
+the assertion). CI's `verify` job sets `RUN_SERVER_TESTS=1` and runs it right after its
+own `npm run build`, so the build is already current. Run it locally the same way:
+```bash
+RUN_SERVER_TESTS=1 npx vitest run src/app/api/backup/restore/route.c1.proxy-body-size.test.ts
+```
+
+**Prisma error logging is event-only.** Every Prisma client this app constructs
+(`src/lib/prisma.ts`) uses `log: [{ emit: "event", level: "error" }]`, never the plain
+`["error"]` string form — the string form makes Prisma print the full pretty-printed
+failing query straight to stdout/stderr itself, which for a validation error is every
+field of every row in the failing write. The `'error'` event handler logs only
+`target` (an engine-internal component tag), never `message` (the unsafe string).
+
+**The update scripts' line-ending override.** `update.sh` / `update.bat` can temporarily
+mark `install.bat` / `update.bat` `-text` in `.git/info/attributes` so a line-ending-only
+difference in the index doesn't block `git pull` (see README, "Upgrading to this
+release"). Every line it adds carries the marker ` blackvault-update` at the end — not a
+`#` comment, which Git rejects on a line with a trailing `#` token — and the very first
+thing every run does is strip any such marked line (and any `.blackvault-update.*`
+backup file) left behind by an earlier run that could not restore cleanly (power loss,
+`SIGKILL`). The override must never outlive the script that added it.
+
 ## Docker Compose
 
 There is **one** production compose file, `docker-compose.yml`, and plain `docker compose` (no
