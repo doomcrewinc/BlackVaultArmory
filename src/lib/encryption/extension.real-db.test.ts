@@ -621,7 +621,7 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
       const req = (u: string) => new NextRequest(`http://localhost${u}`);
       const p = (id: string) => ({ params: Promise.resolve({ id }) });
 
-      const bodies: Array<[string, Response]> = [
+      const bodies: Array<[string, Response | undefined]> = [
         ["GET /api/firearms", await within(8_000, listFirearms(req("/api/firearms")))],
         ["GET /api/firearms/[id]", await within(8_000, getFirearm(req(`/api/firearms/${f.id}`), p(f.id)))],
         ["GET /api/accessories/[id]", await within(8_000, getAccessory(req(`/api/accessories/${a.id}`), p(a.id)))],
@@ -631,6 +631,7 @@ describe(`field encryption against real ${ctx.pg ? `PostgreSQL (${ctx.pg.match(/
         ["export csv, serials", await within(15_000, exportData(req("/api/exports/data?format=csv&includeSerialNumbers=true")))],
       ];
       for (const [what, res] of bodies) {
+        if (!res) throw new Error(`${what}: no response`);
         expect(res.status, what).toBe(200);
         const text = await res.text();
         expect(text, what).not.toContain("serialNumberHash");

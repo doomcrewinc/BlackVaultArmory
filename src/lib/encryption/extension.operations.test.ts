@@ -25,9 +25,9 @@ describe("unknown Prisma operations (fail closed)", () => {
       operation: "updateManyAndReturn",
       args: { where: { id: "x" }, data: { serialNumber: "PLAINTEXT-SERIAL" } },
       query,
-    }).catch((e) => e);
+    }).then(() => null, (e: unknown) => e as Error);
     expect(err).toBeInstanceOf(EncryptedFieldQueryError);
-    expect(String(err.message)).toContain(`operation updateManyAndReturn is not supported on ${model}`);
+    expect(String(err?.message)).toContain(`operation updateManyAndReturn is not supported on ${model}`);
     expect(query).not.toHaveBeenCalled();
   });
 
