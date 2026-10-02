@@ -297,8 +297,11 @@ function backupFileName(request: NextRequest): string | undefined {
  * does no relational connects), P2021/P2022 (schema/column mismatch — a
  * real schema-drift bug), P2024/P2028/P2034 (connection pool timeout,
  * transaction API error, write conflict — infrastructure, not content; the
- * review's own example, P2028, is proven to stay 500 below), and anything
- * outside P2xxx entirely.
+ * review's own example, P2028, is proven to stay 500 below), P2025 (a record
+ * an update/delete/connect depends on was not found — restore only calls
+ * deleteMany and createMany, which never raise it, so it could only mean a
+ * concurrent change or a bug, never file content), and anything outside
+ * P2xxx entirely.
  */
 const RESTORE_CONTENT_ERROR_CODES: ReadonlySet<string> = new Set([
   "P2000", "P2001", "P2002", "P2003", "P2004", "P2005", "P2006", "P2007",

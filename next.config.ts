@@ -30,10 +30,13 @@ const nextConfig: NextConfig = {
     // to ~2.6 GB before any route handler, admin check, or body-size logic
     // of our own ever ran. 64 MB is the trade-off: comfortably covers the
     // backup/restore case (measured ~37,000 firearms with notes at the
-    // sealed-envelope size ratio above) while bounding how much an
-    // unauthenticated request can force this process to buffer. A
-    // household with a larger inventory than that needs a CLI restore path
-    // instead of the browser UI (not built yet).
+    // sealed-envelope size ratio above). It does NOT bound memory: measured,
+    // Next buffers the WHOLE incoming body before it checks this cap (even
+    // with the old 10 MB default a 624 MB body was buffered, per the Task 5 review).
+    // The real control for oversized or hostile request bodies is the
+    // reverse proxy's body limit (Caddy / Nginx Proxy Manager), which the
+    // README tells users to set. A household with a larger inventory than
+    // that needs a CLI restore path instead of the browser UI (not built yet).
     proxyClientMaxBodySize: "64mb",
   },
 };
