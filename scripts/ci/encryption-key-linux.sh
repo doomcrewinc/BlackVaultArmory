@@ -330,6 +330,12 @@ echo "upgrade: seeds encrypted, served intact; snapshot ${USNAPS[0]} (700, files
 endstep
 
 step "3. rotate-key.sh end to end (SQLite)"
+# Final review FIX 3: a checkout made under umask 077 leaves the mounted
+# snapshot script 0600, owned by the host user, so uid 1001 cannot open it.
+# The in-container uploads copy below must still work: only root reads it.
+as_user "chmod 600 scripts/uploads-snapshot.sh"
+[ "$(sudo stat -c '%a %u' "$APP/scripts/uploads-snapshot.sh")" = "600 $TEST_UID" ] ||
+  fail "scripts/uploads-snapshot.sh is $(sudo stat -c '%a %u' "$APP/scripts/uploads-snapshot.sh"), want 600 $TEST_UID"
 if ! OUT=$(as_user "./rotate-key.sh" </dev/null 2>&1); then
   echo "$OUT" | tail -40
   fail "rotate-key.sh failed"
