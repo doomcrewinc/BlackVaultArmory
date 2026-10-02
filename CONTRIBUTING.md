@@ -183,6 +183,60 @@ thing every run does is strip any such marked line (and any `.blackvault-update.
 backup file) left behind by an earlier run that could not restore cleanly (power loss,
 `SIGKILL`). The override must never outlive the script that added it.
 
+## Encrypted files
+
+Uploaded photos and documents are stored as `BVF1` files (spec 3b,
+`docs/superpowers/specs/2026-10-01-encrypted-files-design.md`). `src/lib/files/storage.ts` is the
+one place that knows where they live and how they are written and read.
+
+**Routes never touch file bytes directly.** Write an upload with `writeEncryptedFile(absPath,
+plaintext)` and serve one with `readDecryptedFile(absPath)` (plus `fileResponseHeaders()` for the
+`no-store` headers). `readDecryptedFile` throws `FileAtRestError` (`PLAINTEXT_AT_REST` or
+`DECRYPT_FAILED`, with `causeCode`); answer it with a generic 500 and log the path, never put it
+in the response. A guard test, `src/lib/files/no-plaintext-route-io.test.ts`, scans every
+`route.ts` under `src/app` and fails on a `writeFile` / `writeFileSync` / `readFile` /
+`readFileSync` call. Its allow-list (currently only `api/backup/route.ts`, which writes the sealed
+backup) fails too if a listed file no longer needs its entry. It is a text scan: it does not catch
+an aliased import, `createWriteStream`, `copyFile` or `appendFile`, so do not rely on it alone.
+
+**Use the uploads-root helpers, never a hard-coded path.**
+
+- `uploadsRoot()` — `IMAGE_UPLOAD_DIR` when set, else `<cwd>/uploads` (`/app/uploads` in Docker).
+- `documentsRoot()` — `<uploadsRoot>/documents`. `Document.fileUrl` stays
+  `/api/files/documents/<name>`; only the folder behind it moved.
+- `legacyDocumentsRoot()` — the pre-3b `<cwd>/storage/uploads/documents`. Read only by the
+  startup move step; nothing writes there.
+
+**Atomic writes and temp names.** `writeAtomic()` writes `<name>.<8 random hex>.tmp`, opened
+`"wx"` (create-exclusive, so it never follows a planted link or collides with a concurrent
+writer) with mode 0600, chmodded, written in full (`writeFull` loops on short writes), fsynced,
+renamed over `<name>`, then the folder is fsynced. The startup sweep in
+`src/lib/files/startup.ts` deletes only names matching `/\.[0-9a-f]{8}\.tmp$/`
+(`WRITE_ATOMIC_TMP`), so a temp file must come from `writeAtomic` — a hand-made `foo.tmp` is
+neither swept nor encrypted. Rotation's staging `<name>.rot` is written through the same
+primitive, so its temps are `<name>.rot.<8hex>.tmp` and are swept too.
+
+**Startup order.** `runEncryptionStartup()` (`src/lib/encryption/startup.ts`) calls
+`assertEncryptionKey()` first and `runFileStartup()` last, after the database migration and
+compaction, on the same raw client and before the app serves. Keep `assertEncryptionKey` before
+`runFileStartup`: the file step finishes `.rot` files that are under the current key and refuses
+on files under any other key, so it must only ever run once the key is proven to be this
+database's. Nothing pins that order yet except this paragraph and the code comments.
+
+**The rotation script's mirrors.** `scripts/rotate-encryption-key.mjs` runs as plain ESM in the
+container and cannot import TypeScript, so it mirrors `uploadsRoot`, `writeAtomic` (with
+`writeFull`), the folder walk and the `.rot` naming from `src/lib/files/`.
+`scripts/rotate-encryption-key.test.ts` asserts the `uploadsRoot` mirror equals the real one (as
+it does for `ENCRYPTED_FIELDS`). The `writeAtomic` mirror and the walk have **no** equality test:
+change them in both places, by hand.
+
+**`scripts/uploads-snapshot.sh` runs inside the container.** `scripts/db-snapshot.sh` starts a
+one-off container of the app image (`docker compose run --user 0:0`), mounting this checkout's
+copy of the script and the host's `backups/`. As root it only creates `backups/uploads-<ts>.partial`
+for uid 1001; the copy runs as 1001 with `su-exec`. It must, because the host user cannot read
+the uploads (mode 600, uid 1001). The image ships busybox, not bash: keep the script POSIX `sh`.
+Exit 3 means "nothing to copy". `scripts/db-snapshot.bat` (Windows) still copies on the host.
+
 ## Docker Compose
 
 There is **one** production compose file, `docker-compose.yml`, and plain `docker compose` (no
