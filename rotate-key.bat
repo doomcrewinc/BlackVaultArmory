@@ -53,6 +53,19 @@ set "UNUSED_KEY_FILE=secrets\blackvault_encryption_key.new.unused-!OLD_TS!"
 if exist "!UNUSED_KEY_FILE!" set "UNUSED_KEY_FILE=!UNUSED_KEY_FILE!-%RANDOM%"
 
 :: ── 1. Check the current key exists ───────────────────────────
+:: Final review N1: rotation works on the key FILE. A key held in
+:: BLACKVAULT_ENCRYPTION_KEY (.env, or set in this console) would still be
+:: passed to the app after the swap and conflict with the new file
+:: (KEY_CONFLICT), so refuse before anything is stopped.
+set "ENV_KEY_SOURCE="
+if defined BLACKVAULT_ENCRYPTION_KEY set "ENV_KEY_SOURCE=the console environment"
+if defined ENV_KEY_SOURCE goto :env_key_in_use
+if not exist ".env" goto :no_env_key
+findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
+if errorlevel 1 goto :no_env_key
+set "ENV_KEY_SOURCE=.env"
+goto :env_key_in_use
+:no_env_key
 if not exist "%KEY_FILE%" (
   echo ERROR: %KEY_FILE% not found. Nothing to rotate.
   echo        Run install.bat first, or restore your key file from backup.
@@ -299,6 +312,16 @@ echo Back up %KEY_FILE% now - the pre-rotation database snapshot in backups\ is
 echo encrypted with the OLD key, now at %OLD_KEY_FILE%; keep that file for as
 echo long as you keep that snapshot.
 echo Start BlackVault by hand once you've checked the logs: %COMPOSE% start blackvault
+pause
+exit /b 1
+
+:env_key_in_use
+echo ERROR: Key rotation works on %KEY_FILE%. Your key is in
+echo        BLACKVAULT_ENCRYPTION_KEY (from !ENV_KEY_SOURCE!): move it into that file
+echo        (and remove it from .env / the console) first: put the same 64 hex
+echo        characters in %KEY_FILE%, delete the BLACKVAULT_ENCRYPTION_KEY line
+echo        from .env, and start BlackVault once to check it.
+echo        Nothing was changed; BlackVault was not stopped.
 pause
 exit /b 1
 

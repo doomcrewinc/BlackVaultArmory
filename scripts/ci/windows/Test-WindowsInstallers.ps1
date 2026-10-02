@@ -1251,6 +1251,29 @@ Assert ((Get-Content $stale -Raw) -eq ("cd" * 32)) "the stale .new is byte-for-b
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is untouched"
 Show-EvidenceIfFailed $r
 
+# --------------------------------------------------------------- scenario RK9
+Write-Scenario "rotate-key.bat - the key is held in BLACKVAULT_ENCRYPTION_KEY (.env): refuses before stopping anything (final review N1)"
+$d = New-RotateSandbox "rotate-envkey-file" -WithSnapshot
+Set-Content -Path (Join-Path $d ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Key rotation works on secrets\\blackvault_encryption_key\. Your key is in") "explains rotation works on the key file"
+Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from \.env\): move it into that file") "names .env as the source"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the key file is untouched"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new written"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK9b
+Write-Scenario "rotate-key.bat - BLACKVAULT_ENCRYPTION_KEY set in the console: refuses the same way (final review N1)"
+$d = New-RotateSandbox "rotate-envkey-console" -WithSnapshot
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BLACKVAULT_ENCRYPTION_KEY" = ("cd" * 32) }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from the console environment\): move it into that file") "names the console as the source"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
+Show-EvidenceIfFailed $r
+
 # =============================================================================
 #            field encryption (Task 7): key file, pre-upgrade snapshot
 # =============================================================================
@@ -1332,6 +1355,19 @@ Assert ($r.Output.Contains($BoxLine)) "prints the back-up sentence"
 Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
 Show-EvidenceIfFailed $r
 
+# ---------------------------------------------------------------- scenario K4
+Write-Scenario "install.bat - re-run with the key in .env (BLACKVAULT_ENCRYPTION_KEY): NO key file is created (final review N1)"
+$d = New-Sandbox "key-install-envkey"
+Set-SqliteInstall $d "7093"
+Add-Content -Path (Join-Path $d ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "no key file was created (a second key would be KEY_CONFLICT)"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "says the .env key is in use"
+Assert (-not $r.Output.Contains($BoxLine)) "no new-key message"
+Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario U1
 Write-Scenario "update.bat - SQLite: key created, snapshot copied into backups\ AFTER the build and BEFORE the new image starts"
 $origin = New-GitRemote "key-update-sqlite" (Join-Path $RepoRoot "update.bat")
@@ -1355,6 +1391,19 @@ $iBuild = Get-CallIndex $r.StubLog "compose build --pull"
 $iStop = Get-CallIndex $r.StubLog "compose stop blackvault"
 $iUp = Get-CallIndex $r.StubLog "compose up -d"
 Assert (($iBuild -ge 0) -and ($iStop -gt $iBuild) -and ($iUp -gt $iStop)) "order: build, stop (snapshot), up -d (got $iBuild, $iStop, $iUp)"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario U1b
+Write-Scenario "update.bat - the key is in .env (BLACKVAULT_ENCRYPTION_KEY): NO key file is created, the update completes (final review N1)"
+$origin = New-GitRemote "key-update-envkey" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "key-update-envkey"
+Set-SqliteInstall $work "7094"
+Add-Content -Path (Join-Path $work ".env") -Value ("BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)) -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "no key file was created"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "says the .env key is in use"
+Assert ($r.StubLog -match "compose up -d") "started the new image"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario U2

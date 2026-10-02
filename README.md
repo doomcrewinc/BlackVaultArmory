@@ -771,6 +771,16 @@ The alternative is the environment variable `BLACKVAULT_ENCRYPTION_KEY` (64 hex
 characters) in `.env`. If both the key file and the environment variable are set to
 **different** values, BlackVault refuses to start.
 
+When the key is in `BLACKVAULT_ENCRYPTION_KEY` (a non-empty line in `.env`, or exported
+in the shell / console that runs the script), `install.sh` / `install.bat` and
+`update.sh` / `update.bat` see it and do **not** create a key file — a second, different
+key would make BlackVault refuse to start. Key rotation (below) works only on the key
+file: with `BLACKVAULT_ENCRYPTION_KEY` set, `rotate-key.sh` / `rotate-key.bat` refuse
+before stopping anything. To rotate, first move the key into the file: put the same 64
+hex characters in `secrets/blackvault_encryption_key` (mode 600, folder mode 700), delete
+the `BLACKVAULT_ENCRYPTION_KEY` line from `.env` (and unset it in your shell), and start
+BlackVault once to check it.
+
 BlackVault also refuses to start if the key is missing, wrong for the database it is
 opening, or the database's key check cannot be verified at all. There is no recovery
 from a lost key other than restoring it from a backup of the key file itself, or

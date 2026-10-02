@@ -619,12 +619,28 @@ goto :eof
 :: key material is written (as rotate-key.bat does); a failed icacls aborts.
 :: errorlevel 0 when the key file exists afterwards, 1 with a message when it
 :: could not be created. Never echoes the key.
+:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: non-empty line in .env, or set in this console) no key file is created -
+:: a second, different key would make the app refuse to start (KEY_CONFLICT).
 :ensure_encryption_key
 set "_EK=secrets\blackvault_encryption_key"
 if exist "!_EK!" (
   echo Encryption key: secrets\blackvault_encryption_key ^(existing, unchanged^)
   exit /b 0
 )
+if defined BLACKVAULT_ENCRYPTION_KEY (
+  echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from the console environment^) - no key file created
+  if not exist "secrets\" mkdir "secrets" 2>nul
+  exit /b 0
+)
+if not exist ".env" goto :ensure_key_no_env_key
+findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
+if errorlevel 1 goto :ensure_key_no_env_key
+echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
+:: docker-compose.yml mounts secrets\ with create_host_path: false.
+if not exist "secrets\" mkdir "secrets" 2>nul
+exit /b 0
+:ensure_key_no_env_key
 if not exist "secrets\" mkdir "secrets" 2>nul
 if not exist "secrets\" goto :ensure_key_failed
 set "_KEY="

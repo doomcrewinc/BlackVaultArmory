@@ -12,6 +12,27 @@
 #
 # An existing key file is NEVER overwritten or modified: it may be the only
 # key the database is encrypted with.
+#
+# Final review N1: an install may keep its key in BLACKVAULT_ENCRYPTION_KEY
+# (in .env, or exported in the shell — Compose passes either to the app)
+# instead of the file. Then NO key file is created: a second, different key
+# would make the app refuse to start (KEY_CONFLICT). Needs env_value from
+# scripts/compose-provider.sh, which every caller sources first.
+
+# Where BLACKVAULT_ENCRYPTION_KEY comes from — "the shell environment" (an
+# exported variable overrides .env in Compose) or ".env" — printed on stdout;
+# exit 1 (nothing printed) when neither sets a non-empty value.
+encryption_key_env_source() {
+  if [ -n "${BLACKVAULT_ENCRYPTION_KEY:-}" ]; then
+    echo "the shell environment"
+    return 0
+  fi
+  if [ -n "$(env_value BLACKVAULT_ENCRYPTION_KEY)" ]; then
+    echo ".env"
+    return 0
+  fi
+  return 1
+}
 
 ENCRYPTION_KEY_FILE="secrets/blackvault_encryption_key"
 
@@ -43,8 +64,16 @@ print_key_backup_box() {
 # already there), 1 with a message when it cannot be created.
 ensure_encryption_key() {
   local key tmp
+  local env_source
   if [ -e "$ENCRYPTION_KEY_FILE" ] || [ -L "$ENCRYPTION_KEY_FILE" ]; then
     echo "Encryption key: $ENCRYPTION_KEY_FILE (existing, unchanged)"
+    return 0
+  fi
+  if env_source=$(encryption_key_env_source); then
+    echo "Encryption key: BLACKVAULT_ENCRYPTION_KEY (from $env_source) - no key file created"
+    # docker-compose.yml bind-mounts secrets/ with create_host_path: false,
+    # so the (empty) folder must still exist for the container to start.
+    { mkdir -p secrets && chmod 700 secrets; } 2>/dev/null || true
     return 0
   fi
   if ! mkdir -p secrets || ! chmod 700 secrets; then

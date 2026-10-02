@@ -39,6 +39,8 @@ echo ""
 
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/encryption-key.sh
+. ./scripts/encryption-key.sh
 
 KEY_FILE="secrets/blackvault_encryption_key"
 NEW_KEY_FILE="secrets/blackvault_encryption_key.new"
@@ -120,6 +122,20 @@ on_err() {
 trap on_err ERR
 
 # ── 1. Check the current key exists ───────────────────────────
+# Final review N1: rotation works on the key FILE. A key held in
+# BLACKVAULT_ENCRYPTION_KEY (.env or the shell) would still be passed to the
+# app after the swap and conflict with the new file (KEY_CONFLICT), so refuse
+# before anything is stopped.
+if ENV_KEY_SOURCE=$(encryption_key_env_source); then
+  echo "ERROR: Key rotation works on $KEY_FILE. Your key is in"
+  echo "       BLACKVAULT_ENCRYPTION_KEY (from $ENV_KEY_SOURCE): move it into that file"
+  echo "       (and remove it from .env / unset it) first:"
+  echo "         (umask 077 && mkdir -p secrets && chmod 700 secrets && : > $KEY_FILE && chmod 600 $KEY_FILE)"
+  echo "         then put the same 64 hex characters in $KEY_FILE, delete the"
+  echo "         BLACKVAULT_ENCRYPTION_KEY line from .env, and start BlackVault once to check it."
+  echo "       Nothing was changed; BlackVault was not stopped."
+  exit 1
+fi
 if [ ! -f "$KEY_FILE" ]; then
   echo "ERROR: $KEY_FILE not found. Nothing to rotate."
   echo "       Run ./install.sh first, or restore your key file from backup."

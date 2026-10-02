@@ -260,6 +260,43 @@ describe("update.sh (no git checkout)", () => {
     expect(again.out).toContain("existing, unchanged");
   });
 
+  // ── final review N1: the documented env-var key ──
+  it("N1: BLACKVAULT_ENCRYPTION_KEY in .env → no key file is created (a second key would be KEY_CONFLICT), and the update completes", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), `BLACKVAULT_ENCRYPTION_KEY=${"cd".repeat(32)}\n`);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Encryption key: BLACKVAULT_ENCRYPTION_KEY (from .env) - no key file created");
+    expect(r.out).not.toContain(BOX_LINE);
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+    expect(fs.statSync(path.join(dir, "secrets")).isDirectory()).toBe(true); // the compose mount needs the folder
+    expect(callLines(r.calls)).toContain("compose up -d");
+    expect(r.calls).toContain("key=no");
+  });
+
+  it("N1: BLACKVAULT_ENCRYPTION_KEY exported in the shell → no key file either", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "update.sh", "\n", { BLACKVAULT_ENCRYPTION_KEY: "cd".repeat(32) });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Encryption key: BLACKVAULT_ENCRYPTION_KEY (from the shell environment) - no key file created");
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+  });
+
+  it("N1: an EMPTY BLACKVAULT_ENCRYPTION_KEY= line in .env does not count: the key file is created", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), "BLACKVAULT_ENCRYPTION_KEY=\n");
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(BOX_LINE);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}\n$/);
+  });
+
   it.skipIf(process.getuid?.() === 0)("a failing snapshot aborts non-zero and never starts the new image", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -406,6 +443,22 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
     expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
   });
 
+  it.each([
+    ["in .env", { file: true, env: {} as Record<string, string> }, "from .env"],
+    ["exported in the shell", { file: false, env: { BLACKVAULT_ENCRYPTION_KEY: "cd".repeat(32) } }, "from the shell environment"],
+  ])("N1: a key held in BLACKVAULT_ENCRYPTION_KEY (%s) is refused up front: rotation works on the key file", (_l, how, source) => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    if (how.file) fs.appendFileSync(path.join(dir, ".env"), `BLACKVAULT_ENCRYPTION_KEY=${"cd".repeat(32)}\n`);
+    const r = run(dir, "rotate-key.sh", "", how.env);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("ERROR: Key rotation works on secrets/blackvault_encryption_key. Your key is in");
+    expect(r.out).toContain(`BLACKVAULT_ENCRYPTION_KEY (${source}): move it into that file`);
+    expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
+    expect(r.calls).toBe(""); // docker never invoked
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
   it("exit 1 and the probe answers NEITHER: nothing touched, not restarted, and the recovery text has the NEITHER step", () => {
     const dir = path.join(tmp, "app");
     rotateInstall(dir);
@@ -497,7 +550,7 @@ describe("update.sh after git pull", () => {
   });
 
   it("first hop: the OLD update.sh (develop 663523c) pulling THIS tree still finishes; secrets/ exists for the mount; the next run creates the key and snapshots before starting", () => {
-    const OLD_TREE = TREE.filter((f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "secrets/.gitignore"].includes(f));
+    const OLD_TREE = TREE.filter((f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f));
     const origin = newOrigin((d) => {
       copyTree(d, OLD_TREE);
       fs.copyFileSync(path.join(ROOT, "scripts/fixtures/update.sh.develop-663523c"), path.join(d, "update.sh"));
