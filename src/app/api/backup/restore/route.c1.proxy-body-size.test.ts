@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 
@@ -9,6 +10,8 @@ import { createRequire } from "node:module";
 // way plain Node `require` can — the same reason src/lib/prisma.ts itself
 // reaches it with `require(".prisma/client-sqlite")` rather than `import`.
 const nodeRequire = createRequire(import.meta.url);
+// The exact parser Next uses to normalise proxyClientMaxBodySize (as next.config.test.ts does).
+const bytes = nodeRequire("next/dist/compiled/bytes") as { parse(v: string | number): number | null };
 
 /**
  * Review C1 (critical): Next 16's proxy (src/proxy.ts has no matcher, so it
@@ -145,6 +148,54 @@ function copyStandaloneAssets() {
   );
 }
 
+/**
+ * Final review FIX 13: reuse `.next/standalone` ONLY when it was built with
+ * the cap next.config.ts sets now. A stale build (proven in the Task 5
+ * review: one still had the 256 MB value baked in) would let this test pass
+ * or fail for the wrong config. `next build` records the parsed value in
+ * `.next/required-server-files.json` (`config.experimental.proxyClientMaxBodySize`,
+ * in bytes); `configured` is next.config.ts's raw value ("64mb").
+ */
+function reusableStandaloneBuild(root: string, configured: unknown): boolean {
+  if (!existsSync(`${root}/.next/standalone/server.js`)) return false;
+  let built: unknown;
+  try {
+    built = JSON.parse(readFileSync(`${root}/.next/required-server-files.json`, "utf8"))?.config?.experimental
+      ?.proxyClientMaxBodySize;
+  } catch {
+    return false;
+  }
+  const norm = (v: unknown) => (typeof v === "string" || typeof v === "number" ? bytes.parse(v) : null);
+  const want = norm(configured);
+  return typeof want === "number" && norm(built) === want;
+}
+
+describe("reusableStandaloneBuild (final review FIX 13; always runs)", () => {
+  function fakeBuild(cap: unknown, withServer = true): string {
+    const root = mkdtempSync(`${tmpdir()}/bv-c1-build-`);
+    mkdirSync(`${root}/.next/standalone`, { recursive: true });
+    if (withServer) writeFileSync(`${root}/.next/standalone/server.js`, "");
+    writeFileSync(`${root}/.next/required-server-files.json`, JSON.stringify({ config: { experimental: { proxyClientMaxBodySize: cap } } }));
+    return root;
+  }
+  it("reuses a build whose recorded cap equals next.config.ts's", () => {
+    const root = fakeBuild(64 * 1024 * 1024);
+    expect(reusableStandaloneBuild(root, "64mb")).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+  it("rebuilds when the recorded cap differs (a stale 256 MB build), is missing, or there is no server.js", () => {
+    for (const root of [fakeBuild(256 * 1024 * 1024), fakeBuild(undefined), fakeBuild(64 * 1024 * 1024, false)]) {
+      expect(reusableStandaloneBuild(root, "64mb")).toBe(false);
+      rmSync(root, { recursive: true, force: true });
+    }
+    const noManifest = mkdtempSync(`${tmpdir()}/bv-c1-build-`);
+    mkdirSync(`${noManifest}/.next/standalone`, { recursive: true });
+    writeFileSync(`${noManifest}/.next/standalone/server.js`, "");
+    expect(reusableStandaloneBuild(noManifest, "64mb")).toBe(false);
+    rmSync(noManifest, { recursive: true, force: true });
+  });
+});
+
 describe.skipIf(!process.env.RUN_SERVER_TESTS)(
   "C1 (review, critical): a sealed backup under the 64 MB cap restores through the REAL server's proxy",
   () => {
@@ -168,8 +219,9 @@ describe.skipIf(!process.env.RUN_SERVER_TESTS)(
       //    `db:generate`, regenerating both Prisma clients and schemas —
       //    global `node_modules`/`prisma/*` state any other test worker
       //    could be reading at the same moment (review round 2).
-      const standaloneServerPath = `${process.cwd()}/.next/standalone/server.js`;
-      if (!existsSync(standaloneServerPath)) {
+      // FIX 13: …and only when that build has next.config.ts's current cap.
+      const { default: nextConfig } = await import("../../../../../next.config");
+      if (!reusableStandaloneBuild(process.cwd(), nextConfig.experimental?.proxyClientMaxBodySize)) {
         execFileSync("npx", ["next", "build"], {
           cwd: process.cwd(),
           // No encryption key or database needed to build.
