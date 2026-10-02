@@ -129,7 +129,9 @@ fi
 # only drives the preflight checks.
 # docker compose must get the BLACKVAULT_* keys from .env only, never from
 # this shell's environment (a shell variable would override .env).
-unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD
+# BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
+# uploads snapshot; an inherited value must never reach it (final review FIX 5).
+unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 

@@ -59,6 +59,7 @@ function writeStub() {
     path.join(bin, "docker"),
     `#!/bin/bash
 echo "$*" >> "${calls}"
+[ -n "\${BLACKVAULT_UPLOADS_SNAPSHOT:-}" ] && echo "SAW-UPLOADS-SNAPSHOT=[\${BLACKVAULT_UPLOADS_SNAPSHOT}] at: $*" >> "${calls}"
 if [ -n "$BV_STUB_FAIL_ON" ]; then
   case " $* " in *" $BV_STUB_FAIL_ON "*) echo "[stub] failing on purpose: $*" >&2; exit 1 ;; esac
 fi
@@ -523,6 +524,33 @@ describe("update.sh — uploads snapshot (Task 4)", () => {
     expect(fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"))).toEqual([]);
     expect(r.out).toContain("skipping the uploads snapshot");
     expect(r.calls).toContain("uploads_marker=[]");
+  });
+
+  // Final review FIX 5: a value inherited from the caller's shell never reaches compose.
+  it("update.sh: an exported BLACKVAULT_UPLOADS_SNAPSHOT is cleared; with no uploads snapshot `up` gets an empty marker", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir); // data/uploads exists and is empty: no marker of its own
+    const r = run(dir, "update.sh", "\n", { BLACKVAULT_UPLOADS_SNAPSHOT: "backups/uploads-stale" });
+    expect(r.code, r.out).toBe(0);
+    expect(r.calls).toContain("uploads_marker=[]");
+    // Only the compose-provider probe runs before the unset; no compose call
+    // that runs or recreates a container sees the stale value.
+    const saw = r.calls.split("\n").filter((l) => l.startsWith("SAW-UPLOADS-SNAPSHOT="));
+    expect(saw.filter((l) => !l.endsWith("at: compose version --short"))).toEqual([]);
+  });
+
+  it("rotate-key.sh: an exported BLACKVAULT_UPLOADS_SNAPSHOT never reaches any compose call", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.chmodSync(path.join(dir, "secrets"), 0o700);
+    fs.writeFileSync(path.join(dir, KEY_FILE), "ab".repeat(32), { mode: 0o600 });
+    seedUploads(dir, { skipLink: true });
+    const r = run(dir, "rotate-key.sh", "", { BLACKVAULT_UPLOADS_SNAPSHOT: "backups/uploads-stale" });
+    expect(r.code, r.out).toBe(0);
+    expect(r.calls).toContain("compose start blackvault");
+    expect(r.calls).not.toContain("SAW-UPLOADS-SNAPSHOT");
   });
 
   it("missing uploads folder entirely: still succeeds, no uploads snapshot", () => {

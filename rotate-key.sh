@@ -41,6 +41,10 @@ echo ""
 . ./scripts/compose-provider.sh
 # shellcheck source=scripts/encryption-key.sh
 . ./scripts/encryption-key.sh
+# Final review FIX 5: rotate-key never passes the uploads snapshot marker
+# (its uploads are already encrypted), so an inherited shell value must not
+# reach any compose call below either.
+unset BLACKVAULT_UPLOADS_SNAPSHOT
 
 KEY_FILE="secrets/blackvault_encryption_key"
 NEW_KEY_FILE="secrets/blackvault_encryption_key.new"
