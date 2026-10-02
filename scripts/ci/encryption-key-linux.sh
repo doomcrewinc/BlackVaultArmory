@@ -329,7 +329,10 @@ echo "upgrade: seeds encrypted, served intact; snapshot ${USNAPS[0]} (700, files
 endstep
 
 step "3. rotate-key.sh end to end (SQLite)"
-OUT=$(as_user "./rotate-key.sh" </dev/null)
+if ! OUT=$(as_user "./rotate-key.sh" </dev/null 2>&1); then
+  echo "$OUT" | tail -40
+  fail "rotate-key.sh failed"
+fi
 echo "$OUT" | tail -30
 has "$OUT" "Key rotation complete" || fail "rotation did not complete"
 has "$OUT" "(Firearm 3, Accessory 2, Gear 2)" || fail "rotation did not re-encrypt the seeded rows"
