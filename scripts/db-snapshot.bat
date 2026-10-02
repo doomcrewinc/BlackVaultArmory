@@ -21,6 +21,18 @@
 ::
 :: backups\ is restricted to the current user (icacls) BEFORE anything is
 :: copied into it: a snapshot is a plain copy of the database.
+::
+:: Task 4 (encrypted files at rest): independent of DB_PROVIDER, this script
+:: also copies DATA_DIR\uploads into backups\uploads-<TS>\ (skipped, still
+:: errorlevel 0, when uploads\ is missing or has no files), leaving out
+:: .pre-encryption-* folders and *.tmp / *.rot files. backups\uploads-
+:: <TS>\ is restricted to the current user with icacls BEFORE anything is
+:: copied into it, and inheritance does the rest - no per-file icacls needed.
+:: On success it writes that path to backups\.uploads-snapshot-marker; the
+:: caller (update.bat / rotate-key.bat) reads that file once and removes it.
+:: update.bat passes it as BLACKVAULT_UPLOADS_SNAPSHOT to the ONE `up` that
+:: follows - never to .env - so the app's own startup step does not take a
+:: second snapshot of the same files. See :snapshot_uploads below.
 setlocal EnableDelayedExpansion
 pushd "%~dp0.." || exit /b 1
 
@@ -54,9 +66,8 @@ if errorlevel 1 goto :acl_failed
 icacls "backups" /inheritance:r >nul 2>&1
 if errorlevel 1 goto :acl_failed
 
-if /i not "!DB_PROVIDER!"=="sqlite" goto :postgres
-
-:: ── SQLite ────────────────────────────────────────────────────
+:: DATA_DIR is read here, before the provider branch, because the uploads
+:: snapshot below needs it on BOTH providers (:snapshot_uploads uses it too).
 set "DATA_DIR="
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
@@ -72,6 +83,10 @@ if "!DATA_DIR:~-1!"==" " set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
 if "!DATA_DIR:~-1!"=="	" set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
 :trim_data_dir_done
 if not defined DATA_DIR set "DATA_DIR=.\data"
+
+if /i not "!DB_PROVIDER!"=="sqlite" goto :postgres
+
+:: ── SQLite ────────────────────────────────────────────────────
 set "DB=!DATA_DIR!\db\vault.db"
 if not exist "!DB!" (
   echo No SQLite database at !DB! yet; nothing to snapshot.
@@ -136,6 +151,10 @@ echo          file. Serial numbers and NFA records too, if it was taken before f
 echo          encryption was first turned on; otherwise they need the encryption key
 echo          that was in use when it was taken.
 echo          Delete it once BlackVault is confirmed working:  del "!OUT!"
+
+call :snapshot_uploads
+if errorlevel 1 goto :fail
+
 :ok_nothing
 popd
 exit /b 0
@@ -152,6 +171,90 @@ goto :fail
 :fail
 echo ERROR: database snapshot failed: !FAIL_MSG!
 popd
+exit /b 1
+
+:: :snapshot_uploads - mirrors the "Uploads snapshot (Task 4)" block in
+:: scripts/db-snapshot.sh: change them together. Needs DATA_DIR and TS
+:: (both set above, before the provider branch). Sets FAIL_MSG and returns
+:: errorlevel 1 on any failure (the caller does `if errorlevel 1 goto :fail`);
+:: errorlevel 0 otherwise, including when there was nothing to snapshot.
+::
+:: A reparse point (symbolic link or junction) anywhere under uploads\ is
+:: never followed and never copied: the PowerShell walk below checks
+:: ReparsePoint on every item itself and skips it, rather than using
+:: Get-ChildItem -Recurse - which, on Windows PowerShell 5.1 (what these
+:: scripts invoke; there is no pwsh dependency), follows a directory
+:: symlink/junction by default and could escape the uploads folder entirely.
+:: Like scripts/uploads-snapshot.sh, the walk also skips the app's own
+:: .pre-encryption-* snapshot folders (plain text, already a copy) and every
+:: *.tmp / *.rot file (half-written or mid-rotation work files).
+:: The same walk also copies: a single PowerShell call both counts and
+:: copies every other non-reparse-point file, and prints that count on success, so
+:: "no files to snapshot" (count 0) and "the copy failed" (no output at all,
+:: because the catch block's `exit 1` suppresses the normal `Write-Output`)
+:: are told apart by whether UPLOADS_COPIED ends up defined at all - not by
+:: errorlevel, which a `for /f` loop over a backquoted command does not
+:: reliably reflect in cmd.exe (the same reason update.bat's :require_compose
+:: checks "if not defined _CV" rather than errorlevel, for `docker compose
+:: version`'s own for /f).
+:snapshot_uploads
+del /f /q "backups\.uploads-snapshot-marker" >nul 2>&1
+for /d %%P in ("backups\uploads-*.partial") do rd /s /q "%%P" 2>nul
+set "UPLOADS_SRC=!DATA_DIR!\uploads"
+if not exist "!UPLOADS_SRC!\" (
+  echo No uploads folder at !UPLOADS_SRC! yet; skipping the uploads snapshot.
+  exit /b 0
+)
+set "UPLOADS_OUT=backups\uploads-!TS!"
+if exist "!UPLOADS_OUT!" set "UPLOADS_OUT=!UPLOADS_OUT!-%RANDOM%"
+set "UPLOADS_PARTIAL=!UPLOADS_OUT!.partial"
+mkdir "!UPLOADS_PARTIAL!" 2>nul
+if not exist "!UPLOADS_PARTIAL!\" (
+  set "FAIL_MSG=could not create !UPLOADS_PARTIAL!."
+  exit /b 1
+)
+set "_UP_SID="
+for /f "tokens=2 delims=," %%S in ('whoami /user /fo csv /nh 2^>nul') do set "_UP_SID=%%~S"
+if not defined _UP_SID (
+  rd /s /q "!UPLOADS_PARTIAL!" 2>nul
+  set "FAIL_MSG=could not restrict !UPLOADS_PARTIAL! to your user account with icacls."
+  exit /b 1
+)
+icacls "!UPLOADS_PARTIAL!" /grant:r "*!_UP_SID!:(OI)(CI)F" >nul 2>&1
+if errorlevel 1 goto :uploads_acl_failed
+icacls "!UPLOADS_PARTIAL!" /inheritance:r >nul 2>&1
+if errorlevel 1 goto :uploads_acl_failed
+
+set "UPLOADS_COPIED="
+set "BV_UP_SRC=!UPLOADS_SRC!"
+set "BV_UP_DST=!UPLOADS_PARTIAL!"
+for /f "usebackq delims=" %%N in (`powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $count = 0; function Copy-BVTree([string]$s, [string]$d) { Get-ChildItem -LiteralPath $s -Force | ForEach-Object { if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }; if ($_.PSIsContainer -and $_.Name -like '.pre-encryption-*') { return }; if (-not $_.PSIsContainer -and ($_.Name -like '*.tmp' -or $_.Name -like '*.rot')) { return }; $dp = Join-Path $d $_.Name; if ($_.PSIsContainer) { New-Item -ItemType Directory -Force -Path $dp | Out-Null; Copy-BVTree $_.FullName $dp } else { [IO.File]::WriteAllBytes($dp, [byte[]]@()); Copy-Item -LiteralPath $_.FullName -Destination $dp -Force; $script:count++ } } }; try { Copy-BVTree $env:BV_UP_SRC $env:BV_UP_DST; Write-Output $count } catch { Write-Error $_; exit 1 }" 2^>nul`) do set "UPLOADS_COPIED=%%N"
+set "BV_UP_SRC="
+set "BV_UP_DST="
+if not defined UPLOADS_COPIED (
+  rd /s /q "!UPLOADS_PARTIAL!" 2>nul
+  set "FAIL_MSG=could not copy !UPLOADS_SRC! (permissions? free disk space?)."
+  exit /b 1
+)
+if "!UPLOADS_COPIED!"=="0" (
+  rd /s /q "!UPLOADS_PARTIAL!" 2>nul
+  echo No files in !UPLOADS_SRC! to snapshot; skipping the uploads snapshot.
+  exit /b 0
+)
+move /y "!UPLOADS_PARTIAL!" "!UPLOADS_OUT!" >nul
+if errorlevel 1 (
+  rd /s /q "!UPLOADS_PARTIAL!" 2>nul
+  set "FAIL_MSG=could not finish writing !UPLOADS_OUT!."
+  exit /b 1
+)
+(echo !UPLOADS_OUT!)>"backups\.uploads-snapshot-marker" 2>nul
+echo.
+echo Uploads snapshot saved: !UPLOADS_OUT!
+exit /b 0
+
+:uploads_acl_failed
+rd /s /q "!UPLOADS_PARTIAL!" 2>nul
+set "FAIL_MSG=could not restrict !UPLOADS_PARTIAL! to your user account with icacls."
 exit /b 1
 
 :: Mirrors :provider_from_env in update.bat (and provider_from_env in

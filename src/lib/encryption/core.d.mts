@@ -16,6 +16,7 @@ export interface FieldKeys {
   id: string;
   enc: Buffer;
   idx: Buffer;
+  file: Buffer;
 }
 
 export interface FileSystem {
@@ -36,3 +37,9 @@ export function fingerprint(keys: FieldKeys, value: string): string;
 export function sealBackup(passphrase: string, json: string): string;
 export function isSealedBackup(obj: unknown): boolean;
 export function openBackup(passphrase: string, envelope: unknown): string;
+
+export const FILE_MAGIC: "BVF1";
+export function isEncryptedFile(buf: Buffer): boolean;
+export function fileKeyId(buf: Buffer): string;
+export function encryptFile(keys: FieldKeys, basename: string, plaintext: Buffer): Buffer;
+export function decryptFile(keys: FieldKeys, basename: string, stored: Buffer): Buffer;

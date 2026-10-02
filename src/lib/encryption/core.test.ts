@@ -231,3 +231,72 @@ describe("sealed backups", () => {
     expect(Date.now() - t).toBeLessThan(200);
   });
 });
+
+describe("file encryption", () => {
+  // Computed independently with: node -e 'const{hkdfSync}=require("node:crypto");
+  // const key=Buffer.from("a".repeat(64),"hex");console.log(Buffer.from(hkdfSync(
+  // "sha256",key,Buffer.alloc(0),"blackvault/file-encryption/v1",32)).toString("hex"))'
+  const KNOWN_FILE_SUBKEY_HEX = "2b55a0f25d245b7d287aaebdfb95a5a021b221f7cbda44a1709fba09fd574358";
+  const name = "cmh2abc-def_1727000000000.jpg";
+  it("round-trips empty, small and 20 MB buffers; header layout", () => {
+    for (const size of [0, 17, 20 * 1024 * 1024]) {
+      const plain = Buffer.alloc(size, 7);
+      const enc = core.encryptFile(keys, name, plain);
+      expect(enc.subarray(0, 4).toString("ascii")).toBe("BVF1");
+      expect(enc[4]).toBe(1);
+      expect(enc.subarray(5, 13).toString("ascii")).toBe(keys.id);
+      expect(enc.length).toBe(13 + 12 + size + 16);
+      expect(core.isEncryptedFile(enc)).toBe(true);
+      expect(core.fileKeyId(enc)).toBe(keys.id);
+      expect(core.decryptFile(keys, name, enc).equals(plain)).toBe(true);
+    }
+  });
+  it("plaintext is not BVF1", () => {
+    expect(core.isEncryptedFile(Buffer.from("%PDF-1.7"))).toBe(false);
+    expect(core.isEncryptedFile(Buffer.alloc(0))).toBe(false);
+  });
+  it("tampered header, ciphertext, tag, basename, truncated tag all fail", () => {
+    const enc = core.encryptFile(keys, name, Buffer.from("hello world"));
+    const flip = (i: number) => { const b = Buffer.from(enc); b[i] ^= 1; return b; };
+    expect(() => core.decryptFile(keys, name, flip(4))).toThrow();      // version
+    expect(() => core.decryptFile(keys, name, flip(20))).toThrow();     // iv
+    expect(() => core.decryptFile(keys, name, flip(26))).toThrow();     // ciphertext
+    expect(() => core.decryptFile(keys, name, flip(enc.length - 1))).toThrow(); // tag
+    expect(() => core.decryptFile(keys, "other.jpg", enc)).toThrow();
+    expect(() => core.decryptFile(keys, name, enc.subarray(0, enc.length - 12))).toThrow();
+  });
+  it("wrong key is KEY_MISMATCH; short buffer is MALFORMED", () => {
+    const other = core.deriveKeys(core.parseKeyHex("b".repeat(64)));
+    const enc = core.encryptFile(keys, name, Buffer.from("x"));
+    expect(() => core.decryptFile(other, name, enc)).toThrow(expect.objectContaining({ code: "KEY_MISMATCH" }));
+    expect(() => core.decryptFile(keys, name, Buffer.from("BVF1"))).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
+  it("basename must be a non-empty string (M2)", () => {
+    expect(() => core.encryptFile(keys, "", Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.encryptFile(keys, null as unknown as string, Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.encryptFile(keys, 5 as unknown as string, Buffer.from("x")))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+
+    const enc = core.encryptFile(keys, name, Buffer.from("x"));
+    expect(() => core.decryptFile(keys, "", enc))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.decryptFile(keys, undefined as unknown as string, enc))
+      .toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
+  it("fileKeyId rejects a key id that is not 8 lowercase hex chars (M3)", () => {
+    const enc = core.encryptFile(keys, name, Buffer.from("x"));
+    const bad = Buffer.from(enc);
+    bad.write("ZZZZZZZZ", 5, "ascii"); // same length, not hex — must not reach log/compare as a key id
+    expect(() => core.fileKeyId(bad)).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+    expect(() => core.decryptFile(keys, name, bad)).toThrow(expect.objectContaining({ code: "MALFORMED" }));
+  });
+  it("file subkey is independent and pinned (known answer)", () => {
+    expect(keys.file.equals(keys.enc)).toBe(false);
+    expect(keys.file.equals(keys.idx)).toBe(false);
+    // Implementer: compute once with a standalone node one-liner (hkdfSync sha256, key=a*64 hex,
+    // salt empty, info "blackvault/file-encryption/v1", 32) and pin the full hex here.
+    expect(keys.file.toString("hex")).toBe(KNOWN_FILE_SUBKEY_HEX);
+  });
+});

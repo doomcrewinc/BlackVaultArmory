@@ -4,7 +4,7 @@ import { NextRequest } from "next/server";
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   mkdir: vi.fn(),
-  writeFile: vi.fn(),
+  writeEncryptedFile: vi.fn(),
 }));
 
 vi.mock("@/lib/server/auth", () => ({
@@ -26,14 +26,16 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { document: { create: mocks.create } },
 }));
 
-// The upload directory is mocked out so the route never touches the real
-// uploads tree, and the write calls stay assertable.
-vi.mock("@/lib/upload-security", () => ({
-  getCanonicalUploadsRoot: () => "/tmp/blackvault-test-uploads",
+// The upload directory and the write itself are mocked out so the route
+// never touches the real uploads tree, and the write calls stay assertable.
+// writeEncryptedFile (not fs.writeFile) is what the route must call.
+vi.mock("@/lib/files/storage", () => ({
+  documentsRoot: () => "/tmp/blackvault-test-uploads/documents",
+  writeEncryptedFile: mocks.writeEncryptedFile,
 }));
 
 vi.mock("fs", () => ({
-  promises: { mkdir: mocks.mkdir, writeFile: mocks.writeFile },
+  promises: { mkdir: mocks.mkdir },
 }));
 
 import { POST } from "./route";
@@ -68,7 +70,7 @@ describe("POST /api/documents/upload", () => {
     });
     mocks.create.mockResolvedValue({ id: "doc-1" });
     mocks.mkdir.mockResolvedValue(undefined);
-    mocks.writeFile.mockResolvedValue(undefined);
+    mocks.writeEncryptedFile.mockResolvedValue(undefined);
   });
 
   it("stores gearId and includes the gear relation", async () => {
@@ -89,6 +91,18 @@ describe("POST /api/documents/upload", () => {
     expect(data.type).toBe("RECEIPT");
     expect(data.mimeType).toBe("application/pdf");
     expect(include.gear).toEqual({ select: { id: true, name: true } });
+  });
+
+  it("writes through writeEncryptedFile under documentsRoot(), never fs.writeFile, and fileUrl keeps its shape", async () => {
+    await POST(uploadRequest({ name: "Receipt" }));
+
+    expect(mocks.writeEncryptedFile).toHaveBeenCalledTimes(1);
+    const [writtenPath, writtenBuffer] = mocks.writeEncryptedFile.mock.calls[0];
+    expect(writtenPath.startsWith("/tmp/blackvault-test-uploads/documents/")).toBe(true);
+    expect(Buffer.isBuffer(writtenBuffer)).toBe(true);
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fileUrl).toMatch(/^\/api\/files\/documents\/[a-f0-9]+\.pdf$/);
   });
 
   it("stores all three entity ids as null when none is sent", async () => {
@@ -114,7 +128,7 @@ describe("POST /api/documents/upload", () => {
 
     expect(response.status).toBe(400);
     expect(mocks.create).not.toHaveBeenCalled();
-    expect(mocks.writeFile).not.toHaveBeenCalled();
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("rejects a file whose bytes are not an allowed type", async () => {
@@ -127,7 +141,7 @@ describe("POST /api/documents/upload", () => {
 
     expect(response.status).toBe(400);
     expect(mocks.create).not.toHaveBeenCalled();
-    expect(mocks.writeFile).not.toHaveBeenCalled();
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("rate limits by user ID: two different users have separate buckets", async () => {

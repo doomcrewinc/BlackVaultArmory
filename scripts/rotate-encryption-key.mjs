@@ -24,6 +24,29 @@
 // file changes. The script itself never touches the key files on disk —
 // that is rotate-key.sh/.bat's job (step 6 of the spec's rotation list).
 //
+// Uploaded files (spec 3b, docs/superpowers/specs/2026-10-01-encrypted-files-design.md
+// §3 "Rotation"). Every BVF1 file under the uploads root that is under the OLD
+// key is re-encrypted under the NEW key around that one transaction:
+//   1. Stage (before the transaction): each such file is decrypted and
+//      re-encrypted into `<name>.rot`, written atomically (temp
+//      `<name>.rot.<8hex>.tmp`, mode 0600, fsync, rename, dir fsync). The AAD
+//      is the ORIGINAL file's basename, never `<name>.rot`, so the staged copy
+//      decrypts under the name it is about to take. Originals are not touched.
+//      A BVF1 file under neither key (or with a damaged header), a symlinked
+//      folder, or a leftover `.rot` under the OLD key refuses up front (exit 3).
+//   2. The database transaction, unchanged.
+//   3. Finalise (only after the commit): each `.rot` is renamed over its
+//      original, then each directory is fsynced. A failure here is a warning
+//      (exit stays 0, the C1 rule): src/lib/files/startup.ts renames any `.rot`
+//      under the current key into place on the app's next start.
+//   If the run fails BEFORE the commit, every `.rot` this run staged is
+//   deleted (its original is untouched, so it is never the only copy). A crash
+//   before the commit leaves `.rot` files under a key that is not current;
+//   startup deletes those. A crash after the commit leaves them under the
+//   current key; startup finishes them. Either way no file is ever unreadable.
+//   Files are processed one at a time, whole-file in memory (uploads are capped
+//   at about 20 MB each).
+//
 // Usage: node scripts/rotate-encryption-key.mjs --old-key-file <path> --new-key-file <path>
 //   exit 0  success — one line naming the old/new key ids (never the keys) and row counts.
 //           Exits 0 IFF the transaction committed (fix round 1, C1): a failure AFTER that
@@ -35,12 +58,18 @@
 //   exit 2  usage error
 //   exit 3  refused UP FRONT, before any transaction opened (final review F5): the
 //           database has no key check, or --old-key-file does not open it (it is not
-//           this database's key). Nothing changed and nothing could have; the wrappers
-//           skip the probe (it would answer NEITHER) and say which key is wrong.
+//           this database's key), or (spec 3b) an uploaded file is under neither key,
+//           has a damaged header, sits behind a symlinked folder, or a leftover .rot is
+//           under the old key. Nothing changed and nothing could have; the wrappers
+//           skip the probe and print the reason this script gave.
 //
 // Probe mode: node scripts/rotate-encryption-key.mjs --probe --old-key-file <path> --new-key-file <path>
-//   Read-only. Prints exactly one of OLD, NEW or NEITHER (which key currently opens
-//   AppSettings.encryptionKeyCheck) and exits 0. Exits non-zero (nothing printed on
+//   Read-only. Prints one of OLD, NEW or NEITHER (which key currently opens
+//   AppSettings.encryptionKeyCheck) as its FIRST line and exits 0. Spec 3b adds a
+//   SECOND line, `FILES old=<n> new=<n> rot=<n>`: uploaded files under the old key,
+//   under the new key, and staged `.rot` files. The first line is unchanged, and the
+//   wrappers read only the first line as the answer. If the files cannot be counted
+//   the second line is left out (a warning goes to stderr AFTER the answer line). Exits non-zero (nothing printed on
 //   stdout) when it cannot tell — DB unreachable, no key check row, or a key file itself
 //   unreadable. For the wrappers to use after any non-zero exit from a rotation run, to
 //   tell a committed rotation (now reads as NEW) from one that never took effect (OLD)
@@ -58,13 +87,20 @@
 //   - the audit-event row shape: src/lib/audit/record.ts's writeAuditEvent
 //   - Prisma client selection: src/lib/prisma.ts (loadPrismaClient) via
 //     createRequire, same as scripts/admin-reset-link.mjs
+//   - spec 3b: the uploads root (uploadsRoot) and the atomic write
+//     (writeAtomic) from src/lib/files/storage.ts — the root has an equality
+//     test in scripts/rotate-encryption-key.test.ts — and the folder walk
+//     plus `.rot` naming from src/lib/files/startup.ts, so this script and
+//     the app's startup agree on which files exist and how staging is named.
 
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { promises as fsp, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import {
   parseKeyHex, deriveKeys, encryptValue, decryptValue, fingerprint, EncryptionKeyError,
+  encryptFile, decryptFile, fileKeyId, isEncryptedFile,
 } from "../src/lib/encryption/core.mjs";
 import { clearCompactionPending, compactDatabase } from "../src/lib/encryption/compaction.mjs";
 
@@ -266,6 +302,272 @@ async function compactAfterRotation(raw) {
   }
 }
 
+// ─── Uploaded files (spec 3b) ──────────────────────────────────────
+// fsp.* is always called through the imported namespace object (never
+// destructured), same rule as src/lib/files/storage.ts, so the test fixtures
+// (scripts/rotate-encryption-key.*.preload.cjs) can patch it.
+
+/** Mirrors uploadsRoot in src/lib/files/storage.ts exactly: `IMAGE_UPLOAD_DIR` when set, else `<cwd>/uploads`. */
+export function uploadsRoot(env = process.env) {
+  return env.IMAGE_UPLOAD_DIR ? path.resolve(env.IMAGE_UPLOAD_DIR) : path.join(process.cwd(), "uploads");
+}
+
+/** Mirrors DIR_FSYNC_TOLERATED_CODES in src/lib/files/storage.ts. */
+const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
+
+/** Header bytes needed to classify a file — mirrors CLASSIFY_BYTES in src/lib/files/startup.ts. */
+const CLASSIFY_BYTES = 41;
+
+const ROT_SUFFIX = ".rot";
+
+/** Mirrors writeFull in src/lib/files/storage.ts: loops on short writes; no forward progress throws. */
+async function writeFull(handle, bytes) {
+  let written = 0;
+  while (written < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, written, bytes.length - written);
+    if (bytesWritten <= 0) throw new Error("writeAtomic: write() made no forward progress (0 bytes written)");
+    written += bytesWritten;
+  }
+}
+
+async function syncDir(dir) {
+  try {
+    const dirHandle = await fsp.open(dir, "r");
+    try {
+      await dirHandle.sync();
+    } finally {
+      await dirHandle.close();
+    }
+  } catch (e) {
+    if (!e?.code || !DIR_FSYNC_TOLERATED_CODES.has(e.code)) throw e;
+  }
+}
+
+/**
+ * Mirrors writeAtomic in src/lib/files/storage.ts exactly: `<absPath>.<8 random
+ * hex>.tmp` opened "wx" mode 0600, chmod 0600, full write, fsync, rename, dir
+ * fsync. The temp is removed on any failure up to the rename, so a full disk
+ * leaves no partial file (Review Focus 5). For a `.rot` target the temp is
+ * `<name>.rot.<8hex>.tmp`, which startup's sweep (/\.[0-9a-f]{8}\.tmp$/) removes.
+ */
+async function writeAtomic(absPath, bytes) {
+  const tmpPath = `${absPath}.${randomBytes(4).toString("hex")}.tmp`;
+  const handle = await fsp.open(tmpPath, "wx", 0o600);
+  try {
+    try {
+      await handle.chmod(0o600);
+      await writeFull(handle, bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (e) {
+    await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw e;
+  }
+  try {
+    await fsp.rename(tmpPath, absPath);
+  } catch (e) {
+    await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw e;
+  }
+  await syncDir(path.dirname(absPath));
+}
+
+function symlinkedFolderRefusal(abs) {
+  return new RotationRefusedError(
+    `${abs} is a symbolic link to a folder inside the uploads folder; BlackVault does not follow links there, so the ` +
+      "files behind it could not be rotated. Replace the link with a real folder, then rotate again. Nothing was changed.",
+  );
+}
+
+/**
+ * Every regular file under `root` — mirrors walk() in src/lib/files/startup.ts:
+ * sorted, never following a symlink, never entering a hidden folder (which
+ * includes the `.pre-encryption-*` snapshots). A symlinked folder refuses
+ * (exit 3), as it refuses the app's start. A missing root is no files.
+ */
+async function walkUploads(root) {
+  const files = [];
+  async function visit(dir, isRoot) {
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch (e) {
+      if (isRoot && e?.code === "ENOENT") return;
+      throw new RotationError(`Cannot read the uploads folder ${dir}: ${e?.code ?? describeFailure(e)}. Nothing was changed.`);
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const abs = path.join(dir, e.name);
+      if (e.name.startsWith(".") && !e.isFile()) continue;
+      if (e.isSymbolicLink()) {
+        let isDir = false;
+        try {
+          isDir = (await fsp.stat(abs)).isDirectory();
+        } catch {
+          isDir = false; // dangling: never followed
+        }
+        if (isDir) throw symlinkedFolderRefusal(abs);
+      } else if (e.isDirectory()) await visit(abs, false);
+      else if (e.isFile()) files.push({ abs, name: e.name });
+    }
+  }
+  await visit(root, true);
+  return files;
+}
+
+async function readHead(abs) {
+  const handle = await fsp.open(abs, "r");
+  try {
+    const buf = Buffer.alloc(CLASSIFY_BYTES);
+    let got = 0;
+    while (got < CLASSIFY_BYTES) {
+      const { bytesRead } = await handle.read(buf, got, CLASSIFY_BYTES - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    return buf.subarray(0, got);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The BVF1 key id of `head`, or null when the header is damaged. */
+function keyIdOrNull(head) {
+  try {
+    return fileKeyId(head);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classifies every uploaded file. Candidates follow startup.ts's isCandidate:
+ * not hidden, not a `.tmp` or `.rot` work file. Plaintext candidates are left
+ * alone (the app's startup encrypts them under whatever key is current).
+ * `rot` is every non-hidden `.rot` file, with its key id (null if damaged).
+ */
+async function scanUploads(root, oldKeys, newKeys) {
+  const out = { old: [], new: [], neither: [], rot: [] };
+  for (const f of await walkUploads(root)) {
+    if (f.name.startsWith(".")) continue;
+    const isRot = f.name.endsWith(ROT_SUFFIX);
+    if (!isRot && f.name.endsWith(".tmp")) continue;
+    let head;
+    try {
+      head = await readHead(f.abs);
+    } catch (e) {
+      throw new RotationError(`Cannot read the uploaded file ${f.abs}: ${e?.code ?? describeFailure(e)}. Nothing was changed.`);
+    }
+    if (isRot) {
+      out.rot.push({ ...f, keyId: isEncryptedFile(head) ? keyIdOrNull(head) : null });
+      continue;
+    }
+    if (!isEncryptedFile(head)) continue;
+    const id = keyIdOrNull(head);
+    if (id === oldKeys.id) out.old.push(f);
+    else if (id === newKeys.id) out.new.push(f);
+    else out.neither.push({ ...f, keyId: id });
+  }
+  return out;
+}
+
+/** The up-front file refusals (exit 3): nothing has been written yet. */
+function refuseOnFiles(scan, oldKeys, newKeys) {
+  if (scan.neither.length) {
+    const first = scan.neither[0];
+    const more = scan.neither.length > 1 ? ` (and ${scan.neither.length - 1} more)` : "";
+    const what = first.keyId
+      ? `is encrypted with key ${first.keyId}, which is neither the old key ${oldKeys.id} nor the new key ${newKeys.id}`
+      : "starts like an encrypted file but its header is damaged";
+    throw new RotationRefusedError(
+      `The uploaded file ${first.abs} ${what}${more}; refusing to rotate. Nothing was changed. ` +
+        "Restore it from a backup, or move it out of the uploads folder, then rotate again.",
+    );
+  }
+  const unfinished = scan.rot.find((r) => r.keyId === oldKeys.id);
+  if (unfinished) {
+    throw new RotationRefusedError(
+      `${unfinished.abs} is staging from an earlier key rotation that has not been finished yet; refusing to rotate. ` +
+        "Nothing was changed. Start BlackVault once (its startup finishes that rotation), then rotate again.",
+    );
+  }
+}
+
+/**
+ * Stage one file: decrypt under the old key, re-encrypt under the new key with
+ * the ORIGINAL basename as AAD, prove the result decrypts back to the same
+ * bytes, then write `<abs>.rot` atomically. Never touches `abs`.
+ */
+async function stageFile(f, oldKeys, newKeys) {
+  const basename = path.basename(f.abs);
+  const rot = `${f.abs}${ROT_SUFFIX}`;
+  try {
+    const stored = await fsp.readFile(f.abs);
+    const plain = decryptFile(oldKeys, basename, stored);
+    const staged = encryptFile(newKeys, basename, plain);
+    if (!decryptFile(newKeys, basename, staged).equals(plain)) throw new Error("round-trip check failed");
+    await writeAtomic(rot, staged);
+  } catch (e) {
+    throw new RotationError(
+      `Cannot stage the re-encrypted copy ${rot} of ${f.abs}: ${e?.code ?? describeFailure(e)}. ` +
+        "Nothing was changed (free disk space or fix the folder's permissions, then rotate again).",
+    );
+  }
+  return { abs: f.abs, rot };
+}
+
+/** Before-commit failure: delete every `.rot` this run staged. Their originals are untouched, so none is the only copy. */
+async function discardStaged(staged) {
+  const left = [];
+  for (const s of staged) {
+    try {
+      await fsp.rm(s.rot, { force: true });
+    } catch {
+      left.push(s.rot);
+    }
+  }
+  if (left.length) {
+    console.error(
+      `Warning: could not remove ${left.length} staged file(s), e.g. ${left[0]}. They are not used; BlackVault removes them on its next start.`,
+    );
+  }
+}
+
+/**
+ * After the commit: each `.rot` over its original, then each folder fsynced.
+ * Never throws (the C1 rule: a committed rotation exits 0). Anything left is
+ * finished by src/lib/files/startup.ts on the app's next start with the new key.
+ */
+async function finaliseStaged(staged) {
+  const dirs = new Set();
+  const failed = [];
+  for (const s of staged) {
+    try {
+      await fsp.rename(s.rot, s.abs);
+      dirs.add(path.dirname(s.abs));
+    } catch (e) {
+      failed.push({ s, code: e?.code ?? describeFailure(e) });
+    }
+  }
+  for (const dir of dirs) {
+    try {
+      await syncDir(dir);
+    } catch (e) {
+      console.error(`Warning: rotation committed, but syncing the folder ${dir} failed: ${e?.code ?? describeFailure(e)}.`);
+    }
+  }
+  if (failed.length) {
+    console.error(
+      `Warning: rotation committed, but ${failed.length} re-encrypted file(s) could not be put in place yet ` +
+        `(first: ${failed[0].s.rot}: ${failed[0].code}). BlackVault finishes them when it next starts with the new key; ` +
+        "do not delete the .rot files.",
+    );
+  }
+  return staged.length - failed.length;
+}
+
 /** One line describing any failure — never the key material, never a stack trace (callers of this CLI see one line). */
 function describeFailure(e) {
   const message = e instanceof Error ? e.message : String(e);
@@ -320,6 +622,8 @@ async function rotate(oldKeys, newKeys) {
   const PrismaClient = loadPrismaClient();
   const raw = new PrismaClient();
   let committed = false;
+  /** `{ abs, rot }` for every `.rot` this run wrote (spec 3b). */
+  const staged = [];
   try {
     // Refuse before touching anything unless the OLD key opens this
     // database's key check (field-encryption spec §3: "The script refuses
@@ -340,6 +644,12 @@ async function rotate(oldKeys, newKeys) {
         "The old key does not match this database's encryption key check; refusing to rotate. Nothing was changed.",
       );
     }
+
+    // Spec 3b step 1: classify every uploaded file, refuse up front on one
+    // under neither key, then stage the old-key files as `.rot` copies.
+    const scan = await scanUploads(uploadsRoot(), oldKeys, newKeys);
+    refuseOnFiles(scan, oldKeys, newKeys);
+    for (const f of scan.old) staged.push(await stageFile(f, oldKeys, newKeys));
 
     const counts = await raw.$transaction(async (tx) => {
       const out = {};
@@ -373,7 +683,7 @@ async function rotate(oldKeys, newKeys) {
           entityType: null,
           entityId: null,
           entityLabel: null,
-          changes: JSON.stringify({ from: oldKeys.id, to: newKeys.id, counts: out }),
+          changes: JSON.stringify({ from: oldKeys.id, to: newKeys.id, counts: out, files: staged.length }),
         },
       });
 
@@ -387,11 +697,22 @@ async function rotate(oldKeys, newKeys) {
     } catch (e) {
       console.error(`Warning: rotation committed, but printing the summary failed: ${describeFailure(e)}`);
     }
+    // Spec 3b step 3: only now are the staged copies put in place.
+    const finalised = await finaliseStaged(staged);
+    if (staged.length) {
+      try {
+        console.log(`Re-encrypted ${finalised} uploaded files under the new key.`);
+      } catch {
+        // stdout gone: the files are in place; nothing to report it to.
+      }
+    }
     await compactAfterRotation(raw);
   } catch (e) {
     if (committed) {
       console.error(`Warning: rotation committed, but a post-commit step failed: ${describeFailure(e)}`);
     } else {
+      // Spec 3b step 4: the transaction did not commit, so the staged copies must go.
+      await discardStaged(staged);
       console.error(describeFailure(e));
       process.exitCode = e instanceof RotationRefusedError ? 3 : 1;
     }
@@ -429,13 +750,29 @@ async function main() {
   }
 
   if (parsed.probe) {
+    let answer;
     try {
-      console.log(await runProbe(oldKeys, newKeys));
-      process.exitCode = 0;
+      answer = await runProbe(oldKeys, newKeys);
     } catch (e) {
       console.error(describeFailure(e));
       process.exitCode = 1;
+      return;
     }
+    // Spec 3b: a second line with the file counts. Counted before anything is
+    // printed, and any warning goes out only AFTER the answer line, so the
+    // answer is always line 1 even when `compose run` merges stderr into a TTY.
+    let filesLine = null;
+    let filesWarning = null;
+    try {
+      const scan = await scanUploads(uploadsRoot(), oldKeys, newKeys);
+      filesLine = `FILES old=${scan.old.length} new=${scan.new.length} rot=${scan.rot.length}`;
+    } catch (e) {
+      filesWarning = `Warning: could not count the uploaded files: ${describeFailure(e)}`;
+    }
+    console.log(answer);
+    if (filesLine) console.log(filesLine);
+    if (filesWarning) console.error(filesWarning);
+    process.exitCode = 0;
     return;
   }
 

@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { detectFileSignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
-import { getCanonicalUploadsRoot } from "@/lib/upload-security";
+import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
 
@@ -14,7 +14,7 @@ const MAX_SIZE = 20 * 1024 * 1024; // 20MB
 
 // POST /api/documents/upload
 // Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?, notes?
-// Saves to /storage/uploads/documents/{uuid}.{ext}
+// Saves to <uploadsRoot>/documents/{uuid}.{ext}, encrypted at rest (BVF1).
 // Creates a Document record and returns it.
 export async function POST(request: NextRequest) {
   const auth = await requireAuth();
@@ -85,12 +85,12 @@ export async function POST(request: NextRequest) {
     const fileName = `${fileId}.${detected.extension}`;
     const relativeUrl = `/api/files/documents/${fileName}`;
 
-    const uploadDir = path.join(getCanonicalUploadsRoot(), "documents");
+    const uploadDir = documentsRoot();
     const filePath = path.join(uploadDir, fileName);
 
     await fs.mkdir(uploadDir, { recursive: true });
 
-    await fs.writeFile(filePath, buffer);
+    await writeEncryptedFile(filePath, buffer);
 
     const doc = await prisma.document.create({
       data: {

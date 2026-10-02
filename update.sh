@@ -129,7 +129,9 @@ fi
 # only drives the preflight checks.
 # docker compose must get the BLACKVAULT_* keys from .env only, never from
 # this shell's environment (a shell variable would override .env).
-unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD
+# BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
+# uploads snapshot; an inherited value must never reach it (final review FIX 5).
+unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 
@@ -263,14 +265,30 @@ if ! ./scripts/db-snapshot.sh; then
   echo ""
   echo "ERROR: the database snapshot failed, so the update stopped here. See above."
   echo "       The new version was NOT started."
+  rm -f backups/.uploads-snapshot-marker
   $COMPOSE start blackvault >/dev/null 2>&1 || true
   exit 1
 fi
 
+# Task 4: scripts/db-snapshot.sh also snapshotted the uploads folder (unless
+# it was empty or missing) and left its path in
+# backups/.uploads-snapshot-marker. Read it once, then remove it — never
+# write it to .env — and pass it to the ONE `up` below, so the app's own
+# startup step does not take a second snapshot of the same files.
+UPLOADS_SNAPSHOT_MARKER=""
+if [ -s backups/.uploads-snapshot-marker ]; then
+  UPLOADS_SNAPSHOT_MARKER=$(cat backups/.uploads-snapshot-marker)
+fi
+rm -f backups/.uploads-snapshot-marker
+
 # ── Restart ───────────────────────────────────────────────────
 echo ""
 echo "Restarting..."
-$COMPOSE up -d
+if [ -n "$UPLOADS_SNAPSHOT_MARKER" ]; then
+  BLACKVAULT_UPLOADS_SNAPSHOT="$UPLOADS_SNAPSHOT_MARKER" $COMPOSE up -d
+else
+  $COMPOSE up -d
+fi
 
 echo ""
 echo "Waiting for health check..."

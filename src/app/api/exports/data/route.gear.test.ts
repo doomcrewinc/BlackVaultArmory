@@ -199,7 +199,7 @@ describe("/api/exports/data gear section", () => {
     const gearReference = referenceLines.find((line) => line.includes("gearImage"));
     expect(gearReference).toBeDefined();
     expect(gearReference).toContain("/api/files/images/gear/g1_1.webp");
-    expect(gearReference).toContain("storage/uploads/images/gear/g1_1.webp");
+    expect(gearReference).toContain("uploads/images/gear/g1_1.webp");
   });
 
   it("drops an unsafe gear image URL from the upload references", async () => {

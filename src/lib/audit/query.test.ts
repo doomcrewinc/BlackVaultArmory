@@ -239,6 +239,7 @@ describe("ACTION_GROUPS", () => {
       "RESTORE",
       "ENCRYPTION_ENABLED",
       "KEY_ROTATED",
+      "FILES_ENCRYPTED",
     ]);
   });
 

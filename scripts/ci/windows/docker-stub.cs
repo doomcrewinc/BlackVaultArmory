@@ -42,6 +42,9 @@
 //                            scenario can fail the real rotation run while
 //                            still controlling what the recovery probe says.
 //   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
+//   BV_STUB_PROBE_FILES      spec 3b Task 5: a SECOND probe stdout line,
+//                            e.g. "FILES old=3 new=0 rot=3", printed after
+//                            BV_STUB_PROBE_ANSWER. Unset => one line only.
 //   BV_STUB_RUN_EXIT         final review F5: exit code of the (non-probe)
 //                            rotation `compose run`, e.g. 3 = the CLI refused
 //                            up front. Unset/"0" => normal handling.
@@ -51,6 +54,12 @@
 //                            Lets a scenario act at an exact point — after the
 //                            .bat has written .new, before the key-file swap
 //                            (e.g. lock .new so the SECOND move fails).
+//
+// Task 4: `compose up` also appends a line "ENV BLACKVAULT_UPLOADS_SNAPSHOT=
+// [<value>]" to BV_STUB_LOG, reporting what update.bat passed through its own
+// environment for that one call — proof the uploads-snapshot marker reaches
+// the container's environment, without disturbing the "compose up -d" line
+// itself (several existing scenarios match it with EXACT equality).
 
 using System;
 using System.IO;
@@ -67,6 +76,18 @@ internal static class DockerStub
             // Appending, never truncating: one run makes several calls and the
             // assertions read the whole sequence.
             File.AppendAllText(log, joined + Environment.NewLine);
+
+            // Task 4: `compose up -d` (the app start) also logs the uploads
+            // snapshot marker it was handed, on its OWN line - never appended
+            // to the "compose up -d" line itself, which existing scenarios
+            // match with exact equality (Get-CallIndex).
+            if (args.Length > 1 &&
+                string.Equals(args[0], "compose", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(args[1], "up", StringComparison.OrdinalIgnoreCase))
+            {
+                string uploadsMarker = Environment.GetEnvironmentVariable("BLACKVAULT_UPLOADS_SNAPSHOT") ?? "";
+                File.AppendAllText(log, "ENV BLACKVAULT_UPLOADS_SNAPSHOT=[" + uploadsMarker + "]" + Environment.NewLine);
+            }
         }
 
         if (args.Length == 0 || !string.Equals(args[0], "compose", StringComparison.OrdinalIgnoreCase))
@@ -120,6 +141,11 @@ internal static class DockerStub
                 if (!string.IsNullOrEmpty(answer))
                 {
                     Console.WriteLine(answer);
+                }
+                string filesLine = Environment.GetEnvironmentVariable("BV_STUB_PROBE_FILES");
+                if (!string.IsNullOrEmpty(filesLine))
+                {
+                    Console.WriteLine(filesLine);
                 }
                 return 0;
             }

@@ -258,6 +258,25 @@ echo Snapshotting the database...
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
 
+:: Task 4: scripts\db-snapshot.bat also snapshotted the uploads folder
+:: (unless it was empty or missing) and left its path in
+:: backups\.uploads-snapshot-marker. Read it once, then remove it - never
+:: write it to .env - and pass it to the ONE `up` below, so the app's own
+:: startup step does not take a second snapshot of the same files.
+:: Final review FIX 5: never let a value inherited from the caller reach `up`.
+set "BLACKVAULT_UPLOADS_SNAPSHOT="
+set "UPLOADS_SNAPSHOT_MARKER="
+if exist "backups\.uploads-snapshot-marker" (
+  for /f "usebackq delims=" %%M in ("backups\.uploads-snapshot-marker") do set "UPLOADS_SNAPSHOT_MARKER=%%M"
+  del /f /q "backups\.uploads-snapshot-marker" >nul 2>&1
+)
+
+:: Set directly on this process (never on the caller: setlocal above), so it
+:: reaches ONLY this `up -d`. Not unset afterwards on purpose: doing so right
+:: after `up -d` with a plain `set` would reset the errorlevel the very next
+:: line needs, and leaving it defined for the rest of this script (health
+:: wait, logs) is harmless - nothing else here reads it.
+if defined UPLOADS_SNAPSHOT_MARKER set "BLACKVAULT_UPLOADS_SNAPSHOT=!UPLOADS_SNAPSHOT_MARKER!"
 echo.
 echo Restarting...
 %COMPOSE% up -d
@@ -359,6 +378,7 @@ exit /b 1
 echo.
 echo ERROR: the database snapshot failed, so the update stopped here. See above.
 echo        The new version was NOT started.
+del /f /q "backups\.uploads-snapshot-marker" >nul 2>&1
 %COMPOSE% start blackvault >nul 2>&1
 pause
 exit /b 1

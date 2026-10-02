@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -30,17 +30,27 @@ const ctx = vi.hoisted(() => {
     process.env.DB_PROVIDER = "sqlite";
     process.env.DATABASE_URL = `file:${dir}/t.db?connection_limit=1`;
   }
-  return { pg, dir, file: `${dir}/t.db` };
+  // Spec 3b Task 5: every run gets its own scratch uploads root (IMAGE_UPLOAD_DIR), so the
+  // script never sees the repo's own uploads/ folder.
+  return { pg, dir, file: `${dir}/t.db`, uploads: `${dir}/uploads` };
 });
 
 import type { PrismaClient } from "@prisma/client";
 import { createRawPrismaClient } from "@/lib/prisma";
-import { decryptValue, deriveKeys, encryptValue, envelopeKeyId, fingerprint, generateKeyHex, parseKeyHex } from "@/lib/encryption/core.mjs";
+import {
+  decryptFile, decryptValue, deriveKeys, encryptFile, encryptValue, envelopeKeyId, fileKeyId, fingerprint, generateKeyHex, parseKeyHex,
+} from "@/lib/encryption/core.mjs";
 import { aadFor, ENCRYPTED_FIELDS } from "@/lib/encryption/fields";
-import { ENCRYPTED_FIELDS as ROTATION_FIELDS } from "./rotate-encryption-key.mjs";
+import { ENCRYPTED_FIELDS as ROTATION_FIELDS, uploadsRoot as rotationUploadsRoot } from "./rotate-encryption-key.mjs";
+import { uploadsRoot } from "@/lib/files/storage";
+import { runFileStartup } from "@/lib/files/startup";
+import { resetFieldKeysForTests } from "@/lib/encryption/keys";
 
 type Row = Record<string, unknown>;
-type FieldKeysLike = { id: string; enc: Buffer; idx: Buffer };
+type FieldKeysLike = { id: string; enc: Buffer; idx: Buffer; file: Buffer };
+
+/** The probe's answer line. Spec 3b added a second `FILES ...` line; callers only ever read the first. */
+const firstLine = (stdout: string) => stdout.split("\n")[0].trim();
 
 const KEY_CHECK_AAD = "AppSettings.encryptionKeyCheck";
 const KEY_CHECK_PLAINTEXT = "blackvault-key-check";
@@ -52,6 +62,21 @@ describe("scripts/rotate-encryption-key.mjs's ENCRYPTED_FIELDS mirror", () => {
     const real = [...ENCRYPTED_FIELDS].map((f) => ({ ...f })).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
     const mirrored = [...ROTATION_FIELDS].map((f) => ({ ...f })).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
     expect(mirrored).toEqual(real);
+  });
+});
+
+// Spec 3b Task 5: the script is plain .mjs and cannot import src/lib/files/storage.ts, so it
+// mirrors uploadsRoot(); this keeps the two from drifting (same rule as ENCRYPTED_FIELDS above).
+describe("scripts/rotate-encryption-key.mjs's uploadsRoot mirror", () => {
+  it.each([
+    ["unset", {}],
+    ["empty", { IMAGE_UPLOAD_DIR: "" }],
+    ["absolute", { IMAGE_UPLOAD_DIR: "/srv/blackvault/uploads" }],
+    ["relative", { IMAGE_UPLOAD_DIR: "some/relative/uploads" }],
+    ["trailing slash", { IMAGE_UPLOAD_DIR: "/srv/up/" }],
+  ])("matches src/lib/files/storage.ts's uploadsRoot() (%s)", (_l, env) => {
+    const e = env as unknown as NodeJS.ProcessEnv;
+    expect(rotationUploadsRoot(e)).toBe(uploadsRoot(e));
   });
 });
 
@@ -81,7 +106,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     return spawnSync("node", ["scripts/rotate-encryption-key.mjs", ...args], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: { ...process.env },
+      env: { ...process.env, IMAGE_UPLOAD_DIR: ctx.uploads },
     });
   }
 
@@ -90,7 +115,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     return spawnSync("node", ["--require", preloadPath, "scripts/rotate-encryption-key.mjs", ...args], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: { ...process.env },
+      env: { ...process.env, IMAGE_UPLOAD_DIR: ctx.uploads },
     });
   }
 
@@ -214,6 +239,8 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
 
   beforeEach(async () => {
     await within(10_000, wipe());
+    rmSync(ctx.uploads, { recursive: true, force: true });
+    mkdirSync(ctx.uploads, { recursive: true });
   });
 
   afterEach(() => {
@@ -458,14 +485,14 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
 
     const before = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
     expect(before.status, `stderr: ${before.stderr}`).toBe(0);
-    expect(before.stdout.trim()).toBe("OLD");
+    expect(firstLine(before.stdout)).toBe("OLD");
 
     const rotated = runScript(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
     expect(rotated.status, `stderr: ${rotated.stderr}`).toBe(0);
 
     const after = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
     expect(after.status, `stderr: ${after.stderr}`).toBe(0);
-    expect(after.stdout.trim()).toBe("NEW");
+    expect(firstLine(after.stdout)).toBe("NEW");
   }, 60_000);
 
   it("--probe reports NEITHER, and exits 0, when the key check opens under neither file", async () => {
@@ -478,7 +505,7 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
 
     const result = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
     expect(result.status, `stderr: ${result.stderr}`).toBe(0);
-    expect(result.stdout.trim()).toBe("NEITHER");
+    expect(firstLine(result.stdout)).toBe("NEITHER");
   }, 60_000);
 
   it("--probe exits non-zero (prints nothing on stdout) when it cannot tell: no key check at all", async () => {
@@ -592,6 +619,258 @@ describe(`scripts/rotate-encryption-key.mjs against real ${ctx.pg ? "PostgreSQL"
     // correctly complete the swap rather than deleting the new key file.
     const probe = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
     expect(probe.status).toBe(0);
-    expect(probe.stdout.trim()).toBe("NEW");
+    expect(firstLine(probe.stdout)).toBe("NEW");
+  }, 60_000);
+  // ── spec 3b Task 5: uploaded files ───────────────────────────────
+
+  const CRASH_BEFORE_FINALISE_PRELOAD = path.join(process.cwd(), "scripts", "rotate-encryption-key.crash-before-finalise.preload.cjs");
+  const ENOSPC_ROT_PRELOAD = path.join(process.cwd(), "scripts", "rotate-encryption-key.enospc-rot.preload.cjs");
+
+  /**
+   * Uploaded files exactly as the app stores them: BVF1 under `keys`, AAD bound to the basename.
+   * The image name has a cuid-style `-` (Review Focus 4). Returns relative path → plaintext.
+   */
+  const UPLOADED: Record<string, Buffer> = {
+    "images/firearm_cm1abc-xyz_1700000000000.jpg": Buffer.from("\xff\xd8\xff\xe0 fake jpeg bytes ".repeat(200), "latin1"),
+    "images/gear_g-1_1700000000001.png": Buffer.from("\x89PNG fake png bytes", "latin1"),
+    "documents/1700000000002-receipt.pdf": Buffer.from("%PDF-1.7 fake document ".repeat(50), "latin1"),
+  };
+
+  function seedFiles(keys: FieldKeysLike): Record<string, Buffer> {
+    for (const [rel, plain] of Object.entries(UPLOADED)) {
+      const abs = path.join(ctx.uploads, rel);
+      mkdirSync(path.dirname(abs), { recursive: true });
+      writeFileSync(abs, encryptFile(keys, path.basename(abs), plain), { mode: 0o600 });
+    }
+    return UPLOADED;
+  }
+
+  /** Every regular file under the uploads root (relative, sorted), hidden ones included. */
+  function listUploads(dir = ctx.uploads, rel = ""): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const name of readdirSync(dir).sort()) {
+      const abs = path.join(dir, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(abs);
+      if (st.isDirectory()) out.push(...listUploads(abs, r));
+      else out.push(r);
+    }
+    return out;
+  }
+
+  /** Every file's bytes, keyed by relative path — proves "nothing changed" on disk. */
+  function uploadsSnapshot(): Record<string, string> {
+    return Object.fromEntries(
+      listUploads().map((r) => {
+        const abs = path.join(ctx.uploads, r);
+        return [r, lstatSync(abs).isSymbolicLink() ? `link:${abs}` : readFileSync(abs).toString("base64")];
+      }),
+    );
+  }
+
+  const workFiles = () => listUploads().filter((r) => r.endsWith(".rot") || r.endsWith(".tmp"));
+
+  function expectAllUnder(keys: FieldKeysLike, files: Record<string, Buffer>) {
+    for (const [rel, plain] of Object.entries(files)) {
+      const stored = readFileSync(path.join(ctx.uploads, rel));
+      expect(fileKeyId(stored), rel).toBe(keys.id);
+      expect(decryptFile(keys, path.basename(rel), stored).equals(plain), rel).toBe(true);
+    }
+  }
+
+  it("files: after rotation every uploaded file is under the new key, decrypts to the original bytes, and no .rot/.tmp remains", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+    const files = seedFiles(oldKeys);
+    // Left alone: a plaintext file (the app's startup encrypts it) and a dotfile (never scanned).
+    writeFileSync(path.join(ctx.uploads, "images", "not-yet-encrypted.png"), "plain");
+    writeFileSync(path.join(ctx.uploads, ".DS_Store"), "x");
+
+    const result = runScript(["--old-key-file", keyFile("old-files-1", oldHex), "--new-key-file", keyFile("new-files-1", newHex)]);
+
+    expect(result.status, `stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("Re-encrypted 3 uploaded files under the new key.");
+    expectAllUnder(newKeys, files);
+    expect(workFiles()).toEqual([]);
+    expect(readFileSync(path.join(ctx.uploads, "images", "not-yet-encrypted.png"), "utf8")).toBe("plain");
+    expect(readFileSync(path.join(ctx.uploads, ".DS_Store"), "utf8")).toBe("x");
+    const events = await raw.auditEvent.findMany({ where: { action: "KEY_ROTATED" } });
+    expect(JSON.parse(events[0].changes as string).files).toBe(3);
+  }, 60_000);
+
+  it("files: a database failure before the commit leaves every original untouched and deletes every .rot", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    // Same mid-transaction injection as above: one field under a third key.
+    await raw.accessory.update({
+      where: { id: "a-nfa" },
+      data: { nfaControlNumber: enc(keysFromHex(generateKeyHex()), "Accessory", "nfaControlNumber", "X") },
+    });
+    const filesBefore = uploadsSnapshot();
+    const dbBefore = await rawSnapshot();
+
+    const result = runScript(["--old-key-file", keyFile("old-files-2", oldHex), "--new-key-file", keyFile("new-files-2", newHex)]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Cannot rotate Accessory\.nfaControlNumber/);
+    expect(uploadsSnapshot()).toEqual(filesBefore);
+    expect(workFiles()).toEqual([]);
+    expect(await rawSnapshot()).toBe(dbBefore);
+  }, 60_000);
+
+  it("files: a crash after the commit, before finalising, leaves .rot files under the new key; the app's startup (runFileStartup) finishes them", async () => {
+    // The NEW key is the suite's fixed test key, so the app-side getFieldKeys() — what
+    // runFileStartup uses — is the new key, exactly as after the wrapper's key-file swap.
+    const oldHex = generateKeyHex();
+    const newHex = process.env.BLACKVAULT_ENCRYPTION_KEY as string;
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+    const files = seedFiles(oldKeys);
+    const oldKeyFile = keyFile("old-files-3", oldHex);
+    const newKeyFile = keyFile("new-files-3", newHex);
+
+    const result = runScriptWithPreload(["--old-key-file", oldKeyFile, "--new-key-file", newKeyFile], CRASH_BEFORE_FINALISE_PRELOAD);
+    expect(result.status, `stdout: ${result.stdout} stderr: ${result.stderr}`).toBe(9); // the injected exit
+
+    // The database committed …
+    const settings = await raw.appSettings.findUniqueOrThrow({ where: { id: "singleton" } });
+    expect(decryptValue(newKeys, KEY_CHECK_AAD, settings.encryptionKeyCheck as string)).toBe(KEY_CHECK_PLAINTEXT);
+    // … the originals are still under the OLD key, and every one has a .rot under the NEW key
+    // that decrypts with the ORIGINAL file's basename (what startup verifies before renaming).
+    expectAllUnder(oldKeys, files);
+    for (const [rel, plain] of Object.entries(files)) {
+      const rot = readFileSync(path.join(ctx.uploads, `${rel}.rot`));
+      expect(fileKeyId(rot)).toBe(newKeys.id);
+      expect(decryptFile(newKeys, path.basename(rel), rot).equals(plain)).toBe(true);
+    }
+
+    // The probe (what the wrappers run after a non-zero exit) sees NEW plus the staged files.
+    const probe = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(probe.stdout.split("\n").filter(Boolean)).toEqual(["NEW", "FILES old=3 new=0 rot=3"]);
+
+    // The app's next start (on the swapped-in new key) finishes the rotation.
+    resetFieldKeysForTests();
+    const startup = await within(
+      30_000,
+      runFileStartup(raw, { cwd: ctx.dir, env: { IMAGE_UPLOAD_DIR: ctx.uploads } as unknown as NodeJS.ProcessEnv }),
+    );
+    expect(startup.finishedRotations).toBe(3);
+    expectAllUnder(newKeys, files);
+    expect(workFiles()).toEqual([]);
+  }, 60_000);
+
+  it.each([
+    ["under a third key", (rel: string, plain: Buffer) => encryptFile(keysFromHex(generateKeyHex()), path.basename(rel), plain)],
+    ["with a damaged BVF1 header", (_rel: string, plain: Buffer) => Buffer.concat([Buffer.from("BVF1\x01ZZZZZZZZ", "latin1"), plain, Buffer.alloc(40)])],
+  ])("files: a file %s refuses up front with exit 3, names the file, and nothing changes", async (_l, make) => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    const bad = "images/zz_from-elsewhere_1.jpg";
+    writeFileSync(path.join(ctx.uploads, bad), make(bad, Buffer.from("other bytes")));
+    const filesBefore = uploadsSnapshot();
+    const dbBefore = await rawSnapshot();
+
+    const result = runScript(["--old-key-file", keyFile("old-files-4", oldHex), "--new-key-file", keyFile("new-files-4", newHex)]);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(path.join(ctx.uploads, bad));
+    expect(result.stderr).toContain("Nothing was changed");
+    expect(result.stdout).toBe("");
+    expect(uploadsSnapshot()).toEqual(filesBefore);
+    expect(await rawSnapshot()).toBe(dbBefore);
+  }, 60_000);
+
+  it("files: a leftover .rot under the OLD key (an earlier rotation never finished) refuses up front with exit 3", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    const rel = "images/gear_g-1_1700000000001.png";
+    writeFileSync(path.join(ctx.uploads, `${rel}.rot`), encryptFile(oldKeys, path.basename(rel), Buffer.from("staged")));
+    const filesBefore = uploadsSnapshot();
+    const dbBefore = await rawSnapshot();
+
+    const result = runScript(["--old-key-file", keyFile("old-files-5", oldHex), "--new-key-file", keyFile("new-files-5", newHex)]);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(path.join(ctx.uploads, `${rel}.rot`));
+    expect(uploadsSnapshot()).toEqual(filesBefore);
+    expect(await rawSnapshot()).toBe(dbBefore);
+  }, 60_000);
+
+  it("files: a symlinked folder inside the uploads root refuses up front with exit 3", async () => {
+    const oldHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    const outside = path.join(ctx.dir, "outside");
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, path.join(ctx.uploads, "linked"));
+    const filesBefore = uploadsSnapshot();
+
+    const result = runScript(["--old-key-file", keyFile("old-files-6", oldHex), "--new-key-file", keyFile("new-files-6", generateKeyHex())]);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(path.join(ctx.uploads, "linked"));
+    expect(uploadsSnapshot()).toEqual(filesBefore);
+  }, 60_000);
+
+  it("files (Review Focus 5): disk full while writing a .rot leaves every original intact, cleans up the partial file and every staged .rot, and the run fails before the commit", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    const filesBefore = uploadsSnapshot();
+    const dbBefore = await rawSnapshot();
+
+    // The preload lets the FIRST .rot through, then makes the second one's write land half its bytes and fail ENOSPC.
+    const result = runScriptWithPreload(
+      ["--old-key-file", keyFile("old-files-7", oldHex), "--new-key-file", keyFile("new-files-7", newHex)],
+      ENOSPC_ROT_PRELOAD,
+    );
+
+    expect(result.status, `stdout: ${result.stdout} stderr: ${result.stderr}`).toBe(1);
+    expect(result.stderr).toMatch(/ENOSPC/);
+    expect(result.stderr).toMatch(/\.rot/);
+    expect(uploadsSnapshot()).toEqual(filesBefore);
+    expect(workFiles()).toEqual([]);
+    expect(await rawSnapshot()).toBe(dbBefore);
+    const probe = runScript(["--probe", "--old-key-file", keyFile("old-files-7b", oldHex), "--new-key-file", keyFile("new-files-7b", newHex)]);
+    expect(firstLine(probe.stdout)).toBe("OLD");
+  }, 60_000);
+
+  it("files: --probe's second line counts files under the old key, the new key, and .rot files; the first line is unchanged", async () => {
+    const oldHex = generateKeyHex();
+    const newHex = generateKeyHex();
+    const oldKeys = keysFromHex(oldHex);
+    const newKeys = keysFromHex(newHex);
+    await seed(oldKeys);
+    seedFiles(oldKeys);
+    // One file already under the new key, one plaintext (counted nowhere), one stray .rot, one hidden folder's file.
+    writeFileSync(path.join(ctx.uploads, "images", "already_new_1.jpg"), encryptFile(newKeys, "already_new_1.jpg", Buffer.from("n")));
+    writeFileSync(path.join(ctx.uploads, "images", "plain.png"), "plain");
+    writeFileSync(path.join(ctx.uploads, "images", "stray.jpg.rot"), encryptFile(newKeys, "stray.jpg", Buffer.from("s")));
+    mkdirSync(path.join(ctx.uploads, ".pre-encryption-20260101-000000"), { recursive: true });
+    writeFileSync(path.join(ctx.uploads, ".pre-encryption-20260101-000000", "x.jpg"), encryptFile(oldKeys, "x.jpg", Buffer.from("h")));
+    const oldKeyFile = keyFile("old-files-8", oldHex);
+    const newKeyFile = keyFile("new-files-8", newHex);
+
+    const probe = runScript(["--probe", "--old-key-file", oldKeyFile, "--new-key-file", newKeyFile]);
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(probe.stdout).toBe("OLD\nFILES old=3 new=1 rot=1\n");
   }, 60_000);
 });

@@ -13,6 +13,7 @@ import { isValidTimeZone, normalizeInstant } from "../date-migration";
 import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
 import { clearCompactionPending, compactDatabase, compactionPending } from "./compaction.mjs";
 import { resolveProvider, type DbProvider } from "../db/provider";
+import { runFileStartup } from "../files/startup";
 
 /**
  * Startup steps for field encryption at rest
@@ -597,6 +598,18 @@ export async function runEncryptionStartup(): Promise<MigrationResult> {
     }
     // After the commit, before $disconnect, on the same connection.
     await compactIfPending(raw);
+    // Encrypted files at rest (spec 3b §2 "Startup"): after the database
+    // migration and compaction, on this same raw client (no second
+    // connection under SQLite connection_limit=1), and before this resolves —
+    // so before register() lets the app serve, and no request can read a
+    // file while it is rewritten (Review Focus 3). Throws to refuse start.
+    // ORDER IS LOAD-BEARING (final review FIX 8, T5 M1): runFileStartup must
+    // stay AFTER assertEncryptionKey above. It deletes each .rot file that
+    // is not under the key it is given (when its original exists); started
+    // with the wrong key, those would be a committed rotation's only copies
+    // under the database's key of the files it has not finalised yet.
+    // assertEncryptionKey refuses a wrong key first.
+    await runFileStartup(raw);
     return result;
   } finally {
     await raw.$disconnect();

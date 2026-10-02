@@ -1128,7 +1128,10 @@ $d = New-RotateSandbox "rotate-refused-exit3" -WithSnapshot
 $keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
 $r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_EXIT" = "3"; "BV_STUB_PROBE_ANSWER" = "NEITHER" }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
-Assert ($r.Output -match "ERROR: secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "says the current key file is not this database's key"
+# Spec 3b: exit 3 also covers an uploaded file under neither key, so the headline is generic.
+Assert ($r.Output -match "ERROR: the rotation refused before changing anything; the reason is printed above\.") "generic refusal headline"
+Assert ($r.Output -match "secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "names the wrong-key reason"
+Assert ($r.Output -match "If it names an uploaded file") "names the uploaded-file reason"
 Assert ($r.Output -match "Nothing was changed\. BlackVault was NOT restarted\.") "says nothing changed and the app was not restarted"
 Assert ($r.Output -match "startup log names its key id") "points at the startup log's key id"
 Assert ($r.StubLog -notmatch "--probe") "did NOT run the probe (it would only answer NEITHER)"
@@ -1148,6 +1151,43 @@ Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
 Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new is KEPT when the probe itself fails"
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is untouched"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6f
+# Spec 3b Task 5: the probe prints a SECOND line, "FILES old=<n> new=<n> rot=<n>".
+# Only the first line is the answer (a bare `for /f ... do set` kept the LAST
+# line); the staged .rot count is reported and left to the app's startup.
+Write-Scenario "rotate-key.bat - two-line probe answers NEW with staged .rot files: first line decides, swap completes, .rot files reported as finished at startup (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-new" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEW"; "BV_STUB_PROBE_FILES" = "FILES old=3 new=0 rot=3" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Confirmed: the database is already encrypted with the NEW key") "the FIRST line (NEW) picked the branch"
+Assert ($r.Output -match "3 re-encrypted uploaded files are staged as \.rot files; BlackVault puts them in place when it starts with the new key\.") "reports the 3 staged .rot files from the FILES line"
+Assert ($r.Output -match "Key rotation complete") "completes the swap"
+Assert ($r.StubLog -match "compose start blackvault") "restarted (the app's startup finishes the .rot renames)"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim() -ne $keyBefore.Trim()) "the active key file now holds the NEW key"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6g
+Write-Scenario "rotate-key.bat - two-line probe answers NEW with rot=0: no .rot line, swap completes (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-new-norot" -WithSnapshot
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEW"; "BV_STUB_PROBE_FILES" = "FILES old=0 new=3 rot=0" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "\.rot files") "no staged-files line when rot=0"
+Assert ($r.Output -match "Key rotation complete") "completes the swap"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6h
+Write-Scenario "rotate-key.bat - two-line probe answers OLD: the first line alone picks the OLD branch (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-old" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "OLD"; "BV_STUB_PROBE_FILES" = "FILES old=3 new=0 rot=0" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Confirmed: the database is still encrypted with the OLD key") "the FIRST line (OLD) picked the branch"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*").Count -eq 1) ".new set aside as .new.unused-<ts>"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is unchanged"
+Assert ($r.StubLog -match "compose start blackvault") "restarted on the old key"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario RK7
@@ -1500,6 +1540,131 @@ Assert ((Get-CallIndex $r.StubLog "compose start" -Prefix) -eq -1) "did not star
 $r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad -EnvVars @{ "BV_STUB_FAIL_ON" = "stop" }
 Assert ($r.Output -match "RC=1") "errorlevel 1 when the app cannot be stopped"
 Assert ($r.Output -match ("CWD=" + [regex]::Escape($d) + "\r?\n")) "the caller's folder is unchanged on failure too"
+Show-EvidenceIfFailed $r
+
+# =============================================================================
+#                   Task 4: update scripts snapshot the uploads folder
+# =============================================================================
+# scripts\db-snapshot.bat also copies DATA_DIR\uploads into
+# backups\uploads-<TS>\ before update.bat starts the new image, and leaves
+# the path in backups\.uploads-snapshot-marker for update.bat to pass through
+# as BLACKVAULT_UPLOADS_SNAPSHOT. docker-stub.cs logs that env var on its own
+# "ENV BLACKVAULT_UPLOADS_SNAPSHOT=[...]" line right after "compose up -d",
+# which is how UP1 below proves the marker actually reached the container's
+# environment, not just that update.bat computed it.
+
+function Add-UploadsSeed([string]$Dir) {
+  $uploads = Join-Path $Dir "data\uploads"
+  New-Item -ItemType Directory -Force -Path (Join-Path $uploads "documents") | Out-Null
+  Set-Content -Path (Join-Path $uploads "photo1.jpg") -Value "fake jpeg bytes" -NoNewline -Encoding Ascii
+  Set-Content -Path (Join-Path $uploads "documents\doc1.pdf") -Value "fake pdf bytes" -NoNewline -Encoding Ascii
+}
+
+function Get-UploadsBackups([string]$Dir) {
+  $b = Join-Path $Dir "backups"
+  if (-not (Test-Path $b)) { return @() }
+  return @(Get-ChildItem $b -Directory | Where-Object { $_.Name -like "uploads-*" } | Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+# ---------------------------------------------------------------- scenario UP1
+Write-Scenario "update.bat - Task 4: snapshots the uploads folder byte-for-byte before the new image starts, ACL-restricted, and the marker reaches the container's environment"
+$origin = New-GitRemote "uploads-up1" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up1"
+Set-SqliteInstall $work "7040"
+Add-UploadsSeed $work
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$ups = @(Get-UploadsBackups $work)
+Assert (($ups.Count -eq 1) -and ($ups[0] -match "^uploads-\d{8}-\d{6}$")) "one uploads snapshot backups\uploads-<ts> (got: $($ups -join ', '))"
+if ($ups.Count -eq 1) {
+  $snapDir = Join-Path $work "backups\$($ups[0])"
+  Assert (Test-UserOnlyAcl $snapDir) "the uploads snapshot folder is restricted to the current user"
+  Assert ((Get-Content (Join-Path $snapDir "photo1.jpg") -Raw) -eq "fake jpeg bytes") "photo1.jpg copied byte-for-byte"
+  Assert ((Get-Content (Join-Path $snapDir "documents\doc1.pdf") -Raw) -eq "fake pdf bytes") "documents\doc1.pdf copied byte-for-byte (nested folder preserved)"
+  Assert ($r.Output -match [regex]::Escape("Uploads snapshot saved: backups\$($ups[0])")) "prints the snapshot path"
+  Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[backups\$($ups[0])]")) "the marker reached the container's environment at the 'up' that starts the new image"
+}
+Assert (-not (Test-Path (Join-Path $work "backups\.uploads-snapshot-marker"))) "the marker file was read once and removed, not left lying around"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP2
+Write-Scenario "update.bat - Task 4: an empty uploads folder still succeeds, takes no snapshot, and passes no marker"
+$origin = New-GitRemote "uploads-up2" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up2"
+Set-SqliteInstall $work "7041" # data\uploads exists (Set-SqliteInstall creates it) and is empty
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (@(Get-UploadsBackups $work).Count -eq 0) "no uploads snapshot directory was created"
+Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[]")) "no marker was passed through (empty value)"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP3
+Write-Scenario "update.bat - Task 4: a failed uploads copy (a locked file) exits non-zero, stops the update, restarts the OLD container, and never starts the new image"
+$origin = New-GitRemote "uploads-up3" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up3"
+Set-SqliteInstall $work "7042"
+Add-UploadsSeed $work
+$lockedFile = Join-Path $work "data\uploads\photo1.jpg"
+$lockFlag = Join-Path $Sandboxes "uploads-up3-locked.flag"
+Remove-Item -Force $lockFlag -ErrorAction SilentlyContinue
+Remove-Item -Force "$lockFlag.release" -ErrorAction SilentlyContinue
+$lockJob = Start-FileLockJob $lockedFile $lockFlag
+try {
+  if (-not (Wait-ForFile $lockFlag 30)) { throw "the lock job never reported it held the lock on $lockedFile" }
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+} finally {
+  Stop-FileLockJob $lockJob $lockFlag
+}
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "database snapshot failed") "update.bat says the snapshot failed"
+Assert ((Get-CallIndex $r.StubLog "compose up -d") -eq -1) "the new image was never started (no 'compose up -d')"
+Assert ((Get-CallIndex $r.StubLog "compose start blackvault") -ge 0) "the old container was started again"
+Assert (@(Get-UploadsBackups $work).Count -eq 0) "no uploads snapshot directory was left behind"
+Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "uploads-*.partial" -ErrorAction SilentlyContinue).Count -eq 0) "no partial uploads directory left behind"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP4
+# Final review FIX 7: like scripts/uploads-snapshot.sh, the Windows copy leaves
+# out the app's own plain-text .pre-encryption-* folders and the *.tmp / *.rot
+# work files, so they are not copied again on every update.
+Write-Scenario "update.bat - final review FIX 7: the uploads snapshot skips .pre-encryption-* folders and *.tmp / *.rot files"
+$origin = New-GitRemote "uploads-up4" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up4"
+Set-SqliteInstall $work "7043"
+Add-UploadsSeed $work
+$up4 = Join-Path $work "data\uploads"
+New-Item -ItemType Directory -Force -Path (Join-Path $up4 ".pre-encryption-x") | Out-Null
+Set-Content -Path (Join-Path $up4 ".pre-encryption-x\a.jpg") -Value "plain snapshot" -NoNewline -Encoding Ascii
+Set-Content -Path (Join-Path $up4 "a.jpg.rot") -Value "staged rotation" -NoNewline -Encoding Ascii
+Set-Content -Path (Join-Path $up4 "a.jpg.0123abcd.tmp") -Value "half written" -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$ups = @(Get-UploadsBackups $work)
+Assert ($ups.Count -eq 1) "one uploads snapshot (got: $($ups -join ', '))"
+if ($ups.Count -eq 1) {
+  $snapDir = Join-Path $work "backups\$($ups[0])"
+  Assert (Test-Path (Join-Path $snapDir "photo1.jpg")) "photo1.jpg is in the snapshot"
+  Assert (Test-Path (Join-Path $snapDir "documents\doc1.pdf")) "documents\doc1.pdf is in the snapshot"
+  Assert (-not (Test-Path (Join-Path $snapDir ".pre-encryption-x"))) "the .pre-encryption-x folder was not copied"
+  Assert (-not (Test-Path (Join-Path $snapDir "a.jpg.rot"))) "a.jpg.rot was not copied"
+  Assert (-not (Test-Path (Join-Path $snapDir "a.jpg.0123abcd.tmp"))) "a.jpg.0123abcd.tmp was not copied"
+  $snapFiles = @(Get-ChildItem -LiteralPath $snapDir -Recurse -Force -File)
+  Assert ($snapFiles.Count -eq 2) "exactly 2 files in the snapshot (got $($snapFiles.Count): $(($snapFiles | ForEach-Object { $_.Name }) -join ', '))"
+}
+Assert (Test-Path (Join-Path $up4 ".pre-encryption-x\a.jpg")) "the skipped files stay where they were in uploads"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UP5
+# Final review FIX 5: a BLACKVAULT_UPLOADS_SNAPSHOT inherited from the caller
+# never reaches the `up` that starts the new image.
+Write-Scenario "update.bat - final review FIX 5: an inherited BLACKVAULT_UPLOADS_SNAPSHOT is cleared before 'up'"
+$origin = New-GitRemote "uploads-up5" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "uploads-up5"
+Set-SqliteInstall $work "7044" # empty uploads: no marker of its own
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("https://vault.example.com", "", "") -EnvVars @{ "BLACKVAULT_UPLOADS_SNAPSHOT" = "backups\uploads-stale" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match [regex]::Escape("ENV BLACKVAULT_UPLOADS_SNAPSHOT=[]")) "the 'up' saw an empty value"
+Assert (-not ($r.StubLog -match "uploads-stale")) "the inherited value never reached the stub"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario E1

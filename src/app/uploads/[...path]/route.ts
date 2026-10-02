@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
+import { FileAtRestError, fileResponseHeaders, readDecryptedFile, uploadsRoot } from "@/lib/files/storage";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
@@ -26,10 +27,7 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
     }
 
-    const uploadRoot = process.env.IMAGE_UPLOAD_DIR
-      ? path.resolve(process.env.IMAGE_UPLOAD_DIR)
-      : path.join(process.cwd(), "uploads");
-    const absoluteRoot = path.resolve(uploadRoot);
+    const absoluteRoot = path.resolve(uploadsRoot());
     const filePath = path.resolve(absoluteRoot, ...segments);
     const extension = path.extname(filePath).toLowerCase();
     const contentType = MIME_BY_EXT[extension];
@@ -53,17 +51,30 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
     }
 
-    const file = await fs.readFile(filePath);
+    let file: Buffer;
+    try {
+      file = await readDecryptedFile(filePath);
+    } catch (error) {
+      if (error instanceof FileAtRestError) {
+        console.error(`[uploads] ${error.code}${error.causeCode ? ` (${error.causeCode})` : ""} for ${error.path}`);
+        return NextResponse.json({ error: "File unavailable" }, { status: 500 });
+      }
+      // Fix round 1, m4: this used to rethrow into the outer catch, which
+      // returns a silent, unlogged 404 for EVERY failure — indistinguishable
+      // from a genuinely missing file. Only a real ENOENT (the file vanished
+      // between the lstat check above and this read) is still a 404; any
+      // other failure (e.g. getFieldKeys() throwing) is logged and a 500,
+      // never swallowed.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return NextResponse.json({ error: "File not found" }, { status: 404 });
+      }
+      console.error("GET /uploads/[...path] error:", error);
+      return NextResponse.json({ error: "File unavailable" }, { status: 500 });
+    }
 
-    return new NextResponse(file, {
+    return new NextResponse(new Uint8Array(file), {
       status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "private, max-age=86400",
-        "Content-Disposition": "inline",
-        "X-Content-Type-Options": "nosniff",
-        "Cross-Origin-Resource-Policy": "same-origin",
-      },
+      headers: fileResponseHeaders(contentType),
     });
   } catch {
     return NextResponse.json({ error: "File not found" }, { status: 404 });

@@ -1,4 +1,5 @@
 import path from "path";
+import { documentsRoot } from "./files/storage";
 
 type SupportedSignature = "pdf" | "jpg" | "png" | "gif" | "webp" | "avif";
 
@@ -85,10 +86,6 @@ export function validateUploadBuffer(
 
 const SAFE_FILE_NAME = /^[a-zA-Z0-9._-]+$/;
 
-export function getCanonicalUploadsRoot(): string {
-  return path.resolve(process.cwd(), "storage", "uploads");
-}
-
 export function isSafeDocumentUrl(fileUrl: string): boolean {
   if (!fileUrl.startsWith("/api/files/documents/") && !fileUrl.startsWith("/uploads/documents/")) {
     return false;
@@ -110,8 +107,7 @@ export function resolveDocumentStoragePath(fileUrl: string): string | null {
     ? fileUrl.slice("/api/files/documents/".length)
     : fileUrl.slice("/uploads/documents/".length);
 
-  const uploadsRoot = getCanonicalUploadsRoot();
-  const documentRoot = path.resolve(uploadsRoot, "documents");
+  const documentRoot = path.resolve(documentsRoot());
   const resolvedPath = path.resolve(documentRoot, fileName);
 
   if (!resolvedPath.startsWith(`${documentRoot}${path.sep}`)) {

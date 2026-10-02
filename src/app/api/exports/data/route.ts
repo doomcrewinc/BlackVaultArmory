@@ -586,7 +586,12 @@ export async function GET(request: NextRequest) {
           kind,
           sourceId: normalizedSourceId,
           url: normalizedUrl,
-          storagePath: normalizedUrl.replace("/api/files/", "storage/uploads/"),
+          // Fix round 1, m6: documents moved to <uploadsRoot>/documents
+          // (spec 3b) and are now encrypted at rest; the old literal
+          // "storage/uploads/" prefix named a location nothing writes to
+          // any more. "uploads/" matches the Docker volume mount name
+          // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads).
+          storagePath: normalizedUrl.replace("/api/files/", "uploads/"),
         });
       };
 
@@ -625,9 +630,9 @@ export async function GET(request: NextRequest) {
       payload.uploadedAssetReferences = uploadReferences;
       payload.backupStorageGuidance = {
         summary:
-          "Uploaded files live under storage/uploads. Copy that folder together with this export JSON/CSV file.",
+          "Uploaded images and documents live under uploads/ (images/ and documents/), encrypted at rest. Copy that folder together with this export JSON/CSV file.",
         volumeHint:
-          "Docker hint: mount a persistent host path to /app/storage (example: ./storage:/app/storage) so uploads and backups survive container rebuilds.",
+          "Docker hint: mount a persistent host path to /app/uploads (example: ./uploads:/app/uploads) so uploads and backups survive container rebuilds.",
       };
     }
 

@@ -32,7 +32,33 @@ const ctx = vi.hoisted(() => {
     process.env.DB_PROVIDER = "sqlite";
     process.env.DATABASE_URL = `file:${dir}/t.db?connection_limit=1`;
   }
-  return { pg, dir, file: `${dir}/t.db` };
+  // Spec 3b Task 3: runEncryptionStartup (and so register()) now also runs
+  // the file step. Point its uploads root at a throw-away folder so these
+  // tests never scan or encrypt the repo's own uploads/.
+  process.env.IMAGE_UPLOAD_DIR = `${dir}/uploads`;
+  return { pg, dir, file: `${dir}/t.db`, uploads: `${dir}/uploads` };
+});
+
+// …and its legacy-documents root (<cwd>/storage/uploads/documents) at the
+// same throw-away folder instead of the repo's storage/. The real step runs.
+// A plain function, not vi.fn: afterEach's vi.restoreAllMocks() would strip a
+// vi.fn's implementation and silently skip the file step in later tests.
+// `fileStep.around`, when set by a test, wraps one call (Review Focus 3).
+type FileStep = (client: unknown, opts?: Record<string, unknown>) => Promise<unknown>;
+const fileStep = vi.hoisted(() => ({ calls: 0, around: null as null | ((client: unknown, real: () => Promise<unknown>) => Promise<unknown>) }));
+vi.mock("@/lib/files/startup", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/files/startup")>();
+  const step = real.runFileStartup as unknown as FileStep;
+  return {
+    ...real,
+    runFileStartup: (client: unknown, opts: Record<string, unknown> = {}) => {
+      fileStep.calls++;
+      const go = () => step(client, { ...opts, cwd: ctx.dir });
+      const around = fileStep.around;
+      fileStep.around = null;
+      return around ? around(client, go) : go();
+    },
+  };
 });
 
 // Outside a request: the real next/headers throws, and the actor is `system`.
@@ -769,6 +795,37 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       for (const f of readdirSync(ctx.dir).filter((x) => x.startsWith("pre-encryption-"))) rmSync(join(ctx.dir, f));
     };
     afterEach(removeSnapshots);
+
+    it("Review Focus 3 (spec 3b): runEncryptionStartup runs the file step after the migration and compaction, on the open raw client, before it resolves", async () => {
+      const k = needles();
+      await seedNeedles(k);
+      mkdirSync(join(ctx.uploads, "images"), { recursive: true });
+      const photo = join(ctx.uploads, "images", "focus3.jpg");
+      writeFileSync(photo, "jpeg-plain");
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const order: string[] = [];
+      const seen: { pending: boolean | null; enabledEvents: number } = { pending: null, enabledEvents: -1 };
+      fileStep.around = async (client, realStep) => {
+        order.push("files:start");
+        // Same raw client, still connected: the migration has committed and compaction has run.
+        const asRaw = client as PrismaClient;
+        seen.pending = (await asRaw.appSettings.findUnique({ where: { id: "singleton" } }))?.encryptionCompactionPending ?? null;
+        seen.enabledEvents = await asRaw.auditEvent.count({ where: { action: "ENCRYPTION_ENABLED" } });
+        const r = await realStep();
+        order.push("files:end");
+        return r;
+      };
+      try {
+        await within(60_000, runEncryptionStartup().then(() => order.push("resolved")));
+        expect(order).toEqual(["files:start", "files:end", "resolved"]);
+        expect(seen).toEqual({ pending: false, enabledEvents: 1 });
+        expect(readFileSync(photo).subarray(0, 4).toString("ascii")).toBe("BVF1");
+        expect(await raw.auditEvent.count({ where: { action: "FILES_ENCRYPTED" } })).toBe(1);
+      } finally {
+        rmSync(ctx.uploads, { recursive: true, force: true });
+      }
+    }, 90_000);
 
     it.skipIf(!!ctx.pg)("SQLite: the migration alone leaves the plaintext in the file (the residue), and marks the compaction pending", async () => {
       const k = needles();
