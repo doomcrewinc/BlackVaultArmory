@@ -42,6 +42,9 @@
 //                            scenario can fail the real rotation run while
 //                            still controlling what the recovery probe says.
 //   BV_STUB_PROBE_STATUS     exit code for the probe call; unset/"0" => 0.
+//   BV_STUB_PROBE_FILES      spec 3b Task 5: a SECOND probe stdout line,
+//                            e.g. "FILES old=3 new=0 rot=3", printed after
+//                            BV_STUB_PROBE_ANSWER. Unset => one line only.
 //   BV_STUB_RUN_EXIT         final review F5: exit code of the (non-probe)
 //                            rotation `compose run`, e.g. 3 = the CLI refused
 //                            up front. Unset/"0" => normal handling.
@@ -138,6 +141,11 @@ internal static class DockerStub
                 if (!string.IsNullOrEmpty(answer))
                 {
                     Console.WriteLine(answer);
+                }
+                string filesLine = Environment.GetEnvironmentVariable("BV_STUB_PROBE_FILES");
+                if (!string.IsNullOrEmpty(filesLine))
+                {
+                    Console.WriteLine(filesLine);
                 }
                 return 0;
             }

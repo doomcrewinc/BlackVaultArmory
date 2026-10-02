@@ -150,16 +150,34 @@ if errorlevel 3 if not errorlevel 4 goto :rotate_refused
 echo.
 echo The rotation command exited with an error. Checking which key the database
 echo is actually encrypted with before touching any file...
+::
+:: Spec 3b: the probe prints a SECOND line, "FILES old=<n> new=<n> rot=<n>".
+:: Only the FIRST line is the answer: "do set" alone kept the LAST line, which
+:: would have read the FILES line as the answer. The second line is kept
+:: separately for its staged .rot count.
 set "PROBE_ANSWER="
-for /f "usebackq delims=" %%P in (`%COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new 2^>nul`) do set "PROBE_ANSWER=%%P"
-
-if "!PROBE_ANSWER!"=="NEW" (
-  echo Confirmed: the database is already encrypted with the NEW key.
-  echo Completing the key-file swap...
-  goto :do_swap
+set "PROBE_FILES="
+for /f "usebackq delims=" %%P in (`%COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new 2^>nul`) do (
+  if not defined PROBE_ANSWER (set "PROBE_ANSWER=%%P") else if not defined PROBE_FILES set "PROBE_FILES=%%P"
 )
+
+if "!PROBE_ANSWER!"=="NEW" goto :probe_new
 if "!PROBE_ANSWER!"=="OLD" goto :probe_old
 goto :probe_ambiguous
+
+:: Spec 3b: a crash after the commit can leave re-encrypted uploads staged as
+:: <name>.rot. They are left to BlackVault's startup, which runs before it
+:: serves anything and renames every .rot under its current key into place,
+:: after proving it decrypts (src\lib\files\startup.ts). The swap makes the
+:: new key current, so the restart finishes them; the wrapper doing the same
+:: renames would only repeat it.
+:probe_new
+echo Confirmed: the database is already encrypted with the NEW key.
+set "PROBE_ROT="
+if defined PROBE_FILES for /f "tokens=1,7 delims== " %%A in ("!PROBE_FILES!") do if "%%A"=="FILES" set "PROBE_ROT=%%B"
+if defined PROBE_ROT if not "!PROBE_ROT!"=="0" echo !PROBE_ROT! re-encrypted uploaded files are staged as .rot files; BlackVault puts them in place when it starts with the new key.
+echo Completing the key-file swap...
+goto :do_swap
 
 :: N2 (ruling): set the unused .new aside, never delete it.
 :probe_old
@@ -235,10 +253,12 @@ exit /b 1
 :: Final review F5: the rotation refused up front (exit 3). Nothing changed
 :: and nothing could have, so no probe. The unused .new is set aside, never
 :: deleted (N2), and the app is NOT restarted: with a key file that is not
-:: this database's key it would refuse to start anyway.
+:: this database's key it would refuse to start anyway. Spec 3b: exit 3 also
+:: means an uploaded file is under neither key (or damaged, or behind a
+:: symlinked folder); the app refuses to start on that file too.
 :rotate_refused
 echo.
-echo ERROR: %KEY_FILE% does not open this database (wrong or replaced key).
+echo ERROR: the rotation refused before changing anything; the reason is printed above.
 echo        Nothing was changed. BlackVault was NOT restarted.
 move /y "%NEW_KEY_FILE%" "%UNUSED_KEY_FILE%" >nul
 if errorlevel 1 goto :rotate_refused_rename_failed
@@ -248,9 +268,14 @@ goto :rotate_refused_hint
 echo        WARNING: could not rename %NEW_KEY_FILE% to %UNUSED_KEY_FILE%.
 echo        Move it out of secrets\ by hand before the next rotation.
 :rotate_refused_hint
-echo        Restore the key this database was encrypted with as %KEY_FILE%
-echo        (BlackVault's startup log names its key id: %COMPOSE% logs blackvault),
-echo        start BlackVault, then run rotate-key.bat again.
+echo        If it says the old key does not match:
+echo          %KEY_FILE% does not open this database (wrong or replaced key).
+echo          Restore the key this database was encrypted with as %KEY_FILE%
+echo          (BlackVault's startup log names its key id: %COMPOSE% logs blackvault),
+echo          start BlackVault, then run rotate-key.bat again.
+echo        If it names an uploaded file or folder: restore that file from a backup,
+echo          or move it out of the uploads folder (or follow the hint above), then
+echo          start BlackVault and run rotate-key.bat again.
 pause
 exit /b 1
 

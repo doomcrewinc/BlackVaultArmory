@@ -1128,7 +1128,10 @@ $d = New-RotateSandbox "rotate-refused-exit3" -WithSnapshot
 $keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
 $r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_RUN_EXIT" = "3"; "BV_STUB_PROBE_ANSWER" = "NEITHER" }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
-Assert ($r.Output -match "ERROR: secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "says the current key file is not this database's key"
+# Spec 3b: exit 3 also covers an uploaded file under neither key, so the headline is generic.
+Assert ($r.Output -match "ERROR: the rotation refused before changing anything; the reason is printed above\.") "generic refusal headline"
+Assert ($r.Output -match "secrets\\blackvault_encryption_key does not open this database \(wrong or replaced key\)\.") "names the wrong-key reason"
+Assert ($r.Output -match "If it names an uploaded file") "names the uploaded-file reason"
 Assert ($r.Output -match "Nothing was changed\. BlackVault was NOT restarted\.") "says nothing changed and the app was not restarted"
 Assert ($r.Output -match "startup log names its key id") "points at the startup log's key id"
 Assert ($r.StubLog -notmatch "--probe") "did NOT run the probe (it would only answer NEITHER)"
@@ -1148,6 +1151,43 @@ Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.StubLog -notmatch "compose start blackvault") "did NOT restart"
 Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new")) ".new is KEPT when the probe itself fails"
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the original key file is untouched"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6f
+# Spec 3b Task 5: the probe prints a SECOND line, "FILES old=<n> new=<n> rot=<n>".
+# Only the first line is the answer (a bare `for /f ... do set` kept the LAST
+# line); the staged .rot count is reported and left to the app's startup.
+Write-Scenario "rotate-key.bat - two-line probe answers NEW with staged .rot files: first line decides, swap completes, .rot files reported as finished at startup (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-new" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEW"; "BV_STUB_PROBE_FILES" = "FILES old=3 new=0 rot=3" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Confirmed: the database is already encrypted with the NEW key") "the FIRST line (NEW) picked the branch"
+Assert ($r.Output -match "3 re-encrypted uploaded files are staged as \.rot files; BlackVault puts them in place when it starts with the new key\.") "reports the 3 staged .rot files from the FILES line"
+Assert ($r.Output -match "Key rotation complete") "completes the swap"
+Assert ($r.StubLog -match "compose start blackvault") "restarted (the app's startup finishes the .rot renames)"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw).Trim() -ne $keyBefore.Trim()) "the active key file now holds the NEW key"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6g
+Write-Scenario "rotate-key.bat - two-line probe answers NEW with rot=0: no .rot line, swap completes (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-new-norot" -WithSnapshot
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "NEW"; "BV_STUB_PROBE_FILES" = "FILES old=0 new=3 rot=0" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "\.rot files") "no staged-files line when rot=0"
+Assert ($r.Output -match "Key rotation complete") "completes the swap"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------------- scenario RK6h
+Write-Scenario "rotate-key.bat - two-line probe answers OLD: the first line alone picks the OLD branch (spec 3b)"
+$d = New-RotateSandbox "rotate-probe-files-old" -WithSnapshot
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat" -EnvVars @{ "BV_STUB_FAIL_ON" = "run"; "BV_STUB_PROBE_ANSWER" = "OLD"; "BV_STUB_PROBE_FILES" = "FILES old=3 new=0 rot=0" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Confirmed: the database is still encrypted with the OLD key") "the FIRST line (OLD) picked the branch"
+Assert (@(Get-ChildItem (Join-Path $d "secrets") -Filter "blackvault_encryption_key.new.unused-*").Count -eq 1) ".new set aside as .new.unused-<ts>"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the active key file is unchanged"
+Assert ($r.StubLog -match "compose start blackvault") "restarted on the old key"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario RK7
