@@ -16,6 +16,12 @@
 #      of the rotation, key swap), and the app restarts on the NEW key.
 #   4. Afterwards the key file is still mode 600 and owned by that user, and
 #      no other host user can read it.
+#   5. Uploads are encrypted at rest (spec 3b): a photo and a PDF uploaded
+#      through the API are BVF1 on the volume and served back intact with
+#      Cache-Control: private, no-store; an upgrade with plaintext uploads and
+#      a legacy document rescued by `docker cp` encrypts them, snapshots them
+#      (700/600, uid 1001) and writes one FILES_ENCRYPTED event; after
+#      rotate-key.sh every file carries the new key id and still serves.
 set -Eeuo pipefail
 
 TEST_USER=bvtest
@@ -69,6 +75,49 @@ key_id_of() { sudo cat "$1" | tr -d '[:space:]' | xxd -r -p | sha256sum | cut -c
 # Key id the database's key check was written with (bv2:<keyId>:...).
 db_key_id() {
   sudo sqlite3 "$APP/data/db/vault.db" "SELECT encryptionKeyCheck FROM AppSettings WHERE id='singleton';" | cut -d: -f2
+}
+
+# ---- encrypted uploads (spec 3b) ----
+BASE=http://localhost:3000
+UPLOADS="$APP/data/uploads"
+WORK=$(mktemp -d)
+JAR="$WORK/cookies"
+# The uploads volume belongs to uid 1001, so every read of it goes through sudo.
+sha_of() { sudo sha256sum "$1" | cut -d' ' -f1; }
+magic_of() { sudo head -c4 "$1" | tr -d '\0'; }
+# Key id of a BVF1 file: bytes 5-12 of the header (src/lib/encryption/core.mjs fileKeyId).
+file_key_id() { sudo dd if="$1" bs=1 skip=5 count=8 status=none; }
+files_encrypted_events() {
+  sudo sqlite3 "$APP/data/db/vault.db" "SELECT count(*) FROM AuditEvent WHERE action = 'FILES_ENCRYPTED';"
+}
+
+# assert_uploads_encrypted COUNT [KEY_ID]: exactly COUNT regular files under the
+# uploads volume, each starting with BVF1 (and under KEY_ID when given). The
+# app's own .pre-encryption-* snapshot folders hold plaintext by design and
+# are skipped.
+assert_uploads_encrypted() {
+  local want="$1" key="${2:-}" f n=0
+  while IFS= read -r -d '' f; do
+    [ "$(magic_of "$f")" = "BVF1" ] || fail "not encrypted at rest (no BVF1 header): $f"
+    if [ -n "$key" ]; then
+      [ "$(file_key_id "$f")" = "$key" ] || fail "$f is under key $(file_key_id "$f"), want $key"
+    fi
+    n=$((n + 1))
+  done < <(sudo find "$UPLOADS" -path "$UPLOADS/.pre-encryption-*" -prune -o -type f -print0)
+  [ "$n" = "$want" ] || fail "expected $want files under the uploads volume, found $n"
+  echo "$n files under the uploads volume, all BVF1${key:+ under key $key}"
+}
+
+# serve_check URL SHA256: an authenticated GET returns 200, the original bytes
+# and Cache-Control: private, no-store.
+serve_check() {
+  local url="$1" want="$2" code cc
+  code=$(curl -sS -b "$JAR" -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' "$BASE$url")
+  [ "$code" = "200" ] || fail "GET $url: HTTP $code"
+  [ "$(sha256sum <"$WORK/body" | cut -d' ' -f1)" = "$want" ] || fail "GET $url: the bytes differ from the original"
+  cc=$(grep -i '^cache-control:' "$WORK/headers" | tr -d '\r' | cut -d' ' -f2- || true)
+  [ "$cc" = "private, no-store" ] || fail "GET $url: Cache-Control is '$cc', want 'private, no-store'"
+  echo "GET $url: 200, original sha256, Cache-Control: $cc"
 }
 
 step "tools"
@@ -191,6 +240,94 @@ done
 echo "pre-encryption snapshot ${SNAPS[0]} (600, uid 1001, plaintext); every serial now bv2:$OLD_ID"
 endstep
 
+step "2b. first admin, with the setup token from the log"
+LOGS=$(as_user "docker compose logs --no-color blackvault")
+# A new token at every start while no admin exists: only the last one is valid.
+TOKEN=$(grep -o 'Setup token: [A-Z0-9-]*' <<<"$LOGS" | tail -1 | cut -d' ' -f3 || true)
+[ -n "$TOKEN" ] || fail "no setup token in the log"
+CODE=$(curl -sS -c "$JAR" -b "$JAR" -H 'Content-Type: application/json' -H "Origin: $BASE" \
+  -d "$(jq -n --arg c "$TOKEN" '{setupCode: $c, username: "ciadmin", displayName: "CI Admin", password: "ci-admin-password-1234"}')" \
+  -o "$WORK/setup.json" -w '%{http_code}' "$BASE/api/auth/setup")
+[ "$CODE" = "201" ] || fail "setup: HTTP $CODE $(cat "$WORK/setup.json")"
+[ "$(jq -r .user.role "$WORK/setup.json")" = "ADMIN" ] || fail "setup did not create an admin: $(cat "$WORK/setup.json")"
+echo "signed in as ciadmin (ADMIN)"
+endstep
+
+step "2c. a photo and a PDF uploaded through the API are encrypted at rest"
+# The routes check only the leading magic bytes (src/lib/upload-security.ts).
+{ printf '\x89PNG\r\n\x1a\n'; head -c 4000 /dev/urandom; } >"$WORK/upload.png"
+{ printf '%%PDF-1.4\n'; head -c 4000 /dev/urandom; } >"$WORK/upload.pdf"
+UP_IMG_SHA=$(sha256sum <"$WORK/upload.png" | cut -d' ' -f1)
+UP_PDF_SHA=$(sha256sum <"$WORK/upload.pdf" | cut -d' ' -f1)
+CODE=$(curl -sS -b "$JAR" -H "Origin: $BASE" -F "file=@$WORK/upload.png;type=image/png" \
+  -F entityType=firearm -F entityId=ci-f1 -o "$WORK/img.json" -w '%{http_code}' "$BASE/api/images/upload")
+[ "$CODE" = "201" ] || fail "image upload: HTTP $CODE $(cat "$WORK/img.json")"
+UP_IMG_URL=$(jq -r .url "$WORK/img.json")
+CODE=$(curl -sS -b "$JAR" -H "Origin: $BASE" -F "file=@$WORK/upload.pdf;type=application/pdf" \
+  -F "name=CI Upload PDF" -F firearmId=ci-f1 -o "$WORK/doc.json" -w '%{http_code}' "$BASE/api/documents/upload")
+[ "$CODE" = "201" ] || fail "document upload: HTTP $CODE $(cat "$WORK/doc.json")"
+UP_PDF_URL=$(jq -r .fileUrl "$WORK/doc.json")
+echo "uploaded $UP_IMG_URL and $UP_PDF_URL"
+UP_IMG_FILE="$APP/data$UP_IMG_URL"
+UP_PDF_FILE="$UPLOADS/documents/$(basename "$UP_PDF_URL")"
+for f in "$UP_IMG_FILE" "$UP_PDF_FILE"; do
+  sudo test -f "$f" || fail "uploaded file not on the volume: $f"
+done
+assert_uploads_encrypted 2 "$OLD_ID"
+serve_check "$UP_IMG_URL" "$UP_IMG_SHA"
+serve_check "$UP_PDF_URL" "$UP_PDF_SHA"
+[ "$(files_encrypted_events)" = "0" ] || fail "uploads wrote a FILES_ENCRYPTED event"
+endstep
+
+step "2d. upgrade: plaintext uploads from before file encryption, legacy document rescued with docker cp"
+# Seeded straight into the volume and into the old in-container documents
+# folder of this branch's image, rather than produced by a pre-3b release.
+as_user "docker compose stop"
+SEED_IMG="ci-f1_1700000000000.png"
+SEED_DOC="0123456789abcdef0123456789abcdef.pdf"
+{ printf '\x89PNG\r\n\x1a\n'; head -c 4000 /dev/urandom; } >"$WORK/seed.png"
+{ printf '%%PDF-1.4\n'; head -c 4000 /dev/urandom; } >"$WORK/seed.pdf"
+SEED_IMG_SHA=$(sha256sum <"$WORK/seed.png" | cut -d' ' -f1)
+SEED_PDF_SHA=$(sha256sum <"$WORK/seed.pdf" | cut -d' ' -f1)
+sudo install -o 1001 -g 1001 -m 644 "$WORK/seed.png" "$UPLOADS/images/firearms/$SEED_IMG"
+# /app/storage/uploads/documents, the pre-3b location (src/lib/files/storage.ts legacyDocumentsRoot).
+mkdir -p "$WORK/legacy/storage/uploads/documents"
+cp "$WORK/seed.pdf" "$WORK/legacy/storage/uploads/documents/$SEED_DOC"
+tar -C "$WORK/legacy" --owner=1001 --group=1001 -cf - storage | docker cp - blackvault:/app
+sudo sqlite3 "$APP/data/db/vault.db" "INSERT INTO Document (id, name, type, fileUrl, fileSize, mimeType, firearmId, updatedAt)
+  VALUES ('ci-doc-legacy', 'CI Legacy Receipt', 'RECEIPT', '/api/files/documents/$SEED_DOC', $(stat -c %s "$WORK/seed.pdf"), 'application/pdf', 'ci-f1', 1700000000000);"
+# The rescue step, run before upgrading.
+sudo docker cp blackvault:/app/storage/uploads/documents "$UPLOADS/"
+echo "after docker cp: $(sudo stat -c '%n %U:%G %a' "$UPLOADS/documents" "$UPLOADS/documents/$SEED_DOC" | tr '\n' ' ')"
+# docker cp gives the copies to the user who ran it; the app (uid 1001) must own them.
+sudo chown -R 1001:1001 "$UPLOADS/documents"
+[ "$(sha_of "$UPLOADS/documents/$SEED_DOC")" = "$SEED_PDF_SHA" ] || fail "the rescued document differs from the seed"
+as_user "docker compose up -d"
+wait_healthy
+LOGS=$(as_user "docker compose logs --no-color --since 3m blackvault")
+echo "$LOGS" | grep '\[files\]' || true
+has "$LOGS" "Encrypted existing uploads: 1 photos, 1 documents" || fail "startup did not encrypt the seeded photo and document"
+assert_uploads_encrypted 4 "$OLD_ID"
+serve_check "/uploads/images/firearms/$SEED_IMG" "$SEED_IMG_SHA"
+serve_check "/api/files/documents/$SEED_DOC" "$SEED_PDF_SHA"
+mapfile -t USNAPS < <(sudo find "$UPLOADS" -maxdepth 1 -name '.pre-encryption-*' -printf '%f\n')
+echo "uploads snapshots: ${USNAPS[*]:-<none>}"
+[ "${#USNAPS[@]}" = "1" ] || fail "expected one .pre-encryption-* snapshot (and no .partial), found ${#USNAPS[@]}"
+[[ "${USNAPS[0]}" =~ ^\.pre-encryption-[0-9]{8}-[0-9]{6}(-[0-9]+)?$ ]] || fail "unexpected snapshot name ${USNAPS[0]}"
+USNAP="$UPLOADS/${USNAPS[0]}"
+[ "$(sudo stat -c '%a %u' "$USNAP")" = "700 1001" ] || fail "snapshot folder is $(sudo stat -c '%a %u' "$USNAP"), want 700 1001"
+mapfile -t SNAP_FILES < <(sudo find "$USNAP" -type f)
+[ "${#SNAP_FILES[@]}" = "2" ] || fail "snapshot holds ${#SNAP_FILES[@]} files, want 2: ${SNAP_FILES[*]}"
+for f in "${SNAP_FILES[@]}"; do
+  [ "$(sudo stat -c '%a %u' "$f")" = "600 1001" ] || fail "$f is $(sudo stat -c '%a %u' "$f"), want 600 1001"
+done
+SNAP_SHAS=$(for f in "${SNAP_FILES[@]}"; do sha_of "$f"; done)
+has "$SNAP_SHAS" "$SEED_IMG_SHA" || fail "the snapshot does not hold the original photo"
+has "$SNAP_SHAS" "$SEED_PDF_SHA" || fail "the snapshot does not hold the original document"
+[ "$(files_encrypted_events)" = "1" ] || fail "expected exactly one FILES_ENCRYPTED event, found $(files_encrypted_events)"
+echo "upgrade: seeds encrypted, served intact; snapshot ${USNAPS[0]} (700, files 600, uid 1001, plaintext); one FILES_ENCRYPTED"
+endstep
+
 step "3. rotate-key.sh end to end (SQLite)"
 OUT=$(as_user "./rotate-key.sh" </dev/null)
 echo "$OUT" | tail -30
@@ -214,6 +351,16 @@ done
 LOGS=$(as_user "docker compose logs --no-color --since 2m blackvault")
 has "$LOGS" "Refusing to start\|refusing to start" && fail "the app refused to start on the new key"
 echo "rotated $OLD_ID -> $NEW_ID; app healthy on the new key"
+endstep
+
+step "3b. uploads after the rotation: under the new key, still served intact"
+assert_uploads_encrypted 4 "$NEW_ID"
+serve_check "$UP_IMG_URL" "$UP_IMG_SHA"
+serve_check "$UP_PDF_URL" "$UP_PDF_SHA"
+serve_check "/uploads/images/firearms/$SEED_IMG" "$SEED_IMG_SHA"
+serve_check "/api/files/documents/$SEED_DOC" "$SEED_PDF_SHA"
+[ "$(files_encrypted_events)" = "1" ] || fail "after the rotation: $(files_encrypted_events) FILES_ENCRYPTED events, want 1"
+echo "every upload re-encrypted under $NEW_ID and served with its original bytes"
 endstep
 
 step "4. host mode and owner of the key afterwards"
