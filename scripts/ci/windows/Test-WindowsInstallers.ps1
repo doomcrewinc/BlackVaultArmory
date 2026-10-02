@@ -1517,8 +1517,8 @@ function Set-CrlfIndexedBats([string]$Repo, [string]$Message) {
 function Set-PastMtime([string]$Dir) {
   foreach ($f in @("install.bat", "update.bat")) { (Get-Item (Join-Path $Dir $f)).LastWriteTime = (Get-Date).AddMinutes(-1) }
 }
-function New-CrlfIndexRemote([string]$Name) {
-  $origin = New-GitRemote $Name (Join-Path $RepoRoot "update.bat")
+function New-CrlfIndexRemote([string]$Name, [string]$UpdateBatSource = (Join-Path $RepoRoot "update.bat")) {
+  $origin = New-GitRemote $Name $UpdateBatSource
   Set-Content -Path (Join-Path $origin ".gitattributes") -Value "*.bat text eol=crlf" -Encoding Ascii
   & git -C $origin add .gitattributes | Out-Null
   Set-CrlfIndexedBats $origin "bat files with CRLF in the index"
@@ -1674,18 +1674,34 @@ function Get-ReadmeBlock([string]$Marker) {
 # change — the documented recovery command comes from this checkout's own
 # README.md, same as a real reader would copy it from GitHub).
 $windowsRecoveryBlock = Get-ReadmeBlock "windows"
+
+# Final review FIX 5 (Task 8 MUST-FIX): E6/E7 start from the PRE-RELEASE
+# update.bat (develop 663523c, kept byte for byte in scripts\fixtures), as
+# every real reader's clone does. With the CURRENT update.bat in the clone a
+# broken README block still passed: its failed `git pull` fell through to
+# update.bat, which self-heals the line endings and pulls by itself. The
+# 663523c update.bat cannot (its failed pull exits 1), so only a README block
+# that really works gets the pull through. The pulled release is THIS tree's
+# update.bat and install.bat, so the block's last line runs the new updater.
+$PreReleaseUpdateBat = Join-Path $RepoRoot "scripts\fixtures\update.bat.develop-663523c"
+function Add-ThisReleaseBats([string]$Origin) {
+  foreach ($f in @("install.bat", "update.bat")) { Copy-Item (Join-Path $RepoRoot $f) (Join-Path $Origin $f) -Force }
+  & git -C $Origin -c user.name=ci -c user.email=ci@example.com add install.bat update.bat | Out-Null
+  & git -C $Origin -c user.name=ci -c user.email=ci@example.com commit -q -m "this release" | Out-Null
+}
 Assert ($windowsRecoveryBlock -match "git pull") "premise: the extracted Windows block contains a git pull (markers found real content)"
 Assert ($windowsRecoveryBlock -match "update\.bat") "premise: the extracted Windows block runs update.bat"
 
 # -------------------------------------------------------------- scenario E6
 Write-Scenario "README recovery command (Windows block, extracted verbatim from README.md) - CRLF-dirty clone: the pull succeeds (fix round 1, I2)"
-$origin = New-CrlfIndexRemote "readme-recovery-windows"
+$origin = New-CrlfIndexRemote "readme-recovery-windows" $PreReleaseUpdateBat
 $work = New-WorkingClone $origin "readme-recovery-windows"
 Set-SqliteInstall $work "7046"
 Set-PastMtime $work
 $porcelain = (& git -C $work status --porcelain -- install.bat update.bat) -join "`n"
 Assert ($porcelain -match "M install\.bat" -and $porcelain -match "M update\.bat") "premise: Git reports both files modified (got '$porcelain')"
-Add-CrlfBatChange $origin
+Assert ((Get-FileHash (Join-Path $work "update.bat")).Hash -eq (Get-FileHash $PreReleaseUpdateBat).Hash) "premise: the clone's update.bat is the pre-release (663523c) one, byte for byte"
+Add-ThisReleaseBats $origin
 [IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
 $headBefore = (& git -C $work rev-parse HEAD)
 # Same answers as every other update.bat scenario here: this .env (from
@@ -1699,18 +1715,19 @@ Assert (-not (Test-Path (Join-Path $work ".git\info\attributes"))) "the temporar
 Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
 Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
 Assert ($r.StubLog -match "compose up -d") "update.bat (reached via the recovery command) ran to completion"
+Assert (Test-Path (Join-Path $work "secrets\blackvault_encryption_key")) "the updater the block ran was THIS release's (it created the key file)"
 Show-EvidenceIfFailed $r
 
 # -------------------------------------------------------------- scenario E7
 Write-Scenario "README recovery command (Windows block) - restores an EXISTING .git\info\attributes byte for byte (fix round 1, I2)"
-$origin = New-CrlfIndexRemote "readme-recovery-windows-attrs"
+$origin = New-CrlfIndexRemote "readme-recovery-windows-attrs" $PreReleaseUpdateBat
 $work = New-WorkingClone $origin "readme-recovery-windows-attrs"
 Set-SqliteInstall $work "7047"
 Set-PastMtime $work
 $attrs = Join-Path $work ".git\info\attributes"
 New-Item -ItemType Directory -Force -Path (Split-Path $attrs -Parent) | Out-Null
 [IO.File]::WriteAllText($attrs, "*.png binary`r`n", [Text.Encoding]::ASCII)
-Add-CrlfBatChange $origin
+Add-ThisReleaseBats $origin
 [IO.File]::WriteAllText((Join-Path $work "recovery.cmd"), ($windowsRecoveryBlock -replace "`n", "`r`n"), [Text.Encoding]::ASCII)
 $headBefore = (& git -C $work rev-parse HEAD)
 $r = Invoke-Bat -Dir $work -Script "recovery.cmd" -Answers @("https://vault.example.com", "", "")

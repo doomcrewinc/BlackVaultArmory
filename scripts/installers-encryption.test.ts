@@ -780,6 +780,40 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
   // rather than a hand-copied approximation that could silently drift from
   // what a reader actually sees.
   describe("README recovery command, extracted verbatim from README.md and executed (fix round 1, I2)", () => {
+  // Final review FIX 5 (Task 8 MUST-FIX): the clone starts from the
+  // PRE-RELEASE scripts (develop 663523c), as every real reader's does. With
+  // the CURRENT update.sh in the clone, a broken README block still passed:
+  // its failed `git pull` fell through to `./update.sh`, which self-heals the
+  // line endings and pulls by itself. The 663523c update.sh cannot, so only a
+  // README block that really works gets the pull through.
+  const PRE_RELEASE_TREE = TREE.filter(
+    (f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f),
+  );
+
+  /** v1: the 663523c update.sh, both .bat files with CRLF in the index (what releases before this one shipped). */
+  function preReleaseOrigin(): string {
+    const origin = newOrigin((d) => {
+      copyTree(d, PRE_RELEASE_TREE);
+      fs.copyFileSync(path.join(ROOT, "scripts/fixtures/update.sh.develop-663523c"), path.join(d, "update.sh"));
+      fs.chmodSync(path.join(d, "update.sh"), 0o755); // as Git records it in a real clone
+      fs.writeFileSync(path.join(d, ".gitattributes"), "*.bat text eol=crlf\n");
+      for (const f of ["install.bat", "update.bat"]) fs.writeFileSync(path.join(d, f), BAT_V1);
+    });
+    stageCrlfBats(origin, BAT_V1);
+    git(origin, "commit", "-q", "--amend", "--no-edit");
+    expect(git(origin, "show", "HEAD:update.sh")).toBe(fs.readFileSync(path.join(ROOT, "scripts/fixtures/update.sh.develop-663523c"), "utf8").trim());
+    return origin;
+  }
+
+  /** v2: THIS release — the current tree, and both .bat files changed (LF in the index, as this release renormalised them). */
+  function pushThisRelease(origin: string) {
+    commitAll(origin, (d) => {
+      copyTree(d);
+      fs.chmodSync(path.join(d, "update.sh"), 0o755);
+      for (const f of ["install.bat", "update.bat"]) fs.writeFileSync(path.join(d, f), BAT_V2);
+    }, "this release");
+  }
+
   it("premise: the markers exist and wrap a real recovery command", () => {
     const script = extractReadmeBlock("posix");
     expect(script).toContain("git pull");
@@ -789,7 +823,7 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
 
   it("POSIX block: on a CRLF-dirty clone, the pull succeeds and no stray attributes file is left", () => {
     const script = extractReadmeBlock("posix");
-    const origin = originWithBats(true);
+    const origin = preReleaseOrigin();
     const work = path.join(tmp, "work");
     git(tmp, "clone", "-q", origin, work);
     sqliteInstall(work);
@@ -798,9 +832,11 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
     // a plain pull of a release that changes them aborts (same premise as
     // the "CRLF-in-index checkout" scenario above).
     expect(git(work, "status", "--porcelain", "--", "install.bat", "update.bat")).toMatch(/M install\.bat[\s\S]*M update\.bat/);
-    pushBatChange(origin, true);
+    pushThisRelease(origin);
     const plain = spawnSync("git", ["pull", "-q"], { cwd: work, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig") } });
     expect(plain.status).not.toBe(0);
+    // ...and the clone's own update.sh is the pre-release one (no self-heal).
+    expect(fs.readFileSync(path.join(work, "update.sh"), "utf8")).not.toContain("clear_bat_eol_only_changes");
 
     // A real clone's update.sh is executable (Git records the bit); the
     // recovery command's last line runs it directly (`./update.sh`), unlike
@@ -813,12 +849,14 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
     expect(r.code, r.out).toBe(0);
     expect(git(work, "rev-parse", "HEAD")).not.toBe(before);
     expect(fs.existsSync(path.join(work, ".git/info/attributes"))).toBe(false);
-    expect(r.calls).toContain("AT-APP-START");
+    // The README's last line ran the PULLED (this release's) update.sh: it created the key and snapshotted first.
+    expect(fs.readFileSync(path.join(work, "update.sh"), "utf8")).toBe(fs.readFileSync(path.join(ROOT, "update.sh"), "utf8"));
+    expect(r.calls).toMatch(/AT-APP-START backups=\[blackvault-\d{8}-\d{6}\.db \] key=yes/);
   });
 
   it("POSIX block: restores an EXISTING .git/info/attributes byte for byte, even with no trailing newline", () => {
     const script = extractReadmeBlock("posix");
-    const origin = originWithBats(true);
+    const origin = preReleaseOrigin();
     const work = path.join(tmp, "work");
     git(tmp, "clone", "-q", origin, work);
     sqliteInstall(work);
@@ -828,7 +866,7 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
     // recovery command's `printf '...' >> "$ATTRS"` glued onto, corrupting
     // the user's last line.
     fs.writeFileSync(path.join(work, ".git/info/attributes"), "*.png binary");
-    pushBatChange(origin, true);
+    pushThisRelease(origin);
 
     fs.chmodSync(path.join(work, "update.sh"), 0o755);
     fs.writeFileSync(path.join(work, "recovery.sh"), script);
