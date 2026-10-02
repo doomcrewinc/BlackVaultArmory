@@ -25,16 +25,17 @@ set -Eeo pipefail
 #
 # Task 4 (encrypted files at rest, spec 3b "Update scripts"): independent of
 # PROVIDER, this script also copies $DATA_DIR/uploads into
-# backups/uploads-<YYYYmmdd-HHMMSS>/ (directories mode 700, files mode 600;
-# skipped — still exit 0, no marker — when uploads/ is missing or has no
-# files). On success it leaves the snapshot's path in
+# backups/uploads-<YYYYmmdd-HHMMSS>/ (directories mode 700, files mode 600,
+# owned by the app user uid 1001), inside a one-off container of the app
+# image (scripts/uploads-snapshot.sh; see the comment at UPLOADS_MARKER_FILE
+# below). Skipped — still exit 0, no marker — when uploads/ is missing or has
+# no files. On success it leaves the snapshot's path in
 # backups/.uploads-snapshot-marker; the caller (update.sh / rotate-key.sh)
 # reads that file once and removes it. update.sh passes it as
 # BLACKVAULT_UPLOADS_SNAPSHOT to the ONE `up` that follows — never to .env —
 # so the app's own startup step (src/lib/files/startup.ts) skips its own
 # snapshot for that start only. A symbolic link anywhere under uploads/ is
-# never followed and never copied (see the comment at UPLOADS_MARKER_FILE
-# below).
+# never followed and never copied.
 
 # Run from the folder that holds docker-compose.yml (this script's parent).
 cd "$(dirname "$0")/.."
@@ -135,40 +136,47 @@ echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
 # cannot leave a stale one behind either.
 UPLOADS_MARKER_FILE="backups/.uploads-snapshot-marker"
 rm -f "$UPLOADS_MARKER_FILE"
-rm -rf backups/uploads-*.partial 2>/dev/null
+
+# The copy runs INSIDE a one-off container of the app image (spec 3b, fix for
+# Task 6): the uploaded files are BVF1 files mode 600 owned by the app user
+# (uid 1001), and the app's .pre-encryption-* folders are mode 700, so on
+# Linux the host user cannot read them. scripts/uploads-snapshot.sh starts as
+# root in the container only to create backups/uploads-<TS>.partial for uid
+# 1001 and rename it; the copy itself runs as 1001 (su-exec). The script is
+# mounted from this checkout, not taken from the image, so an older image
+# still runs the current copy rules. The snapshot belongs to uid 1001: delete
+# it with sudo. It skips .pre-encryption-* folders and *.tmp / *.rot files,
+# and never follows a symbolic link. Exit 3 from it means "nothing to copy".
 UPLOADS_SRC="$DATA_DIR/uploads"
-if [ -d "$UPLOADS_SRC" ]; then
-  while IFS= read -r l; do
-    [ -n "$l" ] && echo "WARNING: skipped the symbolic link $l while snapshotting uploads; it was not copied."
-  done < <(find "$UPLOADS_SRC" -type l 2>/dev/null)
-  UPLOADS_FILE_COUNT=$(find "$UPLOADS_SRC" -type f 2>/dev/null | wc -l | tr -d ' ')
-  if [ "${UPLOADS_FILE_COUNT:-0}" -gt 0 ]; then
-    UPLOADS_OUT="backups/uploads-$TS"
-    [ -e "$UPLOADS_OUT" ] && UPLOADS_OUT="backups/uploads-$TS-$$"
-    UPLOADS_PARTIAL="$UPLOADS_OUT.partial"
-    fail_uploads() { rm -rf "$UPLOADS_PARTIAL"; fail "$*"; }
-    (umask 077 && mkdir -p "$UPLOADS_PARTIAL") || fail_uploads "could not create $UPLOADS_PARTIAL."
-    chmod 700 "$UPLOADS_PARTIAL" || fail_uploads "could not restrict $UPLOADS_PARTIAL."
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      rel="${f#"$UPLOADS_SRC"/}"
-      dest="$UPLOADS_PARTIAL/$rel"
-      destdir=$(dirname "$dest")
-      (umask 077 && mkdir -p "$destdir") || fail_uploads "could not create $destdir while snapshotting uploads."
-      chmod 700 "$destdir" || fail_uploads "could not restrict $destdir while snapshotting uploads."
-      (umask 077 && : > "$dest") || fail_uploads "could not create $dest while snapshotting uploads."
-      chmod 600 "$dest" || fail_uploads "could not restrict $dest while snapshotting uploads."
-      cp "$f" "$dest" || fail_uploads "could not copy $f (permissions? free disk space?)."
-    done < <(find "$UPLOADS_SRC" -type f 2>/dev/null)
-    mv "$UPLOADS_PARTIAL" "$UPLOADS_OUT" || fail_uploads "could not finish writing $UPLOADS_OUT."
-    chmod 700 "$UPLOADS_OUT"
+if [ ! -d "$UPLOADS_SRC" ]; then
+  echo "No uploads folder at $UPLOADS_SRC yet; skipping the uploads snapshot."
+  exit 0
+fi
+# Never build or pull here: update.sh has just built the image, and
+# rotate-key.sh runs with the existing app's image. A missing image is an error.
+APP_IMAGE=$($COMPOSE config --images blackvault 2>/dev/null | head -n 1) || true
+[ -n "$APP_IMAGE" ] || fail "could not work out the BlackVault image name from docker-compose.yml."
+docker image inspect "$APP_IMAGE" >/dev/null 2>&1 ||
+  fail "the BlackVault image $APP_IMAGE does not exist yet, so the uploads folder could not be snapshotted. Build it first ($COMPOSE build)."
+UPLOADS_NAME="uploads-$TS"
+[ -e "backups/$UPLOADS_NAME" ] && UPLOADS_NAME="uploads-$TS-$$"
+rc=0
+$COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh \
+  -v "$PWD/backups:/bv-backups" \
+  -v "$PWD/scripts/uploads-snapshot.sh:/bv-uploads-snapshot.sh:ro" \
+  blackvault /bv-uploads-snapshot.sh /app/uploads /bv-backups "$UPLOADS_NAME" || rc=$?
+case "$rc" in
+  0)
+    UPLOADS_OUT="backups/$UPLOADS_NAME"
     (umask 077 && : > "$UPLOADS_MARKER_FILE" && chmod 600 "$UPLOADS_MARKER_FILE" && printf '%s' "$UPLOADS_OUT" > "$UPLOADS_MARKER_FILE") ||
       echo "WARNING: could not write $UPLOADS_MARKER_FILE; the app may take its own snapshot of the uploads folder on its next start."
     echo ""
-    echo "Uploads snapshot saved: $UPLOADS_OUT"
-  else
+    echo "Uploads snapshot saved: $UPLOADS_OUT (owned by the app user, uid 1001; delete it with sudo)"
+    ;;
+  3)
     echo "No files in $UPLOADS_SRC to snapshot; skipping the uploads snapshot."
-  fi
-else
-  echo "No uploads folder at $UPLOADS_SRC yet; skipping the uploads snapshot."
-fi
+    ;;
+  *)
+    fail "could not snapshot the uploads folder $UPLOADS_SRC (exit $rc; see the ERROR above). No partial copy was kept."
+    ;;
+esac

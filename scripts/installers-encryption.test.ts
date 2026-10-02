@@ -32,6 +32,7 @@ const TREE = [
   "scripts/setup-token.sh",
   "scripts/encryption-key.sh",
   "scripts/db-snapshot.sh",
+  "scripts/uploads-snapshot.sh",
 ];
 
 let tmp: string;
@@ -62,6 +63,12 @@ if [ -n "$BV_STUB_FAIL_ON" ]; then
   case " $* " in *" $BV_STUB_FAIL_ON "*) echo "[stub] failing on purpose: $*" >&2; exit 1 ;; esac
 fi
 case "$*" in
+  "compose config --images blackvault") echo "\${BV_STUB_IMAGE-blackvault-blackvault}" ;;
+  *"/bv-uploads-snapshot.sh /app/uploads /bv-backups "*)
+    # The one-off uploads-snapshot container, emulated on the host: the real
+    # scripts/uploads-snapshot.sh against DATA_DIR/uploads (not root, so no su-exec).
+    dd=$(sed -n 's/^DATA_DIR=//p' .env | tail -n 1); for a in "$@"; do name=$a; done
+    sh scripts/uploads-snapshot.sh "\${dd:-./data}/uploads" backups "$name"; exit $? ;;
   *"rotate-encryption-key.mjs --probe"*) echo "\${BV_STUB_PROBE:-OLD}" ;;
   *"rotate-encryption-key.mjs"*) [ -n "$BV_STUB_ROTATE_STDERR" ] && echo "$BV_STUB_ROTATE_STDERR" >&2; exit "\${BV_STUB_ROTATE_EXIT:-0}" ;;
   "compose version --short") echo 2.30.1 ;;
@@ -442,6 +449,71 @@ describe("update.sh — uploads snapshot (Task 4)", () => {
     expect(fs.existsSync(path.join(dir, "backups/.uploads-snapshot-marker"))).toBe(false);
   });
 
+  it("copies inside a one-off app container as root-then-1001, with backups/ and the copy script mounted; never builds or pulls", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    seedUploads(dir, { skipLink: true });
+    const r = run(dir, "scripts/db-snapshot.sh", "");
+    expect(r.code, r.out).toBe(0);
+    const runLine = callLines(r.calls).find((l) => l.includes("/bv-uploads-snapshot.sh"));
+    const real = fs.realpathSync(dir); // $PWD in the script (macOS: /private/var/...)
+    expect(runLine).toBe(
+      `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${real}/backups:/bv-backups ` +
+        `-v ${real}/scripts/uploads-snapshot.sh:/bv-uploads-snapshot.sh:ro blackvault /bv-uploads-snapshot.sh /app/uploads /bv-backups ` +
+        runLine!.split(" ").at(-1),
+    );
+    expect(runLine!.split(" ").at(-1)).toMatch(/^uploads-\d{8}-\d{6}(-\d+)?$/);
+    expect(callLines(r.calls)).toContain("image inspect blackvault-blackvault");
+    expect(r.calls).not.toMatch(/compose (build|pull)/);
+  });
+
+  it("skips the app's .pre-encryption-* folders and every *.tmp / *.rot file (M5)", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    seedUploads(dir, { skipLink: true });
+    const up = path.join(dir, "data/uploads");
+    fs.mkdirSync(path.join(up, ".pre-encryption-20261001-120000/documents"), { recursive: true });
+    fs.writeFileSync(path.join(up, ".pre-encryption-20261001-120000/documents/old.pdf"), "plaintext");
+    fs.mkdirSync(path.join(up, ".pre-encryption-20261001-130000.partial"), { recursive: true });
+    fs.writeFileSync(path.join(up, ".pre-encryption-20261001-130000.partial/x.jpg"), "partial");
+    fs.writeFileSync(path.join(up, "documents/doc1.pdf.0123abcd.tmp"), "half written");
+    fs.writeFileSync(path.join(up, "photo1.jpg.rot"), "mid rotation");
+    const r = run(dir, "scripts/db-snapshot.sh", "");
+    expect(r.code, r.out).toBe(0);
+    const ups = fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"));
+    expect(ups).toHaveLength(1);
+    expect(listFilesRecursive(path.join(dir, "backups", ups[0]))).toEqual(["documents/doc1.pdf", "photo1.jpg"]);
+    expect(fs.readdirSync(path.join(dir, "backups", ups[0])).some((n) => n.startsWith(".pre-encryption-"))).toBe(false);
+  });
+
+  it("only *.tmp / *.rot / snapshot files: nothing to copy, exit 0, no snapshot, no marker", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const up = path.join(dir, "data/uploads");
+    fs.mkdirSync(path.join(up, ".pre-encryption-20261001-120000"), { recursive: true });
+    fs.writeFileSync(path.join(up, ".pre-encryption-20261001-120000/a.jpg"), "plaintext");
+    fs.writeFileSync(path.join(up, "a.jpg.rot"), "mid rotation");
+    const r = run(dir, "scripts/db-snapshot.sh", "");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("skipping the uploads snapshot");
+    expect(backups(dir).filter((n) => n.startsWith("uploads-") || n === ".uploads-snapshot-marker")).toEqual([]);
+  });
+
+  it("the app image is missing: exits non-zero with a real message, starts no container, writes no uploads snapshot", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    seedUploads(dir, { skipLink: true });
+    const r = run(dir, "scripts/db-snapshot.sh", "", { BV_STUB_FAIL_ON: "inspect" });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("ERROR: database snapshot failed: the BlackVault image blackvault-blackvault does not exist yet");
+    expect(r.calls).not.toContain("/bv-uploads-snapshot.sh");
+    expect(backups(dir).filter((n) => n.startsWith("uploads-"))).toEqual([]);
+  });
+
   it("empty uploads folder: still succeeds, takes no uploads snapshot, sets no marker", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -462,6 +534,8 @@ describe("update.sh — uploads snapshot (Task 4)", () => {
     expect(r.code, r.out).toBe(0);
     expect(fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"))).toEqual([]);
     expect(r.calls).toContain("uploads_marker=[]");
+    // No container is started (and so no bind mount creates the folder).
+    expect(r.calls).not.toContain("/bv-uploads-snapshot.sh");
   });
 
   it.skipIf(process.getuid?.() === 0)("a failed uploads copy exits non-zero, the update stops, and no partial directory is left behind", () => {
@@ -474,7 +548,8 @@ describe("update.sh — uploads snapshot (Task 4)", () => {
       const r = run(dir, "update.sh", "\n");
       expect(r.code).not.toBe(0);
       expect(r.out).toContain("ERROR: database snapshot failed");
-      expect(r.out).toContain("could not copy");
+      expect(r.out).toContain("ERROR: could not snapshot the uploads folder");
+      expect(r.out).toContain("could not snapshot the uploads folder");
       expect(r.calls).not.toContain("AT-APP-START");
       expect(callLines(r.calls)).not.toContain("compose up -d");
       expect(callLines(r.calls).at(-1)).toBe("compose start blackvault");
@@ -712,7 +787,7 @@ describe("update.sh after git pull", () => {
   });
 
   it("first hop: the OLD update.sh (develop 663523c) pulling THIS tree still finishes; secrets/ exists for the mount; the next run creates the key and snapshots before starting", () => {
-    const OLD_TREE = TREE.filter((f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f));
+    const OLD_TREE = TREE.filter((f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "scripts/uploads-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f));
     const origin = newOrigin((d) => {
       copyTree(d, OLD_TREE);
       fs.copyFileSync(path.join(ROOT, "scripts/fixtures/update.sh.develop-663523c"), path.join(d, "update.sh"));
@@ -949,7 +1024,7 @@ describe("update.sh before git pull: install.bat / update.bat line endings (fix 
   // line endings and pulls by itself. The 663523c update.sh cannot, so only a
   // README block that really works gets the pull through.
   const PRE_RELEASE_TREE = TREE.filter(
-    (f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f),
+    (f) => !["scripts/encryption-key.sh", "scripts/db-snapshot.sh", "scripts/uploads-snapshot.sh", "secrets/.gitignore", "rotate-key.sh"].includes(f),
   );
 
   /** v1: the 663523c update.sh, both .bat files with CRLF in the index (what releases before this one shipped). */

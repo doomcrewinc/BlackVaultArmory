@@ -363,6 +363,25 @@ serve_check "$UP_PDF_URL" "$UP_PDF_SHA"
 serve_check "/uploads/images/firearms/$SEED_IMG" "$SEED_IMG_SHA"
 serve_check "/api/files/documents/$SEED_DOC" "$SEED_PDF_SHA"
 [ "$(files_encrypted_events)" = "1" ] || fail "after the rotation: $(files_encrypted_events) FILES_ENCRYPTED events, want 1"
+# rotate-key.sh's db-snapshot.sh copied the uploads inside a uid-1001
+# container: 4 BVF1 files (old key), no .pre-encryption-* folder, 700/600, uid 1001.
+mapfile -t BUPS < <(sudo find "$APP/backups" -maxdepth 1 -name 'uploads-*' -printf '%f\n')
+[ "${#BUPS[@]}" = "1" ] || fail "expected one backups/uploads-* snapshot (and no .partial), found: ${BUPS[*]:-none}"
+BUP="$APP/backups/${BUPS[0]}"
+[ "$(sudo stat -c '%a %u' "$BUP")" = "700 1001" ] || fail "$BUP is $(sudo stat -c '%a %u' "$BUP"), want 700 1001"
+[ -z "$(sudo find "$BUP" -name '.pre-encryption-*')" ] || fail "the uploads snapshot copied a .pre-encryption-* folder"
+n=0
+while IFS= read -r -d '' f; do
+  [ "$(sudo stat -c '%a %u' "$f")" = "600 1001" ] || fail "$f is $(sudo stat -c '%a %u' "$f"), want 600 1001"
+  [ "$(magic_of "$f")" = "BVF1" ] || fail "$f in the uploads snapshot is not BVF1"
+  [ "$(file_key_id "$f")" = "$OLD_ID" ] || fail "$f in the uploads snapshot is not under the pre-rotation key $OLD_ID"
+  n=$((n + 1))
+done < <(sudo find "$BUP" -type f -print0)
+[ "$n" = "4" ] || fail "the uploads snapshot holds $n files, want 4"
+while IFS= read -r -d '' d; do
+  [ "$(sudo stat -c '%a %u' "$d")" = "700 1001" ] || fail "$d is $(sudo stat -c '%a %u' "$d"), want 700 1001"
+done < <(sudo find "$BUP" -type d -print0)
+echo "pre-rotation uploads snapshot ${BUPS[0]}: 4 BVF1 files under $OLD_ID, 700/600, uid 1001"
 echo "every upload re-encrypted under $NEW_ID and served with its original bytes"
 endstep
 
