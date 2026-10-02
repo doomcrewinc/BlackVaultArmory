@@ -263,14 +263,30 @@ if ! ./scripts/db-snapshot.sh; then
   echo ""
   echo "ERROR: the database snapshot failed, so the update stopped here. See above."
   echo "       The new version was NOT started."
+  rm -f backups/.uploads-snapshot-marker
   $COMPOSE start blackvault >/dev/null 2>&1 || true
   exit 1
 fi
 
+# Task 4: scripts/db-snapshot.sh also snapshotted the uploads folder (unless
+# it was empty or missing) and left its path in
+# backups/.uploads-snapshot-marker. Read it once, then remove it — never
+# write it to .env — and pass it to the ONE `up` below, so the app's own
+# startup step does not take a second snapshot of the same files.
+UPLOADS_SNAPSHOT_MARKER=""
+if [ -s backups/.uploads-snapshot-marker ]; then
+  UPLOADS_SNAPSHOT_MARKER=$(cat backups/.uploads-snapshot-marker)
+fi
+rm -f backups/.uploads-snapshot-marker
+
 # ── Restart ───────────────────────────────────────────────────
 echo ""
 echo "Restarting..."
-$COMPOSE up -d
+if [ -n "$UPLOADS_SNAPSHOT_MARKER" ]; then
+  BLACKVAULT_UPLOADS_SNAPSHOT="$UPLOADS_SNAPSHOT_MARKER" $COMPOSE up -d
+else
+  $COMPOSE up -d
+fi
 
 echo ""
 echo "Waiting for health check..."

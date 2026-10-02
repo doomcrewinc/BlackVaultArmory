@@ -22,6 +22,19 @@ set -Eeo pipefail
 #
 # backups/ is mode 700 and every snapshot mode 600: it is a plain copy of the
 # database.
+#
+# Task 4 (encrypted files at rest, spec 3b "Update scripts"): independent of
+# PROVIDER, this script also copies $DATA_DIR/uploads into
+# backups/uploads-<YYYYmmdd-HHMMSS>/ (directories mode 700, files mode 600;
+# skipped — still exit 0, no marker — when uploads/ is missing or has no
+# files). On success it leaves the snapshot's path in
+# backups/.uploads-snapshot-marker; the caller (update.sh / rotate-key.sh)
+# reads that file once and removes it. update.sh passes it as
+# BLACKVAULT_UPLOADS_SNAPSHOT to the ONE `up` that follows — never to .env —
+# so the app's own startup step (src/lib/files/startup.ts) skips its own
+# snapshot for that start only. A symbolic link anywhere under uploads/ is
+# never followed and never copied (see the comment at UPLOADS_MARKER_FILE
+# below).
 
 # Run from the folder that holds docker-compose.yml (this script's parent).
 cd "$(dirname "$0")/.."
@@ -41,13 +54,13 @@ fail() {
 
 PROVIDER=$(provider_from_env)
 TS="$(date -u +%Y%m%d-%H%M%S)"
+DATA_DIR=$(env_value DATA_DIR)
+DATA_DIR="${DATA_DIR:-./data}"
 
 mkdir -p backups || fail "could not create the backups folder."
 chmod 700 backups || fail "could not restrict the backups folder."
 
 if [ "$PROVIDER" = "sqlite" ]; then
-  DATA_DIR=$(env_value DATA_DIR)
-  DATA_DIR="${DATA_DIR:-./data}"
   DB="$DATA_DIR/db/vault.db"
   if [ ! -f "$DB" ]; then
     echo "No SQLite database at $DB yet; nothing to snapshot."
@@ -97,3 +110,65 @@ echo "         file. Serial numbers and NFA records too, if it was taken before 
 echo "         encryption was first turned on; otherwise they need the encryption key"
 echo "         that was in use when it was taken."
 echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
+
+# ── Uploads snapshot (Task 4) ───────────────────────────────────
+# A copy of $DATA_DIR/uploads into backups/uploads-<TS>/, written under a
+# .partial name and renamed only once complete — same reason as $OUT above.
+# Every directory is mode 700; every file is created empty and chmod 600
+# BEFORE its contents are written (the 3a lesson: a default ACL on the
+# parent can override the umask).
+#
+# Symlinks: never followed, never copied — `find` without -L already does
+# not descend into a symlinked directory, and a symlinked file is reported
+# and skipped below. A link copied into backups/ could resolve to something
+# outside uploads/ once that folder is moved, zipped or restored elsewhere,
+# and BlackVault itself never treats an uploaded file as a link
+# (src/lib/files/startup.ts skips them the same way).
+#
+# The marker is a plain file, backups/.uploads-snapshot-marker — never a
+# BLACKVAULT_* name and never written to .env: update.sh reads it once,
+# right after this script returns, and exports it as
+# BLACKVAULT_UPLOADS_SNAPSHOT for that one `up` only, so a stale marker from
+# an earlier run can never suppress a snapshot the app genuinely needs on
+# some later, unrelated start. Cleared at the start of every run, so a
+# failure below (or a caller, like rotate-key.sh, that never reads it)
+# cannot leave a stale one behind either.
+UPLOADS_MARKER_FILE="backups/.uploads-snapshot-marker"
+rm -f "$UPLOADS_MARKER_FILE"
+rm -rf backups/uploads-*.partial 2>/dev/null
+UPLOADS_SRC="$DATA_DIR/uploads"
+if [ -d "$UPLOADS_SRC" ]; then
+  while IFS= read -r l; do
+    [ -n "$l" ] && echo "WARNING: skipped the symbolic link $l while snapshotting uploads; it was not copied."
+  done < <(find "$UPLOADS_SRC" -type l 2>/dev/null)
+  UPLOADS_FILE_COUNT=$(find "$UPLOADS_SRC" -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${UPLOADS_FILE_COUNT:-0}" -gt 0 ]; then
+    UPLOADS_OUT="backups/uploads-$TS"
+    [ -e "$UPLOADS_OUT" ] && UPLOADS_OUT="backups/uploads-$TS-$$"
+    UPLOADS_PARTIAL="$UPLOADS_OUT.partial"
+    fail_uploads() { rm -rf "$UPLOADS_PARTIAL"; fail "$*"; }
+    (umask 077 && mkdir -p "$UPLOADS_PARTIAL") || fail_uploads "could not create $UPLOADS_PARTIAL."
+    chmod 700 "$UPLOADS_PARTIAL" || fail_uploads "could not restrict $UPLOADS_PARTIAL."
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      rel="${f#"$UPLOADS_SRC"/}"
+      dest="$UPLOADS_PARTIAL/$rel"
+      destdir=$(dirname "$dest")
+      (umask 077 && mkdir -p "$destdir") || fail_uploads "could not create $destdir while snapshotting uploads."
+      chmod 700 "$destdir" || fail_uploads "could not restrict $destdir while snapshotting uploads."
+      (umask 077 && : > "$dest") || fail_uploads "could not create $dest while snapshotting uploads."
+      chmod 600 "$dest" || fail_uploads "could not restrict $dest while snapshotting uploads."
+      cp "$f" "$dest" || fail_uploads "could not copy $f (permissions? free disk space?)."
+    done < <(find "$UPLOADS_SRC" -type f 2>/dev/null)
+    mv "$UPLOADS_PARTIAL" "$UPLOADS_OUT" || fail_uploads "could not finish writing $UPLOADS_OUT."
+    chmod 700 "$UPLOADS_OUT"
+    (umask 077 && : > "$UPLOADS_MARKER_FILE" && chmod 600 "$UPLOADS_MARKER_FILE" && printf '%s' "$UPLOADS_OUT" > "$UPLOADS_MARKER_FILE") ||
+      echo "WARNING: could not write $UPLOADS_MARKER_FILE; the app may take its own snapshot of the uploads folder on its next start."
+    echo ""
+    echo "Uploads snapshot saved: $UPLOADS_OUT"
+  else
+    echo "No files in $UPLOADS_SRC to snapshot; skipping the uploads snapshot."
+  fi
+else
+  echo "No uploads folder at $UPLOADS_SRC yet; skipping the uploads snapshot."
+fi

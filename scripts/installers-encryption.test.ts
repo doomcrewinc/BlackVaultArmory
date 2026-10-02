@@ -68,7 +68,7 @@ case "$*" in
   "compose ps"*) echo "Up 3 seconds (healthy)" ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
   "compose up -d")
-    echo "AT-APP-START backups=[$(ls backups 2>/dev/null | tr '\\n' ' ')] key=$([ -f secrets/blackvault_encryption_key ] && echo yes || echo no)" >> "${calls}" ;;
+    echo "AT-APP-START backups=[$(ls backups 2>/dev/null | tr '\\n' ' ')] key=$([ -f secrets/blackvault_encryption_key ] && echo yes || echo no) uploads_marker=[\${BLACKVAULT_UPLOADS_SNAPSHOT:-}]" >> "${calls}" ;;
 esac
 exit 0
 `,
@@ -165,6 +165,36 @@ const modeOf = (p: string) => fs.statSync(p).mode & 0o777;
 const backups = (dir: string) => (fs.existsSync(path.join(dir, "backups")) ? fs.readdirSync(path.join(dir, "backups")).sort() : []);
 const callLines = (c: string) => c.split("\n").filter(Boolean);
 const indexOfCall = (c: string, prefix: string) => callLines(c).findIndex((l) => l.startsWith(prefix));
+
+/**
+ * Seeds data/uploads with two regular files (one nested, matching the real
+ * documents/ subfolder) and, unless skipLink, a symlink to one of them —
+ * which Task 4's uploads snapshot must never follow and never copy.
+ */
+function seedUploads(dir: string, { skipLink = false }: { skipLink?: boolean } = {}) {
+  const uploads = path.join(dir, "data/uploads");
+  fs.mkdirSync(path.join(uploads, "documents"), { recursive: true });
+  fs.writeFileSync(path.join(uploads, "photo1.jpg"), "fake jpeg bytes");
+  fs.writeFileSync(path.join(uploads, "documents", "doc1.pdf"), "fake pdf bytes");
+  if (!skipLink) fs.symlinkSync(path.join(uploads, "photo1.jpg"), path.join(uploads, "photo1-link.jpg"));
+}
+
+/** Every regular file under dir (relative paths, "/"-joined, sorted); never descends into a symlinked directory. */
+function listFilesRecursive(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string, rel: string) => {
+    for (const name of fs.readdirSync(d).sort()) {
+      const abs = path.join(d, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = fs.lstatSync(abs);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(abs, r);
+      else out.push(r);
+    }
+  };
+  walk(dir, "");
+  return out.sort();
+}
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bv-inst-enc-"));
@@ -380,6 +410,93 @@ describe("scripts/db-snapshot.sh on its own (the rotate-key.sh contract, R4)", (
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("nothing to snapshot");
     expect(backups(dir)).toEqual([]);
+  });
+});
+
+// ─── Task 4: the update scripts snapshot the uploads folder too ─────────
+
+describe("update.sh — uploads snapshot (Task 4)", () => {
+  it("copies a seeded uploads tree byte-for-byte, dirs 700 / files 600, skips the symlink, and the marker reaches the container environment via the next `up`", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    seedUploads(dir);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    const ups = fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"));
+    expect(ups).toHaveLength(1);
+    const snapDir = path.join(dir, "backups", ups[0]);
+    expect(modeOf(snapDir)).toBe(0o700);
+    expect(modeOf(path.join(snapDir, "documents"))).toBe(0o700);
+    expect(modeOf(path.join(snapDir, "photo1.jpg"))).toBe(0o600);
+    expect(modeOf(path.join(snapDir, "documents/doc1.pdf"))).toBe(0o600);
+    expect(fs.readFileSync(path.join(snapDir, "photo1.jpg"), "utf8")).toBe("fake jpeg bytes");
+    expect(fs.readFileSync(path.join(snapDir, "documents/doc1.pdf"), "utf8")).toBe("fake pdf bytes");
+    // The symlink was never followed and never copied as a link or a file.
+    expect(listFilesRecursive(snapDir)).toEqual(["documents/doc1.pdf", "photo1.jpg"]);
+    expect(r.out).toContain("skipped the symbolic link");
+    expect(r.out).toContain(`Uploads snapshot saved: backups/${ups[0]}`);
+    // The marker reached the container's environment at the `up` that
+    // starts the new image, and was not left lying around afterwards.
+    expect(r.calls).toContain(`uploads_marker=[backups/${ups[0]}]`);
+    expect(fs.existsSync(path.join(dir, "backups/.uploads-snapshot-marker"))).toBe(false);
+  });
+
+  it("empty uploads folder: still succeeds, takes no uploads snapshot, sets no marker", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir); // data/uploads exists and is empty
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"))).toEqual([]);
+    expect(r.out).toContain("skipping the uploads snapshot");
+    expect(r.calls).toContain("uploads_marker=[]");
+  });
+
+  it("missing uploads folder entirely: still succeeds, no uploads snapshot", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.rmSync(path.join(dir, "data/uploads"), { recursive: true, force: true });
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"))).toEqual([]);
+    expect(r.calls).toContain("uploads_marker=[]");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("a failed uploads copy exits non-zero, the update stops, and no partial directory is left behind", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    seedUploads(dir, { skipLink: true });
+    fs.chmodSync(path.join(dir, "data/uploads/photo1.jpg"), 0o000);
+    try {
+      const r = run(dir, "update.sh", "\n");
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain("ERROR: database snapshot failed");
+      expect(r.out).toContain("could not copy");
+      expect(r.calls).not.toContain("AT-APP-START");
+      expect(callLines(r.calls)).not.toContain("compose up -d");
+      expect(callLines(r.calls).at(-1)).toBe("compose start blackvault");
+      expect(fs.existsSync(path.join(dir, "backups/.uploads-snapshot-marker"))).toBe(false);
+      expect(fs.readdirSync(path.join(dir, "backups")).some((n) => n.includes(".partial"))).toBe(false);
+    } finally {
+      fs.chmodSync(path.join(dir, "data/uploads/photo1.jpg"), 0o644);
+    }
+  });
+
+  it("rotate-key.sh also snapshots uploads through the same db-snapshot.sh, but never leaves or needs the marker (compose start does not recreate the container)", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.chmodSync(path.join(dir, "secrets"), 0o700);
+    fs.writeFileSync(path.join(dir, KEY_FILE), "ab".repeat(32), { mode: 0o600 });
+    seedUploads(dir, { skipLink: true });
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(0);
+    const ups = fs.readdirSync(path.join(dir, "backups")).filter((n) => n.startsWith("uploads-"));
+    expect(ups).toHaveLength(1);
+    expect(fs.existsSync(path.join(dir, "backups/.uploads-snapshot-marker"))).toBe(false);
   });
 });
 

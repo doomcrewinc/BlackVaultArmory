@@ -239,9 +239,17 @@ echo ""
 echo "Snapshotting database..."
 if ! ./scripts/db-snapshot.sh; then
   echo "ERROR: database snapshot failed. See the output above."
+  rm -f backups/.uploads-snapshot-marker
   restart_unchanged
   exit 1
 fi
+# Task 4: db-snapshot.sh also snapshotted the uploads folder (one more
+# backup before the rotation re-encrypts them). rotate-key.sh restarts the
+# app with `compose start`, which does not recreate the container, so the
+# marker it left behind would never reach the app anyway — and is not
+# needed: a rotation never leaves plaintext uploads behind for the app's
+# startup step to snapshot again. Just clear it.
+rm -f backups/.uploads-snapshot-marker
 
 # ── 4. Generate the new key ────────────────────────────────────
 PHASE="keygen"
