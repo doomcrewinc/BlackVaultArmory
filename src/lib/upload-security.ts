@@ -1,4 +1,5 @@
 import path from "path";
+import { documentsRoot } from "./files/storage";
 
 type SupportedSignature = "pdf" | "jpg" | "png" | "gif" | "webp" | "avif";
 
@@ -85,8 +86,14 @@ export function validateUploadBuffer(
 
 const SAFE_FILE_NAME = /^[a-zA-Z0-9._-]+$/;
 
+/**
+ * Documents now live under the shared uploads root (spec 3b §1, "Location"):
+ * `<uploadsRoot>/documents`, via src/lib/files/storage.ts's `documentsRoot()`.
+ * The pre-3b location (`<cwd>/storage/uploads`) is kept ONLY as
+ * `legacyDocumentsRoot()` in that module, read by the startup move step.
+ */
 export function getCanonicalUploadsRoot(): string {
-  return path.resolve(process.cwd(), "storage", "uploads");
+  return documentsRoot();
 }
 
 export function isSafeDocumentUrl(fileUrl: string): boolean {
@@ -110,8 +117,7 @@ export function resolveDocumentStoragePath(fileUrl: string): string | null {
     ? fileUrl.slice("/api/files/documents/".length)
     : fileUrl.slice("/uploads/documents/".length);
 
-  const uploadsRoot = getCanonicalUploadsRoot();
-  const documentRoot = path.resolve(uploadsRoot, "documents");
+  const documentRoot = path.resolve(documentsRoot());
   const resolvedPath = path.resolve(documentRoot, fileName);
 
   if (!resolvedPath.startsWith(`${documentRoot}${path.sep}`)) {

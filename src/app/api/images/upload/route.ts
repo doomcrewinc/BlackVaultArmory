@@ -6,6 +6,7 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { ALLOWED_IMAGE_EXTENSIONS, SUPPORTED_IMAGE_FORMATS_LABEL } from "@/lib/image-formats";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";
+import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 const ALLOWED_EXTENSIONS = new Set<string>(ALLOWED_IMAGE_EXTENSIONS);
 
@@ -24,12 +25,6 @@ const ALLOWED_ENTITY_TYPES = new Set([
 ]);
 const MAX_SIZE = 10 * 1024 * 1024;
 const SAFE_ENTITY_ID = /^[a-zA-Z0-9_-]{1,64}$/;
-
-function resolveUploadRoot(): string {
-  return process.env.IMAGE_UPLOAD_DIR
-    ? path.resolve(process.env.IMAGE_UPLOAD_DIR)
-    : path.join(process.cwd(), "uploads");
-}
 
 // POST /api/images/upload - Upload an image for an entity
 // Accepts multipart form data: file, entityType, entityId
@@ -134,14 +129,14 @@ export async function POST(request: NextRequest) {
     const relativeUrl = `/uploads/images/${entityTypeDir}/${fileName}`;
 
     // Resolve the absolute path outside the web root
-    const uploadRoot = resolveUploadRoot();
+    const uploadRoot = uploadsRoot();
     const uploadDir = path.join(uploadRoot, "images", entityTypeDir);
     const filePath = path.join(uploadDir, fileName);
 
     // Ensure the directory exists
     await fs.mkdir(uploadDir, { recursive: true });
 
-    await fs.writeFile(filePath, buffer);
+    await writeEncryptedFile(filePath, buffer);
 
     return NextResponse.json(
       {

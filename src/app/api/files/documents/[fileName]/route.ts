@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
 import { basename } from "path";
 import { requireAuth } from "@/lib/server/auth";
 import { resolveDocumentStoragePath } from "@/lib/upload-security";
+import { FileAtRestError, fileResponseHeaders, readDecryptedFile } from "@/lib/files/storage";
 
 function guessMimeType(fileName: string): string {
   const lower = fileName.toLowerCase();
@@ -30,15 +30,17 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
     }
 
-    const fileBuffer = await fs.readFile(filePath);
+    const fileBuffer = await readDecryptedFile(filePath);
 
     return new NextResponse(new Uint8Array(fileBuffer), {
-      headers: {
-        "Content-Type": guessMimeType(safeName),
-        "Cache-Control": "private, max-age=60",
-      },
+      headers: fileResponseHeaders(guessMimeType(safeName)),
     });
   } catch (error: unknown) {
+    if (error instanceof FileAtRestError) {
+      console.error(`[documents] ${error.code} for ${error.path}`);
+      return NextResponse.json({ error: "Failed to read file" }, { status: 500 });
+    }
+
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }

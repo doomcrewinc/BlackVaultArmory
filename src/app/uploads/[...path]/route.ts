@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
+import { FileAtRestError, fileResponseHeaders, readDecryptedFile, uploadsRoot } from "@/lib/files/storage";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
@@ -26,10 +27,7 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
     }
 
-    const uploadRoot = process.env.IMAGE_UPLOAD_DIR
-      ? path.resolve(process.env.IMAGE_UPLOAD_DIR)
-      : path.join(process.cwd(), "uploads");
-    const absoluteRoot = path.resolve(uploadRoot);
+    const absoluteRoot = path.resolve(uploadsRoot());
     const filePath = path.resolve(absoluteRoot, ...segments);
     const extension = path.extname(filePath).toLowerCase();
     const contentType = MIME_BY_EXT[extension];
@@ -53,17 +51,20 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
     }
 
-    const file = await fs.readFile(filePath);
+    let file: Buffer;
+    try {
+      file = await readDecryptedFile(filePath);
+    } catch (error) {
+      if (error instanceof FileAtRestError) {
+        console.error(`[uploads] ${error.code} for ${error.path}`);
+        return NextResponse.json({ error: "File unavailable" }, { status: 500 });
+      }
+      throw error;
+    }
 
-    return new NextResponse(file, {
+    return new NextResponse(new Uint8Array(file), {
       status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "private, max-age=86400",
-        "Content-Disposition": "inline",
-        "X-Content-Type-Options": "nosniff",
-        "Cross-Origin-Resource-Policy": "same-origin",
-      },
+      headers: fileResponseHeaders(contentType),
     });
   } catch {
     return NextResponse.json({ error: "File not found" }, { status: 404 });

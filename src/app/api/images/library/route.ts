@@ -1,18 +1,23 @@
 import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
+import { uploadsRoot } from "@/lib/files/storage";
 
 const IMAGE_FOLDERS = ["firearms", "accessories", "ammo", "builds"];
 
-function resolveUploadRoot(): string {
-  return process.env.IMAGE_UPLOAD_DIR
-    ? path.resolve(process.env.IMAGE_UPLOAD_DIR)
-    : path.join(process.cwd(), "uploads");
+/**
+ * Staging/migration artifacts that are never real images: a write in
+ * progress (`.tmp`), rotation staging (`.rot`), or a pre-encryption snapshot
+ * directory (`.pre-encryption-*`, which would only ever appear misplaced
+ * here, but is excluded defensively all the same).
+ */
+function isStagingOrSnapshotEntry(name: string): boolean {
+  return name.endsWith(".tmp") || name.endsWith(".rot") || name.startsWith(".pre-encryption-");
 }
 
 export async function GET() {
   try {
-    const root = path.join(resolveUploadRoot(), "images");
+    const root = path.join(uploadsRoot(), "images");
     const images = [] as Array<{ id: string; url: string; folder: string; updatedAt: string }>;
 
     for (const folder of IMAGE_FOLDERS) {
@@ -21,6 +26,7 @@ export async function GET() {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isFile()) continue;
+        if (isStagingOrSnapshotEntry(entry.name)) continue;
         const filePath = path.join(dir, entry.name);
         const stat = await fs.stat(filePath);
         images.push({

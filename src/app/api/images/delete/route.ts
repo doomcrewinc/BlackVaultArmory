@@ -4,18 +4,13 @@ import path from "path";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { uploadsRoot } from "@/lib/files/storage";
 
 const ALLOWED_ENTITY_TYPES = ["firearm", "accessory"] as const;
 type AllowedEntityType = (typeof ALLOWED_ENTITY_TYPES)[number];
 
 // Allows <entityId>_<timestamp>.<ext> format, blocks path traversal
 const SAFE_FILENAME = /^[a-zA-Z0-9_-]{1,100}\.[a-z0-9]{2,5}$/;
-
-function resolveUploadRoot(): string {
-  return process.env.IMAGE_UPLOAD_DIR
-    ? path.resolve(process.env.IMAGE_UPLOAD_DIR)
-    : path.join(process.cwd(), "uploads");
-}
 
 export async function DELETE(request: NextRequest) {
   const auth = await requireAuth();
@@ -65,7 +60,7 @@ export async function DELETE(request: NextRequest) {
   }
 
   // Resolve file path — mirrors upload route's path construction
-  const uploadRoot = resolveUploadRoot();
+  const uploadRoot = uploadsRoot();
   const filePath = path.join(uploadRoot, "images", `${entityType}s`, filename);
 
   // Delete file — tolerate already-gone (ENOENT)
