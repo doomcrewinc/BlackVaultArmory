@@ -25,7 +25,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createRawPrismaClient } from "@/lib/prisma";
 import { decryptFile, deriveKeys, encryptFile, fileKeyId, isEncryptedFile } from "@/lib/encryption/core.mjs";
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
-import { runFileStartup } from "./startup";
+import { FileStartupError, runFileStartup, uploadsHostPath } from "./startup";
 
 const OTHER_KEYS = deriveKeys(Buffer.from("11".repeat(32), "hex"));
 const NOW = new Date("2026-10-01T12:34:56.000Z");
@@ -274,6 +274,10 @@ describe("runFileStartup", () => {
     files.forEach((f, i) => expect(plain(f).toString()).toBe(`jpeg-${"abcde"[i]}`));
     // The first run's complete snapshot already holds every remaining plaintext file: reused, not repeated.
     expect(snapshotDirs()).toHaveLength(1);
+    // Fix round 1, M2: the first event counts every encrypted file, not only this run's three.
+    const all = await events();
+    expect(all).toHaveLength(1);
+    expect(changesOf(all[0]).counts).toEqual({ images: 5, documents: 0 });
   });
 
   it("an unreadable file refuses to start and names the path", async () => {
@@ -427,5 +431,146 @@ describe("runFileStartup", () => {
     expect(readFileSync(outside, "utf8")).toBe("outside-plain");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(warned()).toContain(link);
+  });
+});
+
+describe("runFileStartup — fix round 1", () => {
+  it("M1: a hand-placed legacy report.tmp is never moved and survives two starts; only writeAtomic's own temp names are swept", async () => {
+    const legacyTmp = put("report.tmp", "only copy", legacy());
+    const userTmp = put("images/notes.tmp", "user file");
+    const atomicTmp = put("images/a.jpg.0a1b2c3d.tmp", "partial");
+    await run();
+    await run();
+    expect(readFileSync(legacyTmp, "utf8")).toBe("only copy");
+    expect(existsSync(path.join(root, "documents", "report.tmp"))).toBe(false);
+    expect(warned()).toContain(legacyTmp);
+    expect(readFileSync(userTmp, "utf8")).toBe("user file");
+    expect(existsSync(atomicTmp)).toBe(false);
+  });
+
+  it("M2: an audit write failure is recovered: the restart writes exactly one event with the totals", async () => {
+    put("images/a.jpg", "jpeg-a");
+    put("images/b.jpg", "jpeg-b");
+    put("l.pdf", "%PDF-l", legacy());
+    const failing = {
+      document: raw.document,
+      auditEvent: {
+        count: (a: never) => raw.auditEvent.count(a),
+        create: async () => {
+          throw new Error("SQLITE_BUSY");
+        },
+      },
+    } as unknown as PrismaClient;
+    await expect(within(30_000, runFileStartup(failing, { now: NOW, cwd, env }))).rejects.toThrow(/SQLITE_BUSY/);
+    expect(await events()).toEqual([]);
+    const result = await run();
+    expect(result.counts).toEqual({ images: 0, documents: 0 });
+    const all = await events();
+    expect(all).toHaveLength(1);
+    expect(changesOf(all[0])).toMatchObject({ counts: { images: 2, documents: 1 }, moved: 0 });
+    await run();
+    expect(await events()).toHaveLength(1);
+  });
+
+  it("M3: an EXDEV copy that does not read back identically is removed, and the source kept", async () => {
+    const src = put("z.pdf", "%PDF-good", legacy());
+    const dest = path.join(root, "documents", "z.pdf");
+    const realRename = fsp.rename.bind(fsp);
+    vi.spyOn(fsp, "rename").mockImplementation(async (from, to) => {
+      if (String(from) === src) throw Object.assign(new Error("EXDEV"), { code: "EXDEV" });
+      return realRename(from, to);
+    });
+    const realRead = fsp.readFile.bind(fsp) as (p: unknown, o?: unknown) => Promise<Buffer>;
+    vi.spyOn(fsp, "readFile").mockImplementation((async (p: unknown, o?: unknown) => {
+      const b = await realRead(p, o);
+      return String(p) === dest ? Buffer.from("corrupt") : b;
+    }) as never);
+    await expect(run()).rejects.toThrow(/does not match/);
+    expect(existsSync(dest)).toBe(false);
+    expect(readFileSync(src, "utf8")).toBe("%PDF-good");
+  });
+
+  it("M4: documents/ as a symlink refuses to start, naming it, before anything moves", async () => {
+    if (process.platform === "win32") return;
+    const outside = path.join(work, "docs-elsewhere");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(root, { recursive: true });
+    const link = path.join(root, "documents");
+    execFileSync("ln", ["-s", outside, link]);
+    const src = put("d.pdf", "%PDF-d", legacy());
+    await expect(run()).rejects.toThrow(link);
+    expect(readFileSync(src, "utf8")).toBe("%PDF-d");
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it("M4: any symlinked directory the scan would enter refuses to start, naming it", async () => {
+    if (process.platform === "win32") return;
+    const outside = path.join(work, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, "x.jpg"), "outside-plain");
+    mkdirSync(path.join(root, "images"), { recursive: true });
+    const link = path.join(root, "images", "linked");
+    execFileSync("ln", ["-s", outside, link]);
+    const p = put("images/p.jpg", "jpeg-plain");
+    await expect(run()).rejects.toThrow(link);
+    expect(readFileSync(p, "utf8")).toBe("jpeg-plain");
+    expect(readFileSync(path.join(outside, "x.jpg"), "utf8")).toBe("outside-plain");
+  });
+
+  it("M5: files inside hidden directories are left alone", async () => {
+    const hidden = put(".thumbs/a.jpg", "hidden-dir-file");
+    const result = await run();
+    expect(readFileSync(hidden, "utf8")).toBe("hidden-dir-file");
+    expect(result.counts).toEqual({ images: 0, documents: 0 });
+  });
+
+  it("M6: a raw fs failure becomes a FileStartupError naming the path, with a fix hint", async () => {
+    const t = put("images/a.jpg.0a1b2c3d.tmp", "partial");
+    const realRm = fsp.rm.bind(fsp);
+    vi.spyOn(fsp, "rm").mockImplementation(async (p, o) => {
+      if (String(p) === t) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      return realRm(p, o);
+    });
+    const err = await run().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(FileStartupError);
+    expect((err as Error).message).toContain(t);
+    expect((err as Error).message).toContain("EACCES");
+    expect((err as Error).message).toMatch(/start again/);
+  });
+
+  it("M7: logs progress every 250 files during the snapshot and the encryption", async () => {
+    for (let i = 0; i < 260; i++) put(`images/p${String(i).padStart(3, "0")}.jpg`, `jpeg-${i}`);
+    await run();
+    expect(logged()).toContain("[files] snapshot 250/260");
+    expect(logged()).toContain("[files] encrypted 250/260");
+  }, 60_000);
+
+  it("M8: with the update-script marker set, legacy documents are still snapshotted before they move", async () => {
+    put("images/p.jpg", "jpeg-plain");
+    put("l.pdf", "%PDF-legacy", legacy());
+    const marker = "/srv/blackvault/backups/uploads-20261001-120000";
+    const result = await run({ BLACKVAULT_UPLOADS_SNAPSHOT: marker });
+    const snap = path.join(root, `.pre-encryption-${STAMP}`);
+    expect(snapshotDirs()).toEqual([`.pre-encryption-${STAMP}`]);
+    expect(readFileSync(path.join(snap, "documents", "l.pdf"), "utf8")).toBe("%PDF-legacy");
+    expect(existsSync(path.join(snap, "images"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect(statSync(snap).mode & 0o777).toBe(0o700);
+      expect(statSync(path.join(snap, "documents")).mode & 0o777).toBe(0o700);
+      expect(statSync(path.join(snap, "documents", "l.pdf")).mode & 0o777).toBe(0o600);
+    }
+    expect(plain(path.join(root, "documents", "l.pdf")).toString()).toBe("%PDF-legacy");
+    expect(result.snapshot).toContain(marker);
+    expect(result.snapshot).toContain(snap);
+  });
+
+  it("BLACKVAULT_HOST_UPLOADS_DIR maps an in-container uploads path to the host", () => {
+    const env = { BLACKVAULT_HOST_UPLOADS_DIR: "/srv/blackvault/data/uploads" } as unknown as NodeJS.ProcessEnv;
+    expect(uploadsHostPath("/app/uploads/.pre-encryption-20261001-123456", env)).toBe("/srv/blackvault/data/uploads/.pre-encryption-20261001-123456");
+    expect(uploadsHostPath("/app/uploads/.pre-encryption-x", {} as unknown as NodeJS.ProcessEnv)).toMatch(/in the container.*uploads\/ folder/);
+    expect(uploadsHostPath("/home/me/bv/uploads/.pre-encryption-x", env)).toBe("/home/me/bv/uploads/.pre-encryption-x");
   });
 });

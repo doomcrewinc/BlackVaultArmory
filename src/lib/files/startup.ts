@@ -73,11 +73,38 @@ const CLASSIFY_BYTES = 41;
 
 const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
 
+/**
+ * writeAtomic's own temp names (`<name>.<8 random hex>.tmp`, ./storage.ts).
+ * Fix round 1, M1: the sweep deletes ONLY these, never some other file that
+ * merely ends in `.tmp`. Rotation's `.rot` staging is written through
+ * writeAtomic too, so its temps are `<name>.rot.<8 hex>.tmp` and match.
+ */
+export const WRITE_ATOMIC_TMP = /\.[0-9a-f]{8}\.tmp$/;
+
+/** Fix round 1, M7: a progress line every this many files during the snapshot and the encryption. */
+export const PROGRESS_EVERY = 250;
+
 type Entry = { abs: string; rel: string; name: string };
 
 const codeOf = (e: unknown): string =>
   (typeof e === "object" && e !== null && typeof (e as { code?: unknown }).code === "string" && (e as { code: string }).code) ||
   (e instanceof Error ? e.message : String(e));
+
+/**
+ * Fix round 1, M6: runs one filesystem step and turns any raw error into a
+ * FileStartupError that names the path, the error code and a fix.
+ */
+async function fsStep<T>(what: string, target: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof FileStartupError) throw e;
+    throw new FileStartupError(
+      `Could not ${what} ${target} (${codeOf(e)}). Fix the uploads folder's permissions or free disk space, then start again.`,
+      e,
+    );
+  }
+}
 
 async function lexists(p: string): Promise<boolean> {
   try {
@@ -105,8 +132,13 @@ async function syncDir(dir: string): Promise<void> {
 
 /**
  * Every regular file under `dir` (sorted, relative paths with `/`), never
- * following a symlink and never entering a `.pre-encryption-*` folder.
- * Symlinks are collected separately so the caller can report them.
+ * following a symlink and never entering a hidden folder — which includes
+ * the `.pre-encryption-*` snapshots (fix round 1, M5: the spec excludes
+ * hidden files, and a file inside a hidden folder is hidden too).
+ * Symlinked files are collected so the caller can report them. A symlinked
+ * DIRECTORY the walk would have entered refuses to start (fix round 1, M4):
+ * whatever it points at would be scanned, moved into or left plaintext
+ * outside the uploads root.
  */
 async function walk(root: string): Promise<{ files: Entry[]; symlinks: string[] }> {
   const files: Entry[] = [];
@@ -123,14 +155,31 @@ async function walk(root: string): Promise<{ files: Entry[]; symlinks: string[] 
     for (const e of entries) {
       const abs = path.join(dir, e.name);
       const childRel = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isSymbolicLink()) symlinks.push(abs);
-      else if (e.isDirectory()) {
-        if (!e.name.startsWith(UPLOADS_SNAPSHOT_PREFIX)) await visit(abs, childRel);
-      } else if (e.isFile()) files.push({ abs, rel: childRel, name: e.name });
+      if (e.name.startsWith(".") && !e.isFile()) continue; // hidden folders (and links) are never entered
+      if (e.isSymbolicLink()) {
+        if (await isDirectoryLink(abs)) throw symlinkedFolderError(abs);
+        symlinks.push(abs);
+      } else if (e.isDirectory()) await visit(abs, childRel);
+      else if (e.isFile()) files.push({ abs, rel: childRel, name: e.name });
     }
   }
   await visit(root, "");
   return { files, symlinks };
+}
+
+async function isDirectoryLink(abs: string): Promise<boolean> {
+  try {
+    return (await fsp.stat(abs)).isDirectory();
+  } catch {
+    return false; // dangling: reported as a skipped link, never followed
+  }
+}
+
+function symlinkedFolderError(abs: string): FileStartupError {
+  return new FileStartupError(
+    `${abs} is a symbolic link to a folder. BlackVault does not follow links inside the uploads folder, so the files ` +
+      "behind it would stay unencrypted. Replace the link with a real folder (move the files into it) and start again.",
+  );
 }
 
 /** Files the startup scan may encrypt: not hidden, not a `.tmp` or `.rot` work file (spec §2 step 3). */
@@ -161,10 +210,10 @@ async function readHead(abs: string): Promise<Buffer> {
   }
 }
 
-type Classified = { plaintext: Entry[]; foreign: Array<{ entry: Entry; keyId: string }>; malformed: Entry[] };
+type Classified = { plaintext: Entry[]; current: Entry[]; foreign: Array<{ entry: Entry; keyId: string }>; malformed: Entry[] };
 
 async function classify(files: Entry[], keys: FieldKeys): Promise<Classified> {
-  const out: Classified = { plaintext: [], foreign: [], malformed: [] };
+  const out: Classified = { plaintext: [], current: [], foreign: [], malformed: [] };
   for (const f of files.filter(isCandidate)) {
     const head = await readHead(f.abs);
     if (!isEncryptedFile(head)) {
@@ -179,6 +228,7 @@ async function classify(files: Entry[], keys: FieldKeys): Promise<Classified> {
       continue;
     }
     if (id !== keys.id) out.foreign.push({ entry: f, keyId: id });
+    else out.current.push(f);
   }
   return out;
 }
@@ -237,8 +287,10 @@ async function resolveRotations(files: Entry[], keys: FieldKeys, log: (l: string
           e,
         );
       }
-      await fsp.rename(f.abs, original);
-      await syncDir(path.dirname(original));
+      await fsStep("finish the key rotation by renaming", f.abs, async () => {
+        await fsp.rename(f.abs, original);
+        await syncDir(path.dirname(original));
+      });
       finished++;
       if (originalExists) log(`[files] Finished an interrupted key rotation for ${original}.`);
       else log(`[files] Finished an interrupted key rotation: ${original} was missing, so its re-encrypted copy (the only copy) was put in place.`);
@@ -248,7 +300,7 @@ async function resolveRotations(files: Entry[], keys: FieldKeys, log: (l: string
           "so it may be the only copy of that file.",
       );
     } else {
-      await fsp.rm(f.abs, { force: true });
+      await fsStep("remove the uncommitted key-rotation file", f.abs, () => fsp.rm(f.abs, { force: true }));
       log(`[files] Removed ${f.abs}: staging from a key rotation that did not commit.`);
     }
   }
@@ -261,30 +313,57 @@ async function moveAcrossDevices(src: string, dest: string): Promise<void> {
   const bytes = await fsp.readFile(src);
   await writeAtomic(dest, bytes); // copy + fsync file + rename + fsync dir
   const copied = await fsp.readFile(dest);
-  if (!copied.equals(bytes)) throw new Error(`the copy at ${dest} does not match the original`);
+  if (!copied.equals(bytes)) {
+    // Fix round 1, M3: never leave a suspect copy behind — the next start
+    // would take it for a collision, keep it and encrypt it. The source is
+    // still the good copy.
+    await fsp.rm(dest, { force: true });
+    throw new Error(`the copy at ${dest} does not match the original`);
+  }
   await fsp.unlink(src);
 }
 
-async function moveLegacyDocuments(legacyDir: string, docsDir: string, log: (l: string) => void, warn: (l: string) => void): Promise<number> {
+type LegacyMove = { src: string; dest: string; name: string };
+
+/**
+ * The legacy documents this start will move. Skipped (and logged): anything
+ * not a regular file, hidden files, names a later step would never touch —
+ * `.tmp` / `.rot` (fix round 1, M1: such a file was moved, never encrypted,
+ * then deleted by the next start's sweep) — and names that already exist in
+ * the new folder (Review Focus 1: the existing file is kept).
+ */
+async function planLegacyMoves(legacyDir: string, docsDir: string, warn: (l: string) => void): Promise<LegacyMove[]> {
   let entries: Dirent[];
   try {
     entries = await fsp.readdir(legacyDir, { withFileTypes: true });
   } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     throw new FileStartupError(`Could not read the old documents folder ${legacyDir} (${codeOf(e)}). Fix its permissions and start again.`, e);
   }
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  let moved = 0;
+  const out: LegacyMove[] = [];
   for (const e of entries) {
     if (!e.isFile() || e.name.startsWith(".")) continue;
     const src = path.join(legacyDir, e.name);
     const dest = path.join(docsDir, e.name);
-    await fsp.mkdir(docsDir, { recursive: true });
-    if (await lexists(dest)) {
+    if (e.name.endsWith(".tmp") || e.name.endsWith(".rot")) {
+      warn(`[files] Did not move ${src}: BlackVault never wrote a document with this name, so it was left where it is.`);
+      continue;
+    }
+    if (await fsStep("check", dest, () => lexists(dest))) {
       warn(`[files] Did not move ${src}: ${dest} already exists. The existing file was kept and the old copy left where it is.`);
       continue;
     }
+    out.push({ src, dest, name: e.name });
+  }
+  return out;
+}
+
+async function moveLegacyDocuments(moves: LegacyMove[], legacyDir: string, docsDir: string, log: (l: string) => void): Promise<number> {
+  let moved = 0;
+  for (const { src, dest } of moves) {
     try {
+      await fsp.mkdir(docsDir, { recursive: true });
       try {
         await fsp.rename(src, dest);
       } catch (err) {
@@ -358,9 +437,9 @@ async function reusableSnapshot(root: string, plaintext: Entry[], now: Date): Pr
 
 async function takeUploadsSnapshot(root: string, plaintext: Entry[], now: Date): Promise<{ dir: string; reused: boolean }> {
   let needed = 0;
-  for (const f of plaintext) needed += (await fsp.stat(f.abs)).size;
   let partial: string | null = null;
   try {
+    for (const f of plaintext) needed += (await fsp.stat(f.abs)).size;
     const reuse = await reusableSnapshot(root, plaintext, now);
     if (reuse) return { dir: reuse, reused: true };
     for (const n of await fsp.readdir(root)) {
@@ -372,6 +451,7 @@ async function takeUploadsSnapshot(root: string, plaintext: Entry[], now: Date):
     // killed part-way never looks like a finished snapshot.
     partial = `${final}.partial`;
     await mkdirPrivate(partial);
+    let done = 0;
     for (const f of plaintext) {
       const segments = f.rel.split("/");
       let dir = partial;
@@ -380,6 +460,7 @@ async function takeUploadsSnapshot(root: string, plaintext: Entry[], now: Date):
         await mkdirPrivate(dir);
       }
       await copyPrivate(f.abs, path.join(dir, segments[segments.length - 1]));
+      if (++done % PROGRESS_EVERY === 0) console.log(`[files] snapshot ${done}/${plaintext.length}`);
     }
     await syncDir(partial);
     await fsp.rename(partial, final);
@@ -389,7 +470,7 @@ async function takeUploadsSnapshot(root: string, plaintext: Entry[], now: Date):
     if (partial) await fsp.rm(partial, { recursive: true, force: true }).catch(() => undefined);
     throw new FileStartupError(
       `Could not take the pre-encryption snapshot of the uploads folder, so nothing was encrypted (${codeOf(e)}). ` +
-        `It needs about ${formatBytes(needed)} of free space in ${root}. Free disk space or fix the folder's permissions and start again.`,
+        `It needs about ${needed > 0 ? formatBytes(needed) : "the size of the uploads folder"} of free space in ${root}. Free disk space or fix the folder's permissions and start again.`,
       e,
     );
   }
@@ -453,11 +534,18 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
 
   const root = env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
   const docsDir = path.join(root, "documents");
+  const legacyDir = legacyDocumentsRoot(cwd);
   const isDocument = (e: Entry) => e.rel.startsWith("documents/");
 
-  // 1. Leftover temp files from an interrupted atomic write.
-  for (const f of (await walk(root)).files.filter((e) => e.name.endsWith(".tmp"))) {
-    await fsp.rm(f.abs, { force: true });
+  // Fix round 1, M4: legacy documents are moved INTO documents/, which the
+  // walk below never sees when it is a link. Refuse before anything changes.
+  if (await fsStep("check", docsDir, () => fsp.lstat(docsDir).then((st) => st.isSymbolicLink(), () => false))) {
+    throw symlinkedFolderError(docsDir);
+  }
+
+  // 1. Leftover temp files from an interrupted atomic write — writeAtomic's own names only (M1).
+  for (const f of (await walk(root)).files.filter((e) => WRITE_ATOMIC_TMP.test(e.name))) {
+    await fsStep("remove the leftover temporary file", f.abs, () => fsp.rm(f.abs, { force: true }));
     log(`[files] Removed a leftover temporary file: ${f.abs}`);
   }
 
@@ -482,45 +570,44 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
     );
   }
 
-  // 4. Legacy documents onto the volume.
-  const moved = await moveLegacyDocuments(legacyDocumentsRoot(cwd), docsDir, log, warn);
+  // 4. Legacy documents onto the volume. Fix round 1, M8: the update script's
+  // snapshot (the marker) copies only the host uploads folder, never the old
+  // in-container documents folder — so with the marker set, the documents
+  // about to move are snapshotted here first.
+  const moves = await planLegacyMoves(legacyDir, docsDir, warn);
+  const marker = (env.BLACKVAULT_UPLOADS_SNAPSHOT ?? "").trim();
+  let legacySnapshot: string | null = null;
+  if (marker && moves.length) {
+    const entries = moves.map((m) => ({ abs: m.src, rel: `documents/${m.name}`, name: m.name }));
+    legacySnapshot = await reportSnapshot(await takeUploadsSnapshot(root, entries, now), env, log);
+  }
+  const moved = await moveLegacyDocuments(moves, legacyDir, docsDir, log);
 
   // Rescan: the moved documents are new plaintext.
   const scan = await walk(root);
   for (const link of scan.symlinks) {
     warn(`[files] WARNING: skipped the symbolic link ${link}: uploaded files are never links, so it was left as it is and not encrypted.`);
   }
-  const { plaintext } = await classify(scan.files, keys);
+  const { plaintext, current } = await classify(scan.files, keys);
 
   // 5. Snapshot.
   let snapshot: string | null = null;
-  if (plaintext.length) {
-    const marker = (env.BLACKVAULT_UPLOADS_SNAPSHOT ?? "").trim();
-    if (marker) {
-      snapshot = marker;
-      log(`[files] The update script already saved a snapshot of the uploads folder: ${marker}`);
-    } else {
-      const taken = await takeUploadsSnapshot(root, plaintext, now);
-      snapshot = uploadsHostPath(taken.dir, env);
-      if (taken.reused) {
-        log(`[files] Keeping the snapshot of the uploads folder taken earlier: ${snapshot}`);
-      } else {
-        log(`[files] Snapshot of the uploads folder taken before encrypting: ${snapshot}`);
-        log(
-          "[files] It is a PLAINTEXT copy of your photos and documents. Delete it once BlackVault is confirmed working. " +
-            "On Linux it is owned by the container user (uid 1001): delete it with sudo rm -r.",
-        );
-      }
-    }
+  if (marker && (plaintext.length || legacySnapshot)) {
+    log(`[files] The update script already saved a snapshot of the uploads folder: ${marker}`);
+    snapshot = legacySnapshot ? `${marker}; documents moved from the old folder: ${legacySnapshot}` : marker;
+  } else if (plaintext.length) {
+    snapshot = await reportSnapshot(await takeUploadsSnapshot(root, plaintext, now), env, log);
   }
 
   // 6. Encrypt.
   const counts = { images: 0, documents: 0 };
+  let done = 0;
   for (const f of plaintext) {
     if (await encryptInPlace(f, keys)) {
       if (isDocument(f)) counts.documents++;
       else counts.images++;
     }
+    if (++done % PROGRESS_EVERY === 0) log(`[files] encrypted ${done}/${plaintext.length}`);
   }
   if (counts.images || counts.documents) {
     log(`[files] Encrypted existing uploads: ${counts.images} photos, ${counts.documents} documents.`);
@@ -529,20 +616,51 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   // 7. Missing documents (logged; never a refusal).
   const missing = await findMissingDocuments(raw, docsDir, warn);
 
-  // 8. Audit. Missing documents alone are audited only the first time (no
-  // earlier FILES_ENCRYPTED event), so a restart with the same missing files
-  // does not add an event every time.
-  let write = counts.images + counts.documents + moved > 0;
-  if (!write && missing.length > 0) {
-    write = (await raw.auditEvent.count({ where: { action: "FILES_ENCRYPTED" } })) === 0;
+  // 8. Audit. While no FILES_ENCRYPTED event exists yet (fix round 1, M2), the
+  // first one carries the TOTALS — every BVF1 file per folder — so an event
+  // lost to a failed audit write, or undercounted after a crash part-way, is
+  // recovered by the next start. After that, only a start that changed
+  // something writes one, with that start's counts.
+  const changed = counts.images + counts.documents + moved > 0;
+  const firstEvent = (await raw.auditEvent.count({ where: { action: "FILES_ENCRYPTED" } })) === 0;
+  let eventCounts = counts;
+  if (firstEvent) {
+    eventCounts = { images: counts.images, documents: counts.documents };
+    for (const f of current) {
+      if (isDocument(f)) eventCounts.documents++;
+      else eventCounts.images++;
+    }
   }
-  if (write) {
+  const anyEncrypted = eventCounts.images + eventCounts.documents > 0;
+  if (changed || (firstEvent && (anyEncrypted || missing.length > 0))) {
     await writeAuditEvent(raw, {
       action: "FILES_ENCRYPTED",
       actor: SYSTEM_ACTOR,
-      changes: { counts, moved, missing: missing.slice(0, MISSING_AUDIT_CAP), missingTotal: missing.length, keyId: keys.id, snapshot },
+      changes: {
+        counts: eventCounts,
+        moved,
+        missing: missing.slice(0, MISSING_AUDIT_CAP),
+        missingTotal: missing.length,
+        keyId: keys.id,
+        snapshot,
+      },
     });
   }
 
   return { moved, counts, missing, snapshot, finishedRotations };
+}
+
+/** Logs a snapshot taken or reused; returns its host path. */
+async function reportSnapshot(taken: { dir: string; reused: boolean }, env: NodeJS.ProcessEnv, log: (l: string) => void): Promise<string> {
+  const where = uploadsHostPath(taken.dir, env);
+  if (taken.reused) {
+    log(`[files] Keeping the snapshot of the uploads folder taken earlier: ${where}`);
+  } else {
+    log(`[files] Snapshot of the uploads folder taken before encrypting: ${where}`);
+    log(
+      "[files] It is a PLAINTEXT copy of your photos and documents. Delete it once BlackVault is confirmed working. " +
+        "On Linux it is owned by the container user (uid 1001): delete it with sudo rm -r.",
+    );
+  }
+  return where;
 }
