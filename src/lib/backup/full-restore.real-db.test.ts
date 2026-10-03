@@ -73,7 +73,7 @@ import { createRawPrismaClient, prisma } from "@/lib/prisma";
 import { createBackupSealer, envelopeKeyId, fileKeyId, isEncryptedFile, SealError } from "@/lib/encryption/core.mjs";
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
 import { readDecryptedFile, writeEncryptedFile } from "@/lib/files/storage";
-import { runFileStartup } from "@/lib/files/startup";
+import { assertNoUnfinishedRestore, runFileStartup } from "@/lib/files/startup";
 import { BACKUP_MODELS } from "./models";
 import { buildManifest } from "./manifest";
 import { collectBackupRecords, buildBackupPayload, backupCounts } from "./records";
@@ -799,6 +799,16 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       await restore(source.archive);
       expect(existsSync(path.join(rootB, ".restore-20250101-000000.db-started"))).toBe(true);
       expect(existsSync(path.join(rootB, ".restore-20250101-000000"))).toBe(false);
+      // The restore program ran, and finished, with the older marker there; its
+      // own marker is gone. The APP still refuses to start until the older one
+      // is cleared, and names that one only.
+      const env = { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv;
+      const refusal = await assertNoUnfinishedRestore({ env }).catch((e) => e);
+      expect(refusal.message).toContain(path.join(rootB, ".restore-20250101-000000.db-started"));
+      expect(refusal.message).toContain("backups/restore-20250101-000000-RECOVERY.txt");
+      expect(refusal.message).not.toContain(STAMP);
+      rmSync(path.join(rootB, ".restore-20250101-000000.db-started"), { recursive: true });
+      await expect(assertNoUnfinishedRestore({ env })).resolves.toBeUndefined();
     });
   });
 

@@ -1515,6 +1515,13 @@ closed, the machine restarted) or the automatic rollback failed, which the scrip
 exits. Either way BlackVault is stopped and the install may be half restored. Read the file and
 follow it. **While one exists, a new restore refuses to start.**
 
+**BlackVault does not start on a half-restored install.** A restore that reached its database
+step and was neither finished nor put back leaves its marker, `uploads/.restore-<time>.db-started`,
+and while that marker exists BlackVault exits at startup with a message that names it. Follow
+`backups/restore-<time>-RECOVERY.txt`: its step 3 puts the install back and ends by clearing the
+marker. If that file is already gone, only the marker is left: delete the marker folder itself
+(on Linux with `sudo`) and start BlackVault again.
+
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
 uses as much disk as those files did. Once you have checked the restored install, delete it, and
