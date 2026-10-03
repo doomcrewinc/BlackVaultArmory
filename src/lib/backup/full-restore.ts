@@ -14,6 +14,7 @@ import { acquireFullBackupLock } from "./full-lock";
 import { checkDbAgainstCounts, checkEntriesAgainstManifest } from "./full-verify";
 import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
 import { prepareBackupRestore } from "./restore-core";
+import { DB_STEP_MARKER_SUFFIX, dbStepMarkerName, RESTORE_STAGING_PREFIX, RESTORE_STAMP } from "./restore-marker";
 import { readTar } from "./tar";
 
 /**
@@ -66,7 +67,6 @@ import { readTar } from "./tar";
  * Memory: one file at a time (BVF1 is whole-file AES-GCM), plus db.json.
  */
 
-export const RESTORE_STAGING_PREFIX = ".restore-";
 export const PRE_RESTORE_PREFIX = ".pre-restore-";
 /**
  * Ruling R24. `<uploads>/.restore-<ts>.db-started/` is created — and flushed
@@ -81,8 +81,7 @@ export const PRE_RESTORE_PREFIX = ".pre-restore-";
  * (assertNoUnfinishedRestore in ../files/startup.ts). A hidden folder named `.restore-*`: the startup scan,
  * the uploads snapshot and the backup walk all skip it.
  */
-export const DB_STEP_MARKER_SUFFIX = ".db-started";
-export const dbStepMarkerName = (stamp: string): string => `${RESTORE_STAGING_PREFIX}${stamp}${DB_STEP_MARKER_SUFFIX}`;
+export { DB_STEP_MARKER_SUFFIX, dbStepMarkerName, RESTORE_STAGING_PREFIX } from "./restore-marker";
 
 /** Same two folders, same archive roots, as the backup engine's walk (./full-backup.ts). */
 const UPLOAD_FOLDERS = [
@@ -102,7 +101,6 @@ export const FULL_RESTORE_TRANSACTION_TIMEOUT_MS = 30 * 60 * 1000;
 
 const DB_ENTRY = "db.json";
 const MANIFEST_ENTRY = "manifest.json";
-const STAMP = /^\d{8}-\d{6}(-\d{1,10})?$/;
 /** One entry is held whole in memory, then encrypted (a second buffer). */
 const MAX_ENTRY_BYTES = Math.min(bufferConstants.MAX_LENGTH - 64, 2 ** 31 - 1);
 const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
@@ -223,7 +221,7 @@ async function lstatOrNull(p: string) {
 export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRestoreResult> {
   const env = opts.env ?? process.env;
   const stamp = opts.stamp ?? snapshotStamp(opts.now ?? new Date());
-  if (!STAMP.test(stamp)) throw new FullRestoreError("The restore stamp must look like 20261003-120000. Nothing was changed.", false);
+  if (!RESTORE_STAMP.test(stamp)) throw new FullRestoreError("The restore stamp must look like 20261003-120000. Nothing was changed.", false);
   const file = path.resolve(opts.file);
   const fileName = path.basename(file);
   const root = uploadsRoot(env);

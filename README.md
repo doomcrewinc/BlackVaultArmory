@@ -1516,14 +1516,19 @@ exits. Either way BlackVault is stopped and the install may be half restored. Re
 follow it. **While one exists, a new restore refuses to start.**
 
 **BlackVault does not start on a half-restored install.** A restore that reached its database
-step and was neither finished nor put back leaves its marker, `uploads/.restore-<time>.db-started`,
-and while that marker exists BlackVault exits at startup with a message that names it. Follow
-`backups/restore-<time>-RECOVERY.txt`: its step 3 puts the install back and ends by clearing the
-marker. If that file is already gone, only the marker is left: delete the marker folder itself
-(on Linux with `sudo`) and start BlackVault again. The restore script follows the same rule: it
-removes its own marker before it starts BlackVault, and if it cannot, it does not start BlackVault,
-exits 1 and prints the command that removes the marker. A marker left by an earlier restore stops
-a new restore before anything is checked, with the command that removes it.
+step leaves a marker, `uploads/.restore-<time>.db-started`, until it has finished or been put
+back. While a marker exists BlackVault exits at startup with a message that names it. If
+`backups/restore-<time>-RECOVERY.txt` exists, follow it: it ends by removing the marker, either
+after putting the install back or, when the restore itself had finished and only the marker could
+not be removed, as its one step. If no such file is there, the marker alone does not say whether
+the install is whole: delete the marker folder (on Linux with `sudo`) only if the restore script
+had reported the restore as complete or as put back. Otherwise do not start on that install:
+restore a full backup; the restore script prints the command that removes the marker first.
+
+The restore script follows the same rule. It removes its own marker before it starts BlackVault,
+and if it cannot, it does not start BlackVault, exits 1 and prints the command that removes the
+marker. Markers left by earlier restores stop a new restore before anything is checked, with one
+command that removes them; so does an uploads folder it cannot check for them.
 
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it

@@ -64,7 +64,13 @@
 #          .pre-encryption-*, .restore-*, .pre-restore-*, *.tmp, *.rot.
 #
 # markers  prints the stamp of every marker UPLOADS/.restore-<ts>.db-started,
-#          one per line; nothing when there is none. Changes nothing.
+#          one per line; nothing when there is none, or when UPLOADS is not
+#          there. Changes nothing.
+#
+# WHAT COUNTS AS A MARKER, in every mode: anything directly under UPLOADS
+# with that name, whatever it is (a folder, which is what the restore program
+# creates; a file; a link, dangling or not). The app's start refuses on the
+# same rule (assertNoUnfinishedRestore in src/lib/files/startup.ts).
 #
 # clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
 #          restore program leaves just before its database step (ruling R24).
@@ -106,7 +112,7 @@ check_stamp() {
 
 # restore_state UPLOADS STAMP: prints started, complete or untouched (see the top of this file).
 restore_state() {
-  if [ -e "$1/.restore-$2.db-started" ]; then
+  if [ -e "$1/.restore-$2.db-started" ] || [ -L "$1/.restore-$2.db-started" ]; then
     echo started
   elif { [ -d "$1/.pre-restore-$2/images" ] && [ ! -L "$1/.pre-restore-$2/images" ]; } ||
     { [ -d "$1/.pre-restore-$2/documents" ] && [ ! -L "$1/.pre-restore-$2/documents" ]; }; then
@@ -167,7 +173,6 @@ case "$MODE" in
   uploads) ;;
   markers)
     UP=${2:?usage: snapshot-restore.sh markers UPLOADS}
-    [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
     for m in "$UP"/.restore-*.db-started; do
       if [ -e "$m" ] || [ -L "$m" ]; then
         m=${m##*/.restore-}

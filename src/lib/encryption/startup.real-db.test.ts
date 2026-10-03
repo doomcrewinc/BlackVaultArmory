@@ -1070,7 +1070,7 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
         await within(30_000, register());
         expect(exit).toHaveBeenCalledWith(1);
         const line = String(vi.mocked(console.error).mock.calls[0][0]);
-        expect(line).toMatch(/^\[encryption\] Startup failed, refusing to start: A restore did not finish: its marker /);
+        expect(line).toMatch(/^\[encryption\] Startup failed, refusing to start: A restore did not finish cleanly: its marker /);
         expect(line).toContain(join(ctx.uploads, RESTORE_MARKER));
         expect(line).toContain("backups/restore-20261002-030405-RECOVERY.txt");
         expect(line).toContain('See the README, "Restoring a full backup".');

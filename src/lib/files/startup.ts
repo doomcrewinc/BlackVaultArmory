@@ -8,6 +8,7 @@ import { SNAPSHOT_REUSE_MS, snapshotStamp } from "../encryption/pre-encryption-s
 import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
 import { isSafeDocumentUrl } from "../upload-security";
+import { dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-marker";
 import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
 
 /**
@@ -529,15 +530,6 @@ const startupUploadsRoot = (env: NodeJS.ProcessEnv, cwd: string): string =>
   env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
 
 /**
- * The full-restore program's database-step marker, `.restore-<stamp>.db-started`
- * (dbStepMarkerName in ../backup/full-restore.ts, which is not imported here:
- * the app's startup does not load the restore engine for one name). Group 1
- * is the stamp. `.restore-<stamp>` alone is that program's staging folder,
- * not a marker.
- */
-const RESTORE_MARKER = /^\.restore-(.+)\.db-started$/;
-
-/**
  * Refuses to start while a full restore's database-step marker is directly
  * under the uploads root. The restore program creates the marker just before
  * it replaces the database and removes it only when the whole restore has
@@ -547,9 +539,13 @@ const RESTORE_MARKER = /^\.restore-(.+)\.db-started$/;
  * files, or the other way round — and nothing may serve, migrate or encrypt
  * that.
  *
- * Read-only: one readdir of the uploads root. Any entry with the marker's
- * name counts, whatever its type (scripts/snapshot-restore.sh asks only
- * whether the name exists). A missing uploads root has no marker.
+ * Read-only: one readdir of the uploads root. WHAT COUNTS AS A MARKER is
+ * the name alone (markerStamp in ../backup/restore-marker.ts): any entry
+ * directly under the root called `.restore-<anything>.db-started`, whatever
+ * its type — a folder (what the restore program creates), a file, a link,
+ * a dangling link. scripts/snapshot-restore.sh (`state`, `markers`) and the
+ * wrappers use the same rule, so nothing the app refuses on is invisible to
+ * the commands that clear it. A missing uploads root has no marker.
  *
  * Only the app's start calls this (runEncryptionStartup in
  * ../encryption/startup.ts). The restore, rollback, backup and key-rotation
@@ -565,21 +561,37 @@ export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw new FileStartupError(`Could not read the folder ${root} (${codeOf(e)}). Fix its permissions and start again.`, e);
   }
-  const stamps = names.map((n) => RESTORE_MARKER.exec(n)?.[1]).filter((s): s is string => s !== undefined).sort();
+  // Code-unit order, which for the restore program's stamps is oldest first.
+  const stamps = names
+    .map(markerStamp)
+    .filter((s): s is string => s !== null)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   if (stamps.length === 0) return;
   const one = stamps.length === 1;
-  const markers = stamps.map((s) => path.join(root, `.restore-${s}.db-started`)).join(", ");
-  const recovery = stamps.map((s) => `backups/restore-${s}-RECOVERY.txt`).join(", ");
+  const markers = stamps.map((s) => restoreMarkerLocation(path.join(root, dbStepMarkerName(s)), env)).join(", ");
+  // A recovery file is named after a stamp the restore program accepts; a marker with any other name has none.
+  const recovery = stamps.filter((s) => RESTORE_STAMP.test(s)).map((s) => `backups/restore-${s}-RECOVERY.txt`);
+  const whatToDo = recovery.length
+    ? `If ${recovery.join(" or ")} exists (in the folder that holds docker-compose.yml), follow it: it ends by removing ` +
+      "the marker. If no such file is there, the marker alone cannot say whether the install is whole: "
+    : "No recovery file belongs to a marker with that name, so the marker alone cannot say whether the install is whole: ";
   throw new FileStartupError(
-    `${one ? "A restore did not finish: its marker" : `${stamps.length} restores did not finish: their markers`} ${markers} ` +
-      `${one ? "is" : "are"} still in the uploads folder (on a Docker install that path is inside the container; on the host ` +
-      "it is in the uploads/ folder of your BlackVault data directory). The database and the uploaded files may be half " +
-      `restored, so BlackVault will not start on them. Follow ${recovery} (in the folder that holds docker-compose.yml): ` +
-      `it puts the install back as it was and ends by clearing the marker. If that file is not there (the restore script ` +
-      "deletes it once the restore has finished or has been put back), only the marker is left: delete the marker " +
-      "folder itself (on Linux it belongs to uid 1001: use sudo). Then start BlackVault again. " +
-      'See the README, "Restoring a full backup".',
+    `${one ? "A restore did not finish cleanly: its marker" : `${stamps.length} restores did not finish cleanly: their markers`} ${markers} ` +
+      `${one ? "is" : "are"} still in the uploads folder. The database and the uploaded files may be half restored, so ` +
+      `BlackVault will not start. ${whatToDo}delete the marker folder (on Linux it belongs to uid 1001: use sudo) only if ` +
+      "the restore script had reported the restore as complete or as put back, and then start BlackVault again; otherwise " +
+      "do not start on this install: restore a full backup with restore.sh or restore.bat, which says how to remove the " +
+      'marker first. See the README, "Restoring a full backup".',
   );
+}
+
+/**
+ * Where a marker is, for the refusal's message: the path as this process sees
+ * it and, in a container, where that is on the host (uploadsHostPath).
+ */
+export function restoreMarkerLocation(abs: string, env: NodeJS.ProcessEnv = process.env): string {
+  const host = uploadsHostPath(abs, env);
+  return host === abs || host.startsWith(abs) ? host : `${abs} (on the host: ${host})`;
 }
 
 // ─── The step ───────────────────────────────────────────────────
