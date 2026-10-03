@@ -316,6 +316,8 @@ beforeEach(() => {
     `#!/bin/bash\nif [ -n "\${BV_STUB_DATE:-}" ] && [ "$*" = "-u +%Y%m%d-%H%M%S" ]; then echo "$BV_STUB_DATE"; else PATH=/bin:/usr/bin exec date "$@"; fi\n`,
     { mode: 0o755 },
   );
+  // `uname`, so that a test can choose the system db-snapshot.sh believes it runs on (BV_STUB_UNAME).
+  fs.writeFileSync(path.join(bin, "uname"), `#!/bin/bash\nif [ -n "\${BV_STUB_UNAME:-}" ] && [ "$*" = "-s" ]; then echo "$BV_STUB_UNAME"; else PATH=/bin:/usr/bin exec uname "$@"; fi\n`, { mode: 0o755 });
 });
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -920,6 +922,23 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(during).toContain("ONLY if step 2 printed: started");
       expect(during).not.toContain("the database was never touched: skip to step 4"); // the sentence that was false after a finished restore
       expect(during.indexOf("/bv-snapshot-restore.sh state /app/uploads")).toBeLessThan(during.indexOf("/bv-snapshot-restore.sh uploads /app/uploads"));
+    });
+  });
+
+  describe("scripts/db-snapshot.sh: how to delete the uploads snapshot", () => {
+    const savedLine = (stderr: string) => lines(stderr).find((l) => l.startsWith("Uploads snapshot saved: "));
+
+    it("on Linux the snapshot belongs to uid 1001 and the host user cannot delete it: the line says to use sudo", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_UNAME: "Linux" } });
+      expect(r.code, r.stderr).toBe(0);
+      expect(savedLine(r.stderr)).toBe(`Uploads snapshot saved: backups/${upSnapName()} (owned by the app user, uid 1001; delete it with sudo)`);
+    });
+
+    it.each(["Darwin", "FreeBSD"])("on %s (Docker Desktop, OrbStack: the files show as the host user's own) the same line does not mention sudo", (system) => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_UNAME: system } });
+      expect(r.code, r.stderr).toBe(0);
+      expect(savedLine(r.stderr)).toBe(`Uploads snapshot saved: backups/${upSnapName()} (owned by the app user, uid 1001; delete it once BlackVault is confirmed working)`);
+      expect(r.stderr).not.toMatch(/Uploads snapshot saved: .*sudo/);
     });
   });
 
