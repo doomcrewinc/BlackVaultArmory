@@ -90,10 +90,37 @@ if (Test-Path $csc) {
 if (-not (Test-Path $StubExe)) { throw "could not build the docker stub at $StubExe" }
 Write-Host "docker stub built: $StubExe"
 
+# A harness error must never hide the scenarios after it. The first Windows
+# run of backup.bat died on a harness exception in its FIRST scenario (a
+# missing stdin record turned into $null), so twenty later scenarios never
+# ran and the script's own output was never printed. From here on, any
+# terminating error in a scenario is one FAIL line (with where it happened),
+# and the run goes on with the next statement - so the scenario's own
+# Show-EvidenceIfFailed still prints what the script said. The run still
+# ends with exit 1: the failure is counted.
+$script:TrapArmed = $true
+trap {
+  if (-not $script:TrapArmed) { break }
+  $script:Checks++
+  $where = if ($_.InvocationInfo) { "line $($_.InvocationInfo.ScriptLineNumber)" } else { "unknown line" }
+  $msg = "harness error at ${where}: $($_.Exception.Message)"
+  Write-Host "    FAIL $msg" -ForegroundColor Red
+  $script:Failures.Add($msg)
+  continue
+}
+
 function Assert([bool]$Condition, [string]$Message) {
   $script:Checks++
   if ($Condition) { Write-Host "    ok   $Message" }
   else { Write-Host "    FAIL $Message" -ForegroundColor Red; $script:Failures.Add($Message) }
+}
+
+# A file's bytes as base64, or "" when the file does not exist (never $null).
+function Get-FileBase64([string]$Path) {
+  if (-not (Test-Path $Path)) { return "" }
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($null -eq $bytes -or $bytes.Length -eq 0) { return "" }
+  return [Convert]::ToBase64String($bytes)
 }
 
 # Copies one repo file (a path relative to the repo root, sub-folders
@@ -207,6 +234,8 @@ function Invoke-Bat {
     $out += "`r`n[harness] TIMED OUT after $TimeoutSeconds s; process tree killed`r`n"
   }
   $stub = if (Test-Path $logFile) { (Get-Content $logFile -Raw) } else { "" }
+  if ($null -eq $stub) { $stub = "" }   # Get-Content -Raw of an empty file is $null
+  if ($null -eq $out) { $out = "" }
   return [pscustomobject]@{
     ExitCode = $code
     Output   = $out
@@ -1962,8 +1991,11 @@ Assert ($calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --keep 7") "exactly o
 Assert ($r.StubLog -match "compose ps --status running -q blackvault") "asked whether the app is running"
 $stdinFile = Join-Path $d "__stdin.bin"
 $expected = (New-Object Text.UTF8Encoding($false)).GetBytes($passBytesText)
-$got = if (Test-Path $stdinFile) { [IO.File]::ReadAllBytes($stdinFile) } else { [byte[]]@() }
-Assert ([Convert]::ToBase64String($got) -eq [Convert]::ToBase64String($expected)) "stdin is the passphrase file byte for byte ($($got.Length) bytes, expected $($expected.Length)): nothing stripped, no byte-order mark added"
+# Not `$got = if (...) {...} else { [byte[]]@() }`: an `if` that yields an
+# empty array yields $null, and ToBase64String($null) throws.
+Assert (Test-Path $stdinFile) "the backup program's standard input was recorded (it was started)"
+$gotLength = if (Test-Path $stdinFile) { (Get-Item $stdinFile).Length } else { -1 }
+Assert ((Get-FileBase64 $stdinFile) -eq [Convert]::ToBase64String($expected)) "stdin is the passphrase file byte for byte ($gotLength bytes, expected $($expected.Length)): nothing stripped, no byte-order mark added"
 Assert (-not $r.StubLog.Contains("bat t")) "the passphrase is in no docker argv"
 $envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "" }
 Assert ($envDump.Contains("BV_DOCKER_ARGS=")) "the environment of the backup call was recorded"
@@ -2222,14 +2254,6 @@ function Get-RecoveryFiles([string]$Dir) {
 function Get-UploadsDir([string]$Dir) { return (Join-Path $Dir "data\uploads") }
 
 $RestoreCallPattern = '^compose run --rm -T --name blackvault-restore-(\d{8}-\d{6}) blackvault node dist/scripts/full-restore\.mjs --stamp \1 ' + [regex]::Escape($RestoreName) + '$'
-
-# A file's bytes as base64, or "" when the file does not exist (never $null).
-function Get-FileBase64([string]$Path) {
-  if (-not (Test-Path $Path)) { return "" }
-  $bytes = [IO.File]::ReadAllBytes($Path)
-  if ($null -eq $bytes -or $bytes.Length -eq 0) { return "" }
-  return [Convert]::ToBase64String($bytes)
-}
 
 # ---------------------------------------------------------------- scenario RS1
 Write-Scenario "restore.bat - success (SQLite): check, stop, snapshot, restore, start - in that order; the passphrase file reaches BOTH programs on stdin; it is in no argv and no environment"
