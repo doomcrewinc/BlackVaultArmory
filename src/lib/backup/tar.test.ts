@@ -518,7 +518,7 @@ describe("readTar end-of-archive handling (review I2)", () => {
       padFor(2),
       endMarker(),
     ]);
-    await expect(withDeadline(readAll(Readable.from(archive)))).rejects.toThrow(/end-of-archive/);
+    await expect(withDeadline(readAll(Readable.from(archive)))).rejects.toThrow(/zero block not followed by a second zero block/);
   });
 
   it("rejects non-zero garbage after the two zero blocks", async () => {
