@@ -130,7 +130,8 @@ case "$*" in
     case "\${BV_STUB_RESTORE:-ok}" in
       ok) echo "${OK_LINE}"; exit 0 ;;
       # The restore finished (exit 0, the OK line) but could not remove its own marker.
-      ok-marker-left) marker; swap_images; echo "${OK_LINE}"; exit 0 ;;
+      # BV_STUB_LOCK_BACKUPS_AT_RESTORE=1: from here on the host user cannot create a file in backups/.
+      ok-marker-left) marker; swap_images; [ "\${BV_STUB_LOCK_BACKUPS_AT_RESTORE:-}" = 1 ] && chmod 500 backups; echo "${OK_LINE}"; exit 0 ;;
       # Refused while staging: the database step was never reached, so NO marker.
       refuse)
         mkdir -p "$dd/uploads/.restore-$stamp/images"; printf 'staged' > "$dd/uploads/.restore-$stamp/images/x.jpg"
@@ -838,6 +839,9 @@ describe.skipIf(isWindows)("restore.sh", () => {
   describe("BlackVault is never started while a restore marker exists", () => {
     const markerOf = (stamp: string) => path.join(app, "data/uploads", `.restore-${stamp}.db-started`);
     const clearCommand = (stamp: string) => `docker ${ROLLBACK()} clear-marker /app/uploads ${stamp}`;
+    const oldMarkerError = (markers: string[], commands: string[]) =>
+      `ERROR: the uploads folder holds a marker left by an earlier restore: ${markers.join(", ")}. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. ` +
+      `If you mean to replace what is in this install with the backup, remove every such marker first with:  ${commands.join(" && ")}  Then run the restore again. Nothing was done.`;
     /** Runs one printed command line (the stub docker stands in for docker). */
     const runPrinted = (command: string, env: Record<string, string> = {}) => spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(env), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
 
@@ -862,6 +866,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(fs.existsSync(markerOf(stamp))).toBe(true);
       expect(lines(r.stderr).at(-1)).toBe(
         `ERROR: the restore is complete and was NOT rolled back, but its marker ./data/uploads/.restore-${stamp}.db-started could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. ` +
+          "Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. " +
           `Remove the marker with:  ${clearCommand(stamp)}  Then start BlackVault: docker compose up -d  The same is in ${app}/backups/restore-${stamp}-RECOVERY.txt.`,
       );
       // The recovery file is kept (the app's own refusal points at it), but no longer says how to put the OLD install back.
@@ -869,6 +874,8 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(recoveryFiles()).toEqual([file]);
       const text = fs.readFileSync(path.join(app, "backups", file), "utf8");
       expect(text).toContain(`BlackVault restore ${stamp}: ONE STEP LEFT`);
+      expect(text).toContain("Do NOT run the recovery commands that restore.sh printed before the restore\nstarted (they may still be on your screen): they would put the old install\nback and undo the restore.\n");
+      expect(backupsDir().filter((n) => n.endsWith(".new"))).toEqual([]);
       expect(text).toContain(`  ${clearCommand(stamp)}\n`);
       expect(text).toContain("  docker compose up -d\n");
       expect(text).not.toMatch(/ (uploads|sqlite) \/|psql/);
@@ -917,10 +924,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.code).toBe(1);
       expect(r.stdout).toBe("");
       expect(steps()).toEqual([]);
-      expect(lines(r.stderr)).toEqual([
-        "ERROR: an earlier restore (20250101-000000) left its marker ./data/uploads/.restore-20250101-000000.db-started, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. " +
-          `If you mean to replace what is in this install with the backup, remove the marker first with:  ${clearCommand("20250101-000000")}  Then run the restore again. Nothing was done.`,
-      ]);
+      expect(lines(r.stderr)).toEqual([oldMarkerError(["./data/uploads/.restore-20250101-000000.db-started"], [clearCommand("20250101-000000")])]);
       // The command as printed removes it, and then the restore runs and BlackVault is started.
       const cleared = runPrinted(clearCommand("20250101-000000"));
       expect(cleared.status, cleared.stderr).toBe(0);
@@ -938,7 +942,81 @@ describe.skipIf(isWindows)("restore.sh", () => {
       fs.chmodSync(path.join(app, "data/uploads"), 0o755);
       expect(r.code).toBe(1);
       expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`]);
-      expect(lines(r.stderr).at(-1)).toMatch(/^ERROR: an earlier restore \(20250101-000000\) left its marker .*clear-marker \/app\/uploads 20250101-000000 {2}Then run the restore again\. Nothing was done\.$/);
+      expect(lines(r.stderr)).toEqual([oldMarkerError(["/app/uploads/.restore-20250101-000000.db-started (inside the container)"], [clearCommand("20250101-000000")])]);
+    });
+
+    it("…and when the container cannot be asked either: REFUSED, not taken for 'no marker'; nothing is checked, stopped or changed", () => {
+      fs.mkdirSync(markerOf("20250101-000000"));
+      fs.chmodSync(path.join(app, "data/uploads"), 0o000);
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_ROLLBACK_FAIL: "markers" } });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`]);
+      expect(lines(r.stderr)).toEqual([
+        "ERROR: could not check the uploads folder ./data/uploads for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done.",
+      ]);
+    });
+
+    it("an uploads folder that is not where .env says (mounted from somewhere else): the container is asked for the markers before anything else", () => {
+      fs.renameSync(path.join(app, "data/uploads"), path.join(app, "data/uploads-elsewhere"));
+      run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(steps().slice(0, 2)).toEqual([`${ROLLBACK()} markers /app/uploads`, VERIFY]);
+    });
+
+    it("SEVERAL older markers, one with a space in its name and one that is a glob character: all are named in one run, and the printed command — one line, quoted — removes them all", () => {
+      const before = install();
+      const stamps = ["*", "20250101-000000", "20250202-000000", "my old one"];
+      for (const stamp of stamps) fs.mkdirSync(markerOf(stamp));
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([]);
+      const command = [`docker ${ROLLBACK()} clear-marker /app/uploads '*'`, clearCommand("20250101-000000"), clearCommand("20250202-000000"), `docker ${ROLLBACK()} clear-marker /app/uploads 'my old one'`].join(" && ");
+      expect(lines(r.stderr)).toEqual([oldMarkerError(stamps.map((x) => `./data/uploads/.restore-${x}.db-started`), [command])]);
+      const cleared = runPrinted(command);
+      expect(cleared.status, cleared.stderr).toBe(0);
+      for (const stamp of stamps) expect(fs.existsSync(markerOf(stamp))).toBe(false);
+      expect(install()).toEqual(before);
+    });
+
+    it("a marker that is a dangling symbolic link counts too", () => {
+      fs.symlinkSync("/nonexistent/bv-nowhere", markerOf("20250101-000000"));
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      fs.rmSync(markerOf("20250101-000000"));
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([]);
+      expect(lines(r.stderr)).toEqual([oldMarkerError(["./data/uploads/.restore-20250101-000000.db-started"], [clearCommand("20250101-000000")])]);
+    });
+
+    it("the host cannot look into the uploads folder after a restore that finished: it says what is NOT known, clears the marker anyway, then starts BlackVault", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "ok-marker-left", BV_STUB_HIDE_UPLOADS: "1" } });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code, r.stderr).toBe(0);
+      const stamp = stampOf();
+      expect(afterRestore()).toEqual([`${ROLLBACK()} clear-marker /app/uploads ${stamp}`, "compose up -d"]);
+      expect(r.stderr).toContain("The uploads folder ./data/uploads cannot be looked into from here, so whether the restore left its marker is not known. Removing the marker if it is there...");
+      expect(r.stderr).not.toContain("The restore finished but left its marker");
+      expect(fs.existsSync(markerOf(stamp))).toBe(false);
+    });
+
+    it("the recovery file cannot be rewritten (finished, marker stuck): the last line does NOT say 'the same is in' that file; it says the file still holds the old steps and not to follow them", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "ok-marker-left", BV_STUB_ROLLBACK_FAIL: "clear-marker", BV_STUB_LOCK_BACKUPS_AT_RESTORE: "1" } });
+      fs.chmodSync(path.join(app, "backups"), 0o755);
+      expect(r.code).toBe(1);
+      const stamp = stampOf();
+      const file = `${app}/backups/restore-${stamp}-RECOVERY.txt`;
+      expect(steps()).not.toContain("compose up -d");
+      expect(lines(r.stderr).at(-1)).toBe(
+        `ERROR: the restore is complete and was NOT rolled back, but its marker ./data/uploads/.restore-${stamp}.db-started could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. ` +
+          "Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. " +
+          `Remove the marker with:  ${clearCommand(stamp)}  Then start BlackVault: docker compose up -d  ${file} could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running.`,
+      );
+      expect(r.stderr).not.toContain("The same is in");
+      // The file is the original, whole: never a mix of the two texts, and no work file is left.
+      const text = fs.readFileSync(file, "utf8");
+      expect(text).toContain(`BlackVault restore ${stamp}: RECOVERY`);
+      expect(text).not.toContain("ONE STEP LEFT");
+      expect(backupsDir().filter((n) => n.endsWith(".new"))).toEqual([]);
     });
 
     it("the recovery text never has BlackVault started before the marker is cleared: the only `up -d` of the app is step 4, after step 3's chain has ended with clear-marker", () => {

@@ -184,26 +184,43 @@ host_can_enter() {
   [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
 }
 
-# The stamp of every restore marker (.restore-<time>.db-started) in the
-# uploads folder, one per line. From the host when it can enter that folder;
-# otherwise from inside a container, as root. A folder that is not there has
-# none. When neither can say, nothing is printed: the check of this run's own
-# names, further down, stops the restore in that case.
-leftover_marker_stamps() {
-  local m
+# WHAT COUNTS AS A MARKER, everywhere in this script: anything directly under
+# the uploads folder named .restore-<stamp>.db-started, whatever it is (a
+# folder, which is what the restore program creates; a file; a link, dangling
+# or not) and whatever <stamp> is. scripts/snapshot-restore.sh and the app's
+# own start go by the same rule.
+#
+# collect_leftover_markers: fills OLD_STAMPS with the stamp of every marker
+# in the uploads folder and sets OLD_WHERE to how their paths are shown.
+# From the host when it can enter that folder; otherwise (the folder is
+# closed to this user, or is not where .env says because it is mounted from
+# somewhere else) from inside a container, as root. Returns 1 when neither
+# could say: that is never taken for "no marker". The stamps are read one
+# line at a time and never word-split or expanded.
+OLD_STAMPS=()
+OLD_WHERE=""
+collect_leftover_markers() {
+  local m listed
+  OLD_STAMPS=()
   if host_can_enter "$HOST_UPLOADS_DIR"; then
+    OLD_WHERE="$HOST_UPLOADS_DIR/"
     for m in "$HOST_UPLOADS_DIR"/.restore-*.db-started; do
       if [ -e "$m" ] || [ -L "$m" ]; then
         m=${m##*/.restore-}
-        printf '%s\n' "${m%.db-started}"
+        OLD_STAMPS+=("${m%.db-started}")
       fi
     done
-  elif [ -e "$HOST_UPLOADS_DIR" ]; then
-    # The container mounts backups/; if Docker had to create that folder it
-    # would belong to root, and the snapshot could not be written into it.
-    mkdir -p backups 2> /dev/null
-    "${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> /dev/null || true
+    return 0
   fi
+  OLD_WHERE="/app/uploads/"
+  # The container mounts backups/; if Docker had to create that folder it
+  # would belong to root, and the snapshot could not be written into it.
+  mkdir -p backups 2> /dev/null
+  listed=$("${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> /dev/null) || return 1
+  while IFS= read -r m; do
+    [ -z "$m" ] || OLD_STAMPS+=("$m")
+  done <<< "$listed"
+  return 0
 }
 
 # BlackVault refuses to start while any restore marker is in the uploads
@@ -211,10 +228,21 @@ leftover_marker_stamps() {
 # already stopped this run; a marker WITHOUT one was left by a restore nobody
 # can put back from here any more. It is never removed silently, and a
 # restore is never run on top of it: BlackVault could not be started
-# afterwards, neither after a success nor after a rollback.
-for OLD_STAMP in $(leftover_marker_stamps); do
-  die "an earlier restore ($OLD_STAMP) left its marker $HOST_UPLOADS_DIR/.restore-$OLD_STAMP.db-started, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove the marker first with:  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$OLD_STAMP")  Then run the restore again. Nothing was done."
-done
+# afterwards, neither after a success nor after a rollback. Every marker is
+# named, with ONE command line that removes them all.
+if ! collect_leftover_markers; then
+  die "could not check the uploads folder $HOST_UPLOADS_DIR for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done."
+fi
+if [ "${#OLD_STAMPS[@]}" -gt 0 ]; then
+  OLD_MARKERS=""
+  OLD_COMMANDS=""
+  for OLD_STAMP in "${OLD_STAMPS[@]}"; do
+    OLD_MARKERS="${OLD_MARKERS:+$OLD_MARKERS, }$OLD_WHERE.restore-$OLD_STAMP.db-started"
+    OLD_COMMANDS="${OLD_COMMANDS:+$OLD_COMMANDS && }$(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$OLD_STAMP")"
+  done
+  [ "$OLD_WHERE" = "/app/uploads/" ] && OLD_MARKERS="$OLD_MARKERS (inside the container)"
+  die "the uploads folder holds a marker left by an earlier restore: $OLD_MARKERS. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  $OLD_COMMANDS  Then run the restore again. Nothing was done."
+fi
 
 bv_backup_file_name restore "$FILE"
 NAME=$BACKUP_FILE_NAME
@@ -331,7 +359,7 @@ host_restore_state() {
   local pre="$HOST_UPLOADS_DIR/.pre-restore-$STAMP"
   if ! host_can_enter "$HOST_UPLOADS_DIR"; then
     echo unknown
-  elif [ -e "$MARKER_HOST" ]; then
+  elif [ -e "$MARKER_HOST" ] || [ -L "$MARKER_HOST" ]; then
     echo started
   elif [ ! -e "$pre" ] && [ ! -L "$pre" ]; then
     echo untouched
@@ -382,6 +410,10 @@ marker_left_text() {
   echo "  $MARKER_HOST"
   echo "could not be removed. BlackVault refuses to start while that marker exists,"
   echo "so restore.sh did not start it."
+  echo ""
+  echo "Do NOT run the recovery commands that restore.sh printed before the restore"
+  echo "started (they may still be on your screen): they would put the old install"
+  echo "back and undo the restore."
   echo ""
   echo "Run these from $(bv_shell_quote "$PWD"), in this order."
   echo ""
@@ -489,7 +521,7 @@ TEXT
 # container is asked, as restore_state does.
 if host_can_enter "$HOST_UPLOADS_DIR" || [ ! -e "$HOST_UPLOADS_DIR" ]; then
   for f in "$HOST_UPLOADS_DIR/.pre-restore-$STAMP" "$MARKER_HOST"; do
-    if [ -e "$f" ]; then
+    if [ -e "$f" ] || [ -L "$f" ]; then
       PASSPHRASE=""
       die "$f already exists (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped."
     fi
@@ -654,16 +686,30 @@ if [ "$RC" -eq 0 ] || [ "$STATE" = "complete" ]; then
   # The restore program removes its marker as its last step. If that failed
   # (it says so in a warning and still exits 0), the marker is removed here,
   # as root, BEFORE BlackVault is started: BlackVault refuses to start while
-  # a marker exists. If it cannot be removed, BlackVault is not started; the
-  # recovery file is replaced by one that says what is left to do (the one
-  # written before the restore would put the old install back).
+  # a marker exists. When the host cannot look, it is removed without being
+  # seen (removing a marker that is not there changes nothing). If it cannot
+  # be removed, BlackVault is not started; the recovery file is replaced by
+  # one that says what is left to do (the one written before the restore
+  # would put the old install back).
   if marker_may_be_left; then
-    echo "The restore finished but left its marker $MARKER_HOST. Removing it..." >&2
+    if host_can_enter "$HOST_UPLOADS_DIR"; then
+      echo "The restore finished but left its marker $MARKER_HOST. Removing it..." >&2
+      NOT_REMOVED="its marker $MARKER_HOST could not be removed"
+    else
+      echo "The uploads folder $HOST_UPLOADS_DIR cannot be looked into from here, so whether the restore left its marker is not known. Removing the marker if it is there..." >&2
+      NOT_REMOVED="its marker $MARKER_HOST, if it is still there (the uploads folder cannot be looked into from here), could not be removed"
+    fi
     if ! clear_marker; then
-      if ! (umask 077 && marker_left_text > "$RECOVERY_FILE"); then
-        echo "WARNING: could not rewrite $RECOVERY_FILE. Do NOT follow its step 3: it would put the old install back. Only the command below is needed." >&2
+      # Written beside the recovery file and renamed over it, so that file
+      # is always one whole text: the new one, or (when this fails) the one
+      # written before the restore.
+      if (umask 077 && marker_left_text > "$RECOVERY_FILE.new") 2> /dev/null && mv -f "$RECOVERY_FILE.new" "$RECOVERY_FILE" 2> /dev/null; then
+        WHERE_ELSE="The same is in $PWD/$RECOVERY_FILE."
+      else
+        rm -f "$RECOVERY_FILE.new" 2> /dev/null
+        WHERE_ELSE="$PWD/$RECOVERY_FILE could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running."
       fi
-      die "the restore is complete and was NOT rolled back, but its marker $MARKER_HOST could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Remove the marker with:  $(clear_marker_command)  Then start BlackVault: $COMPOSE up -d  The same is in $PWD/$RECOVERY_FILE."
+      die "the restore is complete and was NOT rolled back, but $NOT_REMOVED, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. Remove the marker with:  $(clear_marker_command)  Then start BlackVault: $COMPOSE up -d  $WHERE_ELSE"
     fi
   fi
   rm -f "$RECOVERY_FILE" || echo "WARNING: could not delete $RECOVERY_FILE; delete it by hand, or the next restore will refuse to start." >&2
