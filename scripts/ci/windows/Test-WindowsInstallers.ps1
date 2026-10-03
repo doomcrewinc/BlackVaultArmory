@@ -2275,10 +2275,61 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
     "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
     "BV_STUB_LOCK_EXIT" = $null; "BV_STUB_LOCK_STDOUT" = $null; "BV_STUB_LOCK_STDERR" = $null
+    "BV_STUB_STATE_ANSWER" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
   return Invoke-Bat -Dir $Dir -Script "restore.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds -InvokeAs $InvokeAs -WorkDir $WorkDir
+}
+
+# Runs ONE command line in cmd.exe the way a user pastes it at a Command
+# Prompt: `cmd /d /s /c "<line>"`, so it is read as a command line, not as a
+# batch file (a `for` variable is %S there, %%S in a batch file). The stub
+# docker is first on PATH; -StateAnswer is what it prints for
+# `/bv-snapshot-restore.sh state`. Standard input is empty. Returns the same
+# object as Invoke-Bat (ExitCode, Output, StubLog, Dir).
+function Invoke-CmdLine([string]$Dir, [string]$Line, [string]$StateAnswer, [int]$TimeoutSeconds = 120) {
+  $logFile = Join-Path $Dir "__stub.log"
+  Remove-Item -Force $logFile -ErrorAction SilentlyContinue
+  $saved = @{}
+  $vars = @{ "BV_STUB_LOG" = $logFile; "BV_STUB_COMPOSE_VERSION" = "2.30.1"; "BV_STUB_FAIL_ON" = $null; "BV_STUB_ROLLBACK_EXIT" = $null; "BV_STUB_STATE_ANSWER" = $StateAnswer }
+  foreach ($k in $vars.Keys) {
+    $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+    [Environment]::SetEnvironmentVariable($k, $vars[$k])
+  }
+  $oldPath = $env:PATH
+  $env:PATH = "$StubDir;$oldPath"
+  $timedOut = $false
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    # /s: strip exactly the outer pair of quotes; the line's own quotes stay.
+    $psi.Arguments = "/d /s /c `"$Line`""
+    $psi.WorkingDirectory = $Dir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+      $timedOut = $true
+      & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null
+    }
+    $p.WaitForExit()
+    $code = if ($timedOut) { -1 } else { $p.ExitCode }
+    $out = $outTask.Result + $errTask.Result
+  } finally {
+    $env:PATH = $oldPath
+    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+  }
+  if ($timedOut) { $out += "`r`n[harness] TIMED OUT after $TimeoutSeconds s; process tree killed`r`n" }
+  $stub = if (Test-Path $logFile) { (Get-Content $logFile -Raw) } else { "" }
+  if ($null -eq $stub) { $stub = "" }
+  if ($null -eq $out) { $out = "" }
+  return [pscustomobject]@{ ExitCode = $code; Output = $out; StubLog = $stub; Dir = $Dir }
 }
 
 # The stub log's lines without the Compose version probes.
@@ -2661,6 +2712,49 @@ Assert ($iLock -gt 0 -and (Get-StepIndex $steps '^compose stop blackvault$') -gt
 Assert ($r.Output.Contains("WARNING: could not check whether a full backup is running (exit 1; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.")) "question fails: one WARNING says so"
 Assert ($r.Output.Contains("Restore complete.")) "question fails: says the restore is complete"
 Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS18
+# On PostgreSQL the database is put back with psql, which no script guards.
+# The recovery file's rollback line therefore starts with a state test. Here
+# that line is taken from the file restore.bat wrote and run AS PRINTED, at a
+# command prompt, once per state. The stub answers the state question
+# (BV_STUB_STATE_ANSWER); what the rollback does to files is proven on Linux.
+Write-Scenario "restore.bat - PostgreSQL: the recovery file's rollback line, run exactly as printed in a Command Prompt, sends psql ONLY when the state is 'started'"
+$d = New-RestoreSandbox "restore-postgres-printed" -Postgres
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "the restore that writes the file exits 0 (got $($r.ExitCode))"
+$during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::ReadAllText((Join-Path $d "__recovery-during.txt")) } else { "" }
+$chain = @($during -split "`r?`n" | Where-Object { $_ -match 'psql' -and $_ -match 'clear-marker' }) | Select-Object -First 1
+$chain = if ($chain) { $chain.Trim() } else { "" }
+Assert ($chain -match '^for /f %S in \(''docker compose run [^'']* /bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}''\) do if "%S"=="started" docker compose run [^&]* /bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6} && docker compose up -d --wait db && ') "the line starts with the state test, with ONE percent sign, and the chain is its body (got: $chain)"
+Assert ($chain -match ' -f - < "backups\\blackvault-\d{8}-\d{6}\.sql" && ' -and $chain -match ' && docker compose run [^&]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}$') "it loads the dump from the quoted snapshot path and ends with clear-marker"
+Assert ($during -match "The line asks for the state again first, and does nothing unless the") "the text says the line tests the state itself"
+Show-EvidenceIfFailed $r
+$psql = 'compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault'
+foreach ($state in @("complete", "untouched")) {
+  $c = Invoke-CmdLine $d $chain $state
+  $steps = @(Get-RestoreSteps $c)
+  Assert ($steps.Count -eq 1 -and $steps[0] -match '/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}$') "state '$state': the only docker call is the state question (got: $($steps -join ' || '))"
+  Assert ((Get-StepIndex $steps 'psql|clear-marker|bv-snapshot-restore\.sh uploads|up -d') -eq -1) "state '$state': no psql, no uploads rollback, no clear-marker"
+  Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The syntax of the command is incorrect") "state '$state': the line is valid at a command prompt"
+  Show-EvidenceIfFailed $c
+}
+$c = Invoke-CmdLine $d $chain "started"
+$steps = @(Get-RestoreSteps $c)
+Assert ($c.ExitCode -eq 0) "state 'started': the line exits 0 (got $($c.ExitCode))"
+Assert ($steps.Count -eq 7) "state 'started': seven docker calls (got $($steps.Count): $($steps -join ' || '))"
+if ($steps.Count -eq 7) {
+  Assert ($steps[0] -match '/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}$') "started: 1. the state question"
+  Assert ($steps[1] -match '/bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6}$') "started: 2. the uploads"
+  Assert ($steps[2] -eq "compose up -d --wait db") "started: 3. the database container"
+  Assert ($steps[3] -eq "$psql -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault") "started: 4. a NEW database"
+  Assert ($steps[4] -eq "$psql -d blackvault_rollback --single-transaction -f -") "started: 5. the dump, in one transaction"
+  Assert ($steps[5] -eq "$psql -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault") "started: 6. the swap"
+  Assert ($steps[6] -match '/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}$') "started: 7. the marker, last"
+}
+Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The system cannot find the file specified") "state 'started': the line is valid at a command prompt and the dump file was found"
+Show-EvidenceIfFailed $c
 
 # ══════════════════════════════════════════════════════════════════════════
 # reencrypt-files.bat (Task 8)

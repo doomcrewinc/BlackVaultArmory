@@ -18,7 +18,7 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS17) and by the static checks at the end of this file.
+ * (scenarios RS1–RS18) and by the static checks at the end of this file.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -220,7 +220,7 @@ function printedCommands(text: string): string[] {
   const out: string[] = [];
   let open = false;
   for (const l of lines(text)) {
-    if (!/^ {2}(docker |rm )/.test(l)) {
+    if (!/^ {2}(docker |rm |\[ "\$\(docker )/.test(l)) {
       if (open) throw new Error(`an && chain is cut off by: ${l}`);
       continue;
     }
@@ -690,9 +690,11 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(during).toContain("  docker compose up -d --wait db");
       expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)' -c 'CREATE DATABASE blackvault_rollback OWNER blackvault'`);
       expect(during).toMatch(/ {2}docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault -d blackvault_rollback --single-transaction -f - < backups\/blackvault-\d{8}-\d{6}\.sql &&\n/);
-      // One && chain from the uploads to clear-marker (the marker is cleared only if every line above worked)…
+      // One && chain from the state test to clear-marker (nothing runs unless the state is started; the marker is cleared only if every line above worked)…
       const chain = printedCommands(during).find((c) => c.includes("psql"))!;
-      expect(chain.split(" &&\n").map((l) => (l.includes("/bv-snapshot-restore.sh ") ? modesOf(l) : l.includes("psql") ? "psql" : l))).toEqual(["uploads", "docker compose up -d --wait db", "psql", "psql", "psql", "clear-marker"]);
+      expect(chain.split(" &&\n").map((l) => (l.includes("/bv-snapshot-restore.sh ") ? modesOf(l) : l.includes("psql") ? "psql" : l))).toEqual(["state", "uploads", "docker compose up -d --wait db", "psql", "psql", "psql", "clear-marker"]);
+      // The first link is step 2's own command inside a test: the rest runs only when it prints `started`.
+      expect(chain.split(" &&\n")[0]).toBe(`[ "$(${printedCommands(during)[0]})" = started ]`);
       // …and, for the two other states, the uploads line by itself.
       expect(printedCommands(during).map((c) => (c.includes("psql") ? "chain" : modesOf(c)))).toEqual(["state", "chain", "uploads", "rm"]);
       expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault WITH (FORCE)' -c 'ALTER DATABASE blackvault_rollback RENAME TO blackvault'`);
@@ -969,12 +971,99 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(recoveryFiles()).toEqual([]);
     }, TEST_LIMIT_MS);
 
+    /**
+     * PostgreSQL. The database commands are psql, which no script guards: the chain's FIRST link asks
+     * for the state, and nothing after it runs unless the answer is `started`. Pasted after a finished
+     * restore (or one that never reached the database) the chain must not send one psql command.
+     */
+    describe("PostgreSQL: the chain asks for the state itself, so pasting it changes nothing unless the restore is half done", () => {
+      const sh = (command: string) => spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
+      const label = (c: string) => (c.includes("/bv-snapshot-restore.sh ") ? c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0] : c.includes("psql") ? "psql" : c);
+      /** The four printed commands: step 2, the chain, the uploads line for the other two states, and the rm. */
+      function printed(text: string) {
+        const commands = printedCommands(text);
+        expect(commands.map((c) => (c.includes("psql") ? "chain" : modesOf(c)))).toEqual(["state", "chain", "uploads", "rm"]);
+        const [state, chain, uploads, rm] = commands;
+        return { state, chain, uploads, rm };
+      }
+
+      it.each([
+        ["complete", "FINISHED"],
+        ["refuse", "never reached the database"],
+      ])("%s (%s): the chain, exactly as printed, runs the state test and NOTHING else — no psql, no uploads rollback, no clear-marker", async (mode) => {
+        pgInstall();
+        const before = install();
+        const text = await wrapperDies(mode);
+        const left = install();
+        const { state, chain, uploads, rm } = printed(text);
+        expect(sh(state).stdout.trim()).toBe(mode === "complete" ? "complete" : "untouched");
+        fs.rmSync(path.join(rec, "calls"));
+        const pasted = sh(chain);
+        expect(pasted.status).not.toBe(0); // it stopped at its first link
+        expect(steps().map(label)).toEqual(["state"]);
+        expect(read("calls")).not.toMatch(/psql|DROP DATABASE|clear-marker|up -d/);
+        expect(fs.existsSync(path.join(rec, "psql-stdin"))).toBe(false);
+        expect(install()).toEqual(left); // not a byte moved
+        // The rest of the file, as printed: the uploads line for this state, then the rm.
+        expect(sh(uploads).status).toBe(0);
+        expect(sh(rm).status).toBe(0);
+        if (mode === "complete") {
+          expect(install()).toEqual(left); // the restored install stays the restored install
+          expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
+        } else expect(install()).toEqual(before); // only the staging folder went
+        expect(read("calls")).not.toMatch(/psql|DROP DATABASE/);
+        expect(recoveryFiles()).toEqual([]);
+      }, TEST_LIMIT_MS);
+
+      it("started: the chain, exactly as printed, puts the uploads back, loads the dump into a new database, swaps it in and clears the marker — in that order", async () => {
+        pgInstall();
+        const before = install();
+        const text = await wrapperDies("crash");
+        expect(install()).not.toEqual(before);
+        const { state, chain, uploads, rm } = printed(text);
+        expect(sh(state).stdout.trim()).toBe("started");
+        fs.rmSync(path.join(rec, "calls"));
+        const pasted = sh(chain);
+        expect(pasted.status, pasted.stderr).toBe(0);
+        expect(steps().map(label)).toEqual(["state", "uploads", "compose up -d --wait db", "psql", "psql", "psql", "clear-marker"]);
+        expect(steps().filter((c) => c.includes("psql"))).toEqual([
+          `${PSQL} -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault`,
+          `${PSQL} -d blackvault_rollback --single-transaction -f -`,
+          `${PSQL} -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault`,
+        ]);
+        expect(read("psql-stdin")).toBe("-- stub pg_dump of blackvault\n"); // the dump, on the loading psql's stdin
+        expect(install()).toEqual(before);
+        // Pasted a second time, it now does nothing: the marker is gone.
+        expect(sh(state).stdout.trim()).toBe("untouched");
+        fs.rmSync(path.join(rec, "calls"));
+        expect(sh(chain).status).not.toBe(0);
+        expect(steps().map(label)).toEqual(["state"]);
+        expect(sh(uploads).status).toBe(0);
+        expect(sh(rm).status).toBe(0);
+        expect(install()).toEqual(before);
+        expect(recoveryFiles()).toEqual([]);
+      }, TEST_LIMIT_MS);
+
+      it("started, and the dump does not load: the chain stops there; the live database is not dropped and the marker stays, so the state is still started", async () => {
+        pgInstall();
+        const text = await wrapperDies("crash");
+        const { state, chain } = printed(text);
+        fs.rmSync(path.join(rec, "calls"));
+        const failed = spawnSync("bash", ["-c", chain], { cwd: app, env: baseEnv({ BV_STUB_FAIL_ON: "--single-transaction" }), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
+        expect(failed.status).not.toBe(0);
+        expect(read("calls")).not.toContain("DROP DATABASE IF EXISTS blackvault WITH");
+        expect(read("calls")).not.toContain("clear-marker");
+        expect(sh(state).stdout.trim()).toBe("started");
+      }, TEST_LIMIT_MS);
+    });
+
     it("the text describes the three states, and on PostgreSQL says the psql lines are for 'started' only", () => {
       pgInstall();
       expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(0);
       const during = read("recovery-during");
       for (const word of ["   complete ", "   started ", "   untouched "]) expect(during).toContain(word);
       expect(during).toContain("ONLY if step 2 printed: started");
+      expect(during).toContain("the first line asks for the state again");
       expect(during).not.toContain("the database was never touched: skip to step 4"); // the sentence that was false after a finished restore
       expect(during.indexOf("/bv-snapshot-restore.sh state /app/uploads")).toBeLessThan(during.indexOf("/bv-snapshot-restore.sh uploads /app/uploads"));
     });
@@ -1224,7 +1313,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS17). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS18). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -1423,8 +1512,12 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     const clear = "!BV_RB! clear-marker /app/uploads !BV_STAMP!";
     const pg = "!BV_PSQL! -d postgres -c";
     expect(text).toContain(`  ${up} ^&^& !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP! ^&^& ${clear}`);
+    // PostgreSQL: psql is guarded by no script, so the line's FIRST link asks for the state (step 2's own command, in
+    // a `for /f`) and everything else is the body of `if "%S"=="started"`: in any other state nothing runs. Written
+    // %%S here because this is a batch file; the recovery file, and so the Command Prompt, gets %S.
+    const ifStarted = `for /f %%S in ('!BV_RB! state /app/uploads !BV_STAMP!') do if "%%S"=="started" `;
     expect(text).toContain(
-      `  ${up} ^&^& docker compose up -d --wait db ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& ${clear}`,
+      `  ${ifStarted}${up} ^&^& docker compose up -d --wait db ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& ${clear}`,
     );
     expect(text).toContain(`  ${up}`); // PostgreSQL, untouched or complete: the uploads line by itself
     // clear-marker is never a line of its own, and never follows anything but "&& ".
@@ -1438,6 +1531,10 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeLessThan(text.indexOf("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!"));
     for (const word of ["   complete   ", "   started    ", "   untouched  "]) expect(text.some((l) => l.startsWith(word))).toBe(true);
     expect(text).toContain("   PostgreSQL: the next line ONLY if step 2 printed: started");
+    expect(text).toContain("   The line asks for the state again first, and does nothing unless the");
+    // The state test is on the PostgreSQL chain only (the SQLite chain's parts check the state themselves), and nothing but that line uses a for variable.
+    expect(text.filter((x) => x.includes("%%"))).toHaveLength(1);
+    expect(text.filter((x) => x.includes("%%"))[0].startsWith(`  ${ifStarted}!BV_RB! uploads `)).toBe(true);
     expect(text.join("\n")).not.toContain("the database was never touched: skip to step 4");
     // …and its wording is restore.sh's, line for line, for the state block.
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
@@ -1470,17 +1567,22 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS17) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS18) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 17; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 18; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
-    expect(runs.length).toBeGreaterThanOrEqual(20);
+    expect(runs.length).toBeGreaterThanOrEqual(21);
     expect(evidence.length).toBe(runs.length);
     const stub = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/docker-stub.cs"), "utf8");
     expect(stub).toContain('"dist/scripts/full-restore.mjs"');
     expect(stub).toContain('"/bv-snapshot-restore.sh"');
     expect(stub).toContain('"--lock-status"');
+    // RS18 runs the recovery file's PostgreSQL line as printed, at a command prompt, in each of the three states.
+    expect(section).toContain("function Invoke-CmdLine(");
+    expect(section).toContain('foreach ($state in @("complete", "untouched")) {');
+    expect(section).toContain('$c = Invoke-CmdLine $d $chain "started"');
+    expect(stub).toContain('"BV_STUB_STATE_ANSWER"');
   });
 });

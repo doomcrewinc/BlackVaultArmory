@@ -585,7 +585,12 @@ goto :eof
 :: the text (delayed expansion is on). Step 3 is ONE command line joined with
 :: ^&^& (restore.sh prints the same chain over several lines): clear-marker
 :: removes the only thing that says "the database step was reached", so it
-:: must never run after a part that failed.
+:: must never run after a part that failed. The PostgreSQL line starts with
+:: a state test (psql is guarded by no script): a `for /f` over the state
+:: command of step 2, then `if` its answer is started, with the whole chain
+:: as the body of that `if`. The loop variable is written here with two
+:: percent signs and reaches the file with one, which is what a Command
+:: Prompt takes: the line is for pasting there, not into a batch file.
 :write_recovery
 del /f /q "!BV_RECOVERY!" >nul 2>&1
 set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"
@@ -630,7 +635,9 @@ if /i "!DB_PROVIDER!"=="sqlite" goto :write_recovery_sqlite
 >>"!BV_RECOVERY!" echo    only if every part before it worked, so the marker is cleared (the last
 >>"!BV_RECOVERY!" echo    part) only when everything is back. If it stops with an ERROR, fix what
 >>"!BV_RECOVERY!" echo    it says and run the whole line again; never run its last part by itself.
->>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& docker compose up -d --wait db ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
+>>"!BV_RECOVERY!" echo    The line asks for the state again first, and does nothing unless the
+>>"!BV_RECOVERY!" echo    answer is started.
+>>"!BV_RECOVERY!" echo   for /f %%S in ('!BV_RB! state /app/uploads !BV_STAMP!') do if "%%S"=="started" !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& docker compose up -d --wait db ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
 >>"!BV_RECOVERY!" echo    If step 2 printed untouched or complete, this line and nothing else (it
 >>"!BV_RECOVERY!" echo    removes the work folder of the restore and checks the photos and documents):
 >>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!

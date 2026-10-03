@@ -108,6 +108,11 @@
 //                            unset/"0" => 0. The stub does NOT run the script:
 //                            what it does to real files is proven on Linux
 //                            (src/lib/backup/full-restore.real-db.test.ts).
+//   BV_STUB_STATE_ANSWER     full restore: what the rollback container prints
+//                            for `/bv-snapshot-restore.sh state ...` (started /
+//                            complete / untouched), exit 0. Unset => the
+//                            generic "[stub] ..." line. For running the
+//                            recovery file's PostgreSQL line as printed.
 //
 // Task 4: `compose up` also appends a line "ENV BLACKVAULT_UPLOADS_SNAPSHOT=
 // [<value>]" to BV_STUB_LOG, reporting what update.bat passed through its own
@@ -262,6 +267,13 @@ internal static class DockerStub
         // generic `run` branch so the rotation's knobs never apply to it.
         if (Array.IndexOf(args, "/bv-snapshot-restore.sh") >= 0)
         {
+            int modeAt = Array.IndexOf(args, "/bv-snapshot-restore.sh") + 1;
+            string stateAnswer = Environment.GetEnvironmentVariable("BV_STUB_STATE_ANSWER");
+            if (modeAt < args.Length && args[modeAt] == "state" && !string.IsNullOrEmpty(stateAnswer))
+            {
+                Console.WriteLine(stateAnswer);
+                return 0;
+            }
             string rollbackExit = Environment.GetEnvironmentVariable("BV_STUB_ROLLBACK_EXIT");
             int rollbackCode;
             if (!string.IsNullOrEmpty(rollbackExit) && int.TryParse(rollbackExit, out rollbackCode) && rollbackCode != 0)
