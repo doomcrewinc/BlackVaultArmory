@@ -155,7 +155,12 @@ afterAll(() => {
 describe("full-restore CLI (bundled, plain node)", () => {
   it("refuses without changing anything: a wrong passphrase, no passphrase, a missing file, a bad stamp, an unknown argument (never echoed)", () => {
     const before = { files: tree(b.uploads), db: sha(fs.readFileSync(b.db)) };
-    const cases: Array<[string[], string, RegExp]> = [
+    const NOT_UTF8 = /^full-restore: the passphrase is not UTF-8 text .*Save the passphrase file as UTF-8 text and try again\. Nothing was changed\.\n$/;
+    const cases: Array<[string[], string | Buffer, RegExp]> = [
+      // R37: a UTF-16 passphrase file (PowerShell 5.1's >), invalid UTF-8, a NUL.
+      [["--dir", backups, "--stamp", STAMP, archive], Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${PASS}\r\n`, "utf16le")]), NOT_UTF8],
+      [["--dir", backups, "--stamp", STAMP, archive], Buffer.concat([Buffer.from(PASS, "utf8"), Buffer.from([0xff])]), NOT_UTF8],
+      [["--dir", backups, "--stamp", STAMP, archive], Buffer.from(`${PASS}\u0000`, "utf8"), NOT_UTF8],
       [["--dir", backups, "--stamp", STAMP, archive], "definitely the wrong passphrase\n", /^full-restore: .*passphrase/i],
       [["--dir", backups, "--stamp", STAMP, archive], "", /^full-restore: no passphrase was supplied on standard input\. Nothing was changed\.\n$/],
       [["--dir", backups, "--stamp", STAMP, "blackvault-full-19990101-000000.bvb"], `${PASS}\n`, /^full-restore: .*ENOENT/],
@@ -171,6 +176,7 @@ describe("full-restore CLI (bundled, plain node)", () => {
       expect(r.stderr).toMatch(message);
       expect(r.stderr.trim().split("\n")).toHaveLength(1);
       expect(r.stderr).not.toContain("typed-passphrase-by-mistake");
+      expect(r.stderr).not.toContain("ünïcode");
     }
     expect(tree(b.uploads)).toEqual(before.files);
     expect(sha(fs.readFileSync(b.db))).toBe(before.db);
@@ -178,7 +184,8 @@ describe("full-restore CLI (bundled, plain node)", () => {
   }, 240_000);
 
   it("restores A's backup onto B (a different key): exit 0, one stdout line, A's records and files under B's key, B's own files in .pre-restore-<stamp>/", () => {
-    const r = restoreCli(["--dir", backups, "--stamp", STAMP, archive], `${PASS}\r\n`); // one trailing CRLF is dropped
+    // R37: the archive was sealed from input WITHOUT a BOM; this passphrase file has one (and one trailing CRLF). Both are dropped.
+    const r = restoreCli(["--dir", backups, "--stamp", STAMP, archive], Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${PASS}\r\n`, "utf8")]));
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     const m = OK_LINE.exec(r.stdout);

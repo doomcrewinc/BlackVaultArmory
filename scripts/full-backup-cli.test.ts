@@ -287,6 +287,52 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(fs.readdirSync(backups)).toEqual([]);
   });
 
+  describe("R37: the passphrase file's encoding (one shared reader for backup, --verify and restore)", () => {
+    const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+    it("a file with a UTF-8 BOM seals a backup that opens with the passphrase TYPED (no BOM), and the reverse", () => {
+      const sealedWithBom = cli(["--dir", backups], Buffer.concat([BOM, Buffer.from(`${PASS}\r\n`, "utf8")]));
+      expect(sealedWithBom.status, sealedWithBom.stderr).toBe(0);
+      const file = OK_LINE.exec(sealedWithBom.stdout)![1];
+      const typed = cli(["--dir", backups, "--verify", file], PASS);
+      expect(typed.stderr).toBe("");
+      expect(typed.status).toBe(0);
+      // The reverse: verified from a BOM file. (A backup made without a BOM is every other test here.)
+      const fromBomFile = cli(["--dir", backups, "--verify", file], Buffer.concat([BOM, Buffer.from(PASS, "utf8")]));
+      expect(fromBomFile.stderr).toBe("");
+      expect(fromBomFile.status).toBe(0);
+    });
+
+    it("a passphrase with non-ASCII characters round-trips between its NFC and NFD forms", () => {
+      const nfc = "pässphräse ünïcode é long".normalize("NFC");
+      const nfd = nfc.normalize("NFD");
+      expect(Buffer.from(nfd, "utf8").equals(Buffer.from(nfc, "utf8"))).toBe(false);
+      const made = cli(["--dir", backups], Buffer.from(`${nfd}\n`, "utf8"));
+      expect(made.status, made.stderr).toBe(0);
+      const file = OK_LINE.exec(made.stdout)![1];
+      expect(cli(["--dir", backups, "--verify", file], Buffer.from(nfc, "utf8")).status).toBe(0);
+      expect(cli(["--dir", backups, "--verify", file], Buffer.from(nfd, "utf8")).status).toBe(0);
+    });
+
+    it.each([
+      ["UTF-16LE with a BOM (PowerShell 5.1's >)", Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${PASS}\r\n`, "utf16le")])],
+      ["UTF-16LE without a BOM", Buffer.from(`${PASS}\r\n`, "utf16le")],
+      ["invalid UTF-8", Buffer.concat([Buffer.from("a long enough passphrase ", "utf8"), Buffer.from([0xc3, 0x28])])],
+      ["a NUL", Buffer.from("a long enough\u0000passphrase", "utf8")],
+    ])("%s is refused before any work: exit 1, nothing created, 'save it as UTF-8', nothing echoed — for a backup and for --verify", (_name, input) => {
+      const existing = OK_LINE.exec(cli(["--dir", backups]).stdout)![1];
+      for (const args of [["--dir", backups], ["--dir", backups, "--keep", "1"], ["--dir", backups, "--verify", existing]]) {
+        const r = cli(args, input);
+        expect(r.status).toBe(1);
+        expect(r.stdout).toBe("");
+        expect(r.stderr).toMatch(/^full-backup: the passphrase is not UTF-8 text .*Save the passphrase file as UTF-8 text and try again\.\n$/);
+        expect(r.stderr).not.toContain("passphrase ünïcode");
+        expect(r.stderr).not.toContain("long enough");
+      }
+      expect(fs.readdirSync(backups)).toEqual([existing]);
+    });
+  });
+
   describe("--keep (ruling R18: pruning runs here, in the same invocation as the backup)", () => {
     const backupFiles = () => fs.readdirSync(backups).filter((n) => /^blackvault-full-\d{8}-\d{6}\.bvb$/.test(n)).sort();
     /** Makes `n` good backups with the bare CLI (no --keep) and returns their names, oldest first. */

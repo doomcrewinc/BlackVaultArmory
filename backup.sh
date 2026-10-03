@@ -13,8 +13,9 @@
 # Copy the files somewhere else; this script does not.
 #
 # PASSPHRASE. With --passphrase-file the file is handed to the backup program
-# on its standard input, byte for byte (the program drops ONE trailing line
-# ending, LF or CRLF, and nothing else). Without it you are asked to type the
+# on its standard input, byte for byte. The program drops ONE leading UTF-8
+# byte order mark and ONE trailing line ending (LF or CRLF), and refuses a
+# file that is not UTF-8 text (UTF-16, for example). Without it you are asked to type the
 # passphrase, without echo — twice when making a backup, once for --verify.
 # The passphrase is never put on a command line or into the environment of
 # any program: a file is redirected, a typed one is written to a pipe by the

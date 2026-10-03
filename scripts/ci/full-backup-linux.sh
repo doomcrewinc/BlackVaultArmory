@@ -575,6 +575,16 @@ else bad "standard output is not exactly one BLACKVAULT_FULL_BACKUP_VERIFIED lin
 # A path into a folder the host user cannot enter (0700, uid 1001).
 wrap "$A" "./backup.sh --verify data/backups/$BK1 --passphrase-file $PASSFILE"
 expect "exit 0 with a path into the backup folder" eq "$RC" 0
+# Ruling R37: the passphrase file's encoding. $BK1 was sealed from a file
+# WITHOUT a byte order mark; the same passphrase from a file WITH one (what
+# Windows editors write) must open it, and a UTF-16 file must be refused.
+{ printf '\xef\xbb\xbf'; sudo cat "$PASSFILE"; } | secret_file "$HOME_DIR/ci-passphrase-bom"
+{ printf '\xff\xfe'; sudo cat "$PASSFILE" | iconv -f UTF-8 -t UTF-16LE; } | secret_file "$HOME_DIR/ci-passphrase-utf16"
+wrap "$A" "./backup.sh --verify $BK1 --passphrase-file $HOME_DIR/ci-passphrase-bom"
+expect "R37: a passphrase file with a UTF-8 BOM opens a backup sealed without one (exit 0)" eq "$RC" 0
+wrap "$A" "./backup.sh --verify $BK1 --passphrase-file $HOME_DIR/ci-passphrase-utf16"
+expect "R37: a UTF-16 passphrase file is refused (exit 1)" eq "$RC" 1
+expect "R37: and it says to save the file as UTF-8" hasf "$ERR" "full-backup: the passphrase is not UTF-8 text"
 wrap "$A" "./backup.sh --verify /etc/hostname --passphrase-file $PASSFILE"
 expect "a path outside the backup folder is refused (exit 1)" eq "$RC" 1
 # An empty lock with a fresh heartbeat is a backup that has just started

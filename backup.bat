@@ -27,7 +27,9 @@
 :: pipe. The variables this script does set for it (BV_PASSFILE = the PATH of
 :: the file, BV_DOCKER_ARGS, BV_MODE, BV_LIMIT) hold no secret.
 :: A passphrase file is passed on byte for byte: the backup program drops ONE
-:: trailing line ending (LF or CRLF) and nothing else.
+:: leading UTF-8 byte order mark and ONE trailing line ending (LF or CRLF),
+:: and refuses a file that is not UTF-8 text (UTF-16, which is what output
+:: redirection writes in Windows PowerShell 5.1).
 :: With no --passphrase-file and no console (Task Scheduler), this script
 :: stops at once with an error instead of waiting on a prompt.
 ::

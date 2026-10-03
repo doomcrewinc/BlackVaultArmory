@@ -9,7 +9,10 @@
  *
  * PASSPHRASE  Read from standard input, and only from there — never from
  *             argv or the environment. Everything up to end-of-input is the
- *             passphrase, minus ONE trailing line ending (LF or CRLF).
+ *             passphrase, minus ONE leading UTF-8 byte order mark and ONE
+ *             trailing line ending (LF or CRLF). Input that is not valid
+ *             UTF-8, or holds a NUL (a UTF-16 file), is refused before any
+ *             work (src/lib/backup/passphrase-input.ts, ruling R37).
  *
  * --dir       The backup folder. Default /app/backups.
  * --verify    Stream-decrypts <file> and checks every file's sha256 against
@@ -59,6 +62,7 @@ import path from "node:path";
 import { DEFAULT_FULL_BACKUP_DIR, FullBackupAlreadyRunningError } from "@/lib/backup/full-lock";
 import { parseKeep, pruneFullBackups } from "@/lib/backup/full-prune";
 import { verifyFullBackup } from "@/lib/backup/full-verify";
+import { readPassphraseFromStdin } from "@/lib/backup/passphrase-input";
 
 const EXIT_OK = 0;
 const EXIT_FAILED = 1;
@@ -95,24 +99,13 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-async function readPassphrase(): Promise<string> {
-  if (process.stdin.isTTY) {
-    throw new UsageError("the passphrase must be supplied on standard input (backup.sh does this for you); it is never read from the terminal here.");
-  }
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  const text = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
-  if (text.length === 0) throw new UsageError("no passphrase was supplied on standard input.");
-  return text;
-}
-
 function oneLine(message: string): string {
   return message.replace(/\s*[\r\n]+\s*/g, " ").trim();
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
-  const passphrase = await readPassphrase();
+  const passphrase = await readPassphraseFromStdin(process.stdin, "backup.sh");
   const dir = path.resolve(args.dir);
 
   if (args.verify !== null) {
