@@ -15,6 +15,9 @@
  *   and `.pre-encryption-*` are folders the app skips;
  * - it ends in `.tmp` (the startup sweep deletes interrupted writes) or
  *   `.rot` (key-rotation staging, which startup would rename over a file);
+ * - its path does not fit the archive format (ustar, ./tar.ts): a file name
+ *   over 100 bytes, or folders in front of it over 155 bytes. Only a
+ *   hand-placed file can be that long; the app's own names are short;
  * - it COLLIDES with a name already accepted: the two would be one file on
  *   a filesystem that ignores case or Unicode normalisation (macOS, Windows,
  *   many NAS shares), or one is a file where the other needs a folder
@@ -27,6 +30,8 @@
  * `A.jpg` is kept and `a.jpg` skipped; a folder `A/` is kept whole and a
  * file `a` skipped.
  */
+
+import { fitsUstarPath } from "./tar";
 
 export const ENTRY_FILE_ROOTS = ["files/images/", "files/documents/"] as const;
 
@@ -46,6 +51,7 @@ export function entryNameRefusal(entryPath: string): string | null {
   if (segments.some((segment) => segment.startsWith("."))) return "it is a hidden file or folder";
   const name = segments[segments.length - 1];
   if (name.endsWith(".tmp") || name.endsWith(".rot")) return "it is a work file (*.tmp / *.rot)";
+  if (!fitsUstarPath(entryPath)) return "its path is too long for a backup: a file name over 100 bytes, or folders over 155 bytes";
   return null;
 }
 

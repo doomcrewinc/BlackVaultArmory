@@ -119,6 +119,22 @@ function splitUstarPath(filePath: string): { prefix: string; name: string } {
   throw new Error(`tar: path too long for ustar format (no valid prefix/name split): ${filePath}`);
 }
 
+/**
+ * Whether `filePath` can be written as a ustar entry at all: it fits the
+ * 100-byte name field, or it can be split at a "/" into a prefix of at most
+ * 155 bytes and a name of at most 100 (lengths in UTF-8 bytes). The name
+ * rule of a full backup (./entry-names.ts) asks this, so that a path that
+ * does not fit is left out and reported instead of failing the whole run.
+ */
+export function fitsUstarPath(filePath: string): boolean {
+  try {
+    splitUstarPath(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function buildHeader(opts: { name: string; prefix: string; size: number; typeflag: string; mtimeSec: number }): Buffer {
   const header = Buffer.alloc(BLOCK_SIZE, 0);
   writeField(header, FIELD.name, NAME_LEN, opts.name);

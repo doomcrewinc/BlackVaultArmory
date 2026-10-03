@@ -123,6 +123,27 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(cli(["--dir", backups, "--verify", m![1]]).status).toBe(0);
   });
 
+  it("M4: a file whose name is too long for the archive format is left out with a WARNING and counted, instead of failing the whole backup; --keep then deletes nothing (R36)", async () => {
+    const long = path.join(tmp, "uploads-long-name");
+    const longName = `${"n".repeat(116)}.jpg`; // 120 bytes: over ustar's 100-byte name field
+    fs.mkdirSync(path.join(long, "images"), { recursive: true });
+    await writeEncryptedFile(path.join(long, "images", "good.jpg"), IMG);
+    await writeEncryptedFile(path.join(long, "images", longName), IMG);
+    const older = OK_LINE.exec(cli(["--dir", backups]).stdout)![1];
+    const r = spawnSync(process.execPath, [bundle, "--dir", backups, "--keep", "1"], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: long }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+    expect(r.status, r.stderr).toBe(0);
+    const m = OK_LINE.exec(r.stdout);
+    expect(m, r.stdout).not.toBeNull();
+    expect(m!.slice(2)).toEqual(["1", String(IMG.length), m![4], "1", "1"]);
+    expect(r.stderr.split("\n").filter(Boolean)).toEqual([
+      `WARNING: skipped files/images/${longName}: unsupported file name (its path is too long for a backup: a file name over 100 bytes, or folders over 155 bytes)`,
+      "WARNING: 1 file could not be read and is NOT in this backup.",
+      "WARNING: old backups were kept because this backup is incomplete",
+    ]);
+    expect(fs.readdirSync(backups).sort()).toEqual([older, m![1]].sort());
+    expect(cli(["--dir", backups, "--verify", m![1]]).status).toBe(0);
+  });
+
   it("R9: an unreadable file is skipped with a WARNING line per file and a final count on stderr; exit 0, and the backup verifies", async () => {
     const dirty = path.join(tmp, "uploads-dirty");
     fs.mkdirSync(path.join(dirty, "images"), { recursive: true });

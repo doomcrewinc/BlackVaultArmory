@@ -54,6 +54,26 @@ describe("entry names a full backup may hold", () => {
     expect(names.add("files/images/b/c.jpg")).toBeNull();
   });
 
+  it("M4: a path the archive format (ustar) cannot hold is refused like any other unsupported name — by bytes, not characters", () => {
+    const why = /too long for a backup/;
+    // The last segment: at most 100 bytes.
+    expect(entryNameRefusal(`files/images/${"n".repeat(100)}`)).toBeNull();
+    expect(entryNameRefusal(`files/images/${"n".repeat(101)}`)).toMatch(why);
+    expect(entryNameRefusal(`files/images/${"é".repeat(50)}`)).toBeNull(); // 100 bytes
+    expect(entryNameRefusal(`files/images/${"é".repeat(51)}`)).toMatch(why); // 51 characters, 102 bytes
+    // The folders in front of it: at most 155 bytes, split at a "/".
+    const folders = (bytes: number) => `files/images/${"d".repeat(bytes - "files/images/".length)}`;
+    expect(Buffer.byteLength(folders(155))).toBe(155);
+    expect(entryNameRefusal(`${folders(155)}/${"n".repeat(100)}`)).toBeNull(); // the longest path there is: 256 bytes
+    expect(entryNameRefusal(`${folders(156)}/${"n".repeat(100)}`)).toMatch(why);
+    // A long path with a usable split somewhere in the middle is fine.
+    expect(entryNameRefusal(`files/images/${"a".repeat(90)}/${"b".repeat(90)}/c.jpg`)).toBeNull();
+    // The set applies it too, and a refused name leaves no trace.
+    const names = new EntryNameSet();
+    expect(names.add(`files/images/${"n".repeat(101)}`)).toMatch(why);
+    expect(names.add(`files/images/${"n".repeat(100)}`)).toBeNull();
+  });
+
   it("printableName shows control characters as ?", () => {
     expect(printableName("a\u0007b\u001b[31mc\n")).toBe("a?b?[31mc?");
   });
