@@ -294,9 +294,6 @@ async function createPartial(dir: string, now: Date): Promise<{ partialPath: str
   return { partialPath, handle };
 }
 
-/** `link(2)` errors that mean "this filesystem cannot hard-link" (SMB/CIFS, FAT, some NAS mounts), not "the name is taken". */
-const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
-
 /**
  * Gives the verified work file its published name,
  * `blackvault-full-<YYYYmmdd-HHMMSS>.bvb`, WITHOUT ever replacing a file that
@@ -312,6 +309,17 @@ const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSY
  * and the rename would be replaced. It needs two runs active at once (the
  * lock normally prevents that) on such a filesystem, publishing in the same
  * second.
+ *
+ * Which `link` errors fall back (ruling R16): ALL of them except two.
+ * - EEXIST: the name is taken — try the next second's.
+ * - ENOENT: the work file is gone (another run's cleanup removed it) — there
+ *   is nothing to publish, so the run fails.
+ * Everything else is treated as "this folder cannot hard-link". There is no
+ * reliable list of the codes that mean it: besides EPERM / ENOTSUP /
+ * EOPNOTSUPP / ENOSYS / EMLINK, an SMB mount can answer EACCES and a union
+ * filesystem EXDEV, and a NAS that refuses links with an unlisted code must
+ * not fail every backup. If the error was a real fault instead (EIO), the
+ * rename fails too and THAT error fails the run.
  */
 async function publish(dir: string, partialPath: string, now: Date): Promise<string> {
   for (let bump = 0; bump < 120; bump++) {
@@ -322,7 +330,7 @@ async function publish(dir: string, partialPath: string, now: Date): Promise<str
     } catch (e) {
       const code = codeOf(e);
       if (code === "EEXIST") continue;
-      if (!code || !LINK_UNSUPPORTED_CODES.has(code)) throw e;
+      if (code === "ENOENT") throw e;
       if (await fsp.lstat(finalPath).then(() => true, () => false)) continue;
       await fsp.rename(partialPath, finalPath);
       return file;

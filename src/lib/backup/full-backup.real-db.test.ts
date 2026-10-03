@@ -715,7 +715,8 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
       if (isPosix) expect(statSync(result.path).mode & 0o777).toBe(0o600);
     });
 
-    it.each(["EPERM", "ENOTSUP", "ENOSYS", "EOPNOTSUPP"])("a folder that cannot hard-link (%s, e.g. an SMB share) still publishes, and still refuses a name that is taken", async (code) => {
+    // R16: any link error but EEXIST / ENOENT falls back — EACCES (SMB), EXDEV (a union filesystem) and EIO are not on any "unsupported" list.
+    it.each(["EPERM", "ENOTSUP", "ENOSYS", "EOPNOTSUPP", "EMLINK", "EACCES", "EXDEV", "EIO"])("a folder that cannot hard-link (%s, e.g. an SMB share) still publishes, and still refuses a name that is taken", async (code) => {
       vi.spyOn(fsp, "link").mockImplementation((async () => {
         throw Object.assign(new Error(`${code}: link`), { code, syscall: "link" });
       }) as never);
@@ -726,11 +727,27 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
       expect(backupFolder()).toEqual([first.file, second.file]);
     });
 
-    it("a publish failure that is not about the name (EIO) fails the run and leaves no .partial", async () => {
+    it("R16: link fails with ENOENT (the work file is gone) → no fallback: rename is never tried, the run fails, nothing is published", async () => {
+      vi.spyOn(fsp, "link").mockImplementation((async () => {
+        throw Object.assign(new Error("ENOENT: link"), { code: "ENOENT", syscall: "link" });
+      }) as never);
+      const rename = vi.spyOn(fsp, "rename");
+      await expect(run()).rejects.toMatchObject({ code: "ENOENT", syscall: "link" });
+      expect(rename.mock.calls.filter(([, to]) => String(to).endsWith(".bvb"))).toEqual([]);
+      expect(backupFolder()).toEqual([]);
+      expect(await events()).toHaveLength(0);
+    });
+
+    it("R16: a real fault (link EIO, then the fallback rename EIO too) fails the run with the rename's error and leaves no .partial", async () => {
       vi.spyOn(fsp, "link").mockImplementation((async () => {
         throw Object.assign(new Error("EIO: link"), { code: "EIO", syscall: "link" });
       }) as never);
-      await expect(run()).rejects.toMatchObject({ code: "EIO" });
+      const realRename = fsp.rename.bind(fsp);
+      vi.spyOn(fsp, "rename").mockImplementation((async (from: string, to: string) => {
+        if (String(to).endsWith(".bvb")) throw Object.assign(new Error("EIO: rename"), { code: "EIO", syscall: "rename" });
+        return realRename(from, to);
+      }) as never);
+      await expect(run()).rejects.toMatchObject({ code: "EIO", syscall: "rename" });
       expect(backupFolder()).toEqual([]);
       expect(await events()).toHaveLength(0);
     });
