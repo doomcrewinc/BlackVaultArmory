@@ -209,6 +209,23 @@ describe("job lifecycle", () => {
     await settle();
   });
 
+  it("an engine that throws synchronously -> job failed (not stuck running); the next POST is accepted", async () => {
+    engine.run.mockImplementationOnce(() => {
+      throw new Error("sync boom");
+    });
+    const res = await POST(post());
+    expect(res.status).toBe(202);
+    await settle();
+    expect((await status()).body).toMatchObject({ state: "failed", error: "sync boom" });
+
+    const next = controlledRun();
+    expect((await POST(post())).status).toBe(202);
+    await next.started;
+    next.resolve(RESULT);
+    await settle();
+    expect((await status()).body.state).toBe("succeeded");
+  });
+
   it("a rejection from the detached run does not become an unhandled rejection", async () => {
     const unhandled = vi.fn();
     process.on("unhandledRejection", unhandled);

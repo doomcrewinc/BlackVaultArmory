@@ -9,6 +9,8 @@ import { StatusMessage } from "@/components/shared/StatusMessage";
 /** The floor the server enforces (core.mjs's MIN_PASSPHRASE) — checked here for an instant inline error. */
 const MIN_PASSPHRASE_LENGTH = 12;
 const POLL_MS = 1000;
+/** Consecutive unreadable status responses after which polling stops and the user is told. */
+const MAX_POLL_FAILURES = 5;
 
 /** Mirrors FullBackupStatus in src/lib/backup/full-job.ts (a server module, so not imported into a client component). */
 export interface FullBackupStatusDto {
@@ -58,6 +60,9 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
   const [status, setStatus] = useState<FullBackupStatusDto | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
+  const lastState = useRef<FullBackupStatusDto["state"] | null>(null);
+  const failures = useRef(0);
+  const [statusUnreadable, setStatusUnreadable] = useState(false);
 
   const stopPolling = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -69,7 +74,12 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
       const res = await fetch("/api/backup/full/status", { cache: "no-store" });
       if (!res.ok) return null;
       const next = (await res.json()) as FullBackupStatusDto;
-      if (alive.current) setStatus(next);
+      lastState.current = next.state;
+      failures.current = 0;
+      if (alive.current) {
+        setStatus(next);
+        setStatusUnreadable(false);
+      }
       return next;
     } catch {
       return null;
@@ -82,8 +92,16 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
     timer.current = setTimeout(async () => {
       const next = await refresh();
       if (!alive.current) return;
-      // A failed poll keeps the last known state: keep polling while it was running.
-      if (next ? next.state === "running" : true) poll();
+      if (next) {
+        if (next.state === "running") poll();
+        return;
+      }
+      // Unreadable (expired session, server down): retry only while the last known state was
+      // "running", and give up after a few in a row, saying so.
+      failures.current += 1;
+      if (lastState.current !== "running") return;
+      if (failures.current >= MAX_POLL_FAILURES) setStatusUnreadable(true);
+      else poll();
     }, POLL_MS);
   }, [refresh, stopPolling]);
 
@@ -126,6 +144,8 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
       });
       if (res.status === 202) {
         // Show "starting" at once; the first poll brings the real counters.
+        lastState.current = "running";
+        failures.current = 0;
         if (alive.current) setStatus({ state: "running", filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
         poll();
         return;
@@ -201,6 +221,10 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
           {running ? "Backup running..." : "Start Full Backup"}
         </StandardButton>
       </div>
+
+      {statusUnreadable && (
+        <StatusMessage tone="warning" message="Could not read the backup status (your session may have expired). The backup may still be running on the server; reload this page to check." />
+      )}
 
       {running && progress && status && (
         <div className="rounded-md border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-3 py-2 flex flex-col gap-1.5" data-testid="full-backup-progress">

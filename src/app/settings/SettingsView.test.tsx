@@ -647,6 +647,45 @@ describe("SettingsView - full backup panel", () => {
     expect(await screen.findByText("A full backup is already running.")).toBeTruthy();
   });
 
+  it("stops polling and says so when the status endpoint keeps failing (e.g. 401)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url !== "/api/backup/full/status") throw new Error(`unexpected fetch: ${url}`);
+        calls += 1;
+        if (calls === 1) {
+          return { ok: true, json: async () => ({ jobId: "j", state: "running", phase: "writing", filesDone: 0, filesTotal: 2, bytesDone: 0, bytesTotal: 10 }) } as Response;
+        }
+        return { ok: false, status: 401, json: async () => ({ error: "Authentication required" }) } as Response;
+      }),
+    );
+    await renderPanel();
+    await screen.findByRole("progressbar");
+    await tick(10_000);
+    expect(screen.getByText(/Could not read the backup status/)).toBeTruthy();
+    const after = calls;
+    expect(after).toBeLessThanOrEqual(6); // 1 good + a handful of failures, not one per second forever
+    await tick(10_000);
+    expect(calls).toBe(after);
+  });
+
+  it("does not keep polling after a failed read when the last known state was not running", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return { ok: false, status: 401, json: async () => ({}) } as Response;
+      }),
+    );
+    await renderPanel();
+    await tick(10_000);
+    expect(calls).toBe(1);
+  });
+
   it("a non-admin does not poll the status endpoint and cannot start a backup", async () => {
     const stub = stubFullBackup([IDLE]);
     await renderPanel(false);

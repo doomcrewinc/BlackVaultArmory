@@ -134,12 +134,13 @@ export async function startFullBackupJob(opts: StartFullBackupOptions): Promise<
 
   // Detached on purpose: the request returns now. Both outcomes are handled,
   // so there is no unhandled rejection to take the server down.
-  void runFullBackup({
+  // `Promise.resolve().then` also turns a synchronous throw into a failed job.
+  void Promise.resolve().then(() => runFullBackup({
     passphrase: opts.passphrase,
     dir,
     actor: opts.actor,
     onProgress: (p) => update({ phase: p.phase, filesDone: p.filesDone, filesTotal: p.filesTotal, bytesDone: p.bytesDone, bytesTotal: p.bytesTotal }),
-  }).then(done, (e: unknown) => {
+  })).then(done, (e: unknown) => {
     console.error("[full-backup] job failed:", messageOf(e));
     update({ state: "failed", error: messageOf(e) });
   });
