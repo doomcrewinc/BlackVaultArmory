@@ -80,6 +80,14 @@ fi
 # (an ACL, a squashed uid or a read-only mount all make them lie). When it
 # cannot write, the Settings button and backup.sh fail with a message that
 # names the folder; BlackVault itself runs normally.
+#
+# chmod 700 runs ONLY after chown succeeded. chmod needs just "the caller
+# owns the folder", so it can succeed where chown is refused (root owns the
+# mount but may not chown it: capabilities dropped, an NFSv4 id-mapping
+# refusal, a share mounted uid=0). 0700 with an owner that is not the app
+# user would lock the app out of a folder it could write to through its
+# group/other bits, and the change would stay on the share. So after a
+# refused chown the mode is left exactly as it is, and the warning says so.
 BACKUPS=/app/backups
 backups_ok=1
 if ! mkdir -p "$BACKUPS" 2>/dev/null; then
@@ -88,16 +96,29 @@ if ! mkdir -p "$BACKUPS" 2>/dev/null; then
 fi
 if [ "$backups_ok" = 1 ]; then
   refused=""
-  chown nextjs:nodejs "$BACKUPS" 2>/dev/null || refused="owner"
-  chmod 700 "$BACKUPS" 2>/dev/null || refused="${refused:+$refused and }mode"
+  if chown nextjs:nodejs "$BACKUPS" 2>/dev/null; then
+    chmod 700 "$BACKUPS" 2>/dev/null || refused="mode"
+  else
+    refused="owner"
+  fi
+  case "$refused" in
+    owner) note="could not set the owner of the backup folder $BACKUPS (a network share usually refuses this), so its mode was left as it is." ;;
+    mode) note="could not set the mode of the backup folder $BACKUPS (a network share usually refuses this)." ;;
+    *) note="" ;;
+  esac
   probe="$BACKUPS/.blackvault-write-test.$$"
   if su-exec nextjs:nodejs sh -c ': > "$1" && rm -f "$1"' sh "$probe" 2>/dev/null; then
-    if [ -n "$refused" ]; then
-      echo "[entrypoint] WARNING: could not set the $refused of the backup folder $BACKUPS (a network share usually refuses this). The app can write to it, so full backups will work; who else can read that folder is decided by the share, not by BlackVault." >&2
+    if [ -n "$note" ]; then
+      echo "[entrypoint] WARNING: $note The app can write to it, so full backups will work; who else can read that folder is decided by the share, not by BlackVault." >&2
     fi
   else
     rm -f "$probe" 2>/dev/null || true
-    echo "[entrypoint] WARNING: the backup folder $BACKUPS is not writable by the app (uid 1001)${refused:+, and its $refused could not be changed}. Full backups will fail until the folder mounted there (BLACKVAULT_BACKUP_DIR, default <DATA_DIR>/backups) is writable by uid 1001. BlackVault starts anyway." >&2
+    case "$refused" in
+      owner) why="; its owner could not be changed, so its mode was left as it is" ;;
+      mode) why="; its mode could not be changed" ;;
+      *) why="" ;;
+    esac
+    echo "[entrypoint] WARNING: the backup folder $BACKUPS is not writable by the app (uid 1001)$why. Full backups will fail until the folder mounted there (BLACKVAULT_BACKUP_DIR, default <DATA_DIR>/backups) is writable by uid 1001. BlackVault starts anyway." >&2
   fi
 fi
 

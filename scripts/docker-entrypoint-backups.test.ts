@@ -89,22 +89,39 @@ describe.skipIf(skip)("docker-entrypoint.sh: the /app/backups step", () => {
     expect(fs.readdirSync(backups)).toEqual([]); // the write test left nothing behind
   });
 
-  it("Review Focus 1: chown AND chmod refused, but the app user can write → one clear WARNING, and it continues", () => {
+  it("Review Focus 1: chown refused, but the app user can write → one clear WARNING, and it continues", () => {
     fs.mkdirSync(backups, { mode: 0o755 });
     const r = run({ BV_REFUSE: "chown,chmod" });
     started(r);
     const warnings = r.stderr.split("\n").filter(Boolean);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: could not set the owner and mode of the backup folder .*app-backups.*The app can write to it, so full backups will work/);
+    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: could not set the owner of the backup folder .*app-backups.*so its mode was left as it is\. The app can write to it, so full backups will work/);
     expect(fs.statSync(backups).mode & 0o777).toBe(0o755); // untouched
     expect(fs.readdirSync(backups)).toEqual([]);
   });
 
-  it("only chown refused, still writable → the warning names the owner only", () => {
-    const r = run({ BV_REFUSE: "chown" });
+  // Fix round 1 (Important 1). chmod needs only "the caller owns the folder",
+  // so it can SUCCEED where chown is refused (root owns the mount but may not
+  // chown it). 0700 with an owner that is not the app user would lock the app
+  // out of a folder it could write through group/other bits — and the change
+  // would stay on the share.
+  it("fix round 1: after a refused chown, chmod is NOT run on the backup folder — a 0777 folder stays 0777 and stays writable", () => {
+    fs.mkdirSync(backups);
+    fs.chmodSync(backups, 0o777);
+    const r = run({ BV_REFUSE: "chown" }); // chmod itself would succeed
     started(r);
-    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: could not set the owner of the backup folder /);
-    expect(r.stderr).not.toMatch(/owner and mode/);
+    expect(r.calls).toContain(`chown nextjs:nodejs ${backups}`);
+    expect(r.calls.split("\n").filter((l) => l.startsWith("chmod ") && l.endsWith(` ${backups}`))).toEqual([]);
+    expect(fs.statSync(backups).mode & 0o777).toBe(0o777);
+    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: could not set the owner of the backup folder .*so its mode was left as it is\. The app can write to it/);
+    expect(r.stderr.split("\n").filter(Boolean)).toHaveLength(1);
+  });
+
+  it("chown accepted but chmod refused, still writable → the warning names the mode only", () => {
+    const r = run({ BV_REFUSE: "chmod" });
+    started(r);
+    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: could not set the mode of the backup folder .*The app can write to it/);
+    expect(r.stderr).not.toMatch(/owner/);
   });
 
   it("Review Focus 1: chown and chmod refused and the app user CANNOT write → a WARNING naming the folder and BLACKVAULT_BACKUP_DIR, and the app STILL starts", () => {
@@ -113,7 +130,7 @@ describe.skipIf(skip)("docker-entrypoint.sh: the /app/backups step", () => {
     started(r);
     const warnings = r.stderr.split("\n").filter(Boolean);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: the backup folder .*app-backups is not writable by the app \(uid 1001\), and its owner and mode could not be changed\..*BLACKVAULT_BACKUP_DIR.*BlackVault starts anyway\.$/);
+    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: the backup folder .*app-backups is not writable by the app \(uid 1001\); its owner could not be changed, so its mode was left as it is\..*BLACKVAULT_BACKUP_DIR.*BlackVault starts anyway\.$/);
   });
 
   it("writability is TESTED, not inferred: chown and chmod both 'succeed' (a share that ignores them) but a write fails → still the not-writable WARNING", () => {
