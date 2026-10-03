@@ -44,7 +44,7 @@ let rec: string;
  * The docker stub. `compose version --short` → BV_STUB_COMPOSE_VERSION
  * (default 2.30.1); `compose ps --status running -q blackvault` → a container
  * id when BV_STUB_RUNNING=1, nothing otherwise; the backup program's call →
- * records stdin, optionally sleeps BV_STUB_SLEEP seconds, prints
+ * records stdin, with BV_STUB_SLEEP only sleeps that many seconds, else prints
  * BV_STUB_STDOUT / BV_STUB_STDERR and exits BV_STUB_EXIT (default 0).
  */
 function writeStub() {
@@ -59,7 +59,8 @@ case "$*" in
   "compose ps --status running -q blackvault") [ "\${BV_STUB_RUNNING:-}" = 1 ] && echo "0123456789ab" ;;
   *"dist/scripts/full-backup.mjs"*)
     cat > "${rec}/stdin"
-    [ -n "\${BV_STUB_SLEEP:-}" ] && sleep "$BV_STUB_SLEEP"
+    # exec: the process \`timeout\` signals must BE the sleep. A sleep left behind as an orphan keeps the test's pipes open.
+    [ -n "\${BV_STUB_SLEEP:-}" ] && exec sleep "$BV_STUB_SLEEP"
     [ -n "\${BV_STUB_STDOUT:-}" ] && echo "$BV_STUB_STDOUT"
     [ -n "\${BV_STUB_STDERR:-}" ] && echo "$BV_STUB_STDERR" >&2
     exit "\${BV_STUB_EXIT:-0}" ;;
@@ -479,5 +480,80 @@ describe.skipIf(isWindows)("backup.sh", () => {
       expect(r.stderr).toMatch(/^ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds\./);
       expect(callLines().filter((c) => c.includes("full-backup.mjs"))).toEqual([]);
     });
+  });
+});
+
+/**
+ * backup.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios BK1–BK10). These
+ * are the properties that can be read off the file on any platform.
+ */
+describe("backup.bat (static checks; executed only by the Windows CI job)", () => {
+  const raw = fs.readFileSync(path.join(ROOT, "backup.bat"));
+  const text = raw.toString("utf8");
+  const batLines = text.split("\r\n");
+  const code = batLines.filter((l) => !l.startsWith("::"));
+  const subroutine = (file: string) => {
+    const t = fs.readFileSync(path.join(ROOT, file), "utf8").replace(/\r\n/g, "\n");
+    const start = t.indexOf("\n:require_compose\n");
+    return t.slice(start, t.indexOf("\ngoto :eof\n", t.indexOf('if !_CMAJ! EQU 2', start)));
+  };
+
+  it("is pure ASCII with CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
+    expect(raw.every((b) => b < 0x80)).toBe(true);
+    expect(text.replace(/\r\n/g, "")).not.toMatch(/[\r\n]/);
+  });
+
+  it("never reads the passphrase into a cmd variable: no `set /p`, and no variable is assigned from the passphrase file's CONTENT", () => {
+    expect(code.filter((l) => /set\s+\/p/i.test(l))).toEqual([]);
+    // The file is only ever named (BV_PASSFILE = its path) and tested; never typed, redirected or looped over by cmd.
+    const uses = code.filter((l) => l.includes("BV_PASSFILE") && !l.trimStart().startsWith(">&2 echo") && !l.startsWith("powershell "));
+    for (const l of uses) expect(l).toMatch(/^(set "BV_PASSFILE=(%~f2)?"|if (not )?(defined BV_PASSFILE|exist "!BV_PASSFILE!\\?") goto :\w+|for %%F in \("!BV_PASSFILE!"\) do if %%~zF EQU 0 goto :passfile_empty)$/);
+    expect(uses.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("the one PowerShell step holds nothing cmd.exe would interpret, compares case-sensitively, and closes the pipe's BaseStream (never the StreamWriter)", () => {
+    const ps = code.filter((l) => l.startsWith('powershell -NoProfile -Command "'));
+    expect(ps).toHaveLength(1);
+    const body = ps[0].slice('powershell -NoProfile -Command "'.length, -1);
+    expect(ps[0].endsWith('"')).toBe(true);
+    expect(body).not.toMatch(/["!%^]/);
+    expect(ps[0].length).toBeLessThan(8000); // cmd.exe's command-line limit is 8191
+    expect(body).toContain("$p1 -cne $p2");
+    expect(body).not.toMatch(/\$p1 -ne \$p2/);
+    expect(body).toContain("-AsSecureString");
+    expect(body).toContain("[Console]::IsInputRedirected");
+    expect(body).toContain("$pipe = $p.StandardInput.BaseStream");
+    expect(body).not.toMatch(/StandardInput\.(Write|Close|Dispose)/);
+    expect(body).toContain("exit $p.ExitCode");
+    // The passphrase is never handed to docker as an argument or an environment variable.
+    expect(body).toContain("$psi.Arguments = $env:BV_DOCKER_ARGS");
+    expect(body).not.toMatch(/EnvironmentVariables|\$env:\w+\s*=/);
+  });
+
+  it("builds the same two docker commands as backup.sh, and maps exit codes the same way", () => {
+    expect(code).toContain('set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
+    expect(code).toContain('if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
+    expect(code).toContain('set "BV_ENGINE_ARGS=--keep !BV_KEEP!"');
+    expect(code).toContain('set "BV_ENGINE_ARGS=--verify !BV_VERIFY_NAME!"');
+    expect(code.join("\n")).not.toMatch(/--no-deps|--user/);
+    const sh = fs.readFileSync(path.join(ROOT, "backup.sh"), "utf8");
+    expect(sh).toContain('CMD=($COMPOSE exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs "${ENGINE_ARGS[@]}")');
+    expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-backup.mjs "${ENGINE_ARGS[@]}")');
+    const tail = code.slice(code.indexOf('set "BV_RC=!errorlevel!"'));
+    expect(tail.slice(0, 6)).toEqual([
+      'set "BV_RC=!errorlevel!"',
+      'if "!BV_RC!"=="0" exit /b 0',
+      'if "!BV_RC!"=="1" exit /b 1',
+      'if "!BV_RC!"=="2" exit /b 2',
+      ">&2 echo ERROR: the backup command ended unexpectedly (exit !BV_RC!); see the output above.",
+      "exit /b 1",
+    ]);
+  });
+
+  it("never pauses, and its :require_compose is rotate-key.bat's, line for line", () => {
+    expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
+    expect(subroutine("backup.bat").length).toBeGreaterThan(300);
+    expect(subroutine("backup.bat")).toBe(subroutine("rotate-key.bat"));
   });
 });
