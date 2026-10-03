@@ -74,15 +74,19 @@ declare -A PROVIDER=()
 step() { echo; echo "::group::$*"; }
 endstep() { echo "::endgroup::"; }
 # fail: cannot go on. bad: recorded, the run goes on and exits 1 at the end.
-fail() { echo "::error::$*"; diagnostics; exit 1; }
-bad() { echo "::error::$*"; FAILED=$((FAILED + 1)); }
+# Both write to standard error: several helpers are called inside $(...).
+fail() { echo "::error::$*" >&2; diagnostics >&2; exit 1; }
+bad() { echo "::error::$*" >&2; FAILED=$((FAILED + 1)); }
 ok() { echo "  ok   $*"; }
 # expect DESCRIPTION CONDITION...: runs the condition, records the outcome.
 expect() {
   local what=$1
   shift
-  if "$@"; then ok "$what"; else bad "$what"; fi
+  if "$@"; then ok "$what"; elif [ "$1" = "eq" ]; then bad "$what — got '$2', want '$3'"; else bad "$what"; fi
 }
+# secret_file PATH < CONTENT: a file of the test user's, mode 600. The chmod is
+# needed: the runner's home folders carry a default ACL, which overrides umask.
+secret_file() { sudo -u "$TEST_USER" bash -c "umask 077 && cat > '$1' && chmod 600 '$1'"; }
 has() { grep -q -- "$2" <<<"$1"; }
 hasf() { grep -qF -- "$2" <<<"$1"; }
 eq() { [ "$1" = "$2" ]; }
@@ -291,7 +295,7 @@ BLACKVAULT_POSTGRES_PASSWORD=$pw
 BLACKVAULT_DATABASE_URL=postgresql://blackvault:$pw@db:5432/blackvault
 EOF
   fi
-  as_in "$dir" "umask 077 && openssl rand -hex 32 > secrets/blackvault_encryption_key"
+  as_in "$dir" "umask 077 && openssl rand -hex 32 > secrets/blackvault_encryption_key && chmod 600 secrets/blackvault_encryption_key .env"
   # The image the job built for install A, under the name this folder's
   # compose project expects: no second build.
   docker tag app-blackvault "$name-blackvault"
@@ -456,7 +460,7 @@ PROVIDER[$A]=sqlite
 [ -f "$A/data/db/vault.db" ] || fail "$A has no database: run scripts/ci/encryption-key-linux.sh first"
 docker image inspect app-blackvault >/dev/null 2>&1 || fail "the image app-blackvault does not exist"
 command -v jq >/dev/null && command -v sqlite3 >/dev/null && command -v xxd >/dev/null || fail "jq, sqlite3 and xxd are needed"
-printf '%s\n' "$PASSPHRASE" | sudo -u "$TEST_USER" bash -c "umask 077 && cat > '$PASSFILE'"
+printf '%s\n' "$PASSPHRASE" | secret_file "$PASSFILE"
 expect "the passphrase file is 600 $TEST_USER" eq "$(sudo stat -c '%a %U' "$PASSFILE")" "600 $TEST_USER"
 A_KEY_ID=$(key_id_of "$A/secrets/blackvault_encryption_key")
 echo "install A key id: $A_KEY_ID"
@@ -473,7 +477,7 @@ if as_in "$A" "ls data/backups" >/dev/null 2>&1; then bad "the host user can lis
 make_png "$WORK/a1.png" 3000000
 make_png "$WORK/a2.png" 1048576
 make_png "$WORK/a3.png" 700
-make_png "$WORK/a4.png" 1
+make_png "$WORK/a4.png" 64
 make_pdf "$WORK/a5.pdf" 2500000
 make_pdf "$WORK/a6.pdf" 9000
 NEW_URLS=$(
@@ -598,7 +602,7 @@ expect "it failed while exporting the records" hasf "$ERR" "full-backup: Cannot 
 same_text "the backup folder is unchanged: both backups, same bytes, no .partial, no lock" "$BEFORE" "$(backup_folder "$A")"
 sudo sqlite3 "$A/data/db/vault.db" "DELETE FROM \"Firearm\" WHERE id = 'ci-plain';"
 # Before anything starts: a passphrase under 12 characters.
-printf 'short\n' | sudo -u "$TEST_USER" bash -c "umask 077 && cat > '$HOME_DIR/ci-short-passphrase'"
+printf 'short\n' | secret_file "$HOME_DIR/ci-short-passphrase"
 wrap "$A" "./backup.sh --passphrase-file $HOME_DIR/ci-short-passphrase --keep 1"
 expect "exit 1 for a passphrase that is too short" eq "$RC" 1
 expect "it says so" hasf "$ERR" "full-backup: Passphrase must be at least 12 characters."
@@ -656,7 +660,7 @@ step "5. on B: a wrong passphrase and a truncated archive exit 1; the app is nev
 INSTANCE=$(app_instance)
 FP=$(fingerprint_of "$B")
 TREE=$(tree_of "$B")
-printf 'not the passphrase 0123456789\n' | sudo -u "$TEST_USER" bash -c "umask 077 && cat > '$HOME_DIR/ci-wrong-passphrase'"
+printf 'not the passphrase 0123456789\n' | secret_file "$HOME_DIR/ci-wrong-passphrase"
 wrap "$B" "./restore.sh $BK5 --passphrase-file $HOME_DIR/ci-wrong-passphrase --yes"
 expect "wrong passphrase: exit 1" eq "$RC" 1
 expect "the program says why" hasf "$ERR" "full-backup: Wrong passphrase or damaged file."
