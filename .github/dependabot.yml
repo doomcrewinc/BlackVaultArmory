@@ -1,0 +1,64 @@
+# Dependabot version updates. Pull requests target the default branch
+# (develop), so each one runs CI and the SonarQube and Snyk scans.
+#
+# Vulnerability alerts and security updates are repository settings
+# (Settings -> Advanced Security), not part of this file.
+version: 2
+updates:
+  # Application dependencies. Minor and patch updates arrive as one grouped
+  # pull request per dependency type; each major update gets its own.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      production-minor-patch:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      development-minor-patch:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # Base image in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: build
+      include: scope
+
+  # Images named in the compose files (PostgreSQL).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: build
+      include: scope
+
+  # Actions used by the workflows. They are pinned to commit SHAs; Dependabot
+  # updates the SHA and the version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
