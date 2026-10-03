@@ -74,6 +74,10 @@
 #   BLACKVAULT_FULL_RESTORE_OK file=<name> files=<n> bytes=<n> pre_restore=<folder>
 # Everything else goes to standard error. A failure ends with one ERROR line
 # that says whether anything was changed.
+# One exception: if the restore program had finished and only its exit status
+# was lost (its container died on the way out), this script still exits 0,
+# with a WARNING; that line, and the RESTORE entry in the audit log, may then
+# be missing.
 #
 # INTERRUPTED (Ctrl-C, a closed terminal, kill). Before the restore has
 # started: BlackVault is started again and nothing was changed. While it
@@ -228,35 +232,51 @@ rollback_postgres() {
 
 rollback_database() {
   if [ "$PROVIDER" = "sqlite" ]; then
-    "${SNAPSHOT_RESTORE[@]}" sqlite "/bv-backups/$(basename "$DB_SNAPSHOT")" /app/data/vault.db >&2
+    "${SNAPSHOT_RESTORE[@]}" "${SQLITE_ROLLBACK_ARGS[@]}" >&2
   else
     rollback_postgres
   fi
 }
 
 UPLOADS_ROLLBACK_ARGS=()
+# With the uploads folder and the stamp, the script itself refuses to touch
+# the database unless the restore's marker exists (ruling R28).
+SQLITE_ROLLBACK_ARGS=()
 rollback_uploads() {
   "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}" >&2
 }
 
 # Ruling R24. What the restore program left behind, seen from the host:
 #   started    its marker exists: the database step was reached, so the
-#              database may hold the backup's records. Also the answer when
-#              the uploads folder cannot be looked into from here — not
-#              knowing is treated as "it may have".
+#              database may hold the backup's records.
 #   complete   no marker, but .pre-restore-<time> exists: the program removes
 #              its marker only after everything is in place, so the restore
 #              FINISHED and only its exit status was lost.
 #   untouched  neither: the database step was never reached.
+#   unknown    the uploads folder cannot be looked into from here AND the
+#              question could not be put to a container either. Nothing is
+#              rolled back blindly: BlackVault is not started and the
+#              recovery file says what to do.
+# scripts/snapshot-restore.sh applies the same rule again by itself, inside
+# the container (ruling R28): its `uploads` mode changes nothing after a
+# finished restore, whatever this function answered.
 restore_state() {
+  local seen
   if [ -e "$MARKER_HOST" ]; then
     echo started
-  elif ! { [ -d "$HOST_UPLOADS_DIR" ] && [ -r "$HOST_UPLOADS_DIR" ] && [ -x "$HOST_UPLOADS_DIR" ]; }; then
-    echo started
-  elif [ -d "$HOST_UPLOADS_DIR/.pre-restore-$STAMP" ]; then
-    echo complete
+  elif [ -d "$HOST_UPLOADS_DIR" ] && [ -r "$HOST_UPLOADS_DIR" ] && [ -x "$HOST_UPLOADS_DIR" ]; then
+    if [ -d "$HOST_UPLOADS_DIR/.pre-restore-$STAMP/images" ] || [ -d "$HOST_UPLOADS_DIR/.pre-restore-$STAMP/documents" ]; then
+      echo complete
+    else
+      echo untouched
+    fi
   else
-    echo untouched
+    # The host user cannot enter the folder (it belongs to the app user): ask inside a container.
+    seen=$("${SNAPSHOT_RESTORE[@]}" state /app/uploads "$STAMP" 2> /dev/null | tr -d '[:space:]') || seen=""
+    case "$seen" in
+      started | complete | untouched) echo "$seen" ;;
+      *) echo unknown ;;
+    esac
   fi
 }
 
@@ -285,16 +305,26 @@ recovery_text() {
   echo "  docker ps -a --filter name=$CONTAINER"
   echo "  $COMPOSE stop blackvault"
   echo ""
-  echo "2. The photos and documents:"
-  echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}")"
+  echo "2. See how far the restore got. This prints one word:"
+  echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" state /app/uploads "$STAMP")"
+  echo "   complete   The restore FINISHED: the records and the files are the backup's."
+  echo "              There is nothing to put back. (The program's OK line and the"
+  echo "              RESTORE entry in the audit log may be missing.) The commands of"
+  echo "              step 3 change nothing in this state; you can go to step 4."
+  echo "   started    The restore had reached the database and did not finish. Step 3"
+  echo "              puts the photos, the documents and the database back."
+  echo "   untouched  The restore never reached the database. Step 3 only removes its"
+  echo "              work folder and checks the photos and documents."
   echo ""
-  echo "3. The database. ONLY if this folder exists:"
-  echo "     $(bv_shell_quote "$MARKER_HOST")"
-  echo "   It is the mark the restore leaves just before it changes the database. If"
-  echo "   it does not exist, the database was never touched: skip to step 4."
+  echo "3. Put it back. Run every line, in this order; each one looks at the state"
+  echo "   itself and changes only what that state needs."
+  echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}")"
   if [ "$PROVIDER" = "sqlite" ]; then
-    echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" sqlite "/bv-backups/$(basename "$DB_SNAPSHOT")" /app/data/vault.db)"
+    echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" "${SQLITE_ROLLBACK_ARGS[@]}")"
   else
+    echo "   PostgreSQL: the next four lines ONLY if step 2 printed: started"
+    echo "   (in any other state they would replace a database the restore did not"
+    echo "   leave half done):"
     echo "  $COMPOSE up -d --wait db"
     echo "  $(bv_quote_cmd "${PSQL[@]}" "${PG_NEW[@]}")"
     echo "  $(bv_quote_cmd "${PSQL[@]}" "${PG_LOAD[@]}") < $(bv_shell_quote "$DB_SNAPSHOT")"
@@ -307,11 +337,25 @@ recovery_text() {
   echo "  rm $(bv_shell_quote "$RECOVERY_FILE")"
 }
 
+# This run's two names must be free. If one exists (a second run in the same
+# second, a clock set back), the restore program would refuse — and a
+# leftover .pre-restore folder would then read as "the restore finished".
+for f in "$HOST_UPLOADS_DIR/.pre-restore-$STAMP" "$MARKER_HOST"; do
+  if [ -e "$f" ]; then
+    PASSPHRASE=""
+    die "$f already exists (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped."
+  fi
+done
+
 # ── 4. Stop the app, snapshot the database and the uploads ────
 # Interrupted before the restore itself has started: nothing was changed.
 interrupted_early() {
   trap - INT TERM HUP
   PASSPHRASE=""
+  # Nothing was changed, so nothing may be left that says otherwise: not the
+  # recovery file (it would block the next restore), not db-snapshot.sh's
+  # marker for update.sh.
+  rm -f "$RECOVERY_FILE" backups/.uploads-snapshot-marker
   if start_app; then
     die "interrupted before the restore started. Nothing was changed; BlackVault was started again."
   fi
@@ -349,6 +393,7 @@ if [ -z "$DB_SNAPSHOT" ] || [ ! -f "$DB_SNAPSHOT" ]; then
   start_app || echo "WARNING: BlackVault did not start; start it by hand: $COMPOSE up -d" >&2
   die "there is no database to snapshot yet, so a failed restore could not be undone. Start BlackVault once ($COMPOSE up -d), wait until it is up, then run the restore again. Nothing was changed."
 fi
+SQLITE_ROLLBACK_ARGS=(sqlite "/bv-backups/$(basename "$DB_SNAPSHOT")" /app/data/vault.db /app/uploads "$STAMP")
 UPLOADS_ROLLBACK_ARGS=(uploads /app/uploads "$STAMP")
 [ -z "$UPLOADS_SNAPSHOT" ] || UPLOADS_ROLLBACK_ARGS+=("/bv-backups/$(basename "$UPLOADS_SNAPSHOT")")
 
@@ -379,6 +424,13 @@ interrupted() {
   local left
   printf 'ERROR: %s\n' "the restore was interrupted. BlackVault is stopped and the install may be half restored." >&2
   echo "Stopping the restore container $CONTAINER..." >&2
+  # The docker client this script started goes first, and is waited for: a
+  # client that has not created the container yet would otherwise create it
+  # after `docker stop` found nothing to stop.
+  if [ -n "$BV_CLIENT_PID" ]; then
+    kill "$BV_CLIENT_PID" 2> /dev/null
+    wait "$BV_CLIENT_PID" 2> /dev/null
+  fi
   docker stop "$CONTAINER" > /dev/null 2>&1
   if left=$(docker ps -aq --filter "name=^${CONTAINER}\$" 2> /dev/null) && [ -z "$left" ]; then
     echo "The restore container is gone." >&2
@@ -401,7 +453,7 @@ STATE=""
 if [ "$RC" -ne 0 ]; then
   STATE=$(restore_state)
   if [ "$STATE" = "complete" ]; then
-    echo "WARNING: the restore program ended with exit $RC, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-$STAMP. Nothing is rolled back." >&2
+    echo "WARNING: the restore program ended with exit $RC, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-$STAMP. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing." >&2
   fi
 fi
 
@@ -429,7 +481,10 @@ fi
 # only if the restore had reached it (ruling R24).
 echo "" >&2
 ROLLED_BACK=1
-if [ "$STATE" = "started" ]; then
+if [ "$STATE" = "unknown" ]; then
+  echo "The restore failed (exit $RC; the reason is above), and how far it got could not be found out: the uploads folder $HOST_UPLOADS_DIR cannot be looked into from here, and asking inside a container failed. Nothing is rolled back blindly." >&2
+  ROLLED_BACK=0
+elif [ "$STATE" = "started" ]; then
   echo "The restore failed (exit $RC; the reason is above) after it had reached the database. Putting the uploads and the database back from the snapshot..." >&2
   rollback_uploads || ROLLED_BACK=0
   rollback_database || ROLLED_BACK=0

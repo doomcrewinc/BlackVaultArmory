@@ -162,15 +162,20 @@ bv_run_with_passphrase() {
 # command has ended; `wait` is interrupted at once. restore.sh uses this for
 # the restore itself, so that its INT/TERM/HUP trap can stop the restore
 # container immediately instead of after it has finished.
+# BV_CLIENT_PID is the command itself (the docker client), never a subshell
+# around it: the typed passphrase is fed through a process substitution
+# (printf, a builtin, in a subshell of this shell), not through a pipeline.
+# The trap kills that pid, so that a client which has not created its
+# container yet cannot create it afterwards.
+BV_CLIENT_PID=""
 bv_run_with_passphrase_waited() {
   if [ -n "$PASSFILE" ]; then
     "${CMD[@]}" < "$PASSFILE" &
   else
-    {
-      printf '%s' "$PASSPHRASE" | "${CMD[@]}"
-      exit "${PIPESTATUS[1]}"
-    } &
+    "${CMD[@]}" < <(printf '%s' "$PASSPHRASE") &
   fi
-  wait $!
+  BV_CLIENT_PID=$!
+  wait "$BV_CLIENT_PID"
   RC=$?
+  BV_CLIENT_PID=""
 }

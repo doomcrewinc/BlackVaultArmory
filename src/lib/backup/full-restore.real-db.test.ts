@@ -73,6 +73,10 @@ import { FullBackupVerifyError, verifyFullBackup } from "./full-verify";
 import { acquireFullBackupLock, FullBackupAlreadyRunningError } from "./full-lock";
 import { FullRestoreError, runFullRestore } from "./full-restore";
 
+// Every test here spawns shell scripts or does real fsyncs. The default 5 s limit only guards against a hang, and on a
+// stalled machine it has failed tests that were doing nothing wrong; the engine calls keep their own 60 s race (`within`).
+vi.setConfig({ testTimeout: 90_000 });
+
 const ROOT = path.resolve(__dirname, "../../..");
 const PASS = "correct horse battery staple";
 const KEY_A = process.env.BLACKVAULT_ENCRYPTION_KEY!;
@@ -816,6 +820,43 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
   });
 
   describe("scripts/snapshot-restore.sh (more)", () => {
+    // Ruling R28: the rule lives in the script, so no caller — a wrapper, a person following the recovery file — can undo a finished restore.
+    it("R28: uploads mode on a FINISHED restore (no marker, .pre-restore-<ts> in place) changes nothing, says so, exits 0 — with or without a snapshot", async () => {
+      const source = await makeSource();
+      await makeTarget();
+      const snap = await takeSnapshot();
+      await restore(source.archive);
+      const finished = tree(rootB);
+      expect(markerExists()).toBe(false);
+      for (const args of [[rootB, STAMP, snap.uploads], [rootB, STAMP]]) {
+        const r = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "uploads", ...args]);
+        expect(r.status, r.stderr).toBe(0);
+        expect(r.stdout).toMatch(/^The restore \d{8}-\d{6} had FINISHED .* Nothing was changed\.\n$/);
+        expect(tree(rootB)).toEqual(finished);
+      }
+      expect(sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "state", rootB, STAMP]).stdout).toBe("complete\n");
+    });
+
+    it("R28: `state` prints started / untouched; `sqlite` given the uploads folder and stamp leaves the database alone unless the marker exists", () => {
+      const state = () => sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "state", rootB, STAMP]).stdout;
+      expect(state()).toBe("untouched\n");
+      const live = path.join(work, "vault.db");
+      const snapDb = path.join(work, "blackvault-x.db");
+      writeFileSync(live, "LIVE");
+      writeFileSync(snapDb, "SNAPSHOT");
+      const guarded = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "sqlite", snapDb, live, rootB, STAMP]);
+      expect(guarded.status, guarded.stderr).toBe(0);
+      expect(guarded.stdout).toMatch(/the database was not touched/);
+      expect(readFileSync(live, "utf8")).toBe("LIVE");
+      mkdirSync(path.join(rootB, MARKER));
+      expect(state()).toBe("started\n");
+      // The marker wins over .pre-restore-<ts>: killed after the renames, before the marker was removed.
+      mkdirSync(path.join(rootB, `.pre-restore-${STAMP}/images`), { recursive: true });
+      expect(state()).toBe("started\n");
+      expect(sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "sqlite", snapDb, live, rootB, STAMP]).status).toBe(0);
+      expect(readFileSync(live, "utf8")).toBe("SNAPSHOT");
+    });
+
     it("clear-marker removes exactly this stamp's marker", () => {
       mkdirSync(path.join(rootB, MARKER));
       writeFileSync(path.join(rootB, MARKER, "started"), "");
@@ -871,10 +912,12 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       mkdirSync(path.join(rootB, `.restore-${STAMP}/images`), { recursive: true });
       mkdirSync(path.join(rootB, `.pre-restore-${STAMP}/images`), { recursive: true });
       mkdirSync(path.join(rootB, "images"), { recursive: true });
+      mkdirSync(path.join(rootB, MARKER)); // the restore had reached its database step (R28: only then are folders moved back)
       writeFileSync(path.join(rootB, "images/from-the-archive.jpg"), "restored content");
       const r = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "uploads", rootB, STAMP]);
       expect(r.status, r.stderr).toBe(0);
-      expect(tree(rootB)).toEqual({ images: "dir" });
+      expect(tree(rootB)).toEqual({ images: "dir", [MARKER]: "dir" });
+      rmSync(path.join(rootB, MARKER), { recursive: true });
 
       // With a snapshot: an extra file stays and is counted.
       mkdirSync(path.join(snapshots, "u/images"), { recursive: true });

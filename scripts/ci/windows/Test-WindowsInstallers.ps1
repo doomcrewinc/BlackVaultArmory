@@ -2246,6 +2246,7 @@ $iUp = Get-StepIndex $steps '^compose up -d$'
 $during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::ReadAllText((Join-Path $d "__recovery-during.txt")) } else { "" }
 Assert ($during -match "BlackVault restore \d{8}-\d{6}: RECOVERY") "R25: the recovery file existed WHILE the restore ran"
 Assert ($during -match "database: backups\\blackvault-\d{8}-\d{6}\.db" -and $during -match "docker stop blackvault-restore-\d{8}-\d{6}" -and $during -match "/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}") "R25: it names the snapshot, the container to stop, and the rollback commands"
+Assert ($during -match "/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}" -and $during -match "complete\s+The restore FINISHED" -and $during -match "started\s+The restore had reached the database" -and $during -match "untouched\s+The restore never reached the database") "R28: it tells the three states apart, and how to find out which one it is"
 Assert ($r.Output.Contains("How to put it back is in")) "R25: it was printed before the restore started"
 Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: it is gone after a successful restore"
 Assert ($iVerify -eq 0) "the first call is the check: '$RestoreVerify' (index $iVerify)"
@@ -2281,7 +2282,7 @@ $iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp \d{8}-\d{6} '
 $stamp = if ($iRestore -ge 0 -and $steps[$iRestore] -match '--stamp (\d{8}-\d{6}) ') { $Matches[1] } else { "" }
 $dbSnap = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }) | Select-Object -First 1
 $upSnap = @(Get-UploadsBackups $d) | Select-Object -First 1
-$iDb = Get-StepIndex $steps ('--user 0:0 --entrypoint /bin/sh .*backups:/bv-backups:ro .*snapshot-restore\.sh:/bv-snapshot-restore\.sh:ro blackvault /bv-snapshot-restore\.sh sqlite /bv-backups/' + [regex]::Escape("$dbSnap") + ' /app/data/vault\.db$')
+$iDb = Get-StepIndex $steps ('--user 0:0 --entrypoint /bin/sh .*backups:/bv-backups:ro .*snapshot-restore\.sh:/bv-snapshot-restore\.sh:ro blackvault /bv-snapshot-restore\.sh sqlite /bv-backups/' + [regex]::Escape("$dbSnap") + ' /app/data/vault\.db /app/uploads ' + [regex]::Escape($stamp) + '$')
 $iUploads = Get-StepIndex $steps ('blackvault /bv-snapshot-restore\.sh uploads /app/uploads ' + [regex]::Escape($stamp) + ' /bv-backups/' + [regex]::Escape("$upSnap") + '\s*$')
 $iUp = Get-StepIndex $steps '^compose up -d$'
 Assert ($iRestore -ge 0 -and $stamp) "the restore program was started with a stamp ($stamp)"

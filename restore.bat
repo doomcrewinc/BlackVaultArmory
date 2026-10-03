@@ -267,6 +267,16 @@ set "BV_CONTAINER=blackvault-restore-!BV_STAMP!"
 :: program's marker and its .pre-restore folder are looked for here.
 set "BV_HOST_UPLOADS=!BV_HOST_DATA!\uploads"
 set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
+:: This run's two names must be free. If one exists (a second run in the
+:: same second, a clock set back), the restore program would refuse - and a
+:: leftover .pre-restore folder would then read as "the restore finished".
+if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!" goto :stamp_taken
+if exist "!BV_MARKER!" goto :stamp_taken
+goto :stamp_free
+:stamp_taken
+>&2 echo ERROR: a .pre-restore-!BV_STAMP! or .restore-!BV_STAMP!.db-started folder already exists in !BV_HOST_UPLOADS! (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped.
+exit /b 1
+:stamp_free
 
 :: -- 6. Stop the app, snapshot the database and the uploads ---------
 >&2 echo Stopping BlackVault...
@@ -336,16 +346,21 @@ if "!BV_RC!"=="0" goto :restore_done
 :: Ruling R24. What the restore program left behind:
 ::   started    its marker exists: the database step was reached. Also the
 ::              answer when the uploads folder is not there to look into.
-::   complete   no marker, but .pre-restore-<time> exists: the program
-::              removes its marker only after everything is in place, so
-::              the restore FINISHED and only its exit status was lost.
+::   complete   no marker, but .pre-restore-<time> holds a previous folder:
+::              the program removes its marker only after everything is in
+::              place, so the restore FINISHED and only its exit status was
+::              lost.
 ::   untouched  neither: the database step was never reached.
+:: scripts/snapshot-restore.sh applies the same rule again by itself, inside
+:: the container (ruling R28): its uploads mode changes nothing after a
+:: finished restore, and its sqlite mode nothing unless the marker exists.
 set "BV_STATE=untouched"
-if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\" set "BV_STATE=complete"
+if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
+if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\documents\" set "BV_STATE=complete"
 if exist "!BV_MARKER!\" set "BV_STATE=started"
 if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=started"
 if not "!BV_STATE!"=="complete" goto :rollback
->&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back.
+>&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.
 
 :restore_done
 del /f /q "!BV_RECOVERY!" >nul 2>&1
@@ -389,7 +404,7 @@ if errorlevel 1 goto :rollback_db_failed
 if errorlevel 1 goto :rollback_db_failed
 goto :rollback_checked
 :rollback_sqlite
-%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db 1>&2
+%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP! 1>&2
 if errorlevel 1 goto :rollback_db_failed
 goto :rollback_checked
 :rollback_db_failed
@@ -459,21 +474,31 @@ set "BV_PSQL=docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault"
 >>"!BV_RECOVERY!" echo   docker ps -a --filter name=!BV_CONTAINER!
 >>"!BV_RECOVERY!" echo   docker compose stop blackvault
 >>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo 2. The photos and documents:
->>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!
+>>"!BV_RECOVERY!" echo 2. See how far the restore got. This prints one word:
+>>"!BV_RECOVERY!" echo   !BV_RB! state /app/uploads !BV_STAMP!
+>>"!BV_RECOVERY!" echo    complete   The restore FINISHED: the records and the files are the backup's.
+>>"!BV_RECOVERY!" echo               There is nothing to put back. (The program's OK line and the
+>>"!BV_RECOVERY!" echo               RESTORE entry in the audit log may be missing.) The commands of
+>>"!BV_RECOVERY!" echo               step 3 change nothing in this state; you can go to step 4.
+>>"!BV_RECOVERY!" echo    started    The restore had reached the database and did not finish. Step 3
+>>"!BV_RECOVERY!" echo               puts the photos, the documents and the database back.
+>>"!BV_RECOVERY!" echo    untouched  The restore never reached the database. Step 3 only removes its
+>>"!BV_RECOVERY!" echo               work folder and checks the photos and documents.
 >>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo 3. The database. ONLY if this folder exists:
->>"!BV_RECOVERY!" echo      "!BV_MARKER!"
->>"!BV_RECOVERY!" echo    It is the mark the restore leaves just before it changes the database. If
->>"!BV_RECOVERY!" echo    it does not exist, the database was never touched: skip to step 4.
+>>"!BV_RECOVERY!" echo 3. Put it back. Run every line, in this order; each one looks at the state
+>>"!BV_RECOVERY!" echo    itself and changes only what that state needs.
+>>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!
 if /i "!DB_PROVIDER!"=="sqlite" goto :write_recovery_sqlite
+>>"!BV_RECOVERY!" echo    PostgreSQL: the next four lines ONLY if step 2 printed: started
+>>"!BV_RECOVERY!" echo    (in any other state they would replace a database the restore did not
+>>"!BV_RECOVERY!" echo    leave half done):
 >>"!BV_RECOVERY!" echo   docker compose up -d --wait db
 >>"!BV_RECOVERY!" echo   !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault"
 >>"!BV_RECOVERY!" echo   !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!"
 >>"!BV_RECOVERY!" echo   !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault"
 goto :write_recovery_tail
 :write_recovery_sqlite
->>"!BV_RECOVERY!" echo   !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db
+>>"!BV_RECOVERY!" echo   !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP!
 :write_recovery_tail
 >>"!BV_RECOVERY!" echo   !BV_RB! clear-marker /app/uploads !BV_STAMP!
 >>"!BV_RECOVERY!" echo.

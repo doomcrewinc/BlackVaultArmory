@@ -519,6 +519,7 @@ describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the
     /^\[ -n "\$answer" \] \|\| die "[^$`]*"$/, // [ : a builtin; the message holds no expansion
     /^if \[ "\$FIRST" != "\$PASSPHRASE" \]; then$/,
     /^printf '%s' "\$PASSPHRASE" \| "\$\{CMD\[@\]\}"$/, // printf: a builtin, writing to the pipe
+    /^"\$\{CMD\[@\]\}" < <\(printf '%s' "\$PASSPHRASE"\) &$/, // the same builtin, in a process substitution (restore.sh's waited-for restore step)
   ];
 
   it("every line naming PASSPHRASE, FIRST or answer is an assignment, a `[ … ]` test, the `read`, or the `printf … |` pipe", () => {
@@ -526,11 +527,12 @@ describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the
     const unexpected = lines.filter((l) => !ALLOWED.some((re) => re.test(l)));
     expect(unexpected).toEqual([]);
     expect(lines.length).toBeGreaterThanOrEqual(15);
-    // It is sent anywhere in exactly two places, both this one line and both in the shared file:
-    // bv_run_with_passphrase and its background twin bv_run_with_passphrase_waited (restore.sh's restore step).
+    // It is sent anywhere in exactly two places, both in the shared file: the pipe of bv_run_with_passphrase,
+    // and the process substitution of bv_run_with_passphrase_waited (restore.sh's restore step).
     const SEND = `printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`;
-    expect(lines.filter((l) => l.includes("|") && !l.includes("||"))).toEqual([SEND, SEND]);
-    expect(codeOf("scripts/backup-common.sh").filter((l) => l === SEND)).toHaveLength(2);
+    const SEND_WAITED = `"\${CMD[@]}" < <(printf '%s' "$PASSPHRASE") &`;
+    expect(lines.filter((l) => (l.includes("|") && !l.includes("||")) || l.includes("<("))).toEqual([SEND, SEND_WAITED]);
+    expect(codeOf("scripts/backup-common.sh").filter((l) => l === SEND || l === SEND_WAITED)).toEqual([SEND, SEND_WAITED]);
     // restore.sh and backup.sh only ever clear it (backup.sh also compares the two typed answers).
     expect(codeOf("restore.sh").filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l)).every((l) => l === 'PASSPHRASE=""')).toBe(true);
   });

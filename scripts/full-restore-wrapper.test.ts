@@ -25,7 +25,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The default 5 s limit only guards against a hang; every run of the script below has its own 60 s limit (spawnSync).
+vi.setConfig({ testTimeout: 120_000 });
 
 const ROOT = path.resolve(__dirname, "..");
 const isWindows = process.platform === "win32";
@@ -63,6 +66,7 @@ case "$*" in
   *"/bv-uploads-snapshot.sh /app/uploads /bv-backups "*)
     for a in "$@"; do name=$a; done
     sh scripts/uploads-snapshot.sh "$dd/uploads" backups "$name"; rc=$?
+    [ -n "\${BV_STUB_SNAPSHOT_SLEEP:-}" ] && { : > "${rec}/snapshotting"; sleep "$BV_STUB_SNAPSHOT_SLEEP"; }
     # After the snapshot: the host user can no longer create a file in backups/.
     [ "\${BV_STUB_LOCK_BACKUPS:-}" = 1 ] && chmod 500 backups
     exit $rc ;;
@@ -82,7 +86,8 @@ case "$*" in
     exit "\${BV_STUB_VERIFY_EXIT:-0}" ;;
   *"dist/scripts/full-restore.mjs"*)
     cat > "${rec}/stdin-restore"
-    [ "\${BV_STUB_HIDE_UPLOADS:-}" = 1 ] && chmod 000 "$dd/uploads"
+    # Once the "container" has ended, the host user can no longer look into the uploads folder.
+    [ "\${BV_STUB_HIDE_UPLOADS:-}" = 1 ] && trap 'chmod 000 "$dd/uploads"' EXIT
     stamp=""; prev=""; for a in "$@"; do [ "$prev" = "--stamp" ] && stamp=$a; prev=$a; done
     # What is on disk WHILE the restore runs: the recovery file (ruling R25).
     cat backups/restore-*-RECOVERY.txt > "${rec}/recovery-during" 2>/dev/null
@@ -93,12 +98,14 @@ case "$*" in
       mkdir -p "$dd/uploads/images"
       printf 'restored' > "$dd/uploads/images/from-backup.jpg"
     }
+    # BV_STUB_THEN_HANG=1: leave the state, then keep "running" (the test kills the wrapper, as a closed window would).
+    finish() { if [ "\${BV_STUB_THEN_HANG:-}" = 1 ]; then echo $$ > "${rec}/restore.pid.tmp"; mv "${rec}/restore.pid.tmp" "${rec}/restore.pid"; exec sleep 120; fi; exit "$1"; }
     case "\${BV_STUB_RESTORE:-ok}" in
       ok) echo "${OK_LINE}"; exit 0 ;;
       # Refused while staging: the database step was never reached, so NO marker.
       refuse)
         mkdir -p "$dd/uploads/.restore-$stamp/images"; printf 'staged' > "$dd/uploads/.restore-$stamp/images/x.jpg"
-        echo "full-restore: [stub] refused. Nothing was changed." >&2; exit 1 ;;
+        echo "full-restore: [stub] refused. Nothing was changed." >&2; finish 1 ;;
       # The database step started (marker), the transaction rolled back: nothing actually changed.
       dbfail) marker; echo "full-restore: [stub] the database step failed." >&2; exit 1 ;;
       crash)
@@ -110,15 +117,18 @@ case "$*" in
         printf 'staged' > "$dd/uploads/.restore-$stamp/documents/from-backup.pdf"
         swap_images
         printf 'damaged' > "$dd/uploads/documents/doc1.pdf"
-        echo "full-restore: [stub] killed." >&2; exit 137 ;;
+        echo "full-restore: [stub] killed." >&2; finish 137 ;;
       # Everything in place and the marker removed, but the exit status is lost (the container died on the way out).
       complete)
+        [ -f "$dd/db/vault.db" ] && printf 'THE RESTORED RECORDS' > "$dd/db/vault.db"
         swap_images
         mv "$dd/uploads/documents" "$dd/uploads/.pre-restore-$stamp/documents"; mkdir -p "$dd/uploads/documents"
-        echo "${OK_LINE}"; exit 137 ;;
-      hang) echo $$ > "${rec}/restore.pid"; exec sleep 25 ;;
+        echo "${OK_LINE}"; finish 137 ;;
+      # The pid file appears complete or not at all (written beside, then renamed).
+      hang) echo $$ > "${rec}/restore.pid.tmp"; mv "${rec}/restore.pid.tmp" "${rec}/restore.pid"; exec sleep 120 ;;
     esac ;;
-  "stop blackvault-restore-"*) [ -f "${rec}/restore.pid" ] && kill "$(cat "${rec}/restore.pid")" 2>/dev/null; exit 0 ;;
+  # BV_STUB_NO_CONTAINER=1: the container was never created, so "docker stop" finds nothing to stop.
+  "stop blackvault-restore-"*) [ "\${BV_STUB_NO_CONTAINER:-}" != 1 ] && [ -f "${rec}/restore.pid" ] && kill "$(cat "${rec}/restore.pid")" 2>/dev/null; exit 0 ;;
   "ps -aq --filter name=^blackvault-restore-"*) [ "\${BV_STUB_CONTAINER_STUCK:-}" = 1 ] && echo "0123456789ab"; exit 0 ;;
   "compose stop blackvault") [ -n "\${BV_STUB_STOP_SLEEP:-}" ] && { : > "${rec}/stopping"; sleep "$BV_STUB_STOP_SLEEP"; } ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
@@ -262,6 +272,12 @@ beforeEach(() => {
   fs.chmodSync(path.join(app, "scripts/db-snapshot.sh"), 0o755);
   seedInstall();
   writeStub();
+  // `date`, so that a test can fix the restore's time stamp (BV_STUB_DATE); everything else goes to the real one.
+  fs.writeFileSync(
+    path.join(bin, "date"),
+    `#!/bin/bash\nif [ -n "\${BV_STUB_DATE:-}" ] && [ "$*" = "-u +%Y%m%d-%H%M%S" ]; then echo "$BV_STUB_DATE"; else PATH=/bin:/usr/bin exec date "$@"; fi\n`,
+    { mode: 0o755 },
+  );
 });
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -270,7 +286,7 @@ afterEach(() => {
 describe.skipIf(isWindows)("restore.sh", () => {
   const ROLLBACK = () => `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups:ro -v ${app}/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro blackvault /bv-snapshot-restore.sh`;
   const PSQL = "compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
-  const backupsDir = () => fs.readdirSync(path.join(app, "backups")).sort();
+  const backupsDir = () => (fs.existsSync(path.join(app, "backups")) ? fs.readdirSync(path.join(app, "backups")).sort() : []);
   const dbSnapName = () => backupsDir().find((n) => /^blackvault-\d{8}-\d{6}\.(db|sql)$/.test(n))!;
   const upSnapName = () => backupsDir().find((n) => n.startsWith("uploads-"))!;
   const recoveryFiles = () => backupsDir().filter((n) => n.endsWith("-RECOVERY.txt"));
@@ -280,6 +296,34 @@ describe.skipIf(isWindows)("restore.sh", () => {
   const pgInstall = () => {
     fs.rmSync(path.join(app, "data"), { recursive: true });
     seedInstall("postgres");
+  };
+
+  /** Starts restore.sh, waits for `marker` to appear in the record folder, sends `signal` to the wrapper ONLY, and resolves with how it ended. */
+  async function runAndSignal(marker: string, signal: NodeJS.Signals, env: Record<string, string>) {
+    const child = spawn("bash", [path.join(app, "restore.sh"), NAME, "--yes", "--passphrase-file", passFile()], { cwd: app, env: baseEnv(env), stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    const started = Date.now();
+    while (!fs.existsSync(path.join(rec, marker)) && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 25));
+    expect(fs.existsSync(path.join(rec, marker)), `exit=${child.exitCode} signal=${child.signalCode} calls=${JSON.stringify(calls())} stderr=${JSON.stringify(stderr)}`).toBe(true);
+    const sentAt = Date.now();
+    child.kill(signal);
+    const code = await new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
+    return { code, stderr, ms: Date.now() - sentAt };
+  }
+
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitUntilDead = async (pid: number) => {
+    const started = Date.now();
+    while (alive(pid) && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 25));
+    return !alive(pid);
   };
 
   describe("the command sequence", () => {
@@ -329,7 +373,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const stamp = stampOf();
       expect(afterRestore()).toEqual([
         `${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`,
-        `${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db`,
+        `${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db /app/uploads ${stamp}`,
         `${ROLLBACK()} clear-marker /app/uploads ${stamp}`,
         "compose up -d",
       ]);
@@ -410,17 +454,33 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(fs.existsSync(path.join(app, `data/uploads/.restore-${stampOf()}.db-started`))).toBe(true); // still says: the database must be put back
     });
 
-    it("the uploads folder cannot be looked into from the host: not knowing counts as 'the database may have changed', and it is put back", () => {
+    it("the uploads folder cannot be looked into from the host: the state is asked INSIDE a container, and acted on (untouched → no database rollback; started → rollback)", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse", BV_STUB_HIDE_UPLOADS: "1" } });
       expect(r.code).toBe(1);
-      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["uploads", "sqlite", "clear-marker", "compose up -d"]);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["state", "uploads", "compose up -d"]);
+
+      fs.rmSync(path.join(rec, "calls"));
+      fs.rmSync(path.join(app, "backups"), { recursive: true });
+      const s2 = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_HIDE_UPLOADS: "1" } });
+      expect(s2.code).toBe(1);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["state", "uploads", "sqlite", "clear-marker", "compose up -d"]);
+    });
+
+    it("…and if it cannot be asked either: NOTHING is rolled back blindly, BlackVault is not started, the recovery file stays and is shown", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_HIDE_UPLOADS: "1", BV_STUB_ROLLBACK_FAIL: "state" } });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code).toBe(1);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["state"]);
+      expect(r.stderr).toContain("how far it got could not be found out");
+      expect(r.stderr).toContain("BlackVault was NOT started.");
+      expect(recoveryFiles()).toHaveLength(1);
     });
 
     it("the program had FINISHED but its exit status was lost (no marker, .pre-restore-<time> in place): nothing is rolled back; BlackVault is started; exit 0 with a WARNING", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete" } });
       expect(r.code, r.stderr).toBe(0);
       expect(afterRestore()).toEqual(["compose up -d"]);
-      expect(r.stderr).toMatch(/WARNING: the restore program ended with exit 137, but it had FINISHED/);
+      expect(r.stderr).toMatch(/WARNING: the restore program ended with exit 137, but it had FINISHED: .* Nothing is rolled back\. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing\./);
       expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
       expect(recoveryFiles()).toEqual([]);
     });
@@ -438,9 +498,9 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(during).toContain(`  docker stop blackvault-restore-${stamp}`);
       expect(during).toContain(`  docker ps -a --filter name=blackvault-restore-${stamp}`);
       expect(during).toContain(`  docker ${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`);
-      expect(during).toContain(`  docker ${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db`);
+      expect(during).toContain(`  docker ${ROLLBACK()} state /app/uploads ${stamp}`);
+      expect(during).toContain(`  docker ${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db /app/uploads ${stamp}`);
       expect(during).toContain(`  docker ${ROLLBACK()} clear-marker /app/uploads ${stamp}`);
-      expect(during).toContain(`     ./data/uploads/.restore-${stamp}.db-started`);
       expect(during).toContain(`  rm backups/restore-${stamp}-RECOVERY.txt`);
       // It was also PRINTED before the restore started.
       expect(r.stderr).toContain(during);
@@ -483,7 +543,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const text = fs.readFileSync(file, "utf8");
       expect(text).toContain(`Run these from '${app}', in this order.`);
       const commands = lines(text).filter((l) => /^ {2}(docker compose run|rm) /.test(l)).map((l) => l.trim());
-      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["uploads", "sqlite", "clear-marker", "rm"]);
+      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["state", "uploads", "sqlite", "clear-marker", "rm"]);
       expect(commands[0]).toContain(`-v '${app}/backups:/bv-backups:ro'`);
       for (const command of commands) {
         const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
@@ -517,24 +577,11 @@ describe.skipIf(isWindows)("restore.sh", () => {
   });
 
   describe("interrupted (R25)", () => {
-    /** Starts restore.sh, waits for `marker` to appear in the record folder, sends `signal` to the wrapper ONLY, and resolves with how it ended. */
-    async function runAndSignal(marker: string, signal: NodeJS.Signals, env: Record<string, string>) {
-      const child = spawn("bash", [path.join(app, "restore.sh"), NAME, "--yes", "--passphrase-file", passFile()], { cwd: app, env: baseEnv(env), stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
-      child.stderr.on("data", (d) => (stderr += d));
-      const started = Date.now();
-      while (!fs.existsSync(path.join(rec, marker)) && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 25));
-      expect(fs.existsSync(path.join(rec, marker)), `exit=${child.exitCode} signal=${child.signalCode} calls=${JSON.stringify(calls())} stderr=${JSON.stringify(stderr)}`).toBe(true);
-      const sentAt = Date.now();
-      child.kill(signal);
-      const code = await new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
-      return { code, stderr, ms: Date.now() - sentAt };
-    }
-
     it.each(["SIGTERM", "SIGHUP", "SIGINT"] as NodeJS.Signals[])("%s while the restore runs: the restore container is stopped BY NAME and seen to be gone, then the recovery text is shown; the file stays; BlackVault is not started", async (signal) => {
       const r = await runAndSignal("restore.pid", signal, { BV_STUB_RESTORE: "hang" });
       expect(r.code).toBe(1);
-      expect(r.ms).toBeLessThan(10_000); // at once: not after the 25 s the container would have run
+      // At once, not when the "container" ends by itself: the stub would run for 120 s. (60 s only guards against that; a stalled machine does not fail it.)
+      expect(r.ms).toBeLessThan(60_000);
       const stamp = stampOf();
       expect(afterRestore()).toEqual([`stop blackvault-restore-${stamp}`, `ps -aq --filter name=^blackvault-restore-${stamp}$`]);
       const tail = r.stderr.slice(r.stderr.indexOf("ERROR: the restore was interrupted."));
@@ -554,19 +601,151 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
     it("interrupted while BlackVault is being stopped (before the restore started): BlackVault is started again and the message says nothing was changed; no recovery file", async () => {
       const before = install();
-      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "2" });
+      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "3" });
       expect(r.code).toBe(1);
-      expect(steps()).toEqual([VERIFY, "compose stop blackvault", "compose up -d"]);
+      // bash runs the trap when the command in progress ends. Wherever the signal landed (a stalled machine may deliver it late),
+      // the restore program never ran and the last thing done was starting BlackVault.
+      expect(steps().slice(0, 2)).toEqual([VERIFY, "compose stop blackvault"]);
+      expect(steps().at(-1)).toBe("compose up -d");
+      expect(steps().some((c) => RESTORE.test(c))).toBe(false);
       expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed; BlackVault was started again.");
       expect(install()).toEqual(before);
-      expect(fs.existsSync(path.join(app, "backups"))).toBe(false);
+      expect(recoveryFiles()).toEqual([]);
     }, 120_000);
 
     it("…and if it cannot be started again, the message says plainly that it is STOPPED", async () => {
-      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "2", BV_STUB_FAIL_ON: "up" });
+      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "3", BV_STUB_FAIL_ON: "up" });
       expect(r.code).toBe(1);
       expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed, but BlackVault is STOPPED: start it with: docker compose up -d");
     }, 120_000);
+
+    // Re-review minor 2: `docker stop` finds nothing when the container was never created; the `compose run` CLIENT must not live on and create it.
+    it("the container does not exist yet: the docker client the wrapper started is killed, so it cannot create the container after the trap has reported it gone", async () => {
+      const r = await runAndSignal("restore.pid", "SIGTERM", { BV_STUB_RESTORE: "hang", BV_STUB_NO_CONTAINER: "1" });
+      expect(r.code).toBe(1);
+      const client = Number(read("restore.pid"));
+      expect(await waitUntilDead(client)).toBe(true); // the wrapper killed it; `docker stop` (a no-op here) did not
+      expect(alive(client)).toBe(false);
+      expect(r.stderr).toContain("The restore container is gone.");
+      expect(afterRestore()).toEqual([`stop blackvault-restore-${stampOf()}`, `ps -aq --filter name=^blackvault-restore-${stampOf()}$`]);
+    }, 120_000);
+
+    // Re-review minor 6.
+    it("interrupted during the snapshot: db-snapshot.sh's uploads marker is not left behind, there is no recovery file, and BlackVault is started again", async () => {
+      const before = install();
+      const r = await runAndSignal("snapshotting", "SIGTERM", { BV_STUB_SNAPSHOT_SLEEP: "3" });
+      expect(r.code).toBe(1);
+      expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed; BlackVault was started again.");
+      expect(steps().at(-1)).toBe("compose up -d");
+      expect(steps().some((c) => RESTORE.test(c))).toBe(false);
+      expect(backupsDir().filter((n) => n === ".uploads-snapshot-marker" || n.endsWith("-RECOVERY.txt"))).toEqual([]);
+      expect(install()).toEqual(before);
+      // A second restore is not blocked.
+      expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(0);
+    }, 120_000);
+
+    it("the early handler also removes a recovery file already written (the window between writing it and starting the restore)", () => {
+      // That window holds only `echo`/`cat`; no test can land a signal in it. Pinned on the script instead.
+      const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+      const body = sh.slice(sh.indexOf("interrupted_early() {"), sh.indexOf("trap interrupted_early INT TERM HUP"));
+      expect(body).toContain('rm -f "$RECOVERY_FILE" backups/.uploads-snapshot-marker');
+      // …and it stays the handler until the restore's own trap replaces it, with nothing that changes the install in between.
+      const between = sh.slice(sh.indexOf('if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then'), sh.indexOf("trap interrupted INT TERM HUP"));
+      expect(between).not.toMatch(/\$COMPOSE (run|exec|stop)|bv_run_with_passphrase/);
+    });
+  });
+
+  // Re-review minor 3.
+  describe("a time stamp that is already taken", () => {
+    it.each([".pre-restore-20270101-000000", ".restore-20270101-000000.db-started"])("%s already exists: refused before BlackVault is stopped — never reported as a completed restore", (leftover) => {
+      const before = install();
+      fs.mkdirSync(path.join(app, "data/uploads", leftover));
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000" } });
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(steps()).toEqual([VERIFY]);
+      expect(lines(r.stderr).at(-1)).toBe(
+        `ERROR: ./data/uploads/${leftover} already exists (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped.`,
+      );
+      fs.rmdirSync(path.join(app, "data/uploads", leftover));
+      expect(install()).toEqual(before);
+    });
+  });
+
+  /**
+   * Ruling R28. The wrapper is DEAD (kill -9: a closed window, a crashed
+   * host) while the restore container runs on and ends in one of the three
+   * states. All that is left is the recovery file. Its commands are then run
+   * EXACTLY AS PRINTED, every one of them, in order.
+   */
+  describe("R28: the recovery file's commands, run exactly as printed, are right in each of the three states", () => {
+    async function wrapperDies(mode: string) {
+      const r = await runAndSignal("restore.pid", "SIGKILL", { BV_STUB_RESTORE: mode, BV_STUB_THEN_HANG: "1" });
+      expect(r.code).toBeNull(); // killed: no trap ran
+      const container = Number(read("restore.pid"));
+      process.kill(container);
+      expect(await waitUntilDead(container)).toBe(true);
+      expect(recoveryFiles()).toHaveLength(1);
+      return fs.readFileSync(path.join(app, "backups", recoveryFiles()[0]), "utf8");
+    }
+    function runPrinted(text: string) {
+      const commands = lines(text).filter((l) => /^ {2}(docker compose run|rm) /.test(l)).map((l) => l.trim());
+      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["state", "uploads", "sqlite", "clear-marker", "rm"]);
+      let out = "";
+      for (const command of commands) {
+        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
+        expect(done.status, `${command}\n${done.stderr}`).toBe(0);
+        out += done.stdout + done.stderr;
+      }
+      return out;
+    }
+
+    it("(a) FINISHED (no marker, .pre-restore-<time> in place): nothing is moved; the records and the files stay the restored ones", async () => {
+      const text = await wrapperDies("complete");
+      const restored = install();
+      expect(fs.readFileSync(path.join(app, "data/db/vault.db"), "utf8")).toBe("THE RESTORED RECORDS");
+      const out = runPrinted(text);
+      expect(out.split("\n")[0]).toBe("complete");
+      expect(out).toContain("had FINISHED");
+      expect(out).not.toContain("Moved the previous");
+      expect(out).not.toContain("copied back from the snapshot");
+      expect(install()).toEqual(restored); // byte for byte: database, restored folders, .pre-restore-<time>
+      expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
+      expect(recoveryFiles()).toEqual([]);
+    }, 120_000);
+
+    it("(b) STARTED (marker present, killed mid-way): rolled back to exactly what was there before", async () => {
+      const before = install();
+      const text = await wrapperDies("crash");
+      expect(install()).not.toEqual(before);
+      const out = runPrinted(text);
+      expect(out.split("\n")[0]).toBe("started");
+      expect(out).toContain("Moved the previous images folder back into place.");
+      expect(install()).toEqual(before);
+      expect(recoveryFiles()).toEqual([]);
+    }, 120_000);
+
+    it("(c) UNTOUCHED (refused while staging, no marker): unchanged — the database file is not even rewritten", async () => {
+      const before = install();
+      const dbPath = path.join(app, "data/db/vault.db");
+      const dbBefore = { mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino };
+      const text = await wrapperDies("refuse");
+      const out = runPrinted(text);
+      expect(out.split("\n")[0]).toBe("untouched");
+      expect(install()).toEqual(before); // the staging folder is gone too
+      expect({ mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino }).toEqual(dbBefore);
+      expect(recoveryFiles()).toEqual([]);
+    }, 120_000);
+
+    it("the text describes the three states, and on PostgreSQL says the psql lines are for 'started' only", () => {
+      pgInstall();
+      expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(0);
+      const during = read("recovery-during");
+      for (const word of ["   complete ", "   started ", "   untouched "]) expect(during).toContain(word);
+      expect(during).toContain("ONLY if step 2 printed: started");
+      expect(during).not.toContain("the database was never touched: skip to step 4"); // the sentence that was false after a finished restore
+      expect(during.indexOf("/bv-snapshot-restore.sh state /app/uploads")).toBeLessThan(during.indexOf("/bv-snapshot-restore.sh uploads /app/uploads"));
+    });
   });
 
   describe("refused with nothing changed", () => {
@@ -783,6 +962,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       'if not exist "backups\\restore-*-RECOVERY.txt" goto :no_recovery_pending',
       'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"',
       'set /p "BV_CONFIRM=Type RESTORE to continue: "',
+      'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!" goto :stamp_taken', // a taken time stamp is refused before the stop
       "%COMPOSE% stop blackvault 1>&2",
       'call scripts\\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1',
       "call :write_recovery",
@@ -801,13 +981,14 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   it("R24: the database is put back only when the marker exists (or the uploads folder is not there to look into); the uploads go first; the marker is cleared last", () => {
     // The gate, in the order it is evaluated: complete < started; a missing uploads folder counts as started.
     const at = code.indexOf('set "BV_STATE=untouched"');
-    expect(code.slice(at, at + 6)).toEqual([
+    expect(code.slice(at, at + 7)).toEqual([
       'set "BV_STATE=untouched"',
-      'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\" set "BV_STATE=complete"',
+      'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\images\\" set "BV_STATE=complete"',
+      'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\documents\\" set "BV_STATE=complete"',
       'if exist "!BV_MARKER!\\" set "BV_STATE=started"',
       'if not exist "!BV_HOST_UPLOADS!\\" set "BV_STATE=started"',
       'if not "!BV_STATE!"=="complete" goto :rollback',
-      ">&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back.",
+      ">&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.",
     ]);
     expect(code).toContain('set "BV_MARKER=!BV_HOST_UPLOADS!\\.restore-!BV_STAMP!.db-started"');
     const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
@@ -818,7 +999,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" 1>&2`,
       `${psql} -d blackvault_rollback --single-transaction -f - < "!BV_DB_SNAPSHOT!" >nul`,
       `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" 1>&2`,
-      `${container} sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db 1>&2`,
+      `${container} sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP! 1>&2`, // the script refuses unless the marker exists (R28)
       ":rolled_back",
       'if not "!BV_STATE!"=="started" goto :marker_cleared',
       `${container} clear-marker /app/uploads !BV_STAMP! 1>&2`,
@@ -839,10 +1020,18 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(text).toContain("  docker stop !BV_CONTAINER!");
     expect(text).toContain("  docker ps -a --filter name=!BV_CONTAINER!");
     expect(text).toContain("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!");
-    expect(text).toContain("  !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db");
+    expect(text).toContain("  !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP!");
+    // R28: the three states, looked up first; the sentence that was false after a finished restore is gone.
+    expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeGreaterThan(0);
+    expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeLessThan(text.indexOf("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!"));
+    for (const word of ["   complete   ", "   started    ", "   untouched  "]) expect(text.some((l) => l.startsWith(word))).toBe(true);
+    expect(text).toContain("   PostgreSQL: the next four lines ONLY if step 2 printed: started");
+    expect(text.join("\n")).not.toContain("the database was never touched: skip to step 4");
+    // …and its wording is restore.sh's, line for line, for the state block.
+    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+    for (const l of text.filter((x) => /^ {3}(complete|started|untouched) |^ {14}\S/.test(x))) expect(sh, l).toContain(`echo "${l}"`);
     expect(text).toContain('  !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!"');
     expect(text).toContain("  !BV_RB! clear-marker /app/uploads !BV_STAMP!");
-    expect(text).toContain('     "!BV_MARKER!"');
     expect(text.join("\n")).toContain("A batch file cannot catch Ctrl-C or a closed");
     // Paths in the commands are quoted (a checkout path with spaces).
     expect(write).toContain('set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"');

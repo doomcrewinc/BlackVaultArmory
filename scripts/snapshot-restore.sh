@@ -3,9 +3,25 @@
 # scripts/db-snapshot.sh took. The restore side of that script: restore.sh /
 # restore.bat run it when a full restore fails (full-backups spec §3 step 5).
 #
-#   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB
+#   snapshot-restore.sh state   UPLOADS STAMP
 #   snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]
+#   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]
 #   snapshot-restore.sh clear-marker UPLOADS STAMP
+#
+# THE THREE STATES (rulings R24 and R28). STAMP is the restore's <ts>. The
+# restore program leaves a marker, UPLOADS/.restore-<ts>.db-started, just
+# before its database step, and removes it only when everything is in place.
+#   started    the marker exists. The database may hold the backup's
+#              records, and the folders may be half swapped: roll back.
+#   complete   no marker, but UPLOADS/.pre-restore-<ts> holds a previous
+#              images/ or documents/ folder. The restore FINISHED. There is
+#              nothing to roll back, and rolling the uploads back alone
+#              would leave the new records with the old files.
+#   untouched  neither. The database step was never reached.
+# The rule is enforced HERE, not by the callers: `uploads` moves the previous
+# folders back only in state started and changes nothing in state complete,
+# so neither wrapper, nor a person following the recovery file, can undo a
+# finished restore. `state` prints the word.
 #
 # Run INSIDE a one-off container of the app image, as root
 # (`docker compose run --user 0:0 --entrypoint /bin/sh`), with the host's
@@ -17,17 +33,20 @@
 # The app must be stopped. PostgreSQL's database is put back by the wrapper
 # itself, through the db container (psql); this script never sees it.
 #
-# sqlite   LIVE_DB becomes a byte-for-byte copy of SNAPSHOT_DB. The copy is
+# sqlite   With UPLOADS and STAMP: only in state started; otherwise it says
+#          the database was not touched and changes nothing (exit 0).
+#          LIVE_DB becomes a byte-for-byte copy of SNAPSHOT_DB. The copy is
 #          written beside it, compared with the snapshot, and only then
 #          renamed over it; it keeps LIVE_DB's owner and mode. A rollback
 #          journal or WAL left by the failed restore is removed (it belongs
 #          to the database being replaced); one saved WITH the snapshot
 #          (SNAPSHOT_DB-journal / -wal) is put back beside it.
 #
-# uploads  STAMP is the failed restore's <ts>. In order:
+# uploads  In state complete: nothing, and it says so (exit 0). Otherwise:
 #          1. UPLOADS/.restore-<ts> (its staging folder: copies of the
 #             archive's files only) is removed.
-#          2. For images and documents: if UPLOADS/.pre-restore-<ts>/<name>
+#          2. Only in state started. For images and documents: if
+#             UPLOADS/.pre-restore-<ts>/<name>
 #             exists, the restore had moved the previous folder there. The
 #             folder now in its place holds only files from the archive; it
 #             is removed and the previous one moved back, exactly as it was
@@ -75,11 +94,46 @@ own() {
   fi
 }
 
+check_stamp() {
+  case "$1" in
+    "" | */* | .*) fail "'$1' is not a restore stamp." ;;
+  esac
+}
+
+# restore_state UPLOADS STAMP: prints started, complete or untouched (see the top of this file).
+restore_state() {
+  if [ -e "$1/.restore-$2.db-started" ]; then
+    echo started
+  elif { [ -d "$1/.pre-restore-$2/images" ] && [ ! -L "$1/.pre-restore-$2/images" ]; } ||
+    { [ -d "$1/.pre-restore-$2/documents" ] && [ ! -L "$1/.pre-restore-$2/documents" ]; }; then
+    echo complete
+  else
+    echo untouched
+  fi
+}
+
 MODE=${1:-}
 case "$MODE" in
+  state)
+    UP=${2:?usage: snapshot-restore.sh state UPLOADS STAMP}
+    STAMP=${3:?usage: snapshot-restore.sh state UPLOADS STAMP}
+    check_stamp "$STAMP"
+    [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
+    restore_state "$UP" "$STAMP"
+    exit 0
+    ;;
   sqlite)
-    SNAP=${2:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB}
-    LIVE=${3:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB}
+    SNAP=${2:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
+    LIVE=${3:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
+    if [ -n "${4:-}" ]; then
+      check_stamp "${5:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}"
+      [ -d "$4" ] || fail "the uploads folder $4 does not exist."
+      STATE=$(restore_state "$4" "$5")
+      if [ "$STATE" != "started" ]; then
+        echo "The restore $5 is in state '$STATE' (its marker $4/.restore-$5.db-started does not exist): the database was not touched by it, and is left as it is."
+        exit 0
+      fi
+    fi
     [ -f "$SNAP" ] || fail "the database snapshot $SNAP does not exist."
     [ -s "$SNAP" ] || fail "the database snapshot $SNAP is empty."
     TMP="$LIVE.rollback.partial"
@@ -110,9 +164,7 @@ case "$MODE" in
   clear-marker)
     UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
-    case "$STAMP" in
-      "" | */* | .*) fail "'$STAMP' is not a restore stamp." ;;
-    esac
+    check_stamp "$STAMP"
     rm -rf "${UP:?}/.restore-$STAMP.db-started" || fail "could not remove $UP/.restore-$STAMP.db-started."
     exit 0
     ;;
@@ -144,7 +196,7 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB | uploads UPLOADS STAMP [SNAPSHOT_DIR] | clear-marker UPLOADS STAMP" >&2
+    echo "usage: snapshot-restore.sh state UPLOADS STAMP | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
     exit 2
     ;;
 esac
@@ -152,9 +204,7 @@ esac
 UP=${2:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 STAMP=${3:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 SNAP=${4:-}
-case "$STAMP" in
-  "" | */* | .*) fail "'$STAMP' is not a restore stamp." ;;
-esac
+check_stamp "$STAMP"
 case "$0" in /*) SELF=$0 ;; *) SELF="$(pwd)/$0" ;; esac
 [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
 if [ -n "$SNAP" ]; then
@@ -164,13 +214,24 @@ fi
 UP=$(cd "$UP" && pwd -P)
 STAGING="$UP/.restore-$STAMP"
 PRE="$UP/.pre-restore-$STAMP"
+STATE=$(restore_state "$UP" "$STAMP")
+
+# Ruling R28: a finished restore is never undone. Nothing below runs: not the
+# move-back, and not the comparison with the snapshot, which would copy the
+# old files over the restored ones.
+if [ "$STATE" = "complete" ]; then
+  echo "The restore $STAMP had FINISHED (its marker is gone and the previous folders are in $PRE): there is nothing to roll back. Nothing was changed."
+  exit 0
+fi
 
 # 1. The failed restore's staging folder.
 rm -rf "$STAGING" || fail "could not remove $STAGING."
 
-# 2. Folders the restore had already moved aside go back.
+# 2. Folders the restore had already moved aside go back (state started only:
+#    restore_state has just said that anything under $PRE belongs to a
+#    restore that did not finish).
 for name in images documents; do
-  if [ -d "$PRE/$name" ] && [ ! -L "$PRE/$name" ]; then
+  if [ "$STATE" = "started" ] && [ -d "$PRE/$name" ] && [ ! -L "$PRE/$name" ]; then
     if [ -e "$UP/$name" ] || [ -L "$UP/$name" ]; then
       rm -rf "${UP:?}/$name" || fail "could not remove the half-restored folder $UP/$name."
     fi
