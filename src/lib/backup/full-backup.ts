@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fsp } from "node:fs";
 import type { Dirent } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -33,14 +33,17 @@ import { TarWriter } from "./tar";
  * 3. reads every backup model through the app client (decrypted) and lists
  *    the uploads on disk;
  * 4. streams a ustar tar — `db.json`, then `files/...`, then `manifest.json`
- *    LAST — through the BVB1 sealer into `<name>.partial` (created empty,
+ *    LAST — through the BVB1 sealer into this run's own work file,
+ *    `blackvault-full-<ts>.<random token>.bvb.partial` (created empty,
  *    chmod 0600, then written). The manifest is last (controller ruling,
  *    overriding the spec's "first") so each file is hashed while it is
  *    streamed and a file that vanishes mid-run can be recorded in
  *    `manifest.skipped`;
  * 5. fsyncs the file, then VERIFIES it (a full stream decrypt plus the
  *    manifest/sha256 check, ./full-verify.ts) while it is still `.partial`;
- * 6. renames it into place and fsyncs the folder (a failure of that fsync is
+ * 6. publishes it as `blackvault-full-<ts>.bvb` with a link that fails if
+ *    that name exists (`publish`, which also states the one filesystem
+ *    exception), and fsyncs the folder (a failure of that fsync is
  *    a warning on the result, not a failed run: the backup is already there);
  * 7. writes the `BACKUP_CREATED` audit entry.
  * On any failure `.partial` is removed and the lock released. Invariant:
@@ -239,16 +242,23 @@ async function assertBackupDirWritable(dir: string): Promise<void> {
 }
 
 /**
- * Removes leftovers of a run that was killed. Called with the lock held, so
- * normally no `.partial` here belongs to a live backup.
+ * Removes leftovers of a run that was killed: every
+ * `blackvault-full-*.bvb.partial` in the folder. Called with the lock held,
+ * so normally none of them belongs to a live backup.
  *
  * The lock is advisory (./full-lock.ts, "WHAT THIS DOES NOT GUARANTEE"): in
- * rare cases two runs hold it at once, and then this CAN remove the other
- * run's in-progress `.partial`. That run keeps writing to its open handle,
- * then fails loudly — `verifyFullBackup` cannot stat the path (or, if the
- * removal lands after its verify, the rename fails) — and publishes nothing.
- * It never turns into an unverified `.bvb`: only a path that has just
- * verified is ever renamed.
+ * rare orderings two runs hold it at once, and then this DOES remove the
+ * other run's in-progress work file. What follows, for that other run:
+ * - it keeps writing to its open handle, and then `verifyFullBackup` cannot
+ *   stat its path (ENOENT) — or, if the removal lands after its verify,
+ *   `publish` cannot link it (ENOENT). It rejects and publishes nothing;
+ * - it cannot pick up this run's work file instead: each run's `.partial`
+ *   name carries its own random token (`createPartial`), so the path it
+ *   verifies and publishes is one only it ever created;
+ * - its failure cleanup removes only that same path, never this run's file.
+ * So a published `.bvb` is always a file that the run publishing it wrote
+ * and verified. Windows usually refuses to delete a file that is open; there
+ * the removal fails quietly and the other run is not disturbed.
  */
 async function removeOrphanedPartials(dir: string): Promise<void> {
   for (const name of await fsp.readdir(dir)) {
@@ -259,33 +269,68 @@ async function removeOrphanedPartials(dir: string): Promise<void> {
 }
 
 /**
- * Creates `blackvault-full-<YYYYmmdd-HHMMSS>.bvb.partial` empty, mode 0600
- * (chmod too: a default ACL on the folder can override the creation mode),
- * before any data is written. If that second's name is already taken — by a
- * finished backup or another partial — the next second's is used, so a
- * backup never overwrites an earlier one.
+ * Creates this run's work file, `blackvault-full-<YYYYmmdd-HHMMSS>.<token>.bvb.partial`,
+ * empty and mode 0600 (chmod too: a default ACL on the folder can override
+ * the creation mode) before any data is written.
+ *
+ * `<token>` is 8 random bytes in hex, new for every run (ruling R15). The
+ * lock is advisory, so two runs can be active at once; with the token they
+ * cannot be writing, verifying or publishing the same path even when they
+ * start in the same second. The name still ends in `.bvb.partial` (what
+ * `removeOrphanedPartials` looks for) and never matches the published
+ * pattern `blackvault-full-*.bvb`.
  */
-async function createPartial(dir: string, now: Date): Promise<{ file: string; partialPath: string; handle: FileHandle }> {
+async function createPartial(dir: string, now: Date): Promise<{ partialPath: string; handle: FileHandle }> {
+  const token = randomBytes(8).toString("hex");
+  const partialPath = path.join(dir, `${FULL_BACKUP_PREFIX}${snapshotStamp(now)}.${token}${FULL_BACKUP_SUFFIX}${PARTIAL_SUFFIX}`);
+  const handle = await fsp.open(partialPath, "wx", 0o600);
+  try {
+    await handle.chmod(0o600);
+  } catch (e) {
+    await handle.close().catch(() => undefined);
+    await fsp.rm(partialPath, { force: true }).catch(() => undefined);
+    throw e;
+  }
+  return { partialPath, handle };
+}
+
+/** `link(2)` errors that mean "this filesystem cannot hard-link" (SMB/CIFS, FAT, some NAS mounts), not "the name is taken". */
+const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
+
+/**
+ * Gives the verified work file its published name,
+ * `blackvault-full-<YYYYmmdd-HHMMSS>.bvb`, WITHOUT ever replacing a file that
+ * is already there. Returns the name used.
+ *
+ * `rename` would silently replace an existing target — another run's backup
+ * published in the same second. So the name is taken with `link`, which
+ * fails with EEXIST when the target exists, and the work file is unlinked
+ * afterwards. If the second's name is taken, the next second's is tried.
+ *
+ * Where the folder cannot hard-link, the fallback is "look, then rename".
+ * That is not atomic: a backup published by another run between the look
+ * and the rename would be replaced. It needs two runs active at once (the
+ * lock normally prevents that) on such a filesystem, publishing in the same
+ * second.
+ */
+async function publish(dir: string, partialPath: string, now: Date): Promise<string> {
   for (let bump = 0; bump < 120; bump++) {
     const file = `${FULL_BACKUP_PREFIX}${snapshotStamp(new Date(now.getTime() + bump * 1000))}${FULL_BACKUP_SUFFIX}`;
     const finalPath = path.join(dir, file);
-    if (await fsp.lstat(finalPath).then(() => true, () => false)) continue;
-    const partialPath = finalPath + PARTIAL_SUFFIX;
-    let handle: FileHandle;
     try {
-      handle = await fsp.open(partialPath, "wx", 0o600);
+      await fsp.link(partialPath, finalPath);
     } catch (e) {
-      if (codeOf(e) === "EEXIST") continue;
-      throw e;
+      const code = codeOf(e);
+      if (code === "EEXIST") continue;
+      if (!code || !LINK_UNSUPPORTED_CODES.has(code)) throw e;
+      if (await fsp.lstat(finalPath).then(() => true, () => false)) continue;
+      await fsp.rename(partialPath, finalPath);
+      return file;
     }
-    try {
-      await handle.chmod(0o600);
-    } catch (e) {
-      await handle.close().catch(() => undefined);
-      await fsp.rm(partialPath, { force: true }).catch(() => undefined);
-      throw e;
-    }
-    return { file, partialPath, handle };
+    // Published. The work name is now just a second link to the same file; if
+    // removing it fails, the next run's cleanup takes it.
+    await fsp.rm(partialPath, { force: true }).catch(() => undefined);
+    return file;
   }
   throw new Error(`Could not find a free backup file name in ${dir}.`);
 }
@@ -348,7 +393,7 @@ async function fsyncDir(dir: string): Promise<void> {
 }
 
 /**
- * Makes one full backup. Resolves once the archive is verified, renamed into
+ * Makes one full backup. Resolves once the archive is verified, published into
  * place and audited. Rejects with
  * - `FullBackupAlreadyRunningError` (./full-lock.ts) — another backup holds
  *   the lock (CLI exit 2, HTTP 409);
@@ -393,7 +438,6 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     const created = await createPartial(dir, now);
     partialPath = created.partialPath;
     handle = created.handle;
-    const file = created.file;
 
     const files: ManifestFileEntry[] = [];
     const skipped: FullBackupSkipped[] = [];
@@ -453,7 +497,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     await handle.close();
     handle = null;
 
-    // Verified while still `.partial`: nothing unverified ever carries the final name.
+    // Verified under its work name: nothing unverified ever carries a published name.
     const bytes = files.reduce((sum, f) => sum + f.size, 0);
     const verified = await verifyFullBackup(partialPath, opts.passphrase, {
       onProgress: (p) => report({ phase: "verifying", filesDone: p.filesDone, filesTotal: files.length, bytesDone: p.bytesDone, bytesTotal: bytes }),
@@ -465,8 +509,8 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
       );
     }
 
+    const file = await publish(dir, partialPath, now);
     const finalPath = path.join(dir, file);
-    await fsp.rename(partialPath, finalPath);
     partialPath = null;
 
     // From here on the backup exists under its final name and has verified.

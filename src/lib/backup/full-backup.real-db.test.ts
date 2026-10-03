@@ -52,13 +52,30 @@ vi.mock("@/lib/server/auth", () => ({
 }));
 
 // The engine's own verify step, wrapped so one test can make it fail.
-const verifyHook = vi.hoisted(() => ({ fail: null as Error | null, calls: 0 }));
+const verifyHook = vi.hoisted(() => ({
+  fail: null as Error | null,
+  calls: 0,
+  /** When set, awaited at the start of each verify with that verify's 1-based call number. */
+  gate: null as ((call: number, file: string) => Promise<void>) | null,
+}));
+// The lock, wrapped so one test can let two runs in at once — which the real,
+// advisory lock can do in rare orderings (full-lock.ts, "WHAT THIS DOES NOT GUARANTEE").
+const lockHook = vi.hoisted(() => ({ bypass: false }));
+vi.mock("./full-lock", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./full-lock")>();
+  return {
+    ...actual,
+    acquireFullBackupLock: async (...args: Parameters<typeof actual.acquireFullBackupLock>) =>
+      lockHook.bypass ? { path: "(bypassed)", release: async () => undefined } : actual.acquireFullBackupLock(...args),
+  };
+});
 vi.mock("./full-verify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./full-verify")>();
   return {
     ...actual,
     verifyFullBackup: async (...args: Parameters<typeof actual.verifyFullBackup>) => {
       verifyHook.calls += 1;
+      if (verifyHook.gate) await verifyHook.gate(verifyHook.calls, args[0]);
       if (verifyHook.fail) throw verifyHook.fail;
       return actual.verifyFullBackup(...args);
     },
@@ -83,6 +100,8 @@ const PASS = "correct horse battery staple";
 const NEEDLE = "PLAINTEXT-NEEDLE-7731";
 const NOW = new Date("2026-10-02T18:04:05.000Z");
 const NAME = "blackvault-full-20261002-180405.bvb";
+/** R15: `blackvault-full-<ts>.<16 hex>.bvb.partial` — a per-run token, so two runs never share a partial. */
+const PARTIAL_NAME = /^blackvault-full-20261002-1804\d\d\.[0-9a-f]{16}\.bvb\.partial$/;
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const isPosix = process.platform !== "win32";
 
@@ -204,6 +223,8 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     env = { ...process.env, IMAGE_UPLOAD_DIR: root } as NodeJS.ProcessEnv;
     verifyHook.fail = null;
     verifyHook.calls = 0;
+    verifyHook.gate = null;
+    lockHook.bypass = false;
   });
 
   afterEach(() => {
@@ -394,6 +415,7 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     await seedUploads();
     writeFileSync(path.join(backups, FULL_BACKUP_LOCK_NAME), JSON.stringify({ pid: deadPid(), startedAt: "2026-01-01T00:00:00.000Z", hostname: os.hostname(), token: "x" }));
     writeFileSync(path.join(backups, "blackvault-full-20260101-000000.bvb.partial"), "half a backup");
+    writeFileSync(path.join(backups, "blackvault-full-20260101-000000.0123456789abcdef.bvb.partial"), "half a backup, tokened name");
     const result = await run();
     expect(backupFolder()).toEqual([result.file]);
     await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3 });
@@ -421,7 +443,8 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     const err = await run().catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect((err as NodeJS.ErrnoException).code).toBe("ENOSPC");
-    expect(partialSeen).toBe(path.join(backups, `${NAME}.partial`));
+    expect(path.dirname(partialSeen)).toBe(backups);
+    expect(path.basename(partialSeen)).toMatch(PARTIAL_NAME);
     expect(writes).toBeGreaterThan(2);
     expect(backupFolder()).toEqual([]); // no .partial, no .bvb, no lock
     expect(await events()).toHaveLength(0);
@@ -584,6 +607,133 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     } finally {
       chmodSync(locked, 0o600);
     }
+  });
+
+  describe("R15: the .partial name carries a per-run token; publishing never replaces another backup", () => {
+    /** Every `.bvb.partial` path the engine creates, in order. */
+    function watchPartials(): string[] {
+      const seen: string[] = [];
+      const realOpen = fsp.open.bind(fsp);
+      vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+        if (String(args[0]).endsWith(".bvb.partial") && args[1] === "wx") seen.push(String(args[0]));
+        return realOpen(...args);
+      }) as typeof fsp.open);
+      return seen;
+    }
+
+    it("two runs with the SAME injected `now` write different partials, and the partial name never looks like a published backup", async () => {
+      const partials = watchPartials();
+      const a = await run();
+      const b = await run();
+      expect(partials).toHaveLength(2);
+      expect(partials[0]).not.toBe(partials[1]);
+      for (const p of partials) {
+        expect(path.basename(p)).toMatch(PARTIAL_NAME);
+        // Still what the orphan cleanup looks for...
+        expect(path.basename(p).startsWith("blackvault-full-") && p.endsWith(".bvb.partial")).toBe(true);
+        // ...and never what a listing of published backups (`blackvault-full-*.bvb`) matches.
+        expect(/^blackvault-full-.*\.bvb$/.test(path.basename(p))).toBe(false);
+      }
+      // The published names are unchanged: no token.
+      expect([a.file, b.file]).toEqual([NAME, "blackvault-full-20261002-180406.bvb"]);
+    });
+
+    it("the finding's ordering: run 1's partial is removed by run 2's cleanup while run 2 is active in the same second → run 1 rejects (ENOENT) and publishes nothing; it never verifies or renames run 2's file", async () => {
+      await seedUploads();
+      lockHook.bypass = true; // both runs "hold" the lock
+      const partials = watchPartials();
+      const published: Array<{ from: string; to: string }> = [];
+      for (const fn of ["link", "rename"] as const) {
+        const real = (fsp[fn] as (a: string, b: string) => Promise<void>).bind(fsp);
+        vi.spyOn(fsp, fn).mockImplementation((async (from: string, to: string) => {
+          if (String(to).endsWith(".bvb")) published.push({ from: String(from), to: String(to) });
+          return real(from, to);
+        }) as never);
+      }
+
+      // Both runs stop at the start of their verify — archive fully written and synced, not yet published.
+      const reached = [0, 1].map(() => {
+        let open!: () => void;
+        return { promise: new Promise<void>((r) => (open = r)), open };
+      });
+      const release = [0, 1].map(() => {
+        let open!: () => void;
+        return { promise: new Promise<void>((r) => (open = r)), open };
+      });
+      const verified: string[] = [];
+      verifyHook.gate = async (call, file) => {
+        verified.push(file);
+        reached[call - 1].open();
+        await release[call - 1].promise;
+      };
+
+      const run1 = run();
+      run1.catch(() => undefined);
+      await within(30_000, reached[0].promise); // run 1 wrote its partial and waits to verify
+      const run2 = run(); // same `now`: its cleanup removes run 1's partial, then it writes its own
+      run2.catch(() => undefined);
+      await within(30_000, reached[1].promise); // run 2's partial is complete, unpublished
+
+      expect(partials).toHaveLength(2);
+      expect(partials[0]).not.toBe(partials[1]); // without the token run 2 would reuse run 1's name
+      expect(readdirSync(backups).filter((n) => n.endsWith(".partial"))).toEqual([path.basename(partials[1])]);
+
+      // Run 1 goes first, while run 2's complete partial sits in the folder.
+      release[0].open();
+      const err1 = await within(30_000, run1.catch((e) => e));
+      expect(err1).toBeInstanceOf(Error);
+      expect((err1 as NodeJS.ErrnoException).code).toBe("ENOENT");
+      expect(published).toEqual([]); // run 1 published nothing — in particular not run 2's file
+      expect(readdirSync(backups)).toEqual([path.basename(partials[1])]); // and did not delete run 2's partial
+
+      release[1].open();
+      const result2 = await within(30_000, run2);
+      expect(result2.file).toBe(NAME);
+      expect(published).toEqual([{ from: partials[1], to: path.join(backups, NAME) }]);
+      expect(verified).toEqual([partials[0], partials[1]]); // each run verified only its own path
+      expect(backupFolder()).toEqual([NAME]);
+      expect(await events()).toHaveLength(1);
+      vi.restoreAllMocks();
+      verifyHook.gate = null;
+      await expect(actualVerify(result2.path, PASS)).resolves.toMatchObject({ files: 3 });
+    });
+
+    it("a backup published under this run's name while it was verifying is NOT replaced: this run takes the next second's name", async () => {
+      await seedUploads();
+      const other = Buffer.from("another run's published backup — must survive byte for byte");
+      verifyHook.gate = async () => {
+        writeFileSync(path.join(backups, NAME), other); // appears after this run chose its name
+      };
+      const result = await run();
+      expect(result.file).toBe("blackvault-full-20261002-180406.bvb");
+      expect(backupFolder()).toEqual([NAME, result.file]);
+      expect(readFileSync(path.join(backups, NAME)).equals(other)).toBe(true);
+      verifyHook.gate = null;
+      await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3 });
+      const rows = await events();
+      expect(JSON.parse(rows[0].changes ?? "null").file).toBe(result.file);
+      if (isPosix) expect(statSync(result.path).mode & 0o777).toBe(0o600);
+    });
+
+    it.each(["EPERM", "ENOTSUP", "ENOSYS", "EOPNOTSUPP"])("a folder that cannot hard-link (%s, e.g. an SMB share) still publishes, and still refuses a name that is taken", async (code) => {
+      vi.spyOn(fsp, "link").mockImplementation((async () => {
+        throw Object.assign(new Error(`${code}: link`), { code, syscall: "link" });
+      }) as never);
+      const first = await run();
+      expect(first.file).toBe(NAME);
+      const second = await run();
+      expect(second.file).toBe("blackvault-full-20261002-180406.bvb");
+      expect(backupFolder()).toEqual([first.file, second.file]);
+    });
+
+    it("a publish failure that is not about the name (EIO) fails the run and leaves no .partial", async () => {
+      vi.spyOn(fsp, "link").mockImplementation((async () => {
+        throw Object.assign(new Error("EIO: link"), { code: "EIO", syscall: "link" });
+      }) as never);
+      await expect(run()).rejects.toMatchObject({ code: "EIO" });
+      expect(backupFolder()).toEqual([]);
+      expect(await events()).toHaveLength(0);
+    });
   });
 
   it("two backups in the same second get different names; neither overwrites the other", async () => {

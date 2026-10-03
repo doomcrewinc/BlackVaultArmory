@@ -75,12 +75,19 @@ import path from "node:path";
  *
  * Why that is acceptable: this lock is advisory. It exists so two backups do
  * not load the machine at once and so the second caller gets a clear
- * "already running". It is not what keeps an archive correct. Each run
- * writes its own `.partial` (created with `wx`, so two runs never share one)
- * and renames it to `.bvb` only after it has verified it; a run whose
- * `.partial` was removed by another run's cleanup fails at verify or at the
- * rename and publishes nothing (see `removeOrphanedPartials` in
- * ./full-backup.ts).
+ * "already running". It is not what keeps an archive correct. In
+ * ./full-backup.ts each run writes a work file whose name carries a random
+ * per-run token, verifies that path, and publishes it with a no-replace link
+ * (`createPartial`, `publish`). So when two runs are active at once:
+ * - they never write, verify or publish the same work file, even when they
+ *   start in the same second;
+ * - the later run's cleanup removes the earlier run's work file
+ *   (`removeOrphanedPartials`); the earlier run then fails with ENOENT at
+ *   its verify or its publish and publishes nothing;
+ * - two runs that both finish get two different published names; neither
+ *   replaces the other's `.bvb` (on a filesystem that cannot hard-link, the
+ *   publish falls back to look-then-rename, which is not atomic — see
+ *   `publish`).
  *
  * Other known limits: a pid recycled by an unrelated process on the same host keeps
  * a stale lock alive until that process exits; the heartbeat rule compares
