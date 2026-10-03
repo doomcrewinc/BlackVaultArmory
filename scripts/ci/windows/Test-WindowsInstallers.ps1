@@ -89,6 +89,11 @@ if (Test-Path $csc) {
 }
 if (-not (Test-Path $StubExe)) { throw "could not build the docker stub at $StubExe" }
 Write-Host "docker stub built: $StubExe"
+# Where a REAL docker.exe sits on this machine. It matters: backup.bat and
+# restore.bat start docker from PowerShell, and Process.Start with a bare
+# name searches the Windows system folders BEFORE PATH - so a docker.exe in
+# System32 was started instead of the stub (first Windows run of BK1).
+Write-Host "real docker on this machine: $(@(& where.exe docker 2>$null) -join '; ')"
 
 # A harness error must never hide the scenarios after it. The first Windows
 # run of backup.bat died on a harness exception in its FIRST scenario (a
@@ -2063,7 +2068,10 @@ Show-EvidenceIfFailed $r
 Write-Scenario "backup.bat - a bad --keep, --keep with --verify, a missing or empty passphrase file, an unknown argument: exit 1 before docker is touched"
 $d = New-BackupSandbox "backup-bad-args"
 $pf = New-PassFile $d "$BackupPass`n"
-foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000")) {
+# "1;2": Windows CI (fa9f32f) showed for /f drops a value whose first
+# character AFTER its leading delimiters is ";", not only one that starts
+# with it - the same hole as "a;b.bvb" in BK9.
+foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000", "1;2")) {
   $r = Invoke-Backup $d "--keep $bad --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep $bad refused, docker never invoked (exit $($r.ExitCode))"
   Show-EvidenceIfFailed $r
@@ -2173,6 +2181,9 @@ Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = ";5 x" }
 Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a limit starting with a semicolon is refused before the program starts (exit $($r.ExitCode))"
 Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "5;5" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a limit with a semicolon after a digit is refused before the program starts (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "6h" }
 Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a non-numeric limit is refused before the program starts (exit $($r.ExitCode))"
 Show-EvidenceIfFailed $r
@@ -2196,6 +2207,13 @@ Show-EvidenceIfFailed $r
 # "no console: exit 1 at once" can be run for both.
 #
 # restore.bat starts docker through the SAME PowerShell line as backup.bat.
+# Ruling R27: ONE PowerShell process reads the passphrase once, runs the
+# check, then steps 5-7 (restore.bat again, in a child cmd.exe), then the
+# restore. What these scenarios prove of that: both programs get the
+# passphrase file's bytes on stdin (RS1), the docker calls keep their order
+# through the child (RS1, RS2, RS7), a refusal in the child stops the restore
+# and is reported once (RS8), and a failed check never reaches the child
+# (RS4). That the PROMPT appears once cannot be run here.
 # Every scenario below prints the script's whole output and the stub log
 # when one of its checks fails (Show-EvidenceIfFailed).
 
@@ -2227,6 +2245,7 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_RESTORE_EXIT" = $null; "BV_STUB_RESTORE_STDOUT" = $null; "BV_STUB_RESTORE_STDERR" = $null; "BV_STUB_ROLLBACK_EXIT" = $null
     "BV_STUB_RESTORE_MARKER_DIR" = $null; "BV_STUB_RESTORE_RECOVERY_COPY" = (Join-Path $Dir "__recovery-during.txt"); "DATA_DIR" = $null
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
+    "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
@@ -2271,6 +2290,8 @@ $during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::Rea
 Assert ($during -match "BlackVault restore \d{8}-\d{6}: RECOVERY") "R25: the recovery file existed WHILE the restore ran"
 Assert ($during -match "database: backups\\blackvault-\d{8}-\d{6}\.db" -and $during -match "docker stop blackvault-restore-\d{8}-\d{6}" -and $during -match "/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}") "R25: it names the snapshot, the container to stop, and the rollback commands"
 Assert ($during -match "/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}" -and $during -match "complete\s+The restore FINISHED" -and $during -match "started\s+The restore had reached the database" -and $during -match "untouched\s+The restore never reached the database") "R28: it tells the three states apart, and how to find out which one it is"
+Assert ($during -match "(?m)^  docker compose run [^\r\n]* /bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6} && docker compose run [^\r\n]* /bv-snapshot-restore\.sh sqlite [^\r\n]* && docker compose run [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}\s*$") "the rollback is ONE command line joined with &&: clear-marker runs only if the uploads and the database lines worked"
+Assert ($during -notmatch "(?m)^  docker compose run [^&\r\n]* /bv-snapshot-restore\.sh clear-marker ") "clear-marker is never a line of its own"
 Assert ($r.Output.Contains("How to put it back is in")) "R25: it was printed before the restore started"
 Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: it is gone after a successful restore"
 Assert ($iVerify -eq 0) "the first call is the check: '$RestoreVerify' (index $iVerify)"
@@ -2389,7 +2410,7 @@ foreach ($outside in @((Join-Path $d $RestoreName), "data\$RestoreName", "C:\Win
   Assert (@(Get-RestoreSteps $r).Count -eq 0) "nothing was run for $outside"
   Show-EvidenceIfFailed $r
 }
-foreach ($badName in @("a&b.bvb", ";x.bvb", "a b.bvb")) {
+foreach ($badName in @("a&b.bvb", ";x.bvb", "a b.bvb", "a;b.bvb")) {
   $r = Invoke-Restore $d "`"$badName`" --yes --passphrase-file `"$pf`""
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: restore: that is not a backup file name") "a bad file name is refused: $badName (exit $($r.ExitCode))"
   Assert (@(Get-RestoreSteps $r).Count -eq 0) "nothing was run for $badName"
@@ -2486,6 +2507,42 @@ $steps = @(Get-RestoreSteps $r)
 Assert ((Get-StepIndex $steps 'psql') -eq -1) "no psql command: the database is never dropped"
 Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads ') -ge 0) "the uploads are checked"
 Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started again"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS12
+# Task 7 re-review, item 3. restore.bat used to call this state "started" and
+# put the PostgreSQL database back; had the restore in fact finished, that
+# gave old records with new files. Now, as restore.sh: nothing blindly.
+Write-Scenario "restore.bat - the uploads folder is not there to look into (PostgreSQL): how far the restore got is unknown, so NOTHING is rolled back, BlackVault is NOT started, the recovery file stays and is shown"
+$d = New-RestoreSandbox "restore-state-unknown" -Postgres
+Remove-Item -Recurse -Force (Get-UploadsDir $d)
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed." }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp '
+Assert ($iRestore -ge 0) "the restore program was started (index $iRestore)"
+Assert ((Get-StepIndex $steps 'psql') -eq -1) "not one psql command: the database is not put back blindly"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh') -eq -1) "no rollback container was started"
+Assert ($iRestore -ge 0 -and $iRestore -eq ($steps.Count - 1)) "BlackVault was NOT started: the restore program is the last docker call (last call: $($steps | Select-Object -Last 1))"
+Assert ($r.Output -match "how far it got could not be found out: the uploads folder .*\\uploads is not there to look into\. Nothing is rolled back blindly\.") "says how far it got is unknown and nothing is rolled back blindly"
+Assert ($r.Output.Contains("BlackVault was NOT started. What to do is in")) "says the app was not started and points at the recovery file"
+Assert ($r.Output -match "/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}") "the recovery text (how to ask for the state inside a container) is shown"
+Assert (@(Get-RecoveryFiles $d).Count -eq 1) "the recovery file stays"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS13
+# Ruling R27: BV_RESTORE_PHASE is how the PowerShell step re-enters
+# restore.bat for steps 5-7. Left set in a console, it must not send a
+# user's run into the middle of the script.
+Write-Scenario "restore.bat - BV_RESTORE_PHASE set in the console: refused with one line before docker is called"
+$d = New-RestoreSandbox "restore-phase-set"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_RESTORE_PHASE" = "prepare" } 60
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BV_RESTORE_PHASE is set in this console") "says why"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never called"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report
