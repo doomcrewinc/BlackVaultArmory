@@ -3,7 +3,7 @@ import { constants as fsConstants, promises as fsp } from "node:fs";
 import type { Dirent } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { Writable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { recordEventBestEffort } from "@/lib/audit/events";
 import { createBackupSealer } from "@/lib/encryption/core.mjs";
@@ -11,7 +11,7 @@ import { getFieldKeys } from "@/lib/encryption/keys";
 import { snapshotStamp } from "@/lib/encryption/pre-encryption-snapshot";
 import { FileAtRestError, readDecryptedFile, uploadsRoot } from "@/lib/files/storage";
 import { APP_VERSION } from "@/lib/version";
-import { acquireFullBackupLock } from "./full-lock";
+import { acquireFullBackupLock, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
 import { verifyFullBackup } from "./full-verify";
 import { buildManifest, type ManifestFileEntry, type ManifestSkippedEntry } from "./manifest";
 import { backupCounts, buildBackupPayload, collectBackupRecords } from "./records";
@@ -50,7 +50,7 @@ import { TarWriter } from "./tar";
  * buffers, and `db.json` (read once, small next to the files).
  */
 
-export const DEFAULT_FULL_BACKUP_DIR = "/app/backups";
+export { DEFAULT_FULL_BACKUP_DIR };
 export const FULL_BACKUP_PREFIX = "blackvault-full-";
 export const FULL_BACKUP_SUFFIX = ".bvb";
 const PARTIAL_SUFFIX = ".partial";
@@ -269,6 +269,18 @@ function fileSink(handle: FileHandle): { sink: Writable; failure: () => Error | 
   return { sink, failure: () => failure };
 }
 
+/**
+ * `buf` as a run of 1 MiB views (no copy). Handing the tar writer a whole
+ * 16 MiB file as ONE chunk makes the sealer encrypt all of it in a single
+ * synchronous step and queue every ciphertext chunk at once; fed a slice at a
+ * time, with the writer awaiting backpressure between slices, the sealed
+ * bytes go to disk as they are produced.
+ */
+const SLICE_BYTES = 1024 * 1024;
+function* slices(buf: Buffer): Generator<Buffer> {
+  for (let offset = 0; offset < buf.length; offset += SLICE_BYTES) yield buf.subarray(offset, offset + SLICE_BYTES);
+}
+
 async function fsyncDir(dir: string): Promise<void> {
   try {
     const handle = await fsp.open(dir, "r");
@@ -366,7 +378,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
         }
         if (plaintext) {
           const sha256 = createHash("sha256").update(plaintext).digest("hex");
-          await tar.addBuffer(upload.archivePath, plaintext);
+          await tar.addFile(upload.archivePath, plaintext.length, Readable.from(slices(plaintext), { objectMode: false }));
           files.push({ path: upload.archivePath, size: plaintext.length, sha256 });
         }
         filesDone += 1;

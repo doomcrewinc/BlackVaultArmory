@@ -26,6 +26,9 @@ import path from "node:path";
  * stale lock present can never both win.
  */
 
+/** The backup folder inside the container (compose mounts BLACKVAULT_BACKUP_DIR there). Lives here, not in full-backup.ts, so the CLI can name it without loading the database client. */
+export const DEFAULT_FULL_BACKUP_DIR = "/app/backups";
+
 export const FULL_BACKUP_LOCK_NAME = ".full-backup.lock";
 
 /** Another full backup holds the lock. CLI: exit 2. Settings button: HTTP 409. */
