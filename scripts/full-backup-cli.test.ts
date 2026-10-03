@@ -11,7 +11,8 @@
  * `*.ts` in scripts/entry/ as an entry point, a test file included.
  *
  * RUN_SLOW_TESTS=1 adds the memory test: a child process running ONLY the
- * backup engine over 2 GiB of uploads must peak under 300 MB RSS.
+ * backup engine over 2 GiB of uploads must peak under 300 MB RSS on Linux
+ * (512 MB on other platforms — ruling R8).
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -190,7 +191,7 @@ describe("full-backup CLI (bundled, plain node)", () => {
   });
 
   it.runIf(!!process.env.RUN_SLOW_TESTS)(
-    "RSS: a child process running only the backup engine over 2 GiB of uploads peaks under 300 MB",
+    "RSS: a child process running only the backup engine over 2 GiB of uploads peaks under 300 MB on Linux (512 MB elsewhere)",
     async () => {
       // 128 hard links to ONE encrypted 16 MiB file: 2 GiB to back up, 16 MiB
       // on disk ("sparse" source data). BVF1 binds the file's basename, so
@@ -241,8 +242,13 @@ describe("full-backup CLI (bundled, plain node)", () => {
       expect(out.files).toBe(COUNT);
       expect(out.bytes).toBe(COUNT * FILE_BYTES);
       const peakMb = out.maxRssKb / 1024;
-      console.log(`[rss] full backup of ${(out.bytes / 2 ** 30).toFixed(2)} GiB: peak RSS ${peakMb.toFixed(1)} MB`);
-      expect(peakMb).toBeLessThan(300);
+      // Ruling R8: the 300 MB cap is the spec's, and it is asserted on Linux —
+      // the image is the supported runtime. Elsewhere (a macOS dev machine
+      // counts freed-but-not-yet-reclaimed pages in RSS and measures ~385 MB
+      // for the same run) the bound is 512 MB, and the peak is logged.
+      const capMb = process.platform === "linux" ? 300 : 512;
+      console.log(`[rss] full backup of ${(out.bytes / 2 ** 30).toFixed(2)} GiB on ${process.platform}: peak RSS ${peakMb.toFixed(1)} MB (cap ${capMb} MB)`);
+      expect(peakMb).toBeLessThan(capMb);
     },
     660_000,
   );
