@@ -80,7 +80,8 @@ async function hashBody(body: Readable): Promise<{ size: number; sha256: string 
   return { size, sha256: hash.digest("hex") };
 }
 
-function checkDbAgainstCounts(dbBytes: Buffer, counts: Record<string, number>): void {
+/** `db.json` must parse and hold exactly `counts` rows per model. Shared with the restore engine (./full-restore.ts). */
+export function checkDbAgainstCounts(dbBytes: Buffer, counts: Record<string, number>): void {
   let db: unknown;
   try {
     db = JSON.parse(dbBytes.toString("utf8"));
@@ -94,6 +95,34 @@ function checkDbAgainstCounts(dbBytes: Buffer, counts: Record<string, number>): 
     if (!Array.isArray(rows)) fail(`db.json has no "${key}" records, but the manifest counts ${expected}.`);
     if (rows.length !== expected) fail(`db.json holds ${rows.length} "${key}" records, but the manifest counts ${expected}.`);
   }
+}
+
+/**
+ * The set of `files/...` entries read from the archive must equal
+ * `manifest.files` exactly — none missing, none extra — and each one's size
+ * and sha256 must match. Returns the files' total plaintext size. Shared with
+ * the restore engine (./full-restore.ts), which runs the same comparison on
+ * what it staged before it changes anything.
+ */
+export function checkEntriesAgainstManifest(seen: ReadonlyMap<string, { size: number; sha256: string }>, manifest: Manifest): number {
+  const listed = new Set<string>();
+  let bytes = 0;
+  for (const entry of manifest.files) {
+    listed.add(entry.path);
+    const actual = seen.get(entry.path);
+    if (!actual) fail(`${entry.path} is listed in the manifest but missing from the archive.`);
+    if (actual.size !== entry.size) {
+      fail(`${entry.path} has the wrong size (${actual.size} bytes, the manifest records ${entry.size}).`);
+    }
+    if (actual.sha256 !== entry.sha256) {
+      fail(`${entry.path} does not match its recorded checksum (sha256). The backup is damaged.`);
+    }
+    bytes += entry.size;
+  }
+  for (const entryPath of seen.keys()) {
+    if (!listed.has(entryPath)) fail(`${entryPath} is in the archive but not listed in the manifest.`);
+  }
+  return bytes;
 }
 
 /**
@@ -145,23 +174,7 @@ export async function verifyFullBackup(file: string, passphrase: string, opts: V
   if (!m) fail("the archive has no manifest.json.");
   if (!dbBytes) fail("the archive has no db.json.");
 
-  const listed = new Set<string>();
-  let bytes = 0;
-  for (const entry of m.files) {
-    listed.add(entry.path);
-    const actual = seen.get(entry.path);
-    if (!actual) fail(`${entry.path} is listed in the manifest but missing from the archive.`);
-    if (actual.size !== entry.size) {
-      fail(`${entry.path} has the wrong size (${actual.size} bytes, the manifest records ${entry.size}).`);
-    }
-    if (actual.sha256 !== entry.sha256) {
-      fail(`${entry.path} does not match its recorded checksum (sha256). The backup is damaged.`);
-    }
-    bytes += entry.size;
-  }
-  for (const entryPath of seen.keys()) {
-    if (!listed.has(entryPath)) fail(`${entryPath} is in the archive but not listed in the manifest.`);
-  }
+  const bytes = checkEntriesAgainstManifest(seen, m);
 
   checkDbAgainstCounts(dbBytes, m.counts);
 

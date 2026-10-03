@@ -15,8 +15,10 @@
 # does the copy itself.
 #
 # Copied: regular files only. Never followed or copied: symbolic links
-# (reported). Skipped: the app's own .pre-encryption-* snapshot folders and
-# every *.tmp / *.rot file (half-written or mid-rotation files). Every folder
+# (reported). Skipped: the app's own .pre-encryption-* snapshot folders, a
+# full restore's .restore-* (staging) and .pre-restore-* (the previous
+# uploads, kept after a restore) folders, and every *.tmp / *.rot file
+# (half-written or mid-rotation files). Every folder
 # is mode 700 and every file is created empty and chmod 600 BEFORE its bytes
 # are written (a default ACL on the parent can override the umask).
 #
@@ -36,7 +38,7 @@ if [ "${1:-}" = "--copy" ]; then
   # cannot read or a failed copy makes find, and so this stage, exit non-zero.
   SRC=$2
   umask 077
-  find "$SRC" -name '.pre-encryption-*' -type d -prune -o -type d -exec sh -c '
+  find "$SRC" \( -name '.pre-encryption-*' -o -name '.restore-*' -o -name '.pre-restore-*' \) -type d -prune -o -type d -exec sh -c '
     set -e
     src=$1; shift
     for d in "$@"; do
@@ -46,7 +48,7 @@ if [ "${1:-}" = "--copy" ]; then
       chmod 700 ".$rel"
     done
   ' sh "$SRC" {} +
-  find "$SRC" -name '.pre-encryption-*' -type d -prune -o \
+  find "$SRC" \( -name '.pre-encryption-*' -o -name '.restore-*' -o -name '.pre-restore-*' \) -type d -prune -o \
     -type f ! -name '*.tmp' ! -name '*.rot' -exec sh -c '
       set -e
       src=$1; shift
@@ -59,7 +61,7 @@ if [ "${1:-}" = "--copy" ]; then
     ' sh "$SRC" {} +
   # Belt and braces: whatever find does with a failed -exec, the copy must
   # hold exactly as many files as the source.
-  want=$(find "$SRC" -name '.pre-encryption-*' -type d -prune -o -type f ! -name '*.tmp' ! -name '*.rot' -print | wc -l)
+  want=$(find "$SRC" \( -name '.pre-encryption-*' -o -name '.restore-*' -o -name '.pre-restore-*' \) -type d -prune -o -type f ! -name '*.tmp' ! -name '*.rot' -print | wc -l)
   got=$(find . -type f | wc -l)
   [ "$want" -eq "$got" ] || { echo "copied $got of $want files" >&2; exit 1; }
   exit 0
@@ -77,10 +79,10 @@ FINAL="$BACKUPS/$NAME"
 rm -rf "$BACKUPS"/uploads-*.partial
 
 [ -d "$SRC" ] || exit 3
-find "$SRC" -name '.pre-encryption-*' -type d -prune -o -type l -print | while IFS= read -r l; do
+find "$SRC" \( -name '.pre-encryption-*' -o -name '.restore-*' -o -name '.pre-restore-*' \) -type d -prune -o -type l -print | while IFS= read -r l; do
   echo "WARNING: skipped the symbolic link $l while snapshotting uploads; it was not copied."
 done
-FIRST=$(find "$SRC" -name '.pre-encryption-*' -type d -prune -o -type f ! -name '*.tmp' ! -name '*.rot' -print | head -n 1)
+FIRST=$(find "$SRC" \( -name '.pre-encryption-*' -o -name '.restore-*' -o -name '.pre-restore-*' \) -type d -prune -o -type f ! -name '*.tmp' ! -name '*.rot' -print | head -n 1)
 [ -n "$FIRST" ] || exit 3
 
 failed() {
