@@ -44,7 +44,8 @@
 #
 # THE RECOVERY FILE. Before step 4 this script prints, and writes to
 # backups/restore-<time>-RECOVERY.txt (and flushes to disk with `sync`),
-# where the snapshot is and the exact commands that put it back by hand. If this script dies (the terminal
+# where the snapshot is and the exact commands that put it back by hand.
+# If this script dies (the terminal
 # closes, the machine restarts), that file is what tells you the install may
 # be half restored and how to undo it. It is deleted when the restore
 # succeeds or the automatic rollback has worked; while one exists, this
@@ -364,7 +365,7 @@ recovery_text() {
     echo "   PostgreSQL: the next seven lines ONLY if step 2 printed: started"
     echo "   (in any other state they would replace a database the restore did not"
     echo "   leave half done; the first line asks for the state again, and nothing"
-    echo "   after it runs unless the answer is started). They are ONE command (each"
+    echo "   after it runs unless that prints started). They are ONE command (each"
     echo "   ends in &&): a line runs only if every line above it worked, so the"
     echo "   marker is cleared (the last line) only when everything is back. Paste"
     echo "   them together. If it stops with an ERROR, fix what it says and run all"
