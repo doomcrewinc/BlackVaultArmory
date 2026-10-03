@@ -12,7 +12,7 @@ import { FileAtRestError, readDecryptedFile, uploadsRoot } from "@/lib/files/sto
 import { listUploads } from "@/lib/files/upload-walk";
 import { APP_VERSION } from "@/lib/version";
 import { EntryNameSet, printableName } from "./entry-names";
-import { acquireFullBackupLock, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
+import { acquireFullBackupLock, CHMOD_REFUSED_CODES, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
 import { verifyFullBackup } from "./full-verify";
 import { buildManifest, type ManifestFileEntry, type ManifestSkippedEntry } from "./manifest";
 import { backupCounts, buildBackupPayload, collectBackupRecords } from "./records";
@@ -127,9 +127,10 @@ export interface FullBackupResult {
    */
   skipped: FullBackupSkipped[];
   /**
-   * Things that went wrong AFTER the backup was verified and renamed into
-   * place (today: the folder fsync failed). The backup succeeded; show these
-   * to the user. Empty on a normal run.
+   * Things that did not stop the backup but that the user must see: the
+   * folder fsync failed after the backup was verified and renamed into place,
+   * or the backup folder's filesystem refused to set the file's mode to 600.
+   * The backup succeeded. Empty on a normal run.
    */
   warnings: string[];
 }
@@ -167,7 +168,7 @@ function classifyReadFailure(e: unknown): { kind: FullBackupSkipped["kind"]; rea
 
 async function assertBackupDirWritable(dir: string): Promise<void> {
   const hint =
-    "Create it and make it writable by the app (uid 1001 in the container); with Docker it is the folder mounted from BLACKVAULT_BACKUP_DIR (default ./data/backups).";
+    "Create it and make it writable by the app (uid 1001 in the container); with Docker it is the folder mounted from BLACKVAULT_BACKUP_DIR (default <DATA_DIR>/backups).";
   let stat;
   try {
     stat = await fsp.stat(dir);
@@ -225,18 +226,31 @@ async function removeOrphanedPartials(dir: string): Promise<void> {
  * `removeOrphanedPartials` looks for) and never matches the published
  * pattern `blackvault-full-*.bvb`.
  */
-async function createPartial(dir: string, now: Date): Promise<{ partialPath: string; handle: FileHandle }> {
+async function createPartial(dir: string, now: Date): Promise<{ partialPath: string; handle: FileHandle; modeRefused: string | null }> {
   const token = randomBytes(8).toString("hex");
   const partialPath = path.join(dir, `${FULL_BACKUP_PREFIX}${snapshotStamp(now)}.${token}${FULL_BACKUP_SUFFIX}${PARTIAL_SUFFIX}`);
   const handle = await fsp.open(partialPath, "wx", 0o600);
+  // The file was created with mode 0600; the chmod is there because a default
+  // ACL on the folder can widen that. Where the filesystem REFUSES the chmod
+  // (CHMOD_REFUSED_CODES: the app does not own what it creates there, or the
+  // filesystem has no modes), the run goes on and the result carries a
+  // warning: the entrypoint has already told the user that on such a folder
+  // "the app can write to it, so full backups will work" and that the share
+  // decides who else can read it. The archive is sealed with the passphrase
+  // either way. Any other failure (EIO) fails the run.
+  let modeRefused: string | null = null;
   try {
     await handle.chmod(0o600);
   } catch (e) {
-    await handle.close().catch(() => undefined);
-    await fsp.rm(partialPath, { force: true }).catch(() => undefined);
-    throw e;
+    const code = codeOf(e);
+    if (code && CHMOD_REFUSED_CODES.has(code)) modeRefused = code;
+    else {
+      await handle.close().catch(() => undefined);
+      await fsp.rm(partialPath, { force: true }).catch(() => undefined);
+      throw e;
+    }
   }
-  return { partialPath, handle };
+  return { partialPath, handle, modeRefused };
 }
 
 /**
@@ -391,6 +405,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     const created = await createPartial(dir, now);
     partialPath = created.partialPath;
     handle = created.handle;
+    const modeRefused = created.modeRefused;
 
     const files: ManifestFileEntry[] = [];
     const skipped: FullBackupSkipped[] = [];
@@ -481,6 +496,13 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     // Nothing below may fail the run or skip the audit entry: a caller told
     // "failed" would retry or alert while a good archive sits in the folder.
     const warnings: string[] = [];
+    if (modeRefused) {
+      warnings.push(
+        `The backup ${file} was written and verified, but its mode could not be set to 600 (${modeRefused}): the backup folder ${dir} ` +
+          "is on a filesystem that does not let the app change it (a FAT or exFAT disk, or a share mounted for another user). " +
+          "Who else can read the file is decided by that filesystem's mount options, not by BlackVault.",
+      );
+    }
     try {
       await fsyncDir(dir);
     } catch (e) {

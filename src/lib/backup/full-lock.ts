@@ -221,7 +221,23 @@ function alreadyRunning(body: LockBody | null): FullBackupAlreadyRunningError {
   });
 }
 
-/** Creates `file` exclusively, mode 0600, holding `text`. False when it already exists. */
+/**
+ * `fchmod` answers that mean "this filesystem does not let the app user set a
+ * mode here": a FAT/exFAT disk or a share mounted for another uid (EPERM: the
+ * app can create and write a file there but does not own it), or one with no
+ * modes at all. Found by running the real program on such a folder: the
+ * entrypoint had said "the app can write to it, so full backups will work",
+ * and then this file's chmod failed every backup. ./full-backup.ts uses the
+ * same list for the archive and turns it into a warning.
+ */
+export const CHMOD_REFUSED_CODES: ReadonlySet<string> = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
+
+/**
+ * Creates `file` exclusively, mode 0600, holding `text`. False when it
+ * already exists. A refused chmod (CHMOD_REFUSED_CODES) is not an error: the
+ * file was created 0600 and holds nothing secret (a pid, a time, a host name
+ * and a random token).
+ */
 async function createExclusive(file: string, text: string): Promise<boolean> {
   let handle;
   try {
@@ -231,7 +247,10 @@ async function createExclusive(file: string, text: string): Promise<boolean> {
     throw e;
   }
   try {
-    await handle.chmod(0o600);
+    await handle.chmod(0o600).catch((e: unknown) => {
+      const code = codeOf(e);
+      if (!code || !CHMOD_REFUSED_CODES.has(code)) throw e;
+    });
     await handle.writeFile(text, "utf8");
     await handle.sync();
   } catch (e) {

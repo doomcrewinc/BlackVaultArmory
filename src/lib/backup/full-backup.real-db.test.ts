@@ -492,6 +492,63 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(JSON.parse(rows[0].changes ?? "null")).toMatchObject({ full: true, file: NAME, verified: true });
   });
 
+  // Found by running the real program on a FAT filesystem mounted for another
+  // uid (scripts/ci/full-backup-linux.sh): the app can create and write the
+  // file but may not chmod it, and the entrypoint had just said "the app can
+  // write to it, so full backups will work".
+  it.each(["EPERM", "ENOTSUP"])("a backup folder that refuses chmod (%s) does not fail the run: the backup verifies, is audited, and the result carries a warning naming the mode", async (code) => {
+    await seedUploads();
+    const realOpen = fsp.open.bind(fsp);
+    let chmods = 0;
+    vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).endsWith(".bvb.partial")) {
+        (handle as unknown as { chmod: unknown }).chmod = async () => {
+          chmods += 1;
+          throw Object.assign(new Error(`${code}: operation not permitted, fchmod`), { code, syscall: "fchmod" });
+        };
+      }
+      return handle;
+    }) as typeof fsp.open);
+
+    const result = await run();
+    expect(chmods).toBe(1);
+    expect(result.file).toBe(NAME);
+    expect(result.files).toBe(3);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatch(/mode could not be set to 600/);
+    expect(result.warnings[0]).toContain(code);
+    expect(result.warnings[0]).toContain(backups);
+    expect(backupFolder()).toEqual([NAME]);
+    vi.restoreAllMocks();
+    await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3 });
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].changes ?? "null")).toMatchObject({ full: true, file: NAME, verified: true });
+  });
+
+  it("any other chmod failure (EIO) still fails the run and leaves nothing behind", async () => {
+    await seedUploads();
+    const realOpen = fsp.open.bind(fsp);
+    vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).endsWith(".bvb.partial")) {
+        (handle as unknown as { chmod: unknown }).chmod = async () => {
+          throw Object.assign(new Error("EIO: i/o error, fchmod"), { code: "EIO", syscall: "fchmod" });
+        };
+      }
+      return handle;
+    }) as typeof fsp.open);
+
+    const err = await run().catch((e) => e);
+    expect((err as NodeJS.ErrnoException).code).toBe("EIO");
+    expect(backupFolder()).toEqual([]);
+    expect(await events()).toHaveLength(0);
+    vi.restoreAllMocks();
+    const ok = await run();
+    expect(backupFolder()).toEqual([ok.file]);
+  });
+
   it("a normal run has no warnings", async () => {
     expect((await run()).warnings).toEqual([]);
   });

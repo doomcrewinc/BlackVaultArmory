@@ -71,6 +71,40 @@ describe("acquireFullBackupLock", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  // A FAT/exFAT disk or a share mounted for another uid: the app can create
+  // and write the lock but may not chmod it. The lock holds nothing secret.
+  it.each(["EPERM", "ENOTSUP"])("a folder that refuses chmod (%s) still gives the lock, and it still excludes a second run", async (code) => {
+    const realOpen = fsp.open.bind(fsp);
+    let chmods = 0;
+    vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      (handle as unknown as { chmod: unknown }).chmod = async () => {
+        chmods += 1;
+        throw Object.assign(new Error(`${code}: operation not permitted, fchmod`), { code, syscall: "fchmod" });
+      };
+      return handle;
+    }) as typeof fsp.open);
+    const lock = await acquire(dir);
+    expect(chmods).toBe(1);
+    expect(body()).toMatchObject({ pid: process.pid, hostname: HOST });
+    await expect(acquireFullBackupLock(dir)).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
+    await lock.release();
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it("any other chmod failure (EIO) fails the acquire and leaves no lock file", async () => {
+    const realOpen = fsp.open.bind(fsp);
+    vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      (handle as unknown as { chmod: unknown }).chmod = async () => {
+        throw Object.assign(new Error("EIO: i/o error, fchmod"), { code: "EIO", syscall: "fchmod" });
+      };
+      return handle;
+    }) as typeof fsp.open);
+    await expect(acquireFullBackupLock(dir)).rejects.toMatchObject({ code: "EIO" });
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it("a second acquire while the first is held fails with FullBackupAlreadyRunningError, and works again after release", async () => {
     const first = await acquire(dir);
     const second = acquireFullBackupLock(dir);
