@@ -95,6 +95,14 @@
 //                            BV_STUB_ENV_FILE records that call's environment
 //                            too. `compose stop` / `compose start` are failed
 //                            with BV_STUB_FAIL_ON, as for rotate-key.bat.
+//   BV_STUB_LOCK_EXIT / BV_STUB_LOCK_STDOUT / BV_STUB_LOCK_STDERR
+//                            full restore: the lock question restore.bat asks
+//                            the running app before it stops it (any call with
+//                            `--lock-status`): its exit code (unset => 0) and
+//                            the line it prints on each stream. It reads no
+//                            standard input and never touches
+//                            BV_STUB_STDIN_FILE, so the check program's record
+//                            there survives it.
 //   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
 //                            (any call naming /bv-snapshot-restore.sh);
 //                            unset/"0" => 0. The stub does NOT run the script:
@@ -155,6 +163,26 @@ internal static class DockerStub
             }
             Console.WriteLine(version);
             return 0;
+        }
+
+        // The lock question (`full-backup.mjs --lock-status`). Before the
+        // backup program's branch: it is the same script, but it takes no
+        // passphrase and must not be given the backup's knobs.
+        if (Array.IndexOf(args, "--lock-status") >= 0)
+        {
+            string lockOut = Environment.GetEnvironmentVariable("BV_STUB_LOCK_STDOUT");
+            if (!string.IsNullOrEmpty(lockOut))
+            {
+                Console.WriteLine(lockOut);
+            }
+            string lockErr = Environment.GetEnvironmentVariable("BV_STUB_LOCK_STDERR");
+            if (!string.IsNullOrEmpty(lockErr))
+            {
+                Console.Error.WriteLine(lockErr);
+            }
+            string lockExit = Environment.GetEnvironmentVariable("BV_STUB_LOCK_EXIT");
+            int lockCode;
+            return (!string.IsNullOrEmpty(lockExit) && int.TryParse(lockExit, out lockCode)) ? lockCode : 0;
         }
 
         // Full backups (Task 6): the backup program, through exec or run.

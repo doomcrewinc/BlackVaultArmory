@@ -566,7 +566,7 @@ expect "BACKUP_CREATED audit entry {full:true, file, verified:true}" eq \
   "$(sql "$A" "SELECT count(*) FROM \"AuditEvent\" WHERE action = 'BACKUP_CREATED' AND changes LIKE '%\"full\":true%' AND changes LIKE '%$BK1%' AND changes LIKE '%\"verified\":true%';")" 1
 endstep
 
-step "2b. backup.sh --verify through the wrapper (a name, then a path); exit 2 while a lock is held"
+step "2b. backup.sh --verify through the wrapper (a name, then a path); exit 2 while a lock is held, and restore.sh refuses before it stops the app"
 wrap "$A" "./backup.sh --verify $BK1 --passphrase-file $PASSFILE"
 expect "exit 0" eq "$RC" 0
 if [[ "$OUT" =~ $VERIFIED_LINE ]]; then
@@ -595,6 +595,17 @@ BEFORE=$(published "$A")
 wrap "$A" "./backup.sh --passphrase-file $PASSFILE"
 expect "exit 2: another backup is already running" eq "$RC" 2
 expect "it says so" hasf "$ERR" "full-backup: Another full backup is already running."
+same_text "nothing was written" "$BEFORE" "$(published "$A")"
+# The same lock stops a restore BEFORE the app is stopped: restore.sh asks
+# the running app (full-backup.mjs --lock-status) once the archive has passed
+# its check.
+sudo -u '#1001' touch "$A/data/backups/.full-backup.lock"
+INSTANCE=$(app_instance)
+wrap "$A" "./restore.sh $BK1 --yes --passphrase-file $PASSFILE"
+expect "restore.sh exits 1 while the lock is held" eq "$RC" 1
+expect "it shows what the running app answered" hasf "$ERR" "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=0 hostname=unknown started=unknown"
+expect "and says a backup is running and nothing was changed" hasf "$ERR" "ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped."
+expect "the app was never stopped (same container, same start time)" eq "$(app_instance)" "$INSTANCE"
 same_text "nothing was written" "$BEFORE" "$(published "$A")"
 sudo rm -f "$A/data/backups/.full-backup.lock"
 endstep

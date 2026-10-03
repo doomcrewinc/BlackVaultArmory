@@ -18,7 +18,7 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS11) and by the static checks at the end of this file.
+ * (scenarios RS1–RS17) and by the static checks at the end of this file.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -43,6 +43,8 @@ const PASS = " restore tëst 'pass' \"phrase\" $HOME `id` \\n * ";
 const NAME = "blackvault-full-20261002-180405.bvb";
 const OK_LINE = `BLACKVAULT_FULL_RESTORE_OK file=${NAME} files=2 bytes=10 pre_restore=.pre-restore-20261003-000000`;
 const VERIFY = `compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify ${NAME}`;
+const PS = "compose ps --status running -q blackvault";
+const LOCK_STATUS = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status";
 const RESTORE = /^compose run --rm -T --name blackvault-restore-(\d{8}-\d{6}) blackvault node dist\/scripts\/full-restore\.mjs --stamp \1 blackvault-full-20261002-180405\.bvb$/;
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -67,6 +69,18 @@ map() { case "$1" in /bv-backups/*) echo "backups/\${1#/bv-backups/}" ;; /app/da
 case "$*" in
   "compose version --short") echo "\${BV_STUB_COMPOSE_VERSION-2.30.1}" ;;
   "compose config --images blackvault") echo "blackvault-blackvault" ;;
+  # BV_STUB_APP_RUNNING=1: the app container is up.
+  "${PS}") [ "\${BV_STUB_APP_RUNNING:-}" = 1 ] && echo "0123456789ab"; exit 0 ;;
+  # The lock question, asked in the running app container. BV_STUB_LOCK: free (default), held, old-image (the CLI
+  # does not know the option yet), killed (the exec itself died).
+  "${LOCK_STATUS}")
+    cat > "${rec}/stdin-lock-status"
+    case "\${BV_STUB_LOCK:-free}" in
+      free) echo "BLACKVAULT_FULL_BACKUP_LOCK state=free"; exit 0 ;;
+      held) echo "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=57 hostname=0123456789ab started=2026-10-03T03:15:00.000Z"; exit 2 ;;
+      old-image) echo "full-backup: unknown argument. Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file>; the passphrase is read from standard input." >&2; exit 1 ;;
+      killed) exit 137 ;;
+    esac ;;
   *"/bv-uploads-snapshot.sh /app/uploads /bv-backups "*)
     for a in "$@"; do name=$a; done
     sh scripts/uploads-snapshot.sh "$dd/uploads" backups "$name"; rc=$?
@@ -373,9 +387,10 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.stdout).toBe(`${OK_LINE}\n`);
       const s = steps();
       const stamp = stampOf();
-      const snap = s[5].split(" ").at(-1)!;
+      const snap = s[6].split(" ").at(-1)!;
       expect(s).toEqual([
         VERIFY,
+        PS, // is the app running? (it is not: nobody to ask about the lock)
         "compose stop blackvault",
         // scripts/db-snapshot.sh (SQLite stops the app itself too, then copies the file; then the uploads, in a container)
         "compose stop blackvault",
@@ -387,7 +402,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
         "compose up -d",
       ]);
       expect(s[0]).not.toMatch(/--user|--no-deps/);
-      expect(s[6]).not.toMatch(/--user|--no-deps/);
+      expect(s[7]).not.toMatch(/--user|--no-deps/);
       // The snapshot exists, the marker file of db-snapshot.sh is gone, the recovery file was removed, and the output names both snapshots.
       expect(backupsDir()).toEqual([expect.stringMatching(/^blackvault-\d{8}-\d{6}\.db$/), snap]);
       expect(r.stderr).toContain(`.pre-restore-${stamp}/`);
@@ -718,7 +733,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.code).toBe(1);
       // bash runs the trap when the command in progress ends. Wherever the signal landed (a stalled machine may deliver it late),
       // the restore program never ran and the last thing done was starting BlackVault.
-      expect(steps().slice(0, 2)).toEqual([VERIFY, "compose stop blackvault"]);
+      expect(steps().slice(0, 3)).toEqual([VERIFY, PS, "compose stop blackvault"]);
       expect(steps().at(-1)).toBe("compose up -d");
       expect(steps().some((c) => RESTORE.test(c))).toBe(false);
       expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed; BlackVault was started again.");
@@ -925,6 +940,68 @@ describe.skipIf(isWindows)("restore.sh", () => {
     });
   });
 
+  describe("a full backup that is running is not killed: the lock is asked for in the running app BEFORE it is stopped", () => {
+    const RUNNING = { BV_STUB_APP_RUNNING: "1" };
+
+    it("the lock is held: exit 1 with the holder shown; BlackVault is never stopped, nothing is snapshotted or changed", () => {
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { ...RUNNING, BV_STUB_LOCK: "held" } });
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(steps()).toEqual([VERIFY, PS, LOCK_STATUS]);
+      expect(lines(r.stderr).slice(-2)).toEqual([
+        "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=57 hostname=0123456789ab started=2026-10-03T03:15:00.000Z",
+        "ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished.",
+      ]);
+      expect(install()).toEqual(before);
+      expect(fs.existsSync(path.join(app, "backups"))).toBe(false);
+    });
+
+    it("the lock is free: the restore goes on — check, ask, stop, in that order; the question gets nothing on stdin and adds nothing to stdout", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: RUNNING });
+      expect(r.code, r.stderr).toBe(0);
+      expect(steps().slice(0, 4)).toEqual([VERIFY, PS, LOCK_STATUS, "compose stop blackvault"]);
+      expect(steps().filter((c) => c === LOCK_STATUS)).toHaveLength(1);
+      expect(fs.readFileSync(path.join(rec, "stdin-lock-status")).length).toBe(0);
+      expect(r.stdout).toBe(`${OK_LINE}\n`);
+      expect(r.stderr).not.toContain("BLACKVAULT_FULL_BACKUP_LOCK");
+      expect(r.stderr).not.toContain("WARNING: could not check");
+      expectPassphraseOnlyOnStdin();
+    });
+
+    it.each([
+      ["old-image", 1, "full-backup: unknown argument."],
+      ["killed", 137, ""],
+    ])("the question itself fails (%s, exit %i): ONE warning and the restore goes on — an image from before the option must not make a restore impossible", (mode, code, shown) => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { ...RUNNING, BV_STUB_LOCK: mode } });
+      expect(r.code, r.stderr).toBe(0);
+      expect(steps().slice(0, 4)).toEqual([VERIFY, PS, LOCK_STATUS, "compose stop blackvault"]);
+      expect(lines(r.stderr).filter((l) => l.startsWith("WARNING: could not check"))).toEqual([
+        `WARNING: could not check whether a full backup is running (exit ${code}; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.`,
+      ]);
+      if (shown) expect(r.stderr).toContain(shown);
+      expect(r.stdout).toBe(`${OK_LINE}\n`);
+    });
+
+    it("BlackVault is not running: nobody is asked (the restore program takes the lock itself)", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code, r.stderr).toBe(0);
+      expect(steps().slice(0, 3)).toEqual([VERIFY, PS, "compose stop blackvault"]);
+      expect(steps()).not.toContain(LOCK_STATUS);
+    });
+
+    it.skipIf(!hasPython)("it is asked only after RESTORE was typed: an unconfirmed restore never reaches it", () => {
+      const refused = runOnTty([NAME, "--passphrase-file", passFile()], ["no"], { ...RUNNING, BV_STUB_LOCK: "held" });
+      expect(refused.code, refused.out).toBe(1);
+      expect(steps()).toEqual([VERIFY]);
+      fs.rmSync(path.join(rec, "calls"));
+      const held = runOnTty([NAME, "--passphrase-file", passFile()], ["RESTORE"], { ...RUNNING, BV_STUB_LOCK: "held" });
+      expect(held.code, held.out).toBe(1);
+      expect(steps()).toEqual([VERIFY, PS, LOCK_STATUS]);
+      expect(held.out).toContain("ERROR: a full backup is running");
+    });
+  });
+
   describe("scripts/db-snapshot.sh: how to delete the uploads snapshot", () => {
     const savedLine = (stderr: string) => lines(stderr).find((l) => l.startsWith("Uploads snapshot saved: "));
 
@@ -1014,7 +1091,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
     it("BlackVault cannot be stopped: exit 1, nothing snapshotted or restored", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_FAIL_ON: "stop" } });
       expect(r.code).toBe(1);
-      expect(steps()).toEqual([VERIFY, "compose stop blackvault"]);
+      expect(steps()).toEqual([VERIFY, PS, "compose stop blackvault"]);
       expect(lines(r.stderr).at(-1)).toBe("ERROR: could not stop BlackVault. Nothing was changed.");
     });
 
@@ -1082,7 +1159,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(read("stdin-restore")).toBe(PASS);
       expectPassphraseOnlyOnStdin();
       // The confirmation comes after the check and before the stop.
-      expect(steps().slice(0, 2)).toEqual([VERIFY, "compose stop blackvault"]);
+      expect(steps().slice(0, 3)).toEqual([VERIFY, PS, "compose stop blackvault"]);
     });
 
     it("anything other than RESTORE: exit 1, BlackVault is never stopped, nothing changed", () => {
@@ -1107,7 +1184,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS11). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS17). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -1219,6 +1296,36 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(sh).toContain('CONTAINER="blackvault-restore-$STAMP"');
   });
 
+  it("a running full backup is not killed: the running app is asked for the lock after the confirmation and before the stop, as restore.sh does", () => {
+    const at = code.indexOf('set "BV_RUNNING="');
+    expect(code.slice(at, at + 13)).toEqual([
+      'set "BV_RUNNING="',
+      'for /f "usebackq delims=" %%I in (`%COMPOSE% ps --status running -q blackvault 2^>nul`) do set "BV_RUNNING=1"',
+      "if not defined BV_RUNNING goto :lock_checked",
+      // Its standard output goes to standard error (standard output is the restore program's line only); it is given no standard input.
+      "%COMPOSE% exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status 1>&2 <nul",
+      'set "BV_LOCK_RC=!errorlevel!"',
+      'if "!BV_LOCK_RC!"=="0" goto :lock_checked',
+      'if "!BV_LOCK_RC!"=="2" goto :lock_held',
+      ">&2 echo WARNING: could not check whether a full backup is running (exit !BV_LOCK_RC!; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.",
+      "goto :lock_checked",
+      ":lock_held",
+      ">&2 echo ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished.",
+      "exit /b 1",
+      ":lock_checked",
+    ]);
+    // In the child phase: after RESTORE was typed and the time stamp was found free, before the stop.
+    const order = [":prepare_phase", 'set /p "BV_CONFIRM=Type RESTORE to continue: "', ":stamp_free", 'set "BV_RUNNING="', ":lock_checked", "%COMPOSE% stop blackvault 1>&2"].map((l) => code.indexOf(l));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The same call and the same two messages as restore.sh.
+    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+    expect(sh).toContain("$($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status < /dev/null 2>&1)");
+    for (const l of code.slice(at, at + 13).filter((x) => x.startsWith(">&2 echo "))) {
+      expect(sh).toContain(l.slice(">&2 echo ".length).replace(/^(ERROR|WARNING): /, "").replace("!BV_LOCK_RC!", "$LOCK_RC").replace(/^could not/, "WARNING: could not"));
+    }
+  });
+
   it("R24: the database is put back only when the marker exists; an uploads folder that is not there to look into rolls NOTHING back; the uploads go first; the marker is cleared last", () => {
     // The gate, in the order it is evaluated: complete < started < unknown (a missing uploads folder; Task 7 re-review item 3).
     const at = code.indexOf('set "BV_STATE=untouched"');
@@ -1323,16 +1430,17 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS15) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS17) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 15; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 17; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
-    expect(runs.length).toBeGreaterThanOrEqual(17);
+    expect(runs.length).toBeGreaterThanOrEqual(20);
     expect(evidence.length).toBe(runs.length);
     const stub = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/docker-stub.cs"), "utf8");
     expect(stub).toContain('"dist/scripts/full-restore.mjs"');
     expect(stub).toContain('"/bv-snapshot-restore.sh"');
+    expect(stub).toContain('"--lock-status"');
   });
 });

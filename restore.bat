@@ -25,6 +25,9 @@
 ::   3. Stops BlackVault and takes a snapshot of the database and the uploads
 ::      folder into backups\ (scripts\db-snapshot.bat). If that fails it
 ::      starts BlackVault again and stops: nothing was changed.
+::      Before the stop, a running BlackVault is asked whether a full backup
+::      is in progress. If one is, the script stops here instead: nothing was
+::      changed and BlackVault keeps running. Run it again afterwards.
 ::   4. Restores, in a one-off container (see restore.sh for the steps).
 ::   5. Starts BlackVault.
 :: IF STEP 4 FAILS, for any reason, the install is put back, BlackVault is
@@ -341,6 +344,30 @@ goto :stamp_free
 >&2 echo ERROR: a .pre-restore-!BV_STAMP! or .restore-!BV_STAMP!.db-started folder already exists in !BV_HOST_UPLOADS! (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped.
 exit /b 1
 :stamp_free
+
+:: A full backup that is running right now (the Settings button, backup.bat,
+:: a scheduled task) would be ended by the stop below, and the restore
+:: program, which takes the same lock, would say "already running" only
+:: after the snapshot. So the running app container is asked first, and the
+:: rule for "is that lock live" stays the engine's own (full-backup.mjs
+:: --lock-status: exit 0 free, exit 2 held, one line naming the holder).
+:: Any other answer means the question failed, not that a backup runs (an
+:: image from before --lock-status answers 1), and never blocks a restore.
+:: With BlackVault stopped there is no container to ask and nothing the stop
+:: could end; the restore program's own lock still applies. As restore.sh.
+set "BV_RUNNING="
+for /f "usebackq delims=" %%I in (`%COMPOSE% ps --status running -q blackvault 2^>nul`) do set "BV_RUNNING=1"
+if not defined BV_RUNNING goto :lock_checked
+%COMPOSE% exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status 1>&2 <nul
+set "BV_LOCK_RC=!errorlevel!"
+if "!BV_LOCK_RC!"=="0" goto :lock_checked
+if "!BV_LOCK_RC!"=="2" goto :lock_held
+>&2 echo WARNING: could not check whether a full backup is running (exit !BV_LOCK_RC!; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.
+goto :lock_checked
+:lock_held
+>&2 echo ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished.
+exit /b 1
+:lock_checked
 
 :: -- 6. Stop the app, snapshot the database and the uploads ---------
 >&2 echo Stopping BlackVault...

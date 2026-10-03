@@ -2245,6 +2245,9 @@ Show-EvidenceIfFailed $r
 $RestoreName = "blackvault-full-20261002-180405.bvb"
 $RestoreVerify = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify $RestoreName"
 $RestoreOkLine = "BLACKVAULT_FULL_RESTORE_OK file=$RestoreName files=2 bytes=10 pre_restore=.pre-restore-20261003-000000"
+$RestorePs = "compose ps --status running -q blackvault"
+$RestoreLockStatus = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status"
+$RestoreLockHeld = "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=57 hostname=0123456789ab started=2026-10-03T03:15:00.000Z"
 
 function New-RestoreSandbox([string]$Name, [switch]$Postgres) {
   $dir = Join-Path $Sandboxes $Name
@@ -2271,6 +2274,7 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_RESTORE_MARKER_DIR" = $null; "BV_STUB_RESTORE_RECOVERY_COPY" = (Join-Path $Dir "__recovery-during.txt"); "DATA_DIR" = $null
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
     "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
+    "BV_STUB_LOCK_EXIT" = $null; "BV_STUB_LOCK_STDOUT" = $null; "BV_STUB_LOCK_STDERR" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
@@ -2323,6 +2327,8 @@ Assert ($iVerify -eq 0) "the first call is the check: '$RestoreVerify' (index $i
 Assert ($iStop -gt $iVerify -and $iRestore -gt $iStop -and $iUp -gt $iRestore) "order: check ($iVerify), stop ($iStop), restore in a NAMED container ($iRestore), start ($iUp)"
 Assert (@($steps | Where-Object { $_ -match "full-restore\.mjs|full-backup\.mjs" } | Where-Object { $_ -match "--user|--no-deps" }).Count -eq 0) "the two program calls have no --user and no --no-deps"
 Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore" }).Count -eq 0) "no rollback container was started"
+Assert ((Get-StepIndex $steps ('^' + [regex]::Escape($RestorePs) + '$')) -gt $iVerify -and (Get-StepIndex $steps ('^' + [regex]::Escape($RestorePs) + '$')) -lt $iStop) "before the stop it asks whether BlackVault is running"
+Assert ((Get-StepIndex $steps '--lock-status') -eq -1) "BlackVault is not running: nobody is asked about the lock"
 $snaps = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' })
 Assert ($snaps.Count -eq 1) "the database snapshot was taken into backups\ before the restore (found: $($snaps -join ', '))"
 Assert (@(Get-UploadsBackups $d).Count -eq 1) "the uploads snapshot was taken"
@@ -2607,6 +2613,53 @@ Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is sta
 Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
 Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
 Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS16
+# A backup started from the Settings button runs inside the app: stopping the
+# app would end it. restore.bat asks the running app for the lock first.
+Write-Scenario "restore.bat - a full backup is running (the lock is held): exit 1 before BlackVault is stopped; nothing is snapshotted"
+$d = New-RestoreSandbox "restore-lock-held"
+$passBytesText = "$BackupPass`n"
+$pf = New-PassFile $d $passBytesText
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_LOCK_EXIT" = "2"; "BV_STUB_LOCK_STDOUT" = $RestoreLockHeld }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ($steps.Count -eq 3 -and $steps[0] -eq $RestoreVerify -and $steps[1] -eq $RestorePs -and $steps[2] -eq $RestoreLockStatus) "the docker calls are the check, 'is it running', and the lock question - nothing else (got: $($steps -join ' || '))"
+Assert ($r.Output.Contains($RestoreLockHeld)) "the holder is shown"
+Assert ($r.Output.Contains("ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished.")) "says a backup is running, nothing was changed, and to run it again later"
+Assert ($r.Output -notmatch "did not pass the check") "does not claim the backup failed its check"
+Assert (-not (Test-Path (Join-Path $d "backups"))) "no snapshot folder was created"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+$expected = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($passBytesText))
+Assert ((Get-FileBase64 (Join-Path $d "__stdin-verify.bin")) -eq $expected) "the lock question was given nothing on stdin: the check program's record of the passphrase is still the only one"
+Assert (-not (Test-Path (Join-Path $d "__stdin-restore.bin"))) "the restore program never ran"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS17
+Write-Scenario "restore.bat - BlackVault is running and the lock is free: check, ask, stop, restore; a lock question that FAILS (an older image) is one WARNING and the restore goes on"
+$d = New-RestoreSandbox "restore-lock-free"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_LOCK_STDOUT" = "BLACKVAULT_FULL_BACKUP_LOCK state=free"; "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "free: exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iLock = Get-StepIndex $steps ('^' + [regex]::Escape($RestoreLockStatus) + '$')
+$iStop = Get-StepIndex $steps '^compose stop blackvault$'
+Assert ($iLock -gt 0 -and $steps[$iLock - 1] -eq $RestorePs) "free: the lock is asked for right after 'is it running' (index $iLock)"
+Assert ($iStop -gt $iLock -and (Get-StepIndex $steps $RestoreCallPattern) -gt $iStop) "free: then stop ($iStop), then the restore"
+Assert (@($steps | Where-Object { $_ -eq $RestoreLockStatus }).Count -eq 1) "free: asked once"
+Assert ($r.Output -notmatch "WARNING: could not check") "free: no warning"
+Assert ($r.Output.Contains("Restore complete.")) "free: says the restore is complete"
+Show-EvidenceIfFailed $r
+$d = New-RestoreSandbox "restore-lock-question-fails"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_LOCK_EXIT" = "1"; "BV_STUB_LOCK_STDERR" = "full-backup: unknown argument."; "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "question fails: exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iLock = Get-StepIndex $steps ('^' + [regex]::Escape($RestoreLockStatus) + '$')
+Assert ($iLock -gt 0 -and (Get-StepIndex $steps '^compose stop blackvault$') -gt $iLock) "question fails: the question was asked (index $iLock) and the restore goes on to the stop"
+Assert ($r.Output.Contains("WARNING: could not check whether a full backup is running (exit 1; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.")) "question fails: one WARNING says so"
+Assert ($r.Output.Contains("Restore complete.")) "question fails: says the restore is complete"
 Show-EvidenceIfFailed $r
 
 # ══════════════════════════════════════════════════════════════════════════

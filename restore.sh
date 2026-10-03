@@ -24,6 +24,9 @@
 #   3. Stops BlackVault and takes a snapshot of the database and the uploads
 #      folder into backups/ (scripts/db-snapshot.sh). If that fails it
 #      starts BlackVault again and stops: nothing was changed.
+#      Before the stop, a running BlackVault is asked whether a full backup
+#      is in progress. If one is, the script stops here instead: nothing was
+#      changed and BlackVault keeps running. Run it again afterwards.
 #   4. Restores, in a one-off container: the backup's files are written
 #      (encrypted with this install's key) into uploads/.restore-<time>/, the
 #      database records are replaced in one transaction, then the current
@@ -407,6 +410,29 @@ else
       die "could not check the uploads folder $HOST_UPLOADS_DIR for what an earlier restore may have left: it cannot be entered from here, and asking inside a container failed. Nothing was changed; BlackVault was not stopped."
       ;;
   esac
+fi
+
+# A full backup that is running right now (the Settings button, backup.sh,
+# a cron job) would be ended by the stop below, and the restore program,
+# which takes the same lock, would say "already running" only after the
+# snapshot. So the running app container is asked first, and the rule for
+# "is that lock live" stays the engine's own (scripts/entry/full-backup.ts
+# --lock-status: exit 0 free, exit 2 held, one line naming the holder).
+# Any other answer means the question failed, not that a backup runs — an
+# image from before --lock-status answers 1 — and never blocks a restore.
+# With BlackVault stopped there is no container to ask and nothing the stop
+# could end; the restore program's own lock still applies.
+if [ -n "$($COMPOSE ps --status running -q blackvault 2> /dev/null)" ]; then
+  LOCK_STATUS=$($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status < /dev/null 2>&1)
+  LOCK_RC=$?
+  if [ "$LOCK_RC" -eq 2 ]; then
+    PASSPHRASE=""
+    printf '%s\n' "$LOCK_STATUS" >&2
+    die "a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished."
+  elif [ "$LOCK_RC" -ne 0 ]; then
+    [ -z "$LOCK_STATUS" ] || printf '%s\n' "$LOCK_STATUS" >&2
+    echo "WARNING: could not check whether a full backup is running (exit $LOCK_RC; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore." >&2
+  fi
 fi
 
 # ── 4. Stop the app, snapshot the database and the uploads ────

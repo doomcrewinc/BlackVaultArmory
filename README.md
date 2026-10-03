@@ -1485,7 +1485,10 @@ does, in this order:
    to ask, so `--yes` is then required; without it the script stops before anything is checked.
 3. **Stops BlackVault and takes a snapshot** of the database and the uploads folder into
    `backups/` (next to `docker-compose.yml`). If the snapshot fails, BlackVault is started again
-   and nothing was changed.
+   and nothing was changed. If a full backup is running when the restore gets here (the
+   **Settings** button, `backup.sh`, a scheduled backup), the restore stops instead, before
+   BlackVault is stopped: `ERROR: a full backup is running`. Nothing was changed; run the restore
+   again when the backup has finished.
 4. **Restores**, in a one-off container. The backup's files are written, encrypted with **this**
    install's key, into `uploads/.restore-<time>/`. The database records are replaced in one
    transaction. Then the current `images/` and `documents/` folders are moved into

@@ -4,6 +4,7 @@
  *
  *   node dist/scripts/full-backup.mjs [--dir <folder>] [--keep <n>]   make a backup
  *   node dist/scripts/full-backup.mjs [--dir <folder>] --verify <file>
+ *   node dist/scripts/full-backup.mjs [--dir <folder>] --lock-status
  *
  * This is the contract backup.sh / backup.bat build on:
  *
@@ -32,6 +33,21 @@
  *             older backups may be the only ones holding those files. Not
  *             allowed together with --verify.
  *
+ * --lock-status  Answers whether a full backup or restore holds the lock in
+ *             the backup folder right now, by the rule the engine itself
+ *             uses (src/lib/backup/full-lock.ts). It reads nothing from
+ *             standard input, needs no passphrase and changes nothing: a
+ *             stale lock is reported as free and left where it is.
+ *             restore.sh asks this in the running app container before it
+ *             stops the app. One stdout line, and the exit code says which:
+ *               exit 0  BLACKVAULT_FULL_BACKUP_LOCK state=free
+ *               exit 2  BLACKVAULT_FULL_BACKUP_LOCK state=held pid=<n> hostname=<name> started=<time>
+ *               exit 1  the lock could not be read (one stderr line, no stdout)
+ *             pid, hostname and started are the holder's, as written in the
+ *             lock file (0 / unknown when it names none); any character
+ *             outside A-Z a-z 0-9 . _ : + - is shown as `?`. Not allowed
+ *             together with --verify or --keep.
+ *
  * STDOUT      Exactly one line on success, nothing on failure:
  *               BLACKVAULT_FULL_BACKUP_OK file=<name> files=<n> bytes=<n> archive_bytes=<n> skipped=<n> unreadable=<n>
  *               BLACKVAULT_FULL_BACKUP_VERIFIED file=<name> files=<n> bytes=<n> archive_bytes=<n>
@@ -53,13 +69,14 @@
  *             `WARNING: old backups were kept because this backup is incomplete`.
  *             The exit code is still 0.
  *
- * EXIT CODE   0 ok · 1 failed · 2 another backup is already running.
+ * EXIT CODE   0 ok · 1 failed · 2 another backup is already running
+ *             (--lock-status: 0 free · 1 could not tell · 2 held).
  *
  * Nothing here imports the database for --verify: the engine (and with it
  * the Prisma client) is loaded only when a backup is actually made.
  */
 import path from "node:path";
-import { DEFAULT_FULL_BACKUP_DIR, FullBackupAlreadyRunningError } from "@/lib/backup/full-lock";
+import { DEFAULT_FULL_BACKUP_DIR, FullBackupAlreadyRunningError, fullBackupLockStatus } from "@/lib/backup/full-lock";
 import { parseKeep, pruneFullBackups } from "@/lib/backup/full-prune";
 import { verifyFullBackup } from "@/lib/backup/full-verify";
 import { readPassphraseFromStdin } from "@/lib/backup/passphrase-input";
@@ -75,12 +92,14 @@ interface Args {
   verify: string | null;
   /** How many published backups to keep; null = never delete anything. */
   keep: number | null;
+  /** Only report whether the lock is held. */
+  lockStatus: boolean;
 }
 
-const USAGE = "Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file>; the passphrase is read from standard input.";
+const USAGE = "Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file> | [--dir <folder>] --lock-status; the passphrase is read from standard input.";
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dir: DEFAULT_FULL_BACKUP_DIR, verify: null, keep: null };
+  const args: Args = { dir: DEFAULT_FULL_BACKUP_DIR, verify: null, keep: null, lockStatus: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--dir" || flag === "--verify" || flag === "--keep") {
@@ -89,6 +108,8 @@ function parseArgs(argv: string[]): Args {
       if (flag === "--dir") args.dir = value;
       else if (flag === "--verify") args.verify = value;
       else args.keep = parseKeep(value); // throws (without echoing the value) unless a whole number >= 1
+    } else if (flag === "--lock-status") {
+      args.lockStatus = true;
     } else {
       // Deliberately does not echo the argument back: if someone puts a
       // passphrase on the command line by mistake, it must not be repeated.
@@ -96,6 +117,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (args.verify !== null && args.keep !== null) throw new UsageError(`--keep cannot be used with --verify. ${USAGE}`);
+  if (args.lockStatus && (args.verify !== null || args.keep !== null)) throw new UsageError(`--lock-status cannot be used with --verify or --keep. ${USAGE}`);
   return args;
 }
 
@@ -103,10 +125,27 @@ function oneLine(message: string): string {
   return message.replace(/\s*[\r\n]+\s*/g, " ").trim();
 }
 
+/** One word of the --lock-status line. The lock file is only a file: what it says is never printed raw. */
+function statusWord(value: string): string {
+  return value.replace(/[^A-Za-z0-9._:+-]/g, "?").slice(0, 100) || "unknown";
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
-  const passphrase = await readPassphraseFromStdin(process.stdin, "backup.sh");
   const dir = path.resolve(args.dir);
+
+  // Before anything is read from standard input: this mode takes no passphrase.
+  if (args.lockStatus) {
+    const status = await fullBackupLockStatus(dir);
+    if (!status.held) {
+      console.log("BLACKVAULT_FULL_BACKUP_LOCK state=free");
+      return EXIT_OK;
+    }
+    console.log(`BLACKVAULT_FULL_BACKUP_LOCK state=held pid=${status.pid} hostname=${statusWord(status.hostname)} started=${statusWord(status.startedAt)}`);
+    return EXIT_ALREADY_RUNNING;
+  }
+
+  const passphrase = await readPassphraseFromStdin(process.stdin, "backup.sh");
 
   if (args.verify !== null) {
     const file = /[\\/]/.test(args.verify) ? path.resolve(args.verify) : path.join(dir, args.verify);
