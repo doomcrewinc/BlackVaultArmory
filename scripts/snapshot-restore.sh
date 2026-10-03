@@ -5,6 +5,7 @@
 #
 #   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB
 #   snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]
+#   snapshot-restore.sh clear-marker UPLOADS STAMP
 #
 # Run INSIDE a one-off container of the app image, as root
 # (`docker compose run --user 0:0 --entrypoint /bin/sh`), with the host's
@@ -41,6 +42,12 @@
 #             only steps 1 and 2 run.
 #          The folders db-snapshot.sh leaves out are left out here too:
 #          .pre-encryption-*, .restore-*, .pre-restore-*, *.tmp, *.rot.
+#
+# clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
+#          restore program leaves just before its database step (ruling R24).
+#          The wrapper calls this once its rollback has worked. `uploads`
+#          never removes it: while it exists, the database still has to be
+#          put back.
 #
 # Exit status: 0 done and checked; anything else a failure, with one ERROR
 # line on standard error. The snapshot is never changed or deleted.
@@ -100,6 +107,15 @@ case "$MODE" in
     exit 0
     ;;
   uploads) ;;
+  clear-marker)
+    UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
+    STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
+    case "$STAMP" in
+      "" | */* | .*) fail "'$STAMP' is not a restore stamp." ;;
+    esac
+    rm -rf "${UP:?}/.restore-$STAMP.db-started" || fail "could not remove $UP/.restore-$STAMP.db-started."
+    exit 0
+    ;;
   --sync)
     # Second stage of `uploads` step 3, run by find below: $2 snapshot, $3
     # uploads, then snapshot files. Prints one line per file it copied back.
@@ -128,7 +144,7 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB | uploads UPLOADS STAMP [SNAPSHOT_DIR]" >&2
+    echo "usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB | uploads UPLOADS STAMP [SNAPSHOT_DIR] | clear-marker UPLOADS STAMP" >&2
     exit 2
     ;;
 esac

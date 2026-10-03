@@ -70,6 +70,7 @@ import { collectBackupRecords, buildBackupPayload, backupCounts } from "./record
 import { TarWriter } from "./tar";
 import { runFullBackup } from "./full-backup";
 import { FullBackupVerifyError, verifyFullBackup } from "./full-verify";
+import { acquireFullBackupLock, FullBackupAlreadyRunningError } from "./full-lock";
 import { FullRestoreError, runFullRestore } from "./full-restore";
 
 const ROOT = path.resolve(__dirname, "../../..");
@@ -216,19 +217,33 @@ async function takeSnapshot(): Promise<{ uploads: string; db: string | null }> {
   return { uploads: path.join(snapshots, "uploads-snap"), db };
 }
 
-/** The wrapper's rollback: scripts/snapshot-restore.sh for the uploads and (SQLite) the database file. */
-async function rollBackFromSnapshot(snap: { uploads: string; db: string | null }): Promise<string> {
-  let out = "";
-  if (snap.db) {
+const MARKER = `.restore-${STAMP}.db-started`;
+const markerExists = () => existsSync(path.join(rootB, MARKER));
+const withoutMarker = (t: Record<string, string>) => Object.fromEntries(Object.entries(t).filter(([p]) => !p.startsWith(MARKER)));
+
+/**
+ * The wrapper's rollback, as restore.sh does it (ruling R24): the uploads
+ * first (scripts/snapshot-restore.sh), then the DATABASE — only when the
+ * engine left its "database step started" marker — then the marker itself.
+ * `dbRolledBack` says whether the database step ran.
+ */
+async function rollBackFromSnapshot(snap: { uploads: string; db: string | null }): Promise<{ out: string; dbRolledBack: boolean }> {
+  const u = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "uploads", rootB, STAMP, snap.uploads]);
+  expect(u.status, u.stdout + u.stderr).toBe(0);
+  let out = u.stdout;
+  const dbRolledBack = markerExists();
+  if (dbRolledBack && snap.db) {
     await prisma.$disconnect();
     await raw.$disconnect();
     const d = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "sqlite", snap.db, ctx.file]);
     expect(d.status, d.stdout + d.stderr).toBe(0);
     out += d.stdout;
   }
-  const u = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "uploads", rootB, STAMP, snap.uploads]);
-  expect(u.status, u.stdout + u.stderr).toBe(0);
-  return out + u.stdout;
+  if (dbRolledBack) {
+    const c = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "clear-marker", rootB, STAMP]);
+    expect(c.status, c.stdout + c.stderr).toBe(0);
+  }
+  return { out, dbRolledBack };
 }
 
 const dbFileSha = () => (ctx.pg ? "(postgres)" : sha(readFileSync(ctx.file)));
@@ -338,7 +353,7 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
     expect(sha(await readDecryptedFile(path.join(rootB, pre, "images/firearms/only-on-target.jpg")))).toBe(sha(EXTRA));
     // What lives outside images/ and documents/ was not touched, and no staging folder is left.
     expect(live[".pre-encryption-20260101-000000/old.jpg"]).toBe(targetBefore[".pre-encryption-20260101-000000/old.jpg"]);
-    expect(Object.keys(live).filter((p) => p.startsWith(".restore-"))).toEqual([]);
+    expect(Object.keys(live).filter((p) => p.startsWith(".restore-"))).toEqual([]); // no staging folder, and the R24 marker was removed
 
     // The audit entry: written after the replace, attributed like the CLI's BACKUP_CREATED, and it survived.
     const events = await within(10_000, raw.auditEvent.findMany({ where: { action: "RESTORE" } }));
@@ -543,7 +558,9 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect(failure).toBeInstanceOf(FullRestoreError);
       expect((failure as FullRestoreError).databaseReplaced).toBe(false);
       expect(coreHook.calls).toBe(1);
-      expect(tree(rootB)).toEqual(before.files);
+      // The marker stays (R24: the database step had started; only the wrapper may decide it is safe to forget).
+      expect(existsSync(path.join(rootB, `.restore-${STAMP}.db-started`, "started"))).toBe(true);
+      expect(Object.fromEntries(Object.entries(tree(rootB)).filter(([p]) => !p.startsWith(`.restore-${STAMP}.db-started`)))).toEqual(before.files);
       expect(await storedRows()).toBe(before.rows);
     });
 
@@ -582,19 +599,45 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       }
     }
 
-    it("failure AFTER STAGING (before the database step): the engine alone undoes everything; the snapshot restore then finds nothing to do", async () => {
+    it("failure AFTER STAGING, before the database step: no marker is left, so the wrapper does NOT touch the database; the engine alone undid everything", async () => {
       const { source, snap, before } = await scenario();
-      coreHook.failBefore = new Error("injected: failure after staging");
+      // The marker itself cannot be written (a full disk): the database step is never reached.
+      const realMkdir = fsp.mkdir.bind(fsp);
+      vi.spyOn(fsp, "mkdir").mockImplementation((async (p: Parameters<typeof fsp.mkdir>[0], o?: Parameters<typeof fsp.mkdir>[1]) => {
+        if (String(p).endsWith(".db-started")) throw Object.assign(new Error("injected: ENOSPC after staging"), { code: "ENOSPC" });
+        return realMkdir(p, o);
+      }) as never);
       const failure = await restore(source.archive).then(() => null, (e: unknown) => e);
-      expect((failure as Error).message).toBe("injected: failure after staging");
+      vi.restoreAllMocks();
+      expect((failure as Error).message).toBe("injected: ENOSPC after staging");
+      expect(coreHook.calls).toBe(0);
 
-      // Engine layer alone: staging removed, uploads and records untouched.
+      // Engine layer alone: staging removed, NO marker, uploads and records untouched — already identical.
+      expect(markerExists()).toBe(false);
       expect(tree(rootB)).toEqual(before.files);
       expect(await storedRows()).toBe(before.rows);
+      expect(dbFileSha()).toBe(before.db);
 
-      const out = await rollBackFromSnapshot(snap);
+      const { out, dbRolledBack } = await rollBackFromSnapshot(snap);
+      expect(dbRolledBack).toBe(false); // R24: nothing reached the database, so nothing is done to it
       expect(out).not.toContain("copied back from the snapshot");
       expect(out).not.toContain("Moved the previous");
+      await expectIdentical(before);
+    });
+
+    it("the database step STARTED and threw before committing (or its commit was never acknowledged): the marker is left, so the wrapper puts the database back", async () => {
+      const { source, snap, before } = await scenario();
+      coreHook.failBefore = new Error("injected: the database step failed");
+      const failure = await restore(source.archive).then(() => null, (e: unknown) => e);
+      expect((failure as Error).message).toBe("injected: the database step failed");
+
+      // Engine layer alone: staging removed, uploads untouched; the marker says the database may have changed.
+      expect(markerExists()).toBe(true);
+      expect(withoutMarker(tree(rootB))).toEqual(before.files);
+
+      const { dbRolledBack } = await rollBackFromSnapshot(snap);
+      expect(dbRolledBack).toBe(true);
+      expect(markerExists()).toBe(false);
       await expectIdentical(before);
     });
 
@@ -611,12 +654,14 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect((failure as FullRestoreError).databaseReplaced).toBe(true);
       expect((failure as Error).message).toMatch(/database records were already replaced/);
 
-      // Engine layer alone: the uploads are as before (staging gone); the database is NOT.
-      expect(tree(rootB)).toEqual(before.files);
+      // Engine layer alone: the uploads are as before (staging gone) plus the marker; the database is NOT.
+      expect(markerExists()).toBe(true);
+      expect(withoutMarker(tree(rootB))).toEqual(before.files);
       expect(await storedRows()).not.toBe(before.rows);
       expect(await within(10_000, raw.firearm.count())).toBe(2);
 
-      await rollBackFromSnapshot(snap);
+      expect((await rollBackFromSnapshot(snap)).dbRolledBack).toBe(true);
+      expect(markerExists()).toBe(false);
       await expectIdentical(before);
     });
 
@@ -635,11 +680,12 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect((failure as FullRestoreError).databaseReplaced).toBe(true);
       expect((failure as Error).message).toMatch(/photos and documents were put back as they were/);
 
-      // Engine layer alone: uploads exactly as before, no .restore-/.pre-restore- folder; database replaced.
-      expect(tree(rootB)).toEqual(before.files);
+      // Engine layer alone: uploads exactly as before (plus the marker), no staging or .pre-restore- folder; database replaced.
+      expect(markerExists()).toBe(true);
+      expect(withoutMarker(tree(rootB))).toEqual(before.files);
       expect(await storedRows()).not.toBe(before.rows);
 
-      const out = await rollBackFromSnapshot(snap);
+      const { out } = await rollBackFromSnapshot(snap);
       expect(out).not.toContain("copied back from the snapshot");
       await expectIdentical(before);
     });
@@ -672,7 +718,7 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect(left[`.restore-${STAMP}/documents/c.pdf`]).toBeDefined();
       expect(left).not.toEqual(before.files);
 
-      const out = await rollBackFromSnapshot(snap);
+      const { out } = await rollBackFromSnapshot(snap);
       expect(out).toContain("Moved the previous images folder back into place.");
       await expectIdentical(before);
     });
@@ -696,19 +742,88 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       writeFileSync(path.join(pre, "images/firearms/a.jpg"), "damaged while it sat in .pre-restore");
       rmSync(path.join(rootB, "documents/only-on-target.pdf"));
 
-      const out = await rollBackFromSnapshot(snap);
+      const { out } = await rollBackFromSnapshot(snap);
       expect(out).toContain("copied back from the snapshot: images/firearms/only-on-target.jpg");
       expect(out).toContain("copied back from the snapshot: images/firearms/a.jpg");
       expect(out).toContain("copied back from the snapshot: documents/only-on-target.pdf");
       await expectIdentical(before);
     });
 
-    it("the restore finished but the process then failed (exit ≠ 0 after everything was in place): the snapshot restore still returns the install to before", async () => {
-      const { source, snap, before } = await scenario();
-      await restore(source.archive); // complete: .pre-restore-<ts> holds the previous folders
-      expect(tree(rootB)).not.toEqual(before.files);
-      await rollBackFromSnapshot(snap);
-      await expectIdentical(before);
+    it("the restore FINISHED: no marker is left and .pre-restore-<ts> exists — the state the wrapper reads as 'complete' when the program's exit status is lost", async () => {
+      const { source } = await scenario();
+      await restore(source.archive);
+      expect(markerExists()).toBe(false);
+      expect(existsSync(path.join(rootB, `.pre-restore-${STAMP}`, "images"))).toBe(true);
+      expect(existsSync(path.join(rootB, `.pre-restore-${STAMP}`, "documents"))).toBe(true);
+      expect(existsSync(path.join(rootB, `.restore-${STAMP}`))).toBe(false);
+    });
+
+    it("a leftover marker for the same stamp refuses a new run before anything is staged; an OLDER run's marker is never removed by a later run", async () => {
+      const { source, before } = await scenario();
+      mkdirSync(path.join(rootB, MARKER));
+      await expect(restore(source.archive)).rejects.toThrow(/\.db-started already exists/);
+      rmSync(path.join(rootB, MARKER), { recursive: true });
+      expect(tree(rootB)).toEqual(before.files);
+      mkdirSync(path.join(rootB, ".restore-20250101-000000.db-started"));
+      mkdirSync(path.join(rootB, ".restore-20250101-000000/images"), { recursive: true }); // old staging: removed
+      await restore(source.archive);
+      expect(existsSync(path.join(rootB, ".restore-20250101-000000.db-started"))).toBe(true);
+      expect(existsSync(path.join(rootB, ".restore-20250101-000000"))).toBe(false);
+    });
+  });
+
+  describe("the full-backup lock (a backup and a restore never run at the same time)", () => {
+    it("a restore refuses, before any change, while a backup holds the lock; and a backup refuses while a restore is running", async () => {
+      const source = await makeSource();
+      await makeTarget();
+      const before = { files: tree(rootB), rows: await storedRows() };
+
+      // 1. A backup is running (it holds the lock in the backup folder).
+      const held = await acquireFullBackupLock(backups);
+      try {
+        const failure = await restore(source.archive).then(() => null, (e: unknown) => e);
+        expect(failure).toBeInstanceOf(FullBackupAlreadyRunningError);
+        expect(coreHook.calls).toBe(0);
+        expect(tree(rootB)).toEqual(before.files); // nothing staged, no marker
+        expect(await storedRows()).toBe(before.rows);
+      } finally {
+        await held.release();
+      }
+
+      // 2. A restore is running: a backup started while it is inside its database step is refused.
+      let backupDuringRestore: unknown = "not attempted";
+      const realMkdir = fsp.mkdir.bind(fsp);
+      vi.spyOn(fsp, "mkdir").mockImplementation((async (p: Parameters<typeof fsp.mkdir>[0], o?: Parameters<typeof fsp.mkdir>[1]) => {
+        if (String(p).endsWith(".db-started")) {
+          backupDuringRestore = await runFullBackup({ passphrase: PASS, dir: backups, now: new Date("2027-03-03T00:00:00Z"), env: { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv }).then(() => "a backup was made", (e: unknown) => e);
+        }
+        return realMkdir(p, o);
+      }) as never);
+      await restore(source.archive);
+      vi.restoreAllMocks();
+      expect(backupDuringRestore).toBeInstanceOf(FullBackupAlreadyRunningError);
+      // The lock is released afterwards: no lock file left, and a backup works again.
+      expect(readdirSync(backups).filter((n) => n.includes("lock"))).toEqual([]);
+      await expect(within(60_000, runFullBackup({ passphrase: PASS, dir: backups, now: new Date("2027-03-04T00:00:00Z"), env: { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv }))).resolves.toMatchObject({ files: 3 });
+    });
+
+    it("the lock is released after a FAILED restore too", async () => {
+      const source = await makeSource();
+      await makeTarget();
+      await restore(source.archive, { passphrase: "not the right passphrase" }).catch(() => undefined);
+      expect(readdirSync(backups).filter((n) => n.includes("lock"))).toEqual([]);
+    });
+  });
+
+  describe("scripts/snapshot-restore.sh (more)", () => {
+    it("clear-marker removes exactly this stamp's marker", () => {
+      mkdirSync(path.join(rootB, MARKER));
+      writeFileSync(path.join(rootB, MARKER, "started"), "");
+      mkdirSync(path.join(rootB, ".restore-20250101-000000.db-started"));
+      const r = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "clear-marker", rootB, STAMP]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readdirSync(rootB)).toEqual([".restore-20250101-000000.db-started"]);
+      expect(sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "clear-marker", rootB, "../x"]).status).toBe(1);
     });
   });
 

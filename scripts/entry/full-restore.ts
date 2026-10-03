@@ -26,9 +26,11 @@
  *             says whether the database was changed. `WARNING: <message>`
  *             on success for anything that went wrong after the restore
  *             was complete.
- * EXIT CODE   0 restored · 1 failed. After a 1 (or any other non-zero
- *             status) the wrapper restores its snapshot, whatever the
- *             message says.
+ * EXIT CODE   0 restored · 1 failed (a backup running at the same time
+ *             included: this run holds the full-backup lock in --dir). After
+ *             any non-zero status the wrapper puts the uploads back, and the
+ *             database too if <uploads>/.restore-<ts>.db-started exists (the
+ *             marker this program leaves just before its database step).
  */
 import path from "node:path";
 import { DEFAULT_FULL_BACKUP_DIR } from "@/lib/backup/full-lock";
@@ -90,7 +92,7 @@ async function main(): Promise<number> {
 
   const [{ runFullRestore }, { prisma }] = await Promise.all([import("@/lib/backup/full-restore"), import("@/lib/prisma")]);
   try {
-    const result = await runFullRestore({ file, passphrase, ...(args.stamp ? { stamp: args.stamp } : {}) });
+    const result = await runFullRestore({ file, passphrase, dir, ...(args.stamp ? { stamp: args.stamp } : {}) });
     for (const warning of result.warnings) console.error(`WARNING: ${oneLine(warning)}`);
     console.log(`BLACKVAULT_FULL_RESTORE_OK file=${result.file} files=${result.files} bytes=${result.bytes} pre_restore=${result.preRestore}`);
     return EXIT_OK;

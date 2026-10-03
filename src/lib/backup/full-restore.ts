@@ -10,6 +10,7 @@ import { getFieldKeys } from "@/lib/encryption/keys";
 import { snapshotStamp } from "@/lib/encryption/pre-encryption-snapshot";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
 import { EntryNameSet, printableName } from "./entry-names";
+import { acquireFullBackupLock } from "./full-lock";
 import { checkDbAgainstCounts, checkEntriesAgainstManifest } from "./full-verify";
 import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
 import { restoreBackupRecords } from "./restore-core";
@@ -49,8 +50,12 @@ import { readTar } from "./tar";
  * uploads are as they were. It cannot undo a COMMITTED step 3:
  * `FullRestoreError.databaseReplaced` says whether that happened. The
  * wrapper restores the database (and re-checks the uploads) from the
- * snapshot it took before starting this — on every failure, whatever this
- * flag says; the flag only words the message.
+ * snapshot it took before starting this. The flag only words the message:
+ * what the wrapper goes by is the marker described below.
+ *
+ * Just before step 3 it leaves a durable marker, `.restore-<ts>.db-started/`
+ * (ruling R24, see DB_STEP_MARKER_SUFFIX): the wrapper puts the DATABASE back
+ * only when that marker exists. The whole run holds the full-backup lock.
  *
  * `.pre-restore-<ts>/` is never deleted here. The startup file scan, the
  * uploads snapshot and the full-backup walk all skip it and `.restore-*`.
@@ -60,6 +65,20 @@ import { readTar } from "./tar";
 
 export const RESTORE_STAGING_PREFIX = ".restore-";
 export const PRE_RESTORE_PREFIX = ".pre-restore-";
+/**
+ * Ruling R24. `<uploads>/.restore-<ts>.db-started/` is created — and flushed
+ * to disk, with the uploads folder — just BEFORE the database step. While it
+ * exists, the database may hold the backup's records: the wrapper puts the
+ * database back from its snapshot only when it finds this marker, and never
+ * touches a database the restore did not reach. It is written before the
+ * commit on purpose: a commit whose acknowledgement was lost must still be
+ * rolled back. This module removes it only when the whole restore succeeded;
+ * after a failure it stays, for the wrapper (which removes it once its
+ * rollback has worked). A hidden folder named `.restore-*`: the startup scan,
+ * the uploads snapshot and the backup walk all skip it.
+ */
+export const DB_STEP_MARKER_SUFFIX = ".db-started";
+export const dbStepMarkerName = (stamp: string): string => `${RESTORE_STAGING_PREFIX}${stamp}${DB_STEP_MARKER_SUFFIX}`;
 
 /** Same two folders, same archive roots, as the backup engine's walk (./full-backup.ts). */
 const UPLOAD_FOLDERS = [
@@ -95,6 +114,13 @@ export interface FullRestoreOptions {
   passphrase: string;
   /** Where the uploads root is read from (`IMAGE_UPLOAD_DIR`). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The backup folder, whose full-backup lock this run holds from before it
+   * stages anything until it ends: a backup made during a restore would
+   * archive a half-restored install (and `--keep` could then delete an older
+   * good one). Defaults to the folder the archive is in.
+   */
+  dir?: string;
   /** Used for the folder names when `stamp` is not given. Defaults to now. */
   now?: Date;
   /**
@@ -190,6 +216,7 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
   const staging = path.join(root, `${RESTORE_STAGING_PREFIX}${stamp}`);
   const preRestoreName = `${PRE_RESTORE_PREFIX}${stamp}`;
   const preRestore = path.join(root, preRestoreName);
+  const marker = path.join(root, dbStepMarkerName(stamp));
 
   // The key must load before anything is staged (EncryptionKeyError otherwise).
   getFieldKeys();
@@ -197,8 +224,10 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
   // Nothing below may start if this run's folders are already there, or if a
   // live folder is not a plain folder (a link would be renamed, not its target).
   await fsp.mkdir(root, { recursive: true });
-  if (await lstatOrNull(preRestore)) {
-    throw new FullRestoreError(`${preRestore} already exists (left by an earlier restore). Move it away first. Nothing was changed.`, false);
+  for (const leftover of [preRestore, marker]) {
+    if (await lstatOrNull(leftover)) {
+      throw new FullRestoreError(`${leftover} already exists (left by an earlier restore). Move it away first. Nothing was changed.`, false);
+    }
   }
   for (const { dir } of UPLOAD_FOLDERS) {
     const stat = await lstatOrNull(path.join(root, dir));
@@ -206,15 +235,41 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
       throw new FullRestoreError(`${path.join(root, dir)} is not a folder (a link, or a file). Replace it with a real folder first. Nothing was changed.`, false);
     }
   }
-  // Staging left by a restore that was killed holds only copies of an archive's files.
-  for (const name of await fsp.readdir(root)) {
-    if (name.startsWith(RESTORE_STAGING_PREFIX)) await fsp.rm(path.join(root, name), { recursive: true, force: true });
-  }
+  // No backup may run while the install is being replaced, and no restore
+  // while a backup is being made (FullBackupAlreadyRunningError: nothing was changed).
+  const lock = await acquireFullBackupLock(path.resolve(opts.dir ?? path.dirname(file)));
 
+  try {
+    return await restoreLocked({ opts, stamp, file, fileName, root, staging, preRestoreName, preRestore, marker });
+  } finally {
+    await lock.release();
+  }
+}
+
+interface RestorePaths {
+  opts: FullRestoreOptions;
+  stamp: string;
+  file: string;
+  fileName: string;
+  root: string;
+  staging: string;
+  preRestoreName: string;
+  preRestore: string;
+  marker: string;
+}
+
+/** Steps 1–5 of the restore, with the lock held and the pre-flight checks passed. */
+async function restoreLocked({ opts, file, fileName, root, staging, preRestoreName, preRestore, marker }: RestorePaths): Promise<FullRestoreResult> {
   let databaseReplaced = false;
   const renamed: Array<{ from: string; to: string }> = [];
   const createdLive: string[] = [];
   let createdPreRestore = false;
+
+  // Staging left by a restore that was killed holds only copies of an archive's files.
+  // An earlier run's database-step marker is NOT staging and is never removed here.
+  for (const name of await fsp.readdir(root)) {
+    if (name.startsWith(RESTORE_STAGING_PREFIX) && !name.endsWith(DB_STEP_MARKER_SUFFIX)) await fsp.rm(path.join(root, name), { recursive: true, force: true });
+  }
 
   try {
     // ── 1. Stage ────────────────────────────────────────────────
@@ -262,6 +317,16 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
     const payload: unknown = JSON.parse(db.toString("utf8"));
 
     // ── 3. Database: one transaction, through the shared restore logic ──
+    // The marker first (ruling R24), durable before the transaction opens.
+    await fsp.mkdir(marker, { mode: 0o700 });
+    const started = await fsp.open(path.join(marker, "started"), "wx", 0o600);
+    try {
+      await started.sync();
+    } finally {
+      await started.close();
+    }
+    await fsyncDir(marker);
+    await fsyncDir(root);
     const restored = await restoreBackupRecords(payload, { logLabel: "full-restore" });
     if (!restored.ok) throw new FullRestoreError(`${restored.error} Nothing was changed.`, false);
     databaseReplaced = true;
@@ -289,6 +354,12 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
 
     // From here on the restore is complete. Nothing below may fail it.
     const warnings: string[] = [];
+    try {
+      await fsp.rm(marker, { recursive: true });
+      await fsyncDir(root);
+    } catch (e) {
+      warnings.push(`The restore finished, but its marker ${marker} could not be removed (${codeOf(e) ?? messageOf(e)}). It can be deleted.`);
+    }
     try {
       await fsp.rmdir(staging);
     } catch (e) {
