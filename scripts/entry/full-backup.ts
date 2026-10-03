@@ -17,13 +17,19 @@
  *             the backup folder; a path is used as given.
  *
  * STDOUT      Exactly one line on success, nothing on failure:
- *               BLACKVAULT_FULL_BACKUP_OK file=<name> files=<n> bytes=<n> archive_bytes=<n> skipped=<n>
+ *               BLACKVAULT_FULL_BACKUP_OK file=<name> files=<n> bytes=<n> archive_bytes=<n> skipped=<n> unreadable=<n>
  *               BLACKVAULT_FULL_BACKUP_VERIFIED file=<name> files=<n> bytes=<n> archive_bytes=<n>
  *             <name> is the archive's file name (no folder, no spaces).
  *             `files`/`bytes` count the uploaded files inside and their total
  *             plaintext size; `archive_bytes` is the .bvb file's own size.
- * STDERR      Human-readable: one `full-backup: <message>` line on failure,
- *             and one line per file skipped because it vanished mid-run.
+ *             `skipped` counts every file left out; `unreadable` is how
+ *             many of those exist but could not be read or decrypted.
+ * STDERR      Human-readable: one `full-backup: <message>` line on failure.
+ *             On success: `full-backup: skipped <path>: <reason>` per file
+ *             that vanished mid-run, and for files that could not be read
+ *             `WARNING: skipped <path>: <reason>` each, then one
+ *             `WARNING: <n> file(s) could not be read ... NOT in this backup.`
+ *             The exit code is still 0.
  *
  * EXIT CODE   0 ok · 1 failed · 2 another backup is already running.
  *
@@ -95,9 +101,20 @@ async function main(): Promise<number> {
   const [{ runFullBackup }, { prisma }] = await Promise.all([import("@/lib/backup/full-backup"), import("@/lib/prisma")]);
   try {
     const result = await runFullBackup({ passphrase, dir });
-    for (const skipped of result.skipped) console.error(`full-backup: skipped ${skipped.path}: ${skipped.reason}`);
+    // A vanished file is normal on a live install; an unreadable one is not,
+    // and the backup is incomplete without it — say so, loudly (ruling R9).
+    let unreadable = 0;
+    for (const skipped of result.skipped) {
+      if (skipped.kind === "unreadable") {
+        unreadable += 1;
+        console.error(`WARNING: skipped ${skipped.path}: ${oneLine(skipped.reason)}`);
+      } else console.error(`full-backup: skipped ${skipped.path}: ${oneLine(skipped.reason)}`);
+    }
+    if (unreadable > 0) {
+      console.error(`WARNING: ${unreadable} ${unreadable === 1 ? "file could not be read and is" : "files could not be read and are"} NOT in this backup.`);
+    }
     console.log(
-      `BLACKVAULT_FULL_BACKUP_OK file=${result.file} files=${result.files} bytes=${result.bytes} archive_bytes=${result.archiveBytes} skipped=${result.skipped.length}`,
+      `BLACKVAULT_FULL_BACKUP_OK file=${result.file} files=${result.files} bytes=${result.bytes} archive_bytes=${result.archiveBytes} skipped=${result.skipped.length} unreadable=${unreadable}`,
     );
     return EXIT_OK;
   } finally {

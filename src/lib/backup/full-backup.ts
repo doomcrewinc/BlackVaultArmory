@@ -65,7 +65,7 @@ const UPLOAD_FOLDERS = [
 const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
 
 export class FullBackupError extends Error {
-  readonly code: "BACKUP_DIR_NOT_WRITABLE" | "FILE_UNREADABLE" | "VERIFY_MISMATCH";
+  readonly code: "BACKUP_DIR_NOT_WRITABLE" | "VERIFY_MISMATCH";
 
   constructor(code: FullBackupError["code"], message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -119,8 +119,17 @@ export interface FullBackupResult {
   bytes: number;
   /** Size of the `.bvb` file itself, in bytes. */
   archiveBytes: number;
-  /** Files that vanished while the backup ran (also in `manifest.skipped`). */
-  skipped: ManifestSkippedEntry[];
+  /**
+   * Files that are NOT in the archive (also in `manifest.skipped`, as
+   * `{ path, reason }`). `vanished`: deleted while the backup ran — expected
+   * on a live install. `unreadable`: the file exists but could not be read or
+   * decrypted — the caller must warn about every one of these.
+   */
+  skipped: FullBackupSkipped[];
+}
+
+export interface FullBackupSkipped extends ManifestSkippedEntry {
+  kind: "vanished" | "unreadable";
 }
 
 interface UploadEntry {
@@ -130,6 +139,31 @@ interface UploadEntry {
 }
 
 const codeOf = (e: unknown): string | undefined => (e as NodeJS.ErrnoException | null)?.code;
+
+/**
+ * Why one file could not be put in the archive, or null when the failure is
+ * not about that file and must fail the run.
+ * - ENOENT: the file was deleted after it was listed (spec §2 step 4).
+ * - It exists but cannot be decrypted (FileAtRestError: damaged, a foreign
+ *   key, plaintext at rest) or cannot be read (an fs error such as EACCES or
+ *   EIO): skipped as `unreadable` (ruling R9) — one bad upload must not block
+ *   every backup, but the caller has to say so loudly.
+ * Anything else (the encryption key cannot be loaded, a bug) is not a
+ * property of this file: skipping would turn "nothing can be read" into a
+ * successful, empty backup.
+ */
+function classifyReadFailure(e: unknown): { kind: FullBackupSkipped["kind"]; reason: string } | null {
+  if (e instanceof FileAtRestError) {
+    const why = e.code === "PLAINTEXT_AT_REST" ? e.code : (e.causeCode ?? e.code);
+    return { kind: "unreadable", reason: `unreadable: could not be decrypted (${why})` };
+  }
+  const fsError = e as NodeJS.ErrnoException | null;
+  if (fsError && typeof fsError.code === "string" && typeof fsError.syscall === "string") {
+    if (fsError.code === "ENOENT") return { kind: "vanished", reason: "vanished during the backup (deleted while it ran)" };
+    return { kind: "unreadable", reason: `unreadable: could not be read (${fsError.code})` };
+  }
+  return null;
+}
 
 /** `*.tmp` (an interrupted writeAtomic), `*.rot` (key rotation staging) and hidden entries are never backed up. */
 function isExcludedName(name: string): boolean {
@@ -300,9 +334,8 @@ async function fsyncDir(dir: string): Promise<void> {
  * place and audited. Rejects with
  * - `FullBackupAlreadyRunningError` (./full-lock.ts) — another backup holds
  *   the lock (CLI exit 2, HTTP 409);
- * - `FullBackupError` — the folder is not writable (the message names it), a
- *   file could not be decrypted (the message names it), or the verified
- *   archive does not match what was written;
+ * - `FullBackupError` — the folder is not writable (the message names it), or
+ *   the verified archive does not match what was written;
  * - `SealError` PASSPHRASE_TOO_SHORT;
  * - the underlying error otherwise (ENOSPC, a database error, a verify
  *   failure).
@@ -345,7 +378,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     const file = created.file;
 
     const files: ManifestFileEntry[] = [];
-    const skipped: ManifestSkippedEntry[] = [];
+    const skipped: FullBackupSkipped[] = [];
     const { sink, failure: sinkFailure } = fileSink(handle);
     const piped = pipeline(sealer, sink);
     piped.catch(() => undefined); // awaited below; never an unhandled rejection in between
@@ -360,21 +393,15 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
       for (const upload of uploads) {
         // The whole file is read and decrypted BEFORE its tar header is
         // written: once addBuffer starts, a failure poisons the writer, so
-        // "this file vanished" has to be known by now, and its size settled.
+        // "this file vanished / cannot be read" has to be known by now, and
+        // its size settled. A skipped file therefore never has a tar entry.
         let plaintext: Buffer | null = null;
         try {
           plaintext = await readDecryptedFile(upload.abs);
         } catch (e) {
-          if (codeOf(e) === "ENOENT") {
-            skipped.push({ path: upload.archivePath, reason: "vanished during the backup (deleted while it ran)" });
-          } else if (e instanceof FileAtRestError) {
-            throw new FullBackupError(
-              "FILE_UNREADABLE",
-              `Cannot back up ${upload.archivePath}: the file ${upload.abs} could not be decrypted (${e.causeCode ?? e.code}). ` +
-                "Nothing was saved. Fix or remove that file and run the backup again.",
-              { cause: e },
-            );
-          } else throw e;
+          const skip = classifyReadFailure(e);
+          if (!skip) throw e;
+          skipped.push({ path: upload.archivePath, ...skip });
         }
         if (plaintext) {
           const sha256 = createHash("sha256").update(plaintext).digest("hex");
@@ -392,7 +419,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
         keyIdAtBackup: getFieldKeys().id,
         counts,
         files,
-        skipped,
+        skipped: skipped.map(({ path: skippedPath, reason }) => ({ path: skippedPath, reason })),
       });
       await tar.addBuffer("manifest.json", Buffer.from(JSON.stringify(manifest), "utf8"));
       await tar.finish();
@@ -428,7 +455,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     await recordEventBestEffort(null, {
       action: "BACKUP_CREATED",
       entityLabel: file,
-      changes: { full: true, file, files: files.length, bytes, verified: true },
+      changes: { full: true, file, files: files.length, bytes, verified: true, skipped: skipped.length },
       ...(opts.actor ? { actorOverride: opts.actor } : {}),
     });
 

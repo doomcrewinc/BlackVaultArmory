@@ -334,10 +334,11 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
 
     expect(acted).toBe(true);
     expect(result.files).toBe(2);
-    expect(result.skipped).toEqual([{ path: "files/images/firearms/b.jpg", reason: expect.stringMatching(/vanished|no longer/i) }]);
+    expect(result.skipped).toEqual([{ path: "files/images/firearms/b.jpg", kind: "vanished", reason: expect.stringMatching(/^vanished/) }]);
 
     const opened = await open(result.path);
-    expect(opened.manifest.skipped).toEqual(result.skipped);
+    expect(opened.manifest.skipped).toEqual([{ path: "files/images/firearms/b.jpg", reason: result.skipped[0].reason }]);
+    expect(JSON.parse((await events())[0].changes ?? "null")).toMatchObject({ files: 2, skipped: 1, verified: true });
     expect(opened.manifest.files.map((f) => f.path)).toEqual(["files/images/firearms/a.jpg", `files/documents/${NEEDLE}-c.pdf`]);
     expect(opened.order).not.toContain("files/images/firearms/b.jpg");
     expect(opened.order.some((p) => p.includes("late.jpg"))).toBe(false);
@@ -453,6 +454,7 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
       files: 3,
       bytes: IMG_A.length + IMG_B.length + DOC_C.length,
       verified: true,
+      skipped: 0,
     });
     expect(rows[0].changes).not.toContain(PASS);
   });
@@ -488,15 +490,67 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(err.message).toMatch(/not writable/i);
   });
 
-  it("a file that cannot be decrypted fails the run, naming the file — it is never silently left out", async () => {
+  it("R9: a corrupted file among good ones is SKIPPED, loudly — the backup succeeds and verifies, the others are intact, manifest.skipped and the audit entry record it", async () => {
     await seedUploads();
+    // A real BVF1 file with one ciphertext byte flipped: exists, reads, fails to decrypt.
+    const corrupt = await upload("images/firearms/corrupt.jpg", Buffer.from("this will not decrypt ".repeat(100)));
+    const bytes = readFileSync(corrupt);
+    bytes[bytes.length - 40] ^= 0xff;
+    writeFileSync(corrupt, bytes);
+    // And one that was never encrypted at all.
     writeFileSync(path.join(root, "images/firearms/plain.jpg"), "not BVF1: plaintext at rest");
-    const err = await run().catch((e) => e);
-    expect(err).toBeInstanceOf(FullBackupError);
-    expect(err.code).toBe("FILE_UNREADABLE");
-    expect(err.message).toContain("files/images/firearms/plain.jpg");
-    expect(backupFolder()).toEqual([]);
-    expect(await events()).toHaveLength(0);
+
+    const result = await run();
+
+    expect(result.files).toBe(3);
+    expect(result.bytes).toBe(IMG_A.length + IMG_B.length + DOC_C.length);
+    expect(result.skipped).toEqual([
+      { path: "files/images/firearms/corrupt.jpg", kind: "unreadable", reason: "unreadable: could not be decrypted (AUTH_FAILED)" },
+      { path: "files/images/firearms/plain.jpg", kind: "unreadable", reason: "unreadable: could not be decrypted (PLAINTEXT_AT_REST)" },
+    ]);
+    // Distinguishable from a vanished file by the reason alone (the manifest has no `kind`).
+    expect(result.skipped.every((s) => !/vanished/.test(s.reason))).toBe(true);
+    expect(backupFolder()).toEqual([result.file]);
+
+    await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3, bytes: result.bytes });
+
+    const opened = await open(result.path);
+    expect(opened.manifest.skipped).toEqual(result.skipped.map(({ path: p, reason }) => ({ path: p, reason })));
+    // No half-written entry for a skipped file: the archive holds exactly the good files.
+    expect(opened.order).toEqual([
+      "db.json",
+      "files/images/firearms/a.jpg",
+      "files/images/firearms/b.jpg",
+      `files/documents/${NEEDLE}-c.pdf`,
+      "manifest.json",
+    ]);
+    const expected: Record<string, Buffer> = {
+      "files/images/firearms/a.jpg": IMG_A,
+      "files/images/firearms/b.jpg": IMG_B,
+      [`files/documents/${NEEDLE}-c.pdf`]: DOC_C,
+    };
+    for (const f of opened.manifest.files) {
+      expect(f.sha256, f.path).toBe(sha(expected[f.path]));
+      expect(opened.entries.get(f.path)!.equals(expected[f.path]), f.path).toBe(true);
+    }
+
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].changes ?? "null")).toEqual({ full: true, file: result.file, files: 3, bytes: result.bytes, verified: true, skipped: 2 });
+  });
+
+  it.runIf(isPosix && process.getuid?.() !== 0)("R9: a file that exists but cannot be read (EACCES) is skipped as unreadable too", async () => {
+    await seedUploads();
+    const locked = await upload("images/firearms/locked.jpg", IMG_A);
+    chmodSync(locked, 0o000);
+    try {
+      const result = await run();
+      expect(result.files).toBe(3);
+      expect(result.skipped).toEqual([{ path: "files/images/firearms/locked.jpg", kind: "unreadable", reason: "unreadable: could not be read (EACCES)" }]);
+      await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3 });
+    } finally {
+      chmodSync(locked, 0o600);
+    }
   });
 
   it("two backups in the same second get different names; neither overwrites the other", async () => {

@@ -25,7 +25,7 @@ import { writeEncryptedFile } from "@/lib/files/storage";
 
 const ROOT = path.resolve(__dirname, "..");
 const PASS = "cli test passphrase ünïcode";
-const OK_LINE = /^BLACKVAULT_FULL_BACKUP_OK file=(blackvault-full-\d{8}-\d{6}\.bvb) files=(\d+) bytes=(\d+) archive_bytes=(\d+) skipped=(\d+)\n$/;
+const OK_LINE = /^BLACKVAULT_FULL_BACKUP_OK file=(blackvault-full-\d{8}-\d{6}\.bvb) files=(\d+) bytes=(\d+) archive_bytes=(\d+) skipped=(\d+) unreadable=(\d+)\n$/;
 const VERIFIED_LINE = /^BLACKVAULT_FULL_BACKUP_VERIFIED file=(blackvault-full-\d{8}-\d{6}\.bvb) files=(\d+) bytes=(\d+) archive_bytes=(\d+)\n$/;
 const isPosixNonRoot = process.platform !== "win32" && process.getuid?.() !== 0;
 
@@ -95,7 +95,8 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(r.status).toBe(0);
     const m = OK_LINE.exec(r.stdout);
     expect(m, r.stdout).not.toBeNull();
-    const [, file, files, bytes, archiveBytes, skipped] = m!;
+    const [, file, files, bytes, archiveBytes, skipped, unreadable] = m!;
+    expect(Number(unreadable)).toBe(0);
     expect(fs.readdirSync(backups)).toEqual([file]);
     expect(Number(files)).toBe(2);
     expect(Number(bytes)).toBe(IMG.length + DOC.length);
@@ -103,6 +104,35 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(Number(skipped)).toBe(0);
     if (process.platform !== "win32") expect(fs.statSync(path.join(backups, file)).mode & 0o777).toBe(0o600);
     expect(fs.readFileSync(path.join(backups, file)).includes(Buffer.from("cli image bytes"))).toBe(false);
+  });
+
+  it("R9: an unreadable file is skipped with a WARNING line per file and a final count on stderr; exit 0, and the backup verifies", async () => {
+    const dirty = path.join(tmp, "uploads-dirty");
+    fs.mkdirSync(path.join(dirty, "images"), { recursive: true });
+    await writeEncryptedFile(path.join(dirty, "images", "good.jpg"), IMG);
+    await writeEncryptedFile(path.join(dirty, "images", "corrupt.jpg"), IMG);
+    const corrupt = fs.readFileSync(path.join(dirty, "images", "corrupt.jpg"));
+    corrupt[corrupt.length - 40] ^= 0xff;
+    fs.writeFileSync(path.join(dirty, "images", "corrupt.jpg"), corrupt);
+
+    const r = spawnSync(process.execPath, [bundle, "--dir", backups], {
+      cwd: ROOT,
+      env: { ...childEnv, IMAGE_UPLOAD_DIR: dirty },
+      input: `${PASS}\n`,
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    expect(r.status).toBe(0);
+    const m = OK_LINE.exec(r.stdout);
+    expect(m, r.stdout).not.toBeNull();
+    expect(m!.slice(2)).toEqual(["1", String(IMG.length), m![4], "1", "1"]);
+    expect(r.stderr.split("\n").filter(Boolean)).toEqual([
+      "WARNING: skipped files/images/corrupt.jpg: unreadable: could not be decrypted (AUTH_FAILED)",
+      "WARNING: 1 file could not be read and is NOT in this backup.",
+    ]);
+    const v = cli(["--dir", backups, "--verify", m![1]]);
+    expect(v.status).toBe(0);
+    expect(VERIFIED_LINE.exec(v.stdout)!.slice(2, 4)).toEqual(["1", String(IMG.length)]);
   });
 
   it("--verify accepts that backup by bare name (looked up in --dir) and by path, with CRLF or no line ending on the passphrase", () => {
