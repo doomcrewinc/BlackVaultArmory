@@ -18,7 +18,7 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS23) and by the static checks at the end of this file.
+ * (scenarios RS1–RS28) and by the static checks at the end of this file.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1516,7 +1516,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS23). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS28). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -1691,7 +1691,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       'set "BV_STATE=untouched"',
       'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\images\\" set "BV_STATE=complete"',
       'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\documents\\" set "BV_STATE=complete"',
-      'if exist "!BV_MARKER!\\" set "BV_STATE=started"',
+      'if exist "!BV_MARKER!" set "BV_STATE=started"',
       'if not exist "!BV_HOST_UPLOADS!\\" set "BV_STATE=unknown"',
       'if "!BV_STATE!"=="unknown" goto :state_unknown',
       'if not "!BV_STATE!"=="complete" goto :rollback',
@@ -1731,7 +1731,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   });
 
   it("R25: the recovery file is written before the restore, deleted on success and after a good rollback, kept and shown after a failed one; it holds restore.sh's steps", () => {
-    const write = code.slice(code.indexOf(":write_recovery"), code.indexOf(":write_marker_left"));
+    const write = code.slice(code.indexOf(":write_recovery"), code.indexOf(":old_marker_named"));
     const text = write.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
     expect(text).toContain("  docker stop !BV_CONTAINER!");
     expect(text).toContain("  docker ps -a --filter name=!BV_CONTAINER!");
@@ -1781,54 +1781,110 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     }
     // Deleted in exactly two places (success / completed, and after a good rollback); never between :rollback and :rolled_back.
     const dels = code.map((l, i) => (l === 'del /f /q "!BV_RECOVERY!" >nul 2>&1' ? i : -1)).filter((i) => i >= 0);
-    expect(dels).toHaveLength(5); // + the one that clears a stale file before writing, + the one after a handoff that could not be written (nothing was changed yet), + the one before the file is replaced by the marker-left text
+    expect(dels).toHaveLength(4); // + the one that clears a stale file before writing, + the one after a handoff that could not be written (nothing was changed yet)
     expect(dels.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
     expect(code.indexOf('type "!BV_RECOVERY!" 1>&2')).toBeGreaterThan(0);
     expect(code.filter((l) => l === 'type "!BV_RECOVERY!" 1>&2')).toHaveLength(2); // before the restore, and after a failed rollback
   });
 
-  it("BlackVault is never started while a restore marker exists: an older marker stops the run up front; this run's marker is cleared before `up -d`, and if it cannot be, the script exits 1 without starting", () => {
-    const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
-    const clear = `${container} clear-marker /app/uploads !BV_STAMP! 1>&2`;
+  it("BlackVault is never started while a restore marker exists: older markers stop the run up front (host or container, never guessed); this run's marker is cleared before `up -d`, seen or not; if it cannot be, the script exits 1 without starting", () => {
+    const run = '--rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
+    const clear = `%COMPOSE% run ${run} clear-marker /app/uploads !BV_STAMP! 1>&2`;
     const at = (line: string, from = 0) => code.indexOf(line, from);
+    /** Each line is looked for AFTER the one before it; all must be found. */
     const inOrder = (linesInOrder: string[], from: number) => {
-      const found = linesInOrder.map((l) => at(l, from));
-      expect(found.every((i) => i >= from), JSON.stringify(found)).toBe(true);
-      expect([...found].sort((a, b) => a - b)).toEqual(found);
+      let next = from;
+      const found = linesInOrder.map((l) => {
+        const i = at(l, next);
+        if (i >= 0) next = i + 1;
+        return i;
+      });
+      expect(found.every((i) => i >= from), JSON.stringify(found.map((i, n) => (i < 0 ? linesInOrder[n] : i)))).toBe(true);
       return found;
     };
-    // 1. An older restore's marker (any stamp): looked for right after the recovery-file check, before the backup is even checked.
+    // DATA_DIR=./data in .env: the host-side path gets backslashes before it is used with `if exist` and `for`.
+    inOrder(['if not defined BV_HOST_DATA set "BV_HOST_DATA=.\\data"', 'set "BV_HOST_DATA=!BV_HOST_DATA:/=\\!"', ":no_recovery_pending"], 0);
+
+    // 1. Older markers (any stamp; folders AND files): right after the recovery-file check, before the backup is even checked.
     const upFront = inOrder(
       [
         ":no_recovery_pending",
-        'set "BV_OLD_MARKER="',
-        'for /d %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do set "BV_OLD_MARKER=%%~nxM"',
-        "if not defined BV_OLD_MARKER goto :no_old_marker",
-        'set "BV_OLD_STAMP=!BV_OLD_MARKER:~9,-11!"',
+        'set "BV_OLD_COUNT=0"',
+        'set "BV_OLD_WHERE=!BV_HOST_DATA!\\uploads\\"',
+        'if not exist "!BV_HOST_DATA!\\uploads\\" goto :old_markers_ask',
+        'for /d %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do call :old_marker_named "%%~nxM"',
+        'for %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do call :old_marker_named "%%~nxM"',
+        "goto :old_markers_known",
+        ":old_markers_ask",
+        'set "BV_OLD_WHERE=/app/uploads/"',
+        'set "BV_MARKERS_ASKED="',
+        // The uploads folder is not on the host: a container is asked. The sentinel line is printed only if the command worked.
+        `for /f "usebackq delims=" %%S in (\`%COMPOSE% run ${run} markers /app/uploads 2^>nul ^&^& echo BV-MARKERS-ASKED\`) do call :old_marker_listed "%%S"`,
+        "if defined BV_MARKERS_ASKED goto :old_markers_known",
+        ">&2 echo ERROR: could not check the uploads folder for a marker left by an earlier restore: !BV_HOST_DATA!\\uploads is not there to look into, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done.",
+        "exit /b 1",
+        ":old_markers_known",
+        'if "!BV_OLD_COUNT!"=="0" goto :no_old_marker',
+        'if "!BV_OLD_WHERE!"=="/app/uploads/" set "BV_OLD_MARKERS=!BV_OLD_MARKERS! (inside the container)"',
+        ">&2 echo ERROR: the uploads folder holds a marker left by an earlier restore: !BV_OLD_MARKERS!. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  !BV_OLD_CMDS!  Then run the restore again. Nothing was done.",
       ],
       0,
     );
+    expect(code.slice(upFront.at(-1)! + 1, upFront.at(-1)! + 3)).toEqual(["exit /b 1", ":no_old_marker"]);
+    expect(upFront.at(-1)!).toBeLessThan(code.findIndex((l) => l.includes("full-backup.mjs --verify")));
+    // Its wording is restore.sh's.
+    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+    expect(sh).toContain("the uploads folder holds a marker left by an earlier restore: $OLD_MARKERS. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  $OLD_COMMANDS  Then run the restore again. Nothing was done.");
+    // One marker: its stamp is cut out of the name, and its command is added to ONE line joined with &&, the stamp quoted.
     expect(".restore-".length).toBe(9);
     expect(".db-started".length).toBe(11);
-    const refusal = code[upFront[4] + 1];
-    expect(refusal).toMatch(/^>&2 echo ERROR: an earlier restore \(!BV_OLD_STAMP!\) left its marker !BV_HOST_DATA!\\uploads\\!BV_OLD_MARKER!, and its recovery file is gone\. BlackVault refuses to start while that marker exists/);
-    expect(refusal).toContain('docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_OLD_STAMP!  Then run the restore again. Nothing was done.');
-    expect(code.slice(upFront[4] + 2, upFront[4] + 4)).toEqual(["exit /b 1", ":no_old_marker"]);
-    expect(upFront[4]).toBeLessThan(code.findIndex((l) => l.includes("full-backup.mjs --verify")));
+    const sub = code.slice(at(":old_marker_named"), at(":write_marker_left"));
+    expect(sub).toEqual([
+      ":old_marker_named",
+      'set "BV_ONE=%~1"',
+      'set "BV_ONE=!BV_ONE:~9,-11!"',
+      "goto :old_marker_add",
+      ":old_marker_listed",
+      'set "BV_ONE=%~1"',
+      'if "!BV_ONE!"=="BV-MARKERS-ASKED" set "BV_MARKERS_ASKED=1"',
+      'if "!BV_ONE!"=="BV-MARKERS-ASKED" goto :eof',
+      ":old_marker_add",
+      "if not defined BV_ONE goto :eof",
+      "set /a BV_OLD_COUNT+=1",
+      'if defined BV_OLD_MARKERS set "BV_OLD_MARKERS=!BV_OLD_MARKERS!, "',
+      'set "BV_OLD_MARKERS=!BV_OLD_MARKERS!!BV_OLD_WHERE!.restore-!BV_ONE!.db-started"',
+      'if defined BV_OLD_CMDS set "BV_OLD_CMDS=!BV_OLD_CMDS! && "',
+      `set "BV_OLD_CMDS=!BV_OLD_CMDS!docker compose run ${run} clear-marker /app/uploads "!BV_ONE!""`,
+      "goto :eof",
+      "",
+    ]);
 
-    // 2. After a restore that finished: the marker is cleared before the app is started; if that fails, no `up -d`.
+    // 2. After a restore that finished: the marker is cleared before the app is started — when it is seen, and ALSO when
+    //    the uploads folder is not there to look into (then nothing is claimed about it). If that fails, no `up -d`.
     const done = inOrder(
       [
         ":restore_done",
-        'if not exist "!BV_MARKER!\\" goto :restore_marker_gone',
+        'set "BV_NOT_REMOVED=its marker !BV_MARKER! could not be removed"',
+        'if exist "!BV_MARKER!" goto :restore_marker_seen',
+        'if exist "!BV_HOST_UPLOADS!\\" goto :restore_marker_gone',
+        ">&2 echo The uploads folder !BV_HOST_UPLOADS! is not there to look into, so whether the restore left its marker is not known. Removing the marker if it is there...",
+        'set "BV_NOT_REMOVED=its marker, if it is still there (the uploads folder !BV_HOST_UPLOADS! is not there to look into), could not be removed"',
+        "goto :restore_clear_marker",
+        ":restore_marker_seen",
+        ">&2 echo The restore finished but left its marker !BV_MARKER!. Removing it...",
+        ":restore_clear_marker",
         clear,
         "if not errorlevel 1 goto :restore_marker_gone",
         "call :write_marker_left",
+        'set "BV_WHERE_ELSE=The same is in !CD!\\!BV_RECOVERY!."',
+        'if not defined BV_LEFT_WRITTEN set "BV_WHERE_ELSE=!CD!\\!BV_RECOVERY! could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running."',
+        ">&2 echo ERROR: the restore is complete and was NOT rolled back, but !BV_NOT_REMOVED!, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  !BV_WHERE_ELSE!",
+        "exit /b 1",
+        ":restore_marker_gone",
       ],
       at(":restore_done"),
     );
-    expect(code[done[4] + 1]).toMatch(/^>&2 echo ERROR: the restore is complete and was NOT rolled back, but its marker !BV_MARKER! could not be removed, and BlackVault refuses to start while that marker exists\. BlackVault was NOT started\. Remove the marker with: {2}!BV_CLEAR_CMD! {2}Then start BlackVault: docker compose up -d {2}The same is in !CD!\\!BV_RECOVERY!\.$/);
-    expect(code.slice(done[4] + 2, done[4] + 4)).toEqual(["exit /b 1", ":restore_marker_gone"]);
+    expect(done.at(-1)! - done[0]).toBe(17); // nothing else between them
     expect(at("%COMPOSE% up -d 1>&2", at(":restore_done"))).toBeGreaterThan(at(":restore_marker_gone"));
 
     // 3. After a rollback that worked: the same rule; the recovery file is not deleted on that path.
@@ -1838,16 +1894,34 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(at("%COMPOSE% up -d 1>&2", at(":rolled_back"))).toBeGreaterThan(at(":marker_cleared"));
 
     // The printed command is the one the script runs, and is set before either path can use it.
-    expect(at('set "BV_CLEAR_CMD=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP!"')).toBeLessThan(at(":restore_done"));
+    expect(at(`set "BV_CLEAR_CMD=docker compose run ${run} clear-marker /app/uploads !BV_STAMP!"`)).toBeLessThan(at(":restore_done"));
     expect(code.findIndex((l) => l.startsWith('set "BV_CLEAR_CMD='))).toBeGreaterThan(at(":restore_ran"));
-    // Nothing tells the user that a marker may simply be left, or deleted at leisure.
+    // Nothing tells the user that a marker may simply be left, or deleted at leisure; a marker is a folder OR a file everywhere.
     expect(text).not.toMatch(/It can be deleted|Delete it by hand/);
+    expect(code.filter((l) => l.includes('"!BV_MARKER!\\"'))).toEqual([]);
 
     // The text that replaces the recovery file: restore.sh's, with the same two steps; nothing in it puts the old install back.
+    // It is written to a file beside it (first line with `>`, so that file never holds two texts), read back, and moved over.
     const left = code.slice(at(":write_marker_left"), at(":run_with_passphrase"));
-    const leftText = left.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
-    expect(left[1]).toBe('del /f /q "!BV_RECOVERY!" >nul 2>&1');
+    expect(left.slice(0, 4)).toEqual([":write_marker_left", 'set "BV_LEFT_WRITTEN="', 'set "BV_LEFT_NEW=!BV_RECOVERY!.new"', '>"!BV_LEFT_NEW!" echo BlackVault restore !BV_STAMP!: ONE STEP LEFT']);
+    expect(left.filter((l) => l.startsWith('>"') || l.includes('"!BV_RECOVERY!" echo'))).toHaveLength(1); // one truncating write; never appended to the recovery file itself
+    const tail = left.slice(left.findIndex((l) => l.startsWith("findstr ")));
+    expect(tail).toEqual([
+      'findstr /c:".pre-restore-!BV_STAMP!" "!BV_LEFT_NEW!" >nul 2>&1',
+      "if errorlevel 1 goto :marker_left_not_written",
+      'move /y "!BV_LEFT_NEW!" "!BV_RECOVERY!" >nul 2>&1',
+      'findstr /b /c:"BlackVault restore !BV_STAMP!: ONE STEP LEFT" "!BV_RECOVERY!" >nul 2>&1',
+      "if errorlevel 1 goto :marker_left_not_written",
+      'set "BV_LEFT_WRITTEN=1"',
+      "goto :eof",
+      ":marker_left_not_written",
+      'del /f /q "!BV_LEFT_NEW!" >nul 2>&1',
+      "goto :eof",
+      "",
+    ]);
+    const leftText = left.filter((l) => /^>>?"!BV_LEFT_NEW!" echo/.test(l)).map((l) => l.replace(/^>>?"!BV_LEFT_NEW!" echo/, "").replace(/^[. ]/, ""));
     expect(leftText[0]).toBe("BlackVault restore !BV_STAMP!: ONE STEP LEFT");
+    expect(leftText.at(-1)).toBe("[uploads folder]\\.pre-restore-!BV_STAMP!\\.");
     expect(leftText.indexOf("  !BV_CLEAR_CMD!")).toBeGreaterThan(leftText.indexOf("1. Remove the marker:"));
     expect(leftText.indexOf("  docker compose up -d")).toBeGreaterThan(leftText.indexOf("  !BV_CLEAR_CMD!"));
     expect(leftText.join("\n")).not.toMatch(/ (uploads|sqlite) \/|psql/);
@@ -1855,8 +1929,13 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       expect(l.replace(/!BV_[A-Z_]+!|!CD!/g, "")).not.toContain("!");
       expect(l).not.toMatch(/[&<>|^%]/);
     }
-    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
-    for (const l of ["could not be removed. BlackVault refuses to start while that marker exists,", "1. Remove the marker:", "The install as it was before the restore is still in this snapshot:"]) {
+    for (const l of [
+      "could not be removed. BlackVault refuses to start while that marker exists,",
+      "started (they may still be on your screen): they would put the old install",
+      "back and undo the restore.",
+      "1. Remove the marker:",
+      "The install as it was before the restore is still in this snapshot:",
+    ]) {
       expect(leftText).toContain(l);
       expect(sh).toContain(`echo "${l}"`);
     }
@@ -1871,9 +1950,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS23) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS28) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 23; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 28; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
@@ -1893,6 +1972,12 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     // RS20–RS23: a marker that is still there. The stub can refuse clear-marker alone.
     expect(stub).toContain('"BV_STUB_CLEAR_MARKER_EXIT"');
     expect(section).toContain('"BV_STUB_CLEAR_MARKER_EXIT" = "1"');
+    // RS24–RS28: an uploads folder that is not on the host (the container is asked), a forward-slash DATA_DIR, a recovery file that cannot be replaced.
+    for (const knob of ["BV_STUB_MARKERS_ANSWER", "BV_STUB_RECOVERY_READONLY"]) {
+      expect(stub).toContain(`"${knob}"`);
+      expect(section).toContain(`"${knob}" = `);
+    }
+    expect(section).toContain('"DATA_DIR=./data`r`n"');
     expect(section).toContain('"BV_STUB_HANDOFF_READONLY" = "1"');
   });
 });

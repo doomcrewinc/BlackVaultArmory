@@ -228,6 +228,10 @@ if "!DATA_DIR!"=="!BV_HOST_DATA!" goto :data_dir_ok
 exit /b 1
 :data_dir_ok
 if not defined BV_HOST_DATA set "BV_HOST_DATA=.\data"
+:: .env may spell DATA_DIR with forward slashes (./data), which docker compose
+:: accepts. The folder is looked into below with `if exist` and `for`, whose
+:: wildcards need backslashes, so the host-side copy of the path gets them.
+set "BV_HOST_DATA=!BV_HOST_DATA:/=\!"
 :: Ruling R25: an earlier restore that did not end cleanly left its recovery
 :: file. Never start a second restore on top of a possibly half-restored install.
 if not exist "backups\restore-*-RECOVERY.txt" goto :no_recovery_pending
@@ -239,10 +243,42 @@ exit /b 1
 :: has already stopped this run; a marker WITHOUT one was left by a restore
 :: nobody can put back from here any more. It is never removed silently, and
 :: a restore is never run on top of it: BlackVault could not be started
-:: afterwards, neither after a success nor after a rollback.
-set "BV_OLD_MARKER="
-for /d %%M in ("!BV_HOST_DATA!\uploads\.restore-*.db-started") do set "BV_OLD_MARKER=%%~nxM"
-if not defined BV_OLD_MARKER goto :no_old_marker
+:: afterwards, neither after a success nor after a rollback. Every marker is
+:: named, with ONE command line that removes them all.
+::
+:: WHAT COUNTS AS A MARKER, everywhere in this script: anything directly
+:: under the uploads folder named .restore-[stamp].db-started, a folder (what
+:: the restore program creates) or a file, whatever [stamp] is; the same rule
+:: as scripts\snapshot-restore.sh and the app's own start. (A dangling link,
+:: which they count too, cannot be seen by `if exist`; inside the container
+:: it still is one, and the app refuses on it.)
+::
+:: Looked for from the host when the uploads folder is there. When it is not
+:: (it is mounted from somewhere other than [DATA_DIR]\uploads), a container
+:: is asked. If that fails too, the restore does not start: "could not check"
+:: is never taken for "no marker". The command prints one stamp per line and
+:: then, only if it worked, the line BV-MARKERS-ASKED.
+set "BV_OLD_COUNT=0"
+set "BV_OLD_MARKERS="
+set "BV_OLD_CMDS="
+set "BV_OLD_WHERE=!BV_HOST_DATA!\uploads\"
+if not exist "!BV_HOST_DATA!\uploads\" goto :old_markers_ask
+for /d %%M in ("!BV_HOST_DATA!\uploads\.restore-*.db-started") do call :old_marker_named "%%~nxM"
+for %%M in ("!BV_HOST_DATA!\uploads\.restore-*.db-started") do call :old_marker_named "%%~nxM"
+goto :old_markers_known
+:old_markers_ask
+set "BV_OLD_WHERE=/app/uploads/"
+set "BV_MARKERS_ASKED="
+for /f "usebackq delims=" %%S in (`%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh markers /app/uploads 2^>nul ^&^& echo BV-MARKERS-ASKED`) do call :old_marker_listed "%%S"
+if defined BV_MARKERS_ASKED goto :old_markers_known
+>&2 echo ERROR: could not check the uploads folder for a marker left by an earlier restore: !BV_HOST_DATA!\uploads is not there to look into, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done.
+exit /b 1
+:old_markers_known
+if "!BV_OLD_COUNT!"=="0" goto :no_old_marker
+if "!BV_OLD_WHERE!"=="/app/uploads/" set "BV_OLD_MARKERS=!BV_OLD_MARKERS! (inside the container)"
+>&2 echo ERROR: the uploads folder holds a marker left by an earlier restore: !BV_OLD_MARKERS!. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  !BV_OLD_CMDS!  Then run the restore again. Nothing was done.
+exit /b 1
+:no_old_marker
 :: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
 set "BV_OLD_STAMP=!BV_OLD_MARKER:~9,-11!"
 >&2 echo ERROR: an earlier restore (!BV_OLD_STAMP!) left its marker !BV_HOST_DATA!\uploads\!BV_OLD_MARKER!, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove the marker first with:  docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_OLD_STAMP!  Then run the restore again. Nothing was done.
@@ -510,7 +546,7 @@ if "!BV_RC!"=="0" goto :restore_done
 set "BV_STATE=untouched"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\documents\" set "BV_STATE=complete"
-if exist "!BV_MARKER!\" set "BV_STATE=started"
+if exist "!BV_MARKER!" set "BV_STATE=started"
 if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=unknown"
 if "!BV_STATE!"=="unknown" goto :state_unknown
 if not "!BV_STATE!"=="complete" goto :rollback
@@ -520,10 +556,28 @@ if not "!BV_STATE!"=="complete" goto :rollback
 :: The restore program removes its marker as its last step. If that failed
 :: (it says so in a warning and still exits 0), the marker is removed here,
 :: as root in a container, BEFORE BlackVault is started: BlackVault refuses
-:: to start while a marker exists. If it cannot be removed, BlackVault is not
+:: to start while a marker exists. When the uploads folder is not there to
+:: look into, the marker is removed without being seen (removing one that is
+:: not there changes nothing). If it cannot be removed, BlackVault is not
 :: started; the recovery file is replaced by one that says what is left to do
 :: (the one written before the restore would put the old install back).
-if not exist "!BV_MARKER!\" goto :restore_marker_gone
+set "BV_NOT_REMOVED=its marker !BV_MARKER! could not be removed"
+if exist "!BV_MARKER!" goto :restore_marker_seen
+if exist "!BV_HOST_UPLOADS!\" goto :restore_marker_gone
+>&2 echo The uploads folder !BV_HOST_UPLOADS! is not there to look into, so whether the restore left its marker is not known. Removing the marker if it is there...
+set "BV_NOT_REMOVED=its marker, if it is still there (the uploads folder !BV_HOST_UPLOADS! is not there to look into), could not be removed"
+goto :restore_clear_marker
+:restore_marker_seen
+>&2 echo The restore finished but left its marker !BV_MARKER!. Removing it...
+:restore_clear_marker
+%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP! 1>&2
+if not errorlevel 1 goto :restore_marker_gone
+call :write_marker_left
+set "BV_WHERE_ELSE=The same is in !CD!\!BV_RECOVERY!."
+if not defined BV_LEFT_WRITTEN set "BV_WHERE_ELSE=!CD!\!BV_RECOVERY! could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running."
+>&2 echo ERROR: the restore is complete and was NOT rolled back, but !BV_NOT_REMOVED!, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  !BV_WHERE_ELSE!
+exit /b 1
+:restore_marker_gone
 >&2 echo The restore finished but left its marker !BV_MARKER!. Removing it...
 %COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP! 1>&2
 if not errorlevel 1 goto :restore_marker_gone
@@ -715,34 +769,81 @@ goto :write_recovery_tail
 >>"!BV_RECOVERY!" echo   del "!BV_RECOVERY!"
 goto :eof
 
+:: :old_marker_named "NAME" / :old_marker_listed "STAMP" - one leftover
+:: marker, by its file name (from the host) or by its stamp (a line the
+:: container printed; the line BV-MARKERS-ASKED says the question worked).
+:: Adds it to BV_OLD_MARKERS and its clear-marker command to BV_OLD_CMDS,
+:: joined with ^&^& so that the whole is one command line. The stamp is quoted
+:: in the command: a hand-made name may hold a space.
+:old_marker_named
+set "BV_ONE=%~1"
+:: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
+set "BV_ONE=!BV_ONE:~9,-11!"
+goto :old_marker_add
+:old_marker_listed
+set "BV_ONE=%~1"
+if "!BV_ONE!"=="BV-MARKERS-ASKED" set "BV_MARKERS_ASKED=1"
+if "!BV_ONE!"=="BV-MARKERS-ASKED" goto :eof
+:old_marker_add
+if not defined BV_ONE goto :eof
+set /a BV_OLD_COUNT+=1
+if defined BV_OLD_MARKERS set "BV_OLD_MARKERS=!BV_OLD_MARKERS!, "
+set "BV_OLD_MARKERS=!BV_OLD_MARKERS!!BV_OLD_WHERE!.restore-!BV_ONE!.db-started"
+if defined BV_OLD_CMDS set "BV_OLD_CMDS=!BV_OLD_CMDS! && "
+set "BV_OLD_CMDS=!BV_OLD_CMDS!docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads "!BV_ONE!""
+goto :eof
+
 :: :write_marker_left - replaces !BV_RECOVERY! when the restore FINISHED and
 :: only its marker could not be removed: the same text as restore.sh's
-:: marker_left_text. No exclamation mark may appear in the text.
+:: marker_left_text. No exclamation mark may appear in the text. It is
+:: written to a file beside the recovery file (its first line with a single
+:: redirection, which empties whatever was there), read back, and moved over
+:: it, so the
+:: recovery file is always one whole text: the new one, or - when this fails,
+:: and then BV_LEFT_WRITTEN stays undefined - the one written before the
+:: restore.
 :write_marker_left
-del /f /q "!BV_RECOVERY!" >nul 2>&1
->>"!BV_RECOVERY!" echo BlackVault restore !BV_STAMP!: ONE STEP LEFT
->>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo restore.bat restored !BV_FILE_NAME! completely: the records and the files are the
->>"!BV_RECOVERY!" echo backup's, and nothing has to be put back. Only the marker of the restore,
->>"!BV_RECOVERY!" echo   !BV_MARKER!
->>"!BV_RECOVERY!" echo could not be removed. BlackVault refuses to start while that marker exists,
->>"!BV_RECOVERY!" echo so restore.bat did not start it.
->>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo Run these in a Command Prompt, from "!CD!", in this order.
->>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo 1. Remove the marker:
->>"!BV_RECOVERY!" echo   !BV_CLEAR_CMD!
->>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo 2. Start BlackVault, check it, then delete this file (while it exists, a new
->>"!BV_RECOVERY!" echo    restore refuses to start):
->>"!BV_RECOVERY!" echo   docker compose up -d
->>"!BV_RECOVERY!" echo   del "!BV_RECOVERY!"
->>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo The install as it was before the restore is still in this snapshot:
->>"!BV_RECOVERY!" echo   database: !BV_DB_SNAPSHOT!
->>"!BV_RECOVERY!" echo   uploads:  !BV_UPLOADS_SHOWN!
->>"!BV_RECOVERY!" echo The photos and documents that were here before are also in
->>"!BV_RECOVERY!" echo [uploads folder]\.pre-restore-!BV_STAMP!\.
+set "BV_LEFT_WRITTEN="
+set "BV_LEFT_NEW=!BV_RECOVERY!.new"
+>"!BV_LEFT_NEW!" echo BlackVault restore !BV_STAMP!: ONE STEP LEFT
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo restore.bat restored !BV_FILE_NAME! completely: the records and the files are the
+>>"!BV_LEFT_NEW!" echo backup's, and nothing has to be put back. Only the marker of the restore,
+>>"!BV_LEFT_NEW!" echo   !BV_MARKER!
+>>"!BV_LEFT_NEW!" echo could not be removed. BlackVault refuses to start while that marker exists,
+>>"!BV_LEFT_NEW!" echo so restore.bat did not start it.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo Do NOT run the recovery commands that restore.bat printed before the restore
+>>"!BV_LEFT_NEW!" echo started (they may still be on your screen): they would put the old install
+>>"!BV_LEFT_NEW!" echo back and undo the restore.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo Run these in a Command Prompt, from "!CD!", in this order.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo 1. Remove the marker:
+>>"!BV_LEFT_NEW!" echo   !BV_CLEAR_CMD!
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo 2. Start BlackVault, check it, then delete this file (while it exists, a new
+>>"!BV_LEFT_NEW!" echo    restore refuses to start):
+>>"!BV_LEFT_NEW!" echo   docker compose up -d
+>>"!BV_LEFT_NEW!" echo   del "!BV_RECOVERY!"
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo The install as it was before the restore is still in this snapshot:
+>>"!BV_LEFT_NEW!" echo   database: !BV_DB_SNAPSHOT!
+>>"!BV_LEFT_NEW!" echo   uploads:  !BV_UPLOADS_SHOWN!
+>>"!BV_LEFT_NEW!" echo The photos and documents that were here before are also in
+>>"!BV_LEFT_NEW!" echo [uploads folder]\.pre-restore-!BV_STAMP!\.
+:: A batch file does not stop on a failed redirection, so the work file is
+:: read back: its last line must be there before it replaces the recovery
+:: file, and afterwards the recovery file must start with the new heading.
+findstr /c:".pre-restore-!BV_STAMP!" "!BV_LEFT_NEW!" >nul 2>&1
+if errorlevel 1 goto :marker_left_not_written
+move /y "!BV_LEFT_NEW!" "!BV_RECOVERY!" >nul 2>&1
+findstr /b /c:"BlackVault restore !BV_STAMP!: ONE STEP LEFT" "!BV_RECOVERY!" >nul 2>&1
+if errorlevel 1 goto :marker_left_not_written
+set "BV_LEFT_WRITTEN=1"
+goto :eof
+:marker_left_not_written
+del /f /q "!BV_LEFT_NEW!" >nul 2>&1
 goto :eof
 
 :: :run_with_passphrase - reads the passphrase ONCE, then: starts

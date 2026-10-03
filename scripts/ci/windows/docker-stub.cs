@@ -113,6 +113,16 @@
 //                            clear-marker ...` ONLY (the other modes keep
 //                            BV_STUB_ROLLBACK_EXIT); unset/"0" => that knob
 //                            decides. The stub never removes the marker.
+//   BV_STUB_MARKERS_ANSWER   full restore: what the rollback container prints
+//                            for `/bv-snapshot-restore.sh markers ...`: the
+//                            stamps, separated by `;`, one per line; exit 0.
+//                            Unset => it prints nothing (no marker). With
+//                            BV_STUB_ROLLBACK_EXIT set it fails like every
+//                            other mode.
+//   BV_STUB_RECOVERY_READONLY  full restore: "1" makes the restore program
+//                            mark backups\restore-*-RECOVERY.txt read-only,
+//                            so that restore.bat cannot replace that file
+//                            afterwards.
 //   BV_STUB_HANDOFF_READONLY full restore: "1" makes `compose stop` mark the
 //                            file named by BV_HANDOFF (restore.bat's handoff
 //                            file, inherited through the environment) as
@@ -251,6 +261,13 @@ internal static class DockerStub
                         File.Copy(found[0], recoveryCopy, true);
                     }
                 }
+                if (Environment.GetEnvironmentVariable("BV_STUB_RECOVERY_READONLY") == "1" && Directory.Exists("backups"))
+                {
+                    foreach (string recoveryFile in Directory.GetFiles("backups", "restore-*-RECOVERY.txt"))
+                    {
+                        File.SetAttributes(recoveryFile, File.GetAttributes(recoveryFile) | FileAttributes.ReadOnly);
+                    }
+                }
             }
             string sleepMs = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_SLEEP_MS");
             int ms;
@@ -297,6 +314,18 @@ internal static class DockerStub
             {
                 Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_ROLLBACK_EXIT)");
                 return rollbackCode;
+            }
+            if (modeAt < args.Length && args[modeAt] == "markers")
+            {
+                string markersAnswer = Environment.GetEnvironmentVariable("BV_STUB_MARKERS_ANSWER");
+                if (!string.IsNullOrEmpty(markersAnswer))
+                {
+                    foreach (string stamp in markersAnswer.Split(';'))
+                    {
+                        if (stamp.Length > 0) Console.WriteLine(stamp);
+                    }
+                }
+                return 0;
             }
             Console.WriteLine("[stub] docker " + joined);
             return 0;
