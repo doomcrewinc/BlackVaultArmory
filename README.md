@@ -1424,6 +1424,11 @@ not a backup.
   cannot replace an existing file. Where the share has no hard links BlackVault renames instead.
   The only difference: two backups running at once and finishing in the same second could then
   replace one another, and the lock normally prevents two from running.
+- **FAT and exFAT disks, and shares where the app does not own its files.** If the folder is
+  mounted for another user (`uid=0`, say) but everyone may write, BlackVault can create the
+  backup but cannot set its mode to 600. The backup is still made, verified and usable; a
+  `WARNING:` says that who else can read the file is decided by the mount options. Mounting
+  the disk for the app's user (`uid=1001,gid=1001,fmask=0177,dmask=0077`) avoids the warning.
 
 ---
 
@@ -1507,9 +1512,9 @@ the snapshot in `backups/` (on Linux with `sudo`).
 - **A backup is a point in time.** It holds the records as they were when it read them. A file
   uploaded while it runs is not in it; a file deleted while it runs is listed as skipped.
 - **No incremental backups.** Every backup is a complete copy. Manage the space with `--keep`.
-- **Each backup needs twice its reading time.** The archive is written, then read back and
-  checked, before it gets its final name. A file in the backup folder named
-  `blackvault-full-….bvb` has therefore been verified once.
+- **Every backup is read twice.** The archive is written, then read back in full and checked,
+  before it gets its final name, so a backup takes roughly twice as long as writing it alone. A
+  file in the backup folder named `blackvault-full-….bvb` has therefore been verified once.
 - **The passphrase is needed for every run.** A scheduled backup needs a passphrase file; see
   above for where to keep it.
 - **Full restore is command-line only.**
@@ -1518,20 +1523,20 @@ the snapshot in `backups/` (on Linux with `sudo`).
   bad file does not block every backup of everything else. Such a backup is incomplete.
 - **Files with names a restore would refuse are left out the same way:** hidden files and
   folders, `*.tmp` and `*.rot`, names with control characters, and one of two names that differ
-  only in upper/lower case or Unicode form (`A.jpg` and `a.jpg`). BlackVault itself never creates
-  such names; this is about files placed in the uploads folder by hand. Only `uploads/images` and
+  only in upper/lower case or Unicode form (`A.jpg` and `a.jpg`). The names BlackVault gives its
+  own uploads are not like that; this is about files placed in the uploads folder by hand. Only `uploads/images` and
   `uploads/documents` are backed up.
 - **"Already running" can outlast a crash.** The lock is a file in the backup folder that a
-  running backup refreshes every 30 seconds. If a backup is killed, a new one from the same
-  container starts at once, but one from another container (`backup.sh` with BlackVault stopped)
-  can answer "already running" for up to 5 minutes. The lock only prevents two backups from
-  loading the machine at once; a backup's correctness does not depend on it.
+  running backup refreshes every 30 seconds. If a backup is killed (a crash, a restart of the
+  machine), the next one can answer "already running" for up to 5 minutes although nothing runs.
+  The lock only prevents two backups from loading the machine at once; a backup's correctness
+  does not depend on it.
 - **Windows: `restore.bat` cannot catch Ctrl-C or a closed window.** `restore.sh` stops the
   restore container and shows the recovery text when it is interrupted; on Windows the recovery
   file is all there is. Do not interrupt a restore.
 - **Windows: the typed prompts are not covered by automated tests.** `backup.bat` and
-  `restore.bat` are tested with `--passphrase-file` and `--yes`; typing the passphrase and
-  `RESTORE` at a console has only been checked by hand.
+  `restore.bat` are tested with `--passphrase-file` and `--yes` only, and against a stand-in for
+  Docker; typing the passphrase and `RESTORE` at a console is not.
 - **Recovering files that are under another key needs that key.** See **Files encrypted with a
   different key**.
 
@@ -1707,7 +1712,7 @@ the uploaded files are encrypted with it, and BlackVault refuses to start on fil
 with a different key.
 
 **Or move with a full backup, and no key file:** make a full backup on the old machine, install
-BlackVault on the new one, create the first admin, then copy the `.bvb` file into the new
+BlackVault on the new one and let it start once, then copy the `.bvb` file into the new
 machine's backup folder and run `./restore.sh` (see **Restoring a full backup**). The new
 install keeps its own key. Accounts and settings are not in a backup: set them up again.
 

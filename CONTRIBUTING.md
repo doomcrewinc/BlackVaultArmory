@@ -293,8 +293,8 @@ image it builds, on real containers:
 
 The first and the third need a real Linux Docker host and **passwordless sudo**, and they are
 not gentle: they create the users `bvtest` (uid 1234) and `bvother`, install under
-`/home/bvtest/`, use port 3000 and the container names `blackvault` and `blackvault-db`, and
-bind-mount a folder onto itself. Run them from the repository root in a throwaway VM, never on
+`/home/bvtest/`, use port 3000 and the container names `blackvault` and `blackvault-db`,
+bind-mount a folder onto itself and loop-mount FAT images under `/mnt`. Run them from the repository root in a throwaway VM, never on
 a machine that runs BlackVault. The third takes over the install the first one leaves, so it
 cannot run alone. The second needs only Docker and an image name, changes nothing on the host,
 and runs on Docker Desktop and OrbStack too:
