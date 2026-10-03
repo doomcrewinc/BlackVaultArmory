@@ -92,8 +92,12 @@ describe(`collectBackupRecords against real ${ctx.pg ? "PostgreSQL" : "SQLite (c
       await Promise.race([write, new Promise((r) => setTimeout(r, 1_500))]);
     };
 
-    const records = await within(60_000, collectBackupRecords());
-    backupRecordHooks.afterRead = null;
+    let records: Awaited<ReturnType<typeof collectBackupRecords>>;
+    try {
+      records = await within(60_000, collectBackupRecords());
+    } finally {
+      backupRecordHooks.afterRead = null;
+    }
     await within(30_000, write ?? Promise.reject(new Error("hook never ran")));
 
     // Reads on the transaction client still decrypt.

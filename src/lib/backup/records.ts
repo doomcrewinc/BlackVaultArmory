@@ -36,9 +36,11 @@ export const backupRecordHooks: { afterRead: ((key: string) => Promise<void>) | 
 /**
  * The read transaction may outlive Prisma's 5 s default on a large install
  * (every table, one connection), and on SQLite it may queue behind a writer.
- * Ten minutes is far past any realistic read and still bounded.
+ * On SQLite the read holds the app's single connection for its whole duration,
+ * so every other request waits while it runs; two minutes is far past any
+ * realistic read and still bounds that pause if a read stalls.
  */
-const READ_TX_TIMEOUT_MS = 600_000;
+const READ_TX_TIMEOUT_MS = 120_000;
 const READ_TX_MAX_WAIT_MS = 30_000;
 
 /**
