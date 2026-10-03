@@ -298,6 +298,20 @@ describe.skipIf(isWindows)("backup.sh", () => {
       expect(backupCallEnv).not.toMatch(/BLACKVAULT_BACKUP_DIR|BLACKVAULT_DATABASE_URL|BLACKVAULT_UPLOADS_SNAPSHOT/);
     });
 
+    // Fix round 1: backup.sh used to assign DATA_DIR itself. When the user's shell EXPORTS DATA_DIR, that
+    // assignment changed the value docker compose then interpolates into every mount.
+    it("fix round 1: a DATA_DIR exported in the shell reaches docker compose unchanged, whatever .env says", () => {
+      fs.writeFileSync(path.join(app, ".env"), `DATA_DIR=${path.join(tmp, "from-dot-env")}\n`);
+      for (const args of [["--passphrase-file", passFile()], ["--verify", "x.bvb", "--passphrase-file", passFile()]]) {
+        fs.rmSync(path.join(rec, "env"), { force: true });
+        const r = run(args, { env: { DATA_DIR: "/exported/by/the/shell", BV_STUB_RUNNING: "1" } });
+        expect(r.code, r.stderr).toBe(0);
+        const dataDirLines = read("env").split("\n").filter((l) => l.startsWith("DATA_DIR="));
+        expect(dataDirLines.length).toBeGreaterThanOrEqual(3); // version, ps, and the backup call
+        expect(new Set(dataDirLines)).toEqual(new Set(["DATA_DIR=/exported/by/the/shell"]));
+      }
+    });
+
     it("Docker Compose missing or older than 2.20: exit 1, one line, nothing run", () => {
       for (const version of ["2.19.3", ""]) {
         fs.rmSync(path.join(rec, "calls"), { force: true });
@@ -484,6 +498,46 @@ describe.skipIf(isWindows)("backup.sh", () => {
 });
 
 /**
+ * Fix round 1. The docker stub's `ps` record cannot see a helper that has
+ * already exited, so "only shell builtins ever touch the typed passphrase"
+ * is pinned here instead: every line of backup.sh that names one of the
+ * three variables holding it must be one of a short list of shapes.
+ */
+describe("backup.sh (static checks: the typed passphrase is only ever handled by shell builtins)", () => {
+  const sh = fs.readFileSync(path.join(ROOT, "backup.sh"), "utf8");
+  const code = sh.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  const ALLOWED = [
+    /^(PASSPHRASE|FIRST)=""$/, // cleared
+    /^PASSPHRASE=\$answer$/, // assigned
+    /^FIRST=\$PASSPHRASE$/,
+    /^local answer$/,
+    /^if ! IFS= read -r -s answer; then$/, // read: a builtin
+    /^\[ -n "\$answer" \] \|\| die "[^$`]*"$/, // [ : a builtin; the message holds no expansion
+    /^if \[ "\$FIRST" != "\$PASSPHRASE" \]; then$/,
+    /^printf '%s' "\$PASSPHRASE" \| "\$\{CMD\[@\]\}"$/, // printf: a builtin, writing to the pipe
+  ];
+
+  it("every line naming PASSPHRASE, FIRST or answer is an assignment, a `[ … ]` test, the `read`, or the `printf … |` pipe", () => {
+    const lines = code.filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l));
+    const unexpected = lines.filter((l) => !ALLOWED.some((re) => re.test(l)));
+    expect(unexpected).toEqual([]);
+    expect(lines.length).toBeGreaterThanOrEqual(10);
+    // Exactly one place sends it anywhere.
+    expect(lines.filter((l) => l.includes("|") && !l.includes("||"))).toEqual([`printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`]);
+  });
+
+  it("nothing is exported, no allexport, no xtrace", () => {
+    expect(code.filter((l) => /\b(export|typeset|declare)\b/.test(l))).toEqual([]);
+    expect(code.filter((l) => /\bset\s+[-+][a-zA-Z]*[ax]/.test(l) || /\bset\s+-o\s+(allexport|xtrace)/.test(l))).toEqual([]);
+    expect(sh.split("\n")[0]).toBe("#!/bin/bash"); // printf and [ are builtins in bash
+  });
+
+  it("does not assign the names docker compose interpolates (DATA_DIR, PORT, COMPOSE_*)", () => {
+    expect(code.filter((l) => /^(DATA_DIR|PORT|COMPOSE_PROFILES|COMPOSE_FILE|COMPOSE_PROJECT_NAME)=/.test(l))).toEqual([]);
+  });
+});
+
+/**
  * backup.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
  * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios BK1–BK10). These
  * are the properties that can be read off the file on any platform.
@@ -549,6 +603,25 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
       ">&2 echo ERROR: the backup command ended unexpectedly (exit !BV_RC!); see the output above.",
       "exit /b 1",
     ]);
+  });
+
+  // Fix round 1: `for /f` skips a line starting with its eol character (";" by default), so each
+  // character check on a user-supplied value must be preceded by a refusal of a leading ";".
+  it("fix round 1: every for /f character check on a user value is guarded against a leading ';'", () => {
+    const checks: Array<[string, string]> = [
+      ["BV_KEEP", ":bad_keep"],
+      ["BV_LIMIT", ":bad_limit"],
+      ["BV_VERIFY_NAME", ":verify_bad_name"],
+    ];
+    for (const [name, label] of checks) {
+      const at = code.findIndex((l) => l.startsWith('for /f "delims=') && l.includes(`("!${name}!")`));
+      expect(at, name).toBeGreaterThan(0);
+      expect(code[at].endsWith(`do goto ${label}`)).toBe(true);
+      expect(code[at - 1]).toBe(`if "!${name}:~0,1!"==";" goto ${label}`);
+    }
+    // No other for /f in the script checks a value the user supplied.
+    const charChecks = code.filter((l) => /^for \/f "delims=[^"]+" %%X in \("!BV_/.test(l));
+    expect(charChecks).toHaveLength(3);
   });
 
   it("never pauses, and its :require_compose is rotate-key.bat's, line for line", () => {

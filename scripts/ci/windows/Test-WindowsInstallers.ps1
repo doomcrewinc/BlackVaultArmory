@@ -2036,6 +2036,9 @@ foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000")) {
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep $bad refused, docker never invoked (exit $($r.ExitCode))"
   Show-EvidenceIfFailed $r
 }
+$r = Invoke-Backup $d "--keep `";3`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep `";3`" (a leading semicolon, for /f's eol character) refused, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--verify x.bvb --keep 2 --passphrase-file `"$pf`""
 Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep cannot be used with --verify" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep with --verify refused (exit $($r.ExitCode))"
 Show-EvidenceIfFailed $r
@@ -2110,7 +2113,10 @@ foreach ($outside in @((Join-Path $Sandboxes $name), (Join-Path $d "data\$name")
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --verify: .* is not in the backup folder" -and @(Get-BackupCalls $r).Count -eq 0) "refused: $outside (exit $($r.ExitCode))"
   Show-EvidenceIfFailed $r
 }
-foreach ($badName in @("-x.bvb", "a b.bvb", "a;b.bvb")) {
+# Fix round 1: for /f skips a value that starts with ";" (its default eol
+# character), so ";a b.bvb" used to pass the character check and reach the
+# backup program as extra arguments. A leading ";" is refused outright.
+foreach ($badName in @("-x.bvb", "a b.bvb", "a;b.bvb", ";a b.bvb", ";x.bvb")) {
   $r = Invoke-Backup $d "--verify `"$badName`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --verify: that is not a backup file name" -and @(Get-BackupCalls $r).Count -eq 0) "refused as a name: $badName (exit $($r.ExitCode))"
   Show-EvidenceIfFailed $r
@@ -2131,6 +2137,9 @@ $sw.Stop()
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "ERROR: the backup did not finish within 2 seconds \(BLACKVAULT_BACKUP_TIMEOUT\)") "says the limit was reached"
 Assert ($sw.Elapsed.TotalSeconds -lt 25) "did not wait for the program to finish ($([int]$sw.Elapsed.TotalSeconds) s)"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = ";5 x" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a limit starting with a semicolon is refused before the program starts (exit $($r.ExitCode))"
 Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "6h" }
 Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a non-numeric limit is refused before the program starts (exit $($r.ExitCode))"

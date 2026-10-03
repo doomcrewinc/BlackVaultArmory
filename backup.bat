@@ -108,7 +108,11 @@ setlocal EnableDelayedExpansion
 
 :: -- 1. --keep ---------------------------------------------------
 if "!BV_MODE!"=="verify" goto :check_keep_verify
+:: for /f skips a line that starts with its eol character, ";" by default,
+:: so a value starting with ";" would pass the character checks below
+:: unexamined. It is refused first, here and at the two other checks.
 if not defined BV_KEEP set "BV_KEEP=7"
+if "!BV_KEEP:~0,1!"==";" goto :bad_keep
 for /f "delims=0123456789" %%X in ("!BV_KEEP!") do goto :bad_keep
 if not "!BV_KEEP:~6!"=="" goto :bad_keep
 :keep_strip
@@ -170,6 +174,7 @@ set "BV_LIMIT="
 if defined BLACKVAULT_BACKUP_TIMEOUT set "BV_LIMIT=!BLACKVAULT_BACKUP_TIMEOUT!"
 set "BLACKVAULT_BACKUP_DIR="
 if not defined BV_LIMIT goto :limit_ok
+if "!BV_LIMIT:~0,1!"==";" goto :bad_limit
 for /f "delims=0123456789" %%X in ("!BV_LIMIT!") do goto :bad_limit
 if "!BV_LIMIT:~8!"=="" goto :limit_ok
 :bad_limit
@@ -197,6 +202,7 @@ if /i not "!BV_VERIFY_DIR!"=="!BV_HOST_FULL!" goto :verify_outside
 :verify_name_check
 if not defined BV_VERIFY_NAME goto :verify_bad_name
 if "!BV_VERIFY_NAME:~0,1!"=="-" goto :verify_bad_name
+if "!BV_VERIFY_NAME:~0,1!"==";" goto :verify_bad_name
 for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" %%X in ("!BV_VERIFY_NAME!") do goto :verify_bad_name
 set "BV_ENGINE_ARGS=--verify !BV_VERIFY_NAME!"
 goto :verify_mapped

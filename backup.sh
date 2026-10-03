@@ -149,8 +149,10 @@ unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWOR
 # mounts at /app/backups. A relative path is relative to this folder.
 HOST_BACKUP_DIR=$(env_value BLACKVAULT_BACKUP_DIR)
 if [ -z "$HOST_BACKUP_DIR" ]; then
-  DATA_DIR=$(env_value DATA_DIR)
-  HOST_BACKUP_DIR="${DATA_DIR:-./data}/backups"
+  # NOT named DATA_DIR: if the user's shell exports DATA_DIR, assigning it
+  # here would change the value docker compose interpolates into every mount.
+  ENV_DATA_DIR=$(env_value DATA_DIR)
+  HOST_BACKUP_DIR="${ENV_DATA_DIR:-./data}/backups"
 fi
 
 # Physical absolute path of a folder. The backup folder is mode 0700 and
@@ -253,10 +255,10 @@ fi
 LIMIT=${BLACKVAULT_BACKUP_TIMEOUT:-}
 if [ -n "$LIMIT" ]; then
   case "$LIMIT" in
-    *[!0-9]*) PASSPHRASE=""; die "BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds." ;;
+    *[!0-9]*) die "BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds." ;;
   esac
   if [ "$((10#$LIMIT))" -gt 0 ]; then
-    command -v timeout >/dev/null 2>&1 || { PASSPHRASE=""; die "BLACKVAULT_BACKUP_TIMEOUT is set but the 'timeout' command is not installed. Nothing was done."; }
+    command -v timeout >/dev/null 2>&1 || die "BLACKVAULT_BACKUP_TIMEOUT is set but the 'timeout' command is not installed. Nothing was done."
     CMD=(timeout "$((10#$LIMIT))" "${CMD[@]}")
   else
     LIMIT=""
