@@ -441,6 +441,38 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(await events()).toHaveLength(0);
   });
 
+  it("fix round 1: a folder-fsync failure AFTER the rename does not fail the run — the verified backup is in place, the audit entry is written, and the result carries a warning", async () => {
+    await seedUploads();
+    const realOpen = fsp.open.bind(fsp);
+    let dirOpens = 0;
+    vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+      // Only the folder fsync opens the backup folder itself, read-only.
+      if (String(args[0]) === backups && args[1] === "r") {
+        dirOpens += 1;
+        throw Object.assign(new Error("EIO: i/o error, open"), { code: "EIO", syscall: "open" });
+      }
+      return realOpen(...args);
+    }) as typeof fsp.open);
+
+    const result = await run();
+    expect(dirOpens).toBe(1);
+    expect(result.file).toBe(NAME);
+    expect(result.files).toBe(3);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatch(/EIO/);
+    expect(result.warnings[0]).toContain(backups);
+    expect(backupFolder()).toEqual([NAME]);
+    vi.restoreAllMocks();
+    await expect(actualVerify(result.path, PASS)).resolves.toMatchObject({ files: 3 });
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].changes ?? "null")).toMatchObject({ full: true, file: NAME, verified: true });
+  });
+
+  it("a normal run has no warnings", async () => {
+    expect((await run()).warnings).toEqual([]);
+  });
+
   it("writes a BACKUP_CREATED audit entry: { full, file, files, bytes, verified }, attributed to system outside a request", async () => {
     await seedUploads();
     const result = await run();

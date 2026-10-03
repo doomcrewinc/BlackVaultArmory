@@ -205,6 +205,37 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(Date.now() - started).toBeLessThan(15_000);
   });
 
+  it("fix round 1: a folder-fsync failure after the rename → exit 0, the OK line, the .bvb in place, and one WARNING line on stderr", () => {
+    // Preloaded into the child: opening the backup FOLDER read-only (the folder fsync) fails with EIO.
+    const preload = path.join(tmp, `dir-fsync-eio-${seq}.cjs`);
+    fs.writeFileSync(
+      preload,
+      [
+        'const fsp = require("node:fs").promises;',
+        "const realOpen = fsp.open.bind(fsp);",
+        "fsp.open = async (p, flags, ...rest) => {",
+        `  if (String(p) === ${JSON.stringify(backups)} && flags === "r") throw Object.assign(new Error("EIO: i/o error, open"), { code: "EIO", syscall: "open" });`,
+        "  return realOpen(p, flags, ...rest);",
+        "};",
+      ].join("\n"),
+    );
+    const r = spawnSync(process.execPath, ["--require", preload, bundle, "--dir", backups], {
+      cwd: ROOT,
+      env: childEnv,
+      input: `${PASS}\n`,
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    expect(r.status).toBe(0);
+    const m = OK_LINE.exec(r.stdout);
+    expect(m, r.stdout).not.toBeNull();
+    expect(fs.readdirSync(backups)).toEqual([m![1]]);
+    const lines = r.stderr.split("\n").filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^WARNING: .*EIO/);
+    expect(cli(["--dir", backups, "--verify", m![1]]).status).toBe(0);
+  });
+
   it("a missing backup folder: exit 1 with a message that names the folder", () => {
     const missing = path.join(tmp, "no-such-backups");
     const r = cli(["--dir", missing]);

@@ -29,6 +29,8 @@
  *             that vanished mid-run, and for files that could not be read
  *             `WARNING: skipped <path>: <reason>` each, then one
  *             `WARNING: <n> file(s) could not be read ... NOT in this backup.`
+ *             `WARNING: <message>` too when the backup was written and
+ *             verified but the folder could not be fsynced afterwards.
  *             The exit code is still 0.
  *
  * EXIT CODE   0 ok · 1 failed · 2 another backup is already running.
@@ -113,6 +115,7 @@ async function main(): Promise<number> {
     if (unreadable > 0) {
       console.error(`WARNING: ${unreadable} ${unreadable === 1 ? "file could not be read and is" : "files could not be read and are"} NOT in this backup.`);
     }
+    for (const warning of result.warnings) console.error(`WARNING: ${oneLine(warning)}`);
     console.log(
       `BLACKVAULT_FULL_BACKUP_OK file=${result.file} files=${result.files} bytes=${result.bytes} archive_bytes=${result.archiveBytes} skipped=${result.skipped.length} unreadable=${unreadable}`,
     );

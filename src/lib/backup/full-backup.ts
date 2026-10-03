@@ -40,7 +40,8 @@ import { TarWriter } from "./tar";
  *    `manifest.skipped`;
  * 5. fsyncs the file, then VERIFIES it (a full stream decrypt plus the
  *    manifest/sha256 check, ./full-verify.ts) while it is still `.partial`;
- * 6. renames it into place and fsyncs the folder;
+ * 6. renames it into place and fsyncs the folder (a failure of that fsync is
+ *    a warning on the result, not a failed run: the backup is already there);
  * 7. writes the `BACKUP_CREATED` audit entry.
  * On any failure `.partial` is removed and the lock released. Invariant:
  * every `blackvault-full-*.bvb` in the folder has verified once.
@@ -126,6 +127,12 @@ export interface FullBackupResult {
    * decrypted — the caller must warn about every one of these.
    */
   skipped: FullBackupSkipped[];
+  /**
+   * Things that went wrong AFTER the backup was verified and renamed into
+   * place (today: the folder fsync failed). The backup succeeded; show these
+   * to the user. Empty on a normal run.
+   */
+  warnings: string[];
 }
 
 export interface FullBackupSkipped extends ManifestSkippedEntry {
@@ -450,7 +457,19 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
     const finalPath = path.join(dir, file);
     await fsp.rename(partialPath, finalPath);
     partialPath = null;
-    await fsyncDir(dir);
+
+    // From here on the backup exists under its final name and has verified.
+    // Nothing below may fail the run or skip the audit entry: a caller told
+    // "failed" would retry or alert while a good archive sits in the folder.
+    const warnings: string[] = [];
+    try {
+      await fsyncDir(dir);
+    } catch (e) {
+      warnings.push(
+        `The backup ${file} was written and verified, but the folder ${dir} could not be flushed to disk ` +
+          `(${codeOf(e) ?? (e instanceof Error ? e.message : String(e))}). If the machine loses power right now the new file may not survive; check that it is still there afterwards.`,
+      );
+    }
 
     await recordEventBestEffort(null, {
       action: "BACKUP_CREATED",
@@ -459,7 +478,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
       ...(opts.actor ? { actorOverride: opts.actor } : {}),
     });
 
-    return { file, path: finalPath, files: files.length, bytes, archiveBytes: verified.archiveBytes, skipped };
+    return { file, path: finalPath, files: files.length, bytes, archiveBytes: verified.archiveBytes, skipped, warnings };
   } catch (e) {
     if (handle) await handle.close().catch(() => undefined);
     if (partialPath) await fsp.rm(partialPath, { force: true }).catch(() => undefined);
