@@ -48,6 +48,8 @@ vi.mock("@/lib/prisma", async () => {
       }),
     };
   }
+  // The records are read in one transaction; the mock's transaction client is the mock itself.
+  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma);
   return { prisma };
 });
 
