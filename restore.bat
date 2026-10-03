@@ -438,7 +438,7 @@ set "BV_STATE=untouched"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\documents\" set "BV_STATE=complete"
 if exist "!BV_MARKER!\" set "BV_STATE=started"
-if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=started"
+if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=unknown"
 if "!BV_STATE!"=="unknown" goto :state_unknown
 if not "!BV_STATE!"=="complete" goto :rollback
 >&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.

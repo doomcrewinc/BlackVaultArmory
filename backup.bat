@@ -78,8 +78,8 @@ exit /b 1
 :arg_passfile
 if "%~2"=="" goto :arg_missing
 set "BV_PASSFILE=%~f2"
-shift
-shift
+shift /1
+shift /1
 goto :parse_args
 
 :arg_keep
