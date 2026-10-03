@@ -354,7 +354,7 @@ describe("streaming full backups (BVB1)", () => {
     ["0 B", 0, [16]],
     ["1 B", 1, [17]],
     ["1 MiB - 1", CHUNK - 1, [CHUNK - 1 + 16]],
-    ["1 MiB", CHUNK, [SEALED_CHUNK, 16]],
+    ["1 MiB", CHUNK, [SEALED_CHUNK]],
     ["1 MiB + 1", CHUNK + 1, [SEALED_CHUNK, 17]],
     ["3.5 MiB", 3.5 * CHUNK, [SEALED_CHUNK, SEALED_CHUNK, SEALED_CHUNK, CHUNK / 2 + 16]],
   ])("round-trips %s with the expected chunk layout", async (_l, n, sizes) => {
@@ -365,15 +365,20 @@ describe("streaming full backups (BVB1)", () => {
     expect((await open(sealed)).equals(input)).toBe(true);
   }, 30000);
 
-  it("a stream ending exactly on 1 MiB carries the final flag on an empty last chunk", async () => {
-    const sealed = await seal(gen(CHUNK));
+  it("a stream ending exactly on 1 MiB seals its one full chunk with the final flag", async () => {
+    const input = gen(CHUNK);
+    const sealed = await seal(input);
     const { head, chunks } = split(sealed);
-    expect(chunks.map((c) => c.length)).toEqual([SEALED_CHUNK, 16]);
-    // Without the empty final chunk the full chunk is not final: TRUNCATED.
-    await rejects(open(Buffer.concat([head, chunks[0]])), "TRUNCATED");
+    expect(chunks.map((c) => c.length)).toEqual([SEALED_CHUNK]);
+    // The opener decrypts the last chunk as final; a non-final flag would surface as TRUNCATED.
+    expect((await open(Buffer.concat([head, chunks[0]]))).equals(input)).toBe(true);
+    // 2 MiB: the first full chunk is NOT final, so dropping the second one is TRUNCATED.
+    const two = split(await seal(gen(2 * CHUNK)));
+    expect(two.chunks.map((c) => c.length)).toEqual([SEALED_CHUNK, SEALED_CHUNK]);
+    await rejects(open(Buffer.concat([two.head, two.chunks[0]])), "TRUNCATED");
   }, 30000);
 
-  describe("tampering with a 3.5 MiB backup", () => {
+  describe("tampering with a 3.5 MiB backup", { timeout: 30000 }, () => {
     let sealed: Buffer;
     let head: Buffer;
     let c: Buffer[];
