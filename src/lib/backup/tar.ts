@@ -4,8 +4,11 @@ import { Readable, Writable } from "node:stream";
  * A minimal POSIX ustar tar writer and reader, with no dependency beyond
  * node:stream.
  *
- * Why hand-rolled: the full backup's plaintext stream (manifest.json, db.json,
- * then every decrypted upload) is piped straight into the BVB1 sealer
+ * Why hand-rolled: the full backup's plaintext stream (db.json, then every
+ * decrypted upload under files/, then manifest.json LAST — controller ruling
+ * for fix round 1, so the engine can hash files while streaming them and
+ * record files that vanish mid-run in `skipped`) is piped straight into the
+ * BVB1 sealer
  * (core.mjs's createBackupSealer). Pulling in a tar library would add a
  * dependency to a crypto-adjacent path for a format that is this small:
  * 512-byte headers, octal numeric fields, a checksum, and padding to 512.
@@ -18,7 +21,8 @@ import { Readable, Writable } from "node:stream";
  *   hold) are rejected rather than switched to a base-256 field, because the
  *   per-file cap elsewhere in the app is 20 MB;
  * - the reader accepts regular files and directories (real tar producers
- *   emit directory entries; we skip them) and rejects every other type
+ *   emit directory entries; we skip them, and reject one with a body) and
+ *   rejects every other type
  *   (symlink, hardlink, device, fifo, pax extended header, ...) with a clear
  *   error, because the writer here never produces them and a backup must
  *   not silently drop content it doesn't understand.
@@ -168,68 +172,100 @@ function writeAsync(stream: Writable, chunk: Buffer): Promise<void> {
 }
 
 /**
- * Streams every chunk of `source` into `dest` (without ending it) and
- * returns the total byte count. Uses async iteration + an awaited write per
- * chunk, so at most one chunk is ever held at a time regardless of the
- * source's total size — the 25 MB round-trip test and the eventual 5–10 GB
- * backup both rely on this not buffering the whole input.
+ * Streams `source` into `dest` (without ending it), enforcing the declared
+ * `size` as it goes. Uses async iteration + an awaited write per chunk, so at
+ * most one chunk is held at a time regardless of the source's total size.
+ *
+ * A chunk that would take the running total past `size` is rejected BEFORE
+ * it is written (review I3), so a file that grows mid-backup is caught on
+ * the chunk that overruns, not after streaming every extra byte. Throwing
+ * out of the `for await` destroys the source. A source that ends short is
+ * rejected after its end.
  */
-async function pipeCounting(source: Readable, dest: Writable): Promise<number> {
+async function pipeExact(source: Readable, dest: Writable, size: number, path: string): Promise<void> {
   let total = 0;
   for await (const chunk of source as AsyncIterable<Buffer>) {
+    if (total + chunk.length > size) {
+      throw new Error(`tar: ${path} produced more than the declared ${size} bytes`);
+    }
     total += chunk.length;
     await writeAsync(dest, chunk);
   }
-  return total;
+  if (total !== size) {
+    throw new Error(`tar: ${path} declared ${size} bytes but the source produced ${total}`);
+  }
 }
 
 /**
  * Writes a ustar archive to `out`. Call `addFile`/`addBuffer` for each entry
- * in order, then `finish()` exactly once.
+ * in order, one at a time, then `finish()` exactly once.
+ *
+ * Failed state (review I3): ANY `addFile` error — a bad path or size, a source
+ * that is short or long, a write error — leaves the writer failed, because by
+ * then a header and part of a body may already be in `out` and the archive is
+ * misaligned. Every later `addFile`/`addBuffer`/`finish` rejects, so a caller
+ * cannot catch the error, carry on, and ship a corrupt archive. A caller that
+ * wants to skip a file (e.g. one that vanished mid-run) must decide that
+ * BEFORE calling `addFile` — open the file and know its size first.
  */
 export class TarWriter {
   private readonly out: Writable;
   private finished = false;
+  private busy = false;
+  private failure: Error | null = null;
 
   constructor(out: Writable) {
     this.out = out;
   }
 
+  private assertUsable(): void {
+    if (this.failure) {
+      throw new Error(`tar: writer is in a failed state after an earlier error (${this.failure.message})`);
+    }
+    if (this.busy) throw new Error("tar: addFile/finish called while another entry is still being written");
+  }
+
   /**
    * Streams `source` into the archive as `path`, declared as `size` bytes.
    * Never buffers the whole file: the source is piped directly into the
-   * underlying stream. After the source ends, the actual byte count is
-   * compared against `size` — a mismatch throws (never padded or truncated
-   * silently), leaving the archive unusable, which is the caller's signal to
-   * abort rather than ship a corrupt backup.
+   * underlying stream. A source that overruns `size` is rejected on the
+   * overrunning chunk; one that ends short is rejected at its end. Either
+   * way the writer enters its failed state (never padded or truncated
+   * silently).
    */
   async addFile(path: string, size: number, source: Readable): Promise<void> {
+    this.assertUsable();
     if (this.finished) throw new Error("tar: cannot add an entry after finish()");
-    if (size < 0 || !Number.isFinite(size)) {
-      throw new Error(`tar: invalid size ${size} for ${path}`);
+    this.busy = true;
+    try {
+      validateEntryPath(path);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw new Error(`tar: invalid size ${size} for ${path}`);
+      }
+      if (size > MAX_USTAR_SIZE) {
+        throw new Error(
+          `tar: ${path} is ${size} bytes, over the ${MAX_USTAR_SIZE}-byte ustar limit (base-256 sizes are not supported; this app caps uploads well under that)`,
+        );
+      }
+      const { prefix, name } = splitUstarPath(path);
+      const header = buildHeader({
+        name,
+        prefix,
+        size,
+        typeflag: TYPE_REGULAR,
+        mtimeSec: Math.floor(Date.now() / 1000),
+      });
+      await writeAsync(this.out, header);
+      await pipeExact(source, this.out, size, path);
+      const pad = padLength(size);
+      if (pad > 0) await writeAsync(this.out, Buffer.alloc(pad, 0));
+    } catch (err) {
+      this.failure = err instanceof Error ? err : new Error(String(err));
+      if (!source.destroyed) source.destroy();
+      throw err;
+    } finally {
+      this.busy = false;
     }
-    if (size > MAX_USTAR_SIZE) {
-      throw new Error(
-        `tar: ${path} is ${size} bytes, over the ${MAX_USTAR_SIZE}-byte ustar limit (base-256 sizes are not supported; this app caps uploads well under that)`,
-      );
-    }
-    const { prefix, name } = splitUstarPath(path);
-    const header = buildHeader({
-      name,
-      prefix,
-      size,
-      typeflag: TYPE_REGULAR,
-      mtimeSec: Math.floor(Date.now() / 1000),
-    });
-    await writeAsync(this.out, header);
-
-    const written = await pipeCounting(source, this.out);
-    if (written !== size) {
-      throw new Error(`tar: ${path} declared ${size} bytes but the source produced ${written}`);
-    }
-
-    const pad = padLength(size);
-    if (pad > 0) await writeAsync(this.out, Buffer.alloc(pad, 0));
   }
 
   /** Convenience wrapper over `addFile` for content already in memory. */
@@ -237,25 +273,38 @@ export class TarWriter {
     await this.addFile(path, buf.length, Readable.from(buf, { objectMode: false }));
   }
 
-  /** Writes the two terminating zero blocks. The writer must not be used afterwards. */
+  /** Writes the two terminating zero blocks. The writer must not be used afterwards. Rejects if the writer is in its failed state. */
   async finish(): Promise<void> {
+    this.assertUsable();
     if (this.finished) return;
     this.finished = true;
     await writeAsync(this.out, Buffer.alloc(BLOCK_SIZE * 2, 0));
   }
 }
 
-/** Reads a NUL-terminated (and NUL-padded) ASCII field. Throws if a non-NUL byte follows the terminator — a sign of a malformed or hostile header. */
+const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Reads a NUL-terminated (and NUL-padded) string field as strict UTF-8.
+ * Throws if a non-NUL byte follows the terminator (a malformed or hostile
+ * header) or if the bytes are not valid UTF-8 — a lossy decode would map two
+ * different byte strings to the same name (both "a�").
+ */
 function readCString(buf: Buffer, offset: number, len: number): string {
   const field = buf.subarray(offset, offset + len);
   const nul = field.indexOf(0);
-  if (nul === -1) return field.toString("utf8");
-  for (let i = nul + 1; i < field.length; i++) {
-    if (field[i] !== 0) {
-      throw new Error("tar: malformed header field (non-NUL byte after string terminator)");
+  if (nul !== -1) {
+    for (let i = nul + 1; i < field.length; i++) {
+      if (field[i] !== 0) {
+        throw new Error("tar: malformed header field (non-NUL byte after string terminator)");
+      }
     }
   }
-  return field.subarray(0, nul).toString("utf8");
+  try {
+    return UTF8_STRICT.decode(nul === -1 ? field : field.subarray(0, nul));
+  } catch {
+    throw new Error("tar: entry name is not valid UTF-8");
+  }
 }
 
 function readOctalField(buf: Buffer, offset: number, len: number): number {
@@ -269,19 +318,35 @@ function readOctalField(buf: Buffer, offset: number, len: number): number {
   return parseInt(text, 8);
 }
 
-function isZeroBlock(block: Buffer): boolean {
-  for (let i = 0; i < block.length; i++) {
-    if (block[i] !== 0) return false;
+function isAllZero(buf: Buffer): boolean {
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] !== 0) return false;
   }
   return true;
 }
 
-function validateEntryPath(path: string): void {
+/**
+ * The one path rule for archive entries, used by the writer, the reader and
+ * the manifest (`files[].path`), so nothing downstream (restore, Task 7) has
+ * to normalise a path: a path that passes is already canonical.
+ *
+ * A valid path is non-empty, relative, uses `/` only, and every segment is a
+ * non-empty name other than `.` and `..`. That rejects `..` anywhere, a
+ * leading `/`, `a//b`, a trailing `/`, `./a`, `a/./b`, `.`, backslashes
+ * (`..\..\evil` is a traversal on Windows tools) and NUL bytes. UTF-8
+ * validity is enforced where bytes are decoded (`readCString`); a JS string
+ * cannot hold invalid UTF-8 except as lone surrogates, rejected here too.
+ */
+export function validateEntryPath(path: string): void {
   if (path.length === 0) throw new Error("tar: empty entry path");
-  if (path.includes("\0")) throw new Error(`tar: NUL byte in entry path`);
+  if (path.includes("\0")) throw new Error("tar: NUL byte in entry path");
+  if (path.includes("\\")) throw new Error(`tar: backslash in entry path: ${path}`);
+  if (!path.isWellFormed()) throw new Error("tar: entry path is not valid UTF-8 (lone surrogate)");
   if (path.startsWith("/")) throw new Error(`tar: absolute path in archive: ${path}`);
   for (const segment of path.split("/")) {
     if (segment === "..") throw new Error(`tar: ".." path segment in archive: ${path}`);
+    if (segment === ".") throw new Error(`tar: "." path segment in archive: ${path}`);
+    if (segment === "") throw new Error(`tar: empty path segment (double or trailing "/") in archive: ${path}`);
   }
 }
 
@@ -307,89 +372,173 @@ function parseHeader(block: Buffer): ParsedHeader {
   const prefix = readCString(block, FIELD.prefix, PREFIX_LEN);
   const path = prefix.length > 0 ? `${prefix}/${name}` : name;
   const size = readOctalField(block, FIELD.size, 12);
-  const typeflag = block.subarray(FIELD.typeflag, FIELD.typeflag + 1).toString("ascii") || TYPE_REGULAR;
+  const typeflag = block.subarray(FIELD.typeflag, FIELD.typeflag + 1).toString("ascii");
 
   return { path, size, typeflag: typeflag === "\0" ? TYPE_REGULAR : typeflag };
 }
 
-/** Pull-based reader over a Node Readable: lets callers ask for exactly N bytes at a time without ever buffering more than requested. */
-class BlockReader {
-  private readonly input: Readable;
-  private ended = false;
+/**
+ * A byte queue over a Readable, consumed with the stream's async iterator.
+ *
+ * Why not `read(n)` + `'readable'` (the first version): attaching a
+ * `'readable'` listener while a partial buffer is queued re-emits on the
+ * next tick, so waiting for "n bytes" on any multi-chunk async input became a
+ * nextTick spin that starved I/O and never received the data (review C1).
+ * The async iterator has no such bookkeeping: `next()` resolves with the next
+ * chunk, `done` at a clean end, and rejects with the stream's error.
+ *
+ * Errors are sticky: once a read fails (stream error or unexpected end), every
+ * later read rethrows the same error, so a failure seen first by an entry body
+ * still surfaces from `readTar`.
+ *
+ * Memory: holds at most the chunks needed to satisfy the current request plus
+ * the unconsumed rest of the last chunk pulled (the opener emits 1 MiB
+ * chunks). Body data is handed out as zero-copy subarrays.
+ */
+class ByteSource {
+  private readonly iter: AsyncIterator<unknown>;
+  private readonly chunks: Buffer[] = [];
+  private head = 0;
+  private headOffset = 0;
+  private queued = 0;
+  private done = false;
+  private error: unknown = null;
 
   constructor(input: Readable) {
-    this.input = input;
+    this.iter = input[Symbol.asyncIterator]();
   }
 
-  async readExact(n: number): Promise<Buffer> {
-    if (n === 0) return Buffer.alloc(0);
-    const chunks: Buffer[] = [];
-    let needed = n;
-    while (needed > 0) {
-      const chunk = this.input.read(needed) as Buffer | null;
-      if (chunk && chunk.length > 0) {
-        // `.read(n)` is only guaranteed to return AT MOST n bytes for a
-        // stream in byte mode. Defend anyway (an object-mode or otherwise
-        // unusual Readable can hand back more in one go): keep only what's
-        // needed and push the rest back onto the stream for the next call,
-        // rather than silently discarding it.
-        if (chunk.length > needed) {
-          chunks.push(chunk.subarray(0, needed));
-          this.input.unshift(chunk.subarray(needed));
-          needed = 0;
-          continue;
-        }
-        chunks.push(chunk);
-        needed -= chunk.length;
-        continue;
+  /** Pulls one chunk. Returns false at a clean end of input. */
+  private async pull(): Promise<boolean> {
+    if (this.error !== null) throw this.error;
+    if (this.done) return false;
+    let result: IteratorResult<unknown>;
+    try {
+      result = await this.iter.next();
+    } catch (err) {
+      this.error = err;
+      throw err;
+    }
+    if (result.done) {
+      this.done = true;
+      return false;
+    }
+    const value = result.value;
+    let chunk: Buffer;
+    if (Buffer.isBuffer(value)) chunk = value;
+    else if (value instanceof Uint8Array) chunk = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    else return this.fail(new Error("tar: input stream must yield bytes (Buffer/Uint8Array), not strings or objects"));
+    if (chunk.length > 0) {
+      this.chunks.push(chunk);
+      this.queued += chunk.length;
+    }
+    return true;
+  }
+
+  private fail(err: Error): never {
+    this.error = err;
+    throw err;
+  }
+
+  private truncated(wanted: number): never {
+    return this.fail(new Error(`tar: unexpected end of archive (wanted ${wanted} bytes, got ${this.queued})`));
+  }
+
+  /** Removes up to `max` bytes from the front of the first queued chunk (zero-copy). */
+  private takeFromHead(max: number): Buffer {
+    const chunk = this.chunks[this.head];
+    const n = Math.min(max, chunk.length - this.headOffset);
+    const out = chunk.subarray(this.headOffset, this.headOffset + n);
+    this.headOffset += n;
+    this.queued -= n;
+    if (this.headOffset === chunk.length) {
+      this.head++;
+      this.headOffset = 0;
+      if (this.head > 64 || this.head === this.chunks.length) {
+        this.chunks.splice(0, this.head);
+        this.head = 0;
       }
-      if (this.ended) break;
-      await this.waitForMore();
     }
-    const result = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, n - needed);
-    if (result.length < n) {
-      throw new Error(`tar: unexpected end of archive (wanted ${n} bytes, got ${result.length})`);
-    }
-    return result;
+    return out;
   }
 
-  private waitForMore(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const onReadable = () => {
-        cleanup();
-        resolve();
-      };
-      const onEnd = () => {
-        this.ended = true;
-        cleanup();
-        resolve();
-      };
-      const onError = (err: Error) => {
-        cleanup();
-        reject(err);
-      };
-      const cleanup = () => {
-        this.input.off("readable", onReadable);
-        this.input.off("end", onEnd);
-        this.input.off("error", onError);
-      };
-      this.input.once("readable", onReadable);
-      this.input.once("end", onEnd);
-      this.input.once("error", onError);
-    });
+  /** Exactly `n` bytes, or throws "unexpected end of archive". Use for headers and padding only (bounded n). */
+  async readExact(n: number): Promise<Buffer> {
+    if (this.error !== null) throw this.error;
+    while (this.queued < n) {
+      if (!(await this.pull())) this.truncated(n);
+    }
+    if (n === 0) return Buffer.alloc(0);
+    const first = this.takeFromHead(n);
+    if (first.length === n) return first;
+    const parts = [first];
+    let got = first.length;
+    while (got < n) {
+      const part = this.takeFromHead(n - got);
+      parts.push(part);
+      got += part.length;
+    }
+    return Buffer.concat(parts, n);
+  }
+
+  /** Between 1 and `max` bytes (whatever is queued, pulling if nothing is), or throws at end of input. */
+  async readSome(max: number): Promise<Buffer> {
+    if (this.error !== null) throw this.error;
+    while (this.queued === 0) {
+      if (!(await this.pull())) this.truncated(max);
+    }
+    return this.takeFromHead(max);
+  }
+
+  /** Discards exactly `n` bytes without buffering them, or throws "unexpected end of archive". */
+  async skip(n: number): Promise<void> {
+    let left = n;
+    while (left > 0) left -= (await this.readSome(left)).length;
+  }
+
+  /**
+   * Reads the input to its end and checks that every remaining byte is zero.
+   * Running to the end is what lets the BVB1 opener's final-chunk and
+   * trailing-bytes checks fire before `readTar` resolves.
+   */
+  async expectZerosToEnd(): Promise<void> {
+    for (;;) {
+      while (this.queued > 0) {
+        if (!isAllZero(this.takeFromHead(this.queued))) {
+          this.fail(new Error("tar: trailing non-zero data after the end-of-archive marker"));
+        }
+      }
+      if (!(await this.pull())) return;
+    }
+  }
+
+  /** Stops consuming the input after a failure: `return()` on a stream iterator destroys the stream. */
+  async abandon(): Promise<void> {
+    try {
+      await this.iter.return?.();
+    } catch {
+      // The stream already failed; its own error is the one being reported.
+    }
   }
 }
 
 const BODY_CHUNK = 64 * 1024;
 
-/** The Readable handed to `onEntry`. Pulls from the shared BlockReader lazily, `BODY_CHUNK` bytes at a time, so a 20 MB entry is never buffered in full. */
+/**
+ * The Readable handed to `onEntry`. Pulls from the shared ByteSource lazily,
+ * at most `BODY_CHUNK` bytes per `_read`, so a large entry is never buffered
+ * in full. `remaining` counts body bytes not yet taken from the source;
+ * `inFlight` lets `readTar` wait for an outstanding pull before it takes the
+ * source back.
+ */
 class EntryBodyStream extends Readable {
-  private remaining: number;
-  private readonly reader: BlockReader;
+  remaining: number;
+  inFlight: Promise<void> | null = null;
+  private readonly source: ByteSource;
 
-  constructor(reader: BlockReader, size: number) {
+  constructor(source: ByteSource, size: number) {
     super();
-    this.reader = reader;
+    this.source = source;
     this.remaining = size;
   }
 
@@ -398,68 +547,113 @@ class EntryBodyStream extends Readable {
       this.push(null);
       return;
     }
-    const want = Math.min(this.remaining, BODY_CHUNK);
-    this.reader
-      .readExact(want)
-      .then((chunk) => {
+    this.inFlight = this.source.readSome(Math.min(this.remaining, BODY_CHUNK)).then(
+      (chunk) => {
         this.remaining -= chunk.length;
-        this.push(chunk);
-      })
-      .catch((err: Error) => {
+        this.inFlight = null;
+        if (!this.destroyed) this.push(chunk);
+      },
+      (err: Error) => {
+        this.inFlight = null;
         this.destroy(err);
-      });
+      },
+    );
   }
-}
-
-function whenEnded(stream: Readable): Promise<void> {
-  return new Promise((resolve, reject) => {
-    stream.once("end", resolve);
-    stream.once("error", reject);
-  });
 }
 
 /**
  * Reads a ustar archive from `input`, calling `onEntry(path, size, body)` for
- * each regular file in order. Directory entries are skipped. Any other entry
- * type (symlink, hardlink, device, fifo, pax header, ...) throws, because
- * this writer never produces one and silently skipping it would drop content
- * from a backup without saying so.
+ * each regular file in order. Directory entries (size 0 only) are skipped.
+ * Any other entry type (symlink, hardlink, device, fifo, pax header, ...)
+ * throws, because this writer never produces one and silently skipping it
+ * would drop content from a backup without saying so.
  *
- * Backpressure: `readTar` does not read past an entry's body until that
- * body's Readable has emitted 'end' — so a slow or partial consumer of one
- * entry stalls the whole archive rather than letting the reader buffer
- * ahead.
+ * Works for any chunking of `input` (single buffer, fs stream, the BVB1
+ * opener's 1 MiB chunks, 1-byte pieces).
+ *
+ * Rejects (never hangs) on:
+ * - a truncated archive ("unexpected end of archive"), anywhere;
+ * - a bad header, an unsafe or non-UTF-8 path (`validateEntryPath`), a
+ *   duplicate entry name, a directory entry with a body;
+ * - a single zero block not followed by a second one, or any non-zero byte
+ *   after the two-zero-block end marker. `readTar` reads the input to its
+ *   end before resolving, so an error the input raises at its end (the BVB1
+ *   opener's missing-final-chunk and trailing-bytes checks) rejects
+ *   `readTar` too.
+ * On rejection the input stream is destroyed.
+ *
+ * Body contract (review I1): `body` is only valid until `onEntry`'s promise
+ * settles. If `onEntry` resolves without reading the whole body — or
+ * destroys it — `readTar` destroys the body and skips the unread rest itself,
+ * then continues with the next entry. So a consumer may skip an entry simply
+ * by returning. Skipping still reads the bytes (a truncated body still
+ * rejects). If `onEntry` rejects, `readTar` rejects with that error.
+ *
+ * Backpressure: `readTar` does not read past an entry's body until
+ * `onEntry` settles, so a slow consumer stalls the archive rather than
+ * letting the reader buffer ahead.
  */
 export async function readTar(
   input: Readable,
   onEntry: (path: string, size: number, body: Readable) => Promise<void>,
 ): Promise<void> {
-  const reader = new BlockReader(input);
+  const source = new ByteSource(input);
+  try {
+    await readEntries(source, onEntry);
+  } catch (err) {
+    await source.abandon();
+    throw err;
+  }
+}
+
+async function readEntries(
+  source: ByteSource,
+  onEntry: (path: string, size: number, body: Readable) => Promise<void>,
+): Promise<void> {
+  const seen = new Set<string>();
 
   for (;;) {
-    const block = await reader.readExact(BLOCK_SIZE);
-    if (isZeroBlock(block)) return;
+    const block = await source.readExact(BLOCK_SIZE);
+    if (isAllZero(block)) {
+      const second = await source.readExact(BLOCK_SIZE);
+      if (!isAllZero(second)) {
+        throw new Error("tar: corrupt end-of-archive marker (a zero block not followed by a second zero block)");
+      }
+      await source.expectZerosToEnd();
+      return;
+    }
 
     const header = parseHeader(block);
-    validateEntryPath(header.path);
+    const isDirectory = header.typeflag === TYPE_DIRECTORY;
+    // Directory entries conventionally end in "/" ("sub/"); that one slash is
+    // allowed and stripped. A file entry with a trailing "/" fails the rule.
+    const path = isDirectory && header.path.endsWith("/") ? header.path.slice(0, -1) : header.path;
+    validateEntryPath(path);
+    if (seen.has(path)) throw new Error(`tar: duplicate entry in archive: ${path}`);
+    seen.add(path);
 
-    if (header.typeflag === TYPE_DIRECTORY) {
-      if (header.size > 0) await reader.readExact(header.size);
-      const pad = padLength(header.size);
-      if (pad > 0) await reader.readExact(pad);
+    if (isDirectory) {
+      if (header.size !== 0) throw new Error(`tar: directory entry ${path} has a non-zero size (${header.size})`);
       continue;
     }
 
     if (header.typeflag !== TYPE_REGULAR) {
-      throw new Error(`tar: unsupported entry type '${header.typeflag}' for ${header.path}`);
+      throw new Error(`tar: unsupported entry type '${header.typeflag}' for ${path}`);
     }
 
-    const body = new EntryBodyStream(reader, header.size);
-    const entryDone = onEntry(header.path, header.size, body);
-    await Promise.all([entryDone, whenEnded(body)]);
+    const body = new EntryBodyStream(source, header.size);
+    try {
+      await onEntry(path, header.size, body);
+    } finally {
+      // Take the source back: stop the body pulling, and let any pull already
+      // under way land (it updates `remaining`) before reading on.
+      if (!body.destroyed) body.destroy();
+      await body.inFlight;
+    }
+    if (body.remaining > 0) await source.skip(body.remaining);
 
     const pad = padLength(header.size);
-    if (pad > 0) await reader.readExact(pad);
+    if (pad > 0) await source.readExact(pad);
   }
 }
 
