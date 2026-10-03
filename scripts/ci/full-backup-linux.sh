@@ -73,7 +73,8 @@ WORK=$(mktemp -d)
 PASSFILE=$HOME_DIR/ci-backup-passphrase
 # Not exported, and only ever handled by builtins: the sampler below looks
 # for it in every process's arguments and environment.
-PASSPHRASE="ci backup passphrase ünï 0123456789"
+PASS_ASCII="ci backup passphrase"
+PASSPHRASE="$PASS_ASCII ünï 0123456789"
 ADMIN_PASSWORD="ci-admin-password-1234"
 FAILED=0
 CUR=$A
@@ -99,6 +100,19 @@ has() { grep -q -- "$2" <<<"$1"; }
 hasf() { grep -qF -- "$2" <<<"$1"; }
 eq() { [ "$1" = "$2" ]; }
 as_in() { local dir=$1; shift; sudo -u "$TEST_USER" -H bash -c "cd '$dir' && $*"; }
+
+# Whatever ends this script (a failed check that cannot go on, a kill, the
+# job's time limit): stop the sampler and take away every mount it made, so
+# nothing is left mounted on the runner.
+cleanup() {
+  local m
+  [ -z "${SAMPLER:-}" ] || kill "$SAMPLER" 2>/dev/null || true
+  for m in "$B/data/uploads/documents" "$D/data/uploads/documents" /mnt/bv-fat-foreign /mnt/bv-fat-own; do
+    if mountpoint -q "$m" 2>/dev/null; then sudo umount "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null || true; fi
+  done
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 diagnostics() {
   echo "::group::diagnostics (install $CUR)"
@@ -338,6 +352,7 @@ sampler_start() {
   SAMPLER=$!
 }
 sampler_stop() {
+  [ -n "$SAMPLER" ] || return 0
   kill "$SAMPLER" 2>/dev/null || true
   wait "$SAMPLER" 2>/dev/null || true
   SAMPLER=""
@@ -351,7 +366,10 @@ sampler_verdict() {
   expect "the samples saw the wrapper's own command line (--passphrase-file)" grep -qF -- "--passphrase-file $PASSFILE" "$SAMPLES"
   expect "the samples saw the program inside the container ($1)" grep -qF -- "$1" "$SAMPLES"
   expect "the samples saw a container's environment (docker inspect)" grep -qF -- '"DB_PROVIDER=' "$SAMPLES"
-  if grep -qF -- "$PASSPHRASE" "$SAMPLES"; then
+  # Bytes, not characters (LC_ALL=C), and the ASCII part by itself too: the
+  # passphrase holds non-ASCII letters, and the proof must not depend on the
+  # locale or on how a tool printed them.
+  if LC_ALL=C grep -qF -- "$PASSPHRASE" "$SAMPLES" || LC_ALL=C grep -qF -- "$PASS_ASCII" "$SAMPLES"; then
     bad "the passphrase is visible in a process listing or a docker inspect"
   else
     ok "the passphrase is in no sampled command line, process environment or docker inspect"
@@ -422,8 +440,13 @@ restored_matches_a() {
 
 # failing_restore DIR NAME: the restore of NAME onto DIR (running, logged in)
 # must fail AFTER its database step and be rolled back completely.
+# The oid of the database named blackvault. A database that was dropped and
+# another one renamed into its place has a different oid.
+pg_database_oid() {
+  as_in "$1" "docker compose exec -T db psql -At -q -U blackvault -d postgres" <<<"SELECT oid FROM pg_database WHERE datname = 'blackvault';"
+}
 failing_restore() {
-  local dir=$1 name=$2 docs="$1/data/uploads/documents" before_fp before_tree extra_url extra_sha
+  local dir=$1 name=$2 docs="$1/data/uploads/documents" before_fp before_tree extra_url extra_sha before_oid="" after_oid=""
   # Make the install differ from the backup first, or "unchanged" proves nothing.
   sql "$dir" "DELETE FROM \"AmmoStock\" WHERE id LIKE 'ci-ammo-10%';" >/dev/null
   make_png "$WORK/extra.png" 5000
@@ -432,6 +455,7 @@ failing_restore() {
   expect "before: 139 AmmoStock rows (the backup holds 150)" eq "$(sql "$dir" "SELECT count(*) FROM \"AmmoStock\";")" 139
   before_fp=$(fingerprint_of "$dir")
   before_tree=$(tree_of "$dir")
+  [ "${PROVIDER[$dir]}" != "postgres" ] || before_oid=$(pg_database_oid "$dir")
   # The black-box failure. documents/ becomes a mount point (a bind mount of
   # itself), as it would be with a NAS share mounted there. Docker's bind of
   # the uploads folder carries it into the container, where rename(2) of a
@@ -462,6 +486,12 @@ failing_restore() {
   expect "no .restore-* staging folder or marker is left" eq "$(restore_leftovers "$dir")" 0
   expect "the failed run left no RESTORE audit entry (still $3, from the earlier successful restore)" eq "$(audit_count "$dir" RESTORE "$name")" "$3"
   if [ "${PROVIDER[$dir]}" = "postgres" ]; then
+    # Direct proof that the rollback's drop/rename ran: same name, another database.
+    after_oid=$(pg_database_oid "$dir")
+    echo "  pg_database oid of 'blackvault': before the failing restore $before_oid, after the rollback $after_oid"
+    if [[ "$before_oid" =~ ^[0-9]+$ ]] && [[ "$after_oid" =~ ^[0-9]+$ ]] && [ "$before_oid" != "$after_oid" ]; then
+      ok "PostgreSQL: the database named blackvault is a DIFFERENT database now (oid $before_oid → $after_oid): the snapshot was loaded into a new one and swapped in"
+    else bad "PostgreSQL: the database oid did not change ($before_oid → $after_oid): the drop/rename did not run"; fi
     expect "PostgreSQL: no blackvault_rollback database is left, and blackvault is owned by blackvault" eq \
       "$(as_in "$dir" "docker compose exec -T db psql -At -q -U blackvault -d postgres" <<<"SELECT d.datname || ':' || r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname LIKE 'blackvault%' ORDER BY 1;" | tr '\n' ' ')" "blackvault:blackvault "
   fi
