@@ -282,7 +282,7 @@ set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
 >&2 echo Checking the backup !BV_FILE_NAME! (nothing is changed yet)...
 set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"
 set "BV_DOCKER_ARGS_2=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"
-set "BV_BETWEEN=!BV_SELF!"
+set "BV_BETWEEN=%~f0"
 set "BV_HANDOFF=%TEMP%\blackvault-restore-handoff-%RANDOM%%RANDOM%.txt"
 del /f /q "!BV_HANDOFF!" >nul 2>&1
 set "BV_RESTORE_PHASE=prepare"
