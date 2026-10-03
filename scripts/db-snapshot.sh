@@ -174,7 +174,7 @@ case "$rc" in
     (umask 077 && : > "$UPLOADS_MARKER_FILE" && chmod 600 "$UPLOADS_MARKER_FILE" && printf '%s' "$UPLOADS_OUT" > "$UPLOADS_MARKER_FILE") ||
       echo "WARNING: could not write $UPLOADS_MARKER_FILE; the app may take its own snapshot of the uploads folder on its next start."
     echo ""
-    if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
       DELETE_ADVICE="delete it with sudo"
     else
       DELETE_ADVICE="delete it once BlackVault is confirmed working"

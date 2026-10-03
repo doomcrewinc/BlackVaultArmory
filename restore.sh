@@ -361,15 +361,18 @@ recovery_text() {
   else
     # The psql lines are guarded by no script, so the chain's first link is
     # step 2's command in a test: in any state but started it ends the chain.
-    echo "3. Put it back. Step 2 says which of the two to run."
-    echo "   PostgreSQL: the next seven lines ONLY if step 2 printed: started"
-    echo "   (in any other state they would replace a database the restore did not"
-    echo "   leave half done; the first line asks for the state again, and nothing"
-    echo "   after it runs unless that prints started). They are ONE command (each"
-    echo "   ends in &&): a line runs only if every line above it worked, so the"
-    echo "   marker is cleared (the last line) only when everything is back. Paste"
-    echo "   them together. If it stops with an ERROR, fix what it says and run all"
-    echo "   of them again; never run the last line by itself."
+    # Fixed text, copied as it stands (nothing in it is expanded).
+    cat << 'TEXT'
+3. Put it back. Step 2 says which of the two to run.
+   PostgreSQL: the next seven lines ONLY if step 2 printed: started
+   (in any other state they would replace a database the restore did not
+   leave half done; the first line asks for the state again, and nothing
+   after it runs unless that prints started). They are ONE command (each
+   ends in &&): a line runs only if every line above it worked, so the
+   marker is cleared (the last line) only when everything is back. Paste
+   them together. If it stops with an ERROR, fix what it says and run all
+   of them again; never run the last line by itself.
+TEXT
     echo "  [ \"\$($(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" state /app/uploads "$STAMP"))\" = started ] &&"
     echo "  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}") &&"
     echo "  $COMPOSE up -d --wait db &&"
@@ -427,15 +430,15 @@ fi
 # image from before --lock-status answers 1 — and never blocks a restore.
 # With BlackVault stopped there is no container to ask and nothing the stop
 # could end; the restore program's own lock still applies.
-if [ -n "$($COMPOSE ps --status running -q blackvault 2> /dev/null)" ]; then
+if [[ -n "$($COMPOSE ps --status running -q blackvault 2> /dev/null)" ]]; then
   LOCK_STATUS=$($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status < /dev/null 2>&1)
   LOCK_RC=$?
-  if [ "$LOCK_RC" -eq 2 ]; then
+  if [[ "$LOCK_RC" -eq 2 ]]; then
     PASSPHRASE=""
     printf '%s\n' "$LOCK_STATUS" >&2
     die "a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished."
-  elif [ "$LOCK_RC" -ne 0 ]; then
-    [ -z "$LOCK_STATUS" ] || printf '%s\n' "$LOCK_STATUS" >&2
+  elif [[ "$LOCK_RC" -ne 0 ]]; then
+    [[ -z "$LOCK_STATUS" ]] || printf '%s\n' "$LOCK_STATUS" >&2
     echo "WARNING: could not check whether a full backup is running (exit $LOCK_RC; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore." >&2
   fi
 fi
