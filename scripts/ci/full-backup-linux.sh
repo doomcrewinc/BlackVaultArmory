@@ -23,7 +23,8 @@
 #      the archive has more than one chunk).
 #   2. backup.sh --passphrase-file with the app running (compose exec) and
 #      stopped (compose run): exit 0, one parseable OK line, the .bvb is in the
-#      backup folder, 1001:1001 mode 600 in a 700 folder, the passphrase is in
+#      backup folder, 1001:1001 mode 600 in a 700 folder (on BOTH paths: the
+#      exec path once wrote 1001:65533), the passphrase is in
 #      no process listing, process environment or `docker inspect` sampled
 #      while it ran; --verify through the wrapper; exit 2 while a lock is held.
 #   6. --keep (ruling R32): --verify of a corrupted copy exits 1; a backup
@@ -47,6 +48,13 @@
 #   9. PostgreSQL: A's backup restored onto C; backup.sh on C (running and
 #      stopped); C's backup restored onto D; then the failing restore on D,
 #      whose rollback is pg_dump → psql into a side database → drop/rename.
+#  10. The backup folder somewhere else (BLACKVAULT_BACKUP_DIR), on D: a FAT
+#      filesystem that belongs to another uid (chown refused, chmod refused,
+#      no hard links): the entrypoint warns, the backup works and warns about
+#      the mode, --keep prunes, --verify passes; a FAT filesystem mounted for
+#      uid 1001 (no hard links): works without a warning; and a path that is
+#      NOT mounted: Docker creates it on the local disk and the backup lands
+#      there without an error (the README's NAS warning).
 #
 # A check that fails is reported and the script goes on where it safely can,
 # so one run shows everything that is wrong; it then exits 1.
@@ -354,27 +362,32 @@ OK_LINE='^BLACKVAULT_FULL_BACKUP_OK file=(blackvault-full-[0-9]{8}-[0-9]{6}\.bvb
 VERIFIED_LINE='^BLACKVAULT_FULL_BACKUP_VERIFIED file=(blackvault-full-[0-9]{8}-[0-9]{6}\.bvb) files=([0-9]+) bytes=([0-9]+) archive_bytes=([0-9]+)$'
 RESTORE_LINE='^BLACKVAULT_FULL_RESTORE_OK file=(blackvault-full-[0-9]{8}-[0-9]{6}\.bvb) files=([0-9]+) bytes=([0-9]+) pre_restore=(\.pre-restore-[0-9]{8}-[0-9]{6})$'
 
-# good_backup DIR WANT-FILES WANT-BYTES: checks RC/OUT of a backup.sh run that
-# has just finished, and the file it wrote. Sets NEW to the file name.
+# good_backup DIR WANT-FILES WANT-BYTES [FOLDER [FILE-STAT [FOLDER-STAT]]]:
+# checks RC/OUT of a backup.sh run that has just finished, and the file it
+# wrote. Sets NEW to the file name. FOLDER is the backup folder on the host
+# (default DIR/data/backups); the STATs are `owner:group mode` (defaults: the
+# file 1001:1001 600, the folder 1001:1001 700).
 NEW=""
 good_backup() {
-  local dir=$1 f
+  local dir=$1 f folder=${4:-$1/data/backups} file_stat=${5:-1001:1001 600} folder_stat=${6:-1001:1001 700}
   NEW=""
   expect "exit 0" eq "$RC" 0
   if [[ "$OUT" =~ $OK_LINE ]]; then
     NEW=${BASH_REMATCH[1]}
     ok "standard output is exactly the OK line"
     expect "files=$2 bytes=$3 skipped=0 unreadable=0" eq "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[5]} ${BASH_REMATCH[6]}" "$2 $3 0 0"
-    f="$dir/data/backups/$NEW"
-    expect "$NEW is in the backup folder" sudo test -f "$f"
-    expect "it is 1001:1001 mode 600" eq "$(sudo stat -c '%u:%g %a' "$f")" "1001:1001 600"
+    f="$folder/$NEW"
+    expect "$NEW is in the backup folder $folder" sudo test -f "$f"
+    # Also on the exec path: backup.sh passes -u 1001:1001 (with -u 1001 alone the group was 65533).
+    expect "it is $file_stat" eq "$(sudo stat -c '%u:%g %a' "$f")" "$file_stat"
     expect "archive_bytes is its size" eq "$(sudo stat -c %s "$f")" "${BASH_REMATCH[4]}"
-    expect "it starts with the BVB1 magic" eq "$(magic_of "$f")" "BVB1"
+    # A 4-byte length, then the header JSON in clear (src/lib/encryption/core.mjs).
+    expect "it starts with the full-backup header" eq "$(sudo head -c 400 "$f" | grep -a -c '"format":"blackvault-full-backup"')" 1
   else
     bad "standard output is not exactly one BLACKVAULT_FULL_BACKUP_OK line"
   fi
-  expect "the backup folder is 1001:1001 mode 700" eq "$(sudo stat -c '%u:%g %a' "$dir/data/backups")" "1001:1001 700"
-  expect "no .partial and no lock are left" eq "$(sudo find "$dir/data/backups" -maxdepth 1 \( -name '*.partial' -o -name '.full-backup.lock*' \) | wc -l | tr -d ' ')" 0
+  expect "the backup folder is $folder_stat" eq "$(sudo stat -c '%u:%g %a' "$folder")" "$folder_stat"
+  expect "no .partial and no lock are left" eq "$(sudo find "$folder" -maxdepth 1 \( -name '*.partial' -o -name '.full-backup.lock*' \) | wc -l | tr -d ' ')" 0
 }
 
 # good_restore DIR NAME WANT-FILES: checks RC/OUT of a restore.sh run that has
@@ -447,7 +460,7 @@ failing_restore() {
   expect "the file uploaded after the backup is still served" eq "$(served_by_app <<<"$extra_url" | cut -d' ' -f2)" "$extra_sha"
   expect "no RECOVERY file is left" eq "$(recovery_files "$dir")" 0
   expect "no .restore-* staging folder or marker is left" eq "$(restore_leftovers "$dir")" 0
-  expect "no RESTORE audit entry for the failed run" eq "$(audit_count "$dir" RESTORE "$name")" "$3"
+  expect "the failed run left no RESTORE audit entry (still $3, from the earlier successful restore)" eq "$(audit_count "$dir" RESTORE "$name")" "$3"
   if [ "${PROVIDER[$dir]}" = "postgres" ]; then
     expect "PostgreSQL: no blackvault_rollback database is left, and blackvault is owned by blackvault" eq \
       "$(as_in "$dir" "docker compose exec -T db psql -At -q -U blackvault -d postgres" <<<"SELECT d.datname || ':' || r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname LIKE 'blackvault%' ORDER BY 1;" | tr '\n' ' ')" "blackvault:blackvault "
@@ -792,7 +805,75 @@ endstep
 
 step "9d. PostgreSQL: a restore onto D that FAILS after its database step is rolled back (pg_dump → side database → drop/rename)"
 failing_restore "$D" "$C_NAME" 1
+endstep
+
+# ════════════════════════════════════════════════════════════════════════════
+# set_backup_dir PATH: BLACKVAULT_BACKUP_DIR in D's .env, the container recreated.
+set_backup_dir() {
+  as_in "$D" "sed -i '/^BLACKVAULT_BACKUP_DIR=/d' .env && echo 'BLACKVAULT_BACKUP_DIR=$1' >> .env"
+  up
+  [ "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/backups"}}{{.Source}}{{end}}{{end}}' blackvault)" = "$1" ] ||
+    fail "the container's /app/backups is not mounted from $1"
+}
+# fat_folder NAME MOUNT-OPTIONS → /mnt/NAME, a 64 MB FAT filesystem.
+fat_folder() {
+  sudo dd if=/dev/zero of="$WORK/$1.img" bs=1M count=64 status=none
+  sudo mkfs.vfat "$WORK/$1.img" >/dev/null || fail "mkfs.vfat failed"
+  sudo mkdir -p "/mnt/$1"
+  sudo mount -o "loop,$2" "$WORK/$1.img" "/mnt/$1" || fail "could not mount the FAT image ($2)"
+}
+entrypoint_log() { as_in "$D" "docker compose logs --no-color --since $(docker inspect -f '{{.State.StartedAt}}' blackvault) blackvault" 2>&1 | grep '\[entrypoint\]' || true; }
+D_FILES=$(urls_of "$D" | wc -l | tr -d ' ')
+D_BYTES=$(served_by_app < <(urls_of "$D") | awk '{s += $3} END {print s}')
+
+step "10a. the backup folder on a FAT filesystem that belongs to ANOTHER uid: chown refused, chmod refused, no hard links"
+command -v mkfs.vfat >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq dosfstools; }
+fat_folder bv-fat-foreign "uid=0,gid=0,umask=000"
+set_backup_dir /mnt/bv-fat-foreign
+LOGS=$(entrypoint_log)
+echo "$LOGS" | cut -c1-400
+expect "the entrypoint warns that the owner could not be set and leaves the mode alone" hasf "$LOGS" "[entrypoint] WARNING: could not set the owner of the backup folder /app/backups (a network share usually refuses this), so its mode was left as it is."
+expect "and says backups will work, because the app can write there" hasf "$LOGS" "The app can write to it, so full backups will work"
+sudo -u '#1001' touch /mnt/bv-fat-foreign/ci-a || bad "uid 1001 cannot write to the FAT folder"
+if sudo -u '#1001' ln /mnt/bv-fat-foreign/ci-a /mnt/bv-fat-foreign/ci-b 2>/dev/null; then
+  bad "this filesystem has hard links: the case proves nothing about the rename fallback"
+else ok "uid 1001 can write there but cannot hard-link (so a backup is published by rename)"; fi
+if sudo -u '#1001' chmod 600 /mnt/bv-fat-foreign/ci-a 2>/dev/null; then bad "uid 1001 can chmod there: the case proves nothing about a refused chmod"; else ok "and cannot chmod what it creates"; fi
+sudo rm -f /mnt/bv-fat-foreign/ci-a /mnt/bv-fat-foreign/ci-b
+wrap "$D" "./backup.sh --passphrase-file $PASSFILE --keep 1"
+good_backup "$D" "$D_FILES" "$D_BYTES" /mnt/bv-fat-foreign "0:0 777" "0:0 777"
+FAT1=$NEW
+expect "it warns that the mode could not be set, and why" hasf "$ERR" "its mode could not be set to 600 (EPERM): the backup folder /app/backups is on a filesystem that does not let the app change it"
+sleep 1
+wrap "$D" "./backup.sh --passphrase-file $PASSFILE --keep 1"
+good_backup "$D" "$D_FILES" "$D_BYTES" /mnt/bv-fat-foreign "0:0 777" "0:0 777"
+expect "--keep 1 deleted the first one there" hasf "$ERR" "full-backup: deleted old backup $FAT1"
+expect "exactly one backup is left" eq "$(sudo find /mnt/bv-fat-foreign -name 'blackvault-full-*.bvb' | wc -l | tr -d ' ')" 1
+wrap "$D" "./backup.sh --verify $NEW --passphrase-file $PASSFILE"
+expect "--verify of the backup on FAT: exit 0" eq "$RC" 0
+endstep
+
+step "10b. the backup folder on a FAT filesystem mounted for uid 1001 (no hard links, nothing refused)"
+fat_folder bv-fat-own "uid=1001,gid=1001,fmask=0177,dmask=0077"
+set_backup_dir /mnt/bv-fat-own
+LOGS=$(entrypoint_log)
+expect "the entrypoint has nothing to warn about" eq "$LOGS" ""
+wrap "$D" "./backup.sh --passphrase-file $PASSFILE"
+good_backup "$D" "$D_FILES" "$D_BYTES" /mnt/bv-fat-own
+if has "$ERR" "WARNING"; then bad "an unexpected WARNING"; else ok "no WARNING"; fi
+endstep
+
+step "10c. BLACKVAULT_BACKUP_DIR on a path that is NOT mounted: Docker creates it on the local disk, and the backup lands there without an error"
+sudo rm -rf /mnt/bv-nas-not-mounted
+set_backup_dir /mnt/bv-nas-not-mounted/blackvault-backups
+expect "Docker created the folder, on the local disk, and the entrypoint gave it to uid 1001" eq \
+  "$(sudo stat -c '%u:%g %a' /mnt/bv-nas-not-mounted/blackvault-backups) $(sudo stat -f -c '%T' /mnt/bv-nas-not-mounted/blackvault-backups | grep -c 'msdos\|nfs\|cifs\|smb')" "1001:1001 700 0"
+wrap "$D" "./backup.sh --passphrase-file $PASSFILE"
+good_backup "$D" "$D_FILES" "$D_BYTES" /mnt/bv-nas-not-mounted/blackvault-backups
+if has "$ERR" "WARNING\|ERROR"; then bad "it said something about the folder"; else ok "nothing warns that the share is missing (hence the README's note)"; fi
 down
+sudo umount /mnt/bv-fat-foreign /mnt/bv-fat-own || true
+sudo rm -rf /mnt/bv-nas-not-mounted /mnt/bv-fat-foreign /mnt/bv-fat-own
 endstep
 
 rm -rf "$WORK" 2>/dev/null || sudo rm -rf "$WORK"
