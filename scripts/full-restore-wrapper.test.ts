@@ -1831,6 +1831,15 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       0,
     );
     expect(code.slice(upFront.at(-1)! + 1, upFront.at(-1)! + 3)).toEqual(["exit /b 1", ":no_old_marker"]);
+    // …and the script goes straight on from there: nothing of an earlier form of this check is left behind it.
+    expect(code[upFront.at(-1)! + 3]).toBe("");
+    expect(text).not.toMatch(/BV_OLD_STAMP|BV_OLD_MARKER\b/);
+    // No label is defined twice anywhere in the file (cmd would silently use the first).
+    const labels = code.filter((l) => /^:[A-Za-z_]/.test(l));
+    expect(labels.filter((l, i) => labels.indexOf(l) !== i)).toEqual([]);
+    // …and every `goto` / `call` names a label that exists.
+    const targets = [...code.join("\n").matchAll(/(?:goto|call) (:[A-Za-z_]+)/g)].map((m) => m[1]).filter((l) => l !== ":eof");
+    expect([...new Set(targets.filter((l) => !labels.includes(l)))]).toEqual([]);
     expect(upFront.at(-1)!).toBeLessThan(code.findIndex((l) => l.includes("full-backup.mjs --verify")));
     // Its wording is restore.sh's.
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");

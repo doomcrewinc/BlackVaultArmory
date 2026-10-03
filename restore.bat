@@ -279,11 +279,6 @@ if "!BV_OLD_WHERE!"=="/app/uploads/" set "BV_OLD_MARKERS=!BV_OLD_MARKERS! (insid
 >&2 echo ERROR: the uploads folder holds a marker left by an earlier restore: !BV_OLD_MARKERS!. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  !BV_OLD_CMDS!  Then run the restore again. Nothing was done.
 exit /b 1
 :no_old_marker
-:: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
-set "BV_OLD_STAMP=!BV_OLD_MARKER:~9,-11!"
->&2 echo ERROR: an earlier restore (!BV_OLD_STAMP!) left its marker !BV_HOST_DATA!\uploads\!BV_OLD_MARKER!, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove the marker first with:  docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_OLD_STAMP!  Then run the restore again. Nothing was done.
-exit /b 1
-:no_old_marker
 
 :: -- 3. The file: a name in the backup folder, or a path into it ----
 :: The backup folder on the HOST: the same expression docker-compose.yml
@@ -576,13 +571,6 @@ call :write_marker_left
 set "BV_WHERE_ELSE=The same is in !CD!\!BV_RECOVERY!."
 if not defined BV_LEFT_WRITTEN set "BV_WHERE_ELSE=!CD!\!BV_RECOVERY! could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running."
 >&2 echo ERROR: the restore is complete and was NOT rolled back, but !BV_NOT_REMOVED!, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  !BV_WHERE_ELSE!
-exit /b 1
-:restore_marker_gone
->&2 echo The restore finished but left its marker !BV_MARKER!. Removing it...
-%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP! 1>&2
-if not errorlevel 1 goto :restore_marker_gone
-call :write_marker_left
->&2 echo ERROR: the restore is complete and was NOT rolled back, but its marker !BV_MARKER! could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  The same is in !CD!\!BV_RECOVERY!.
 exit /b 1
 :restore_marker_gone
 del /f /q "!BV_RECOVERY!" >nul 2>&1
