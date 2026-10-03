@@ -393,6 +393,9 @@ if host_can_enter "$HOST_UPLOADS_DIR" || [ ! -e "$HOST_UPLOADS_DIR" ]; then
     fi
   done
 else
+  # The container mounts backups/; if Docker had to create that folder it
+  # would belong to root, and the snapshot could not be written into it.
+  mkdir -p backups 2> /dev/null
   case "$(container_restore_state)" in
     untouched) ;;
     started | complete)
