@@ -1,0 +1,164 @@
+/**
+ * scripts/docker-entrypoint.sh, the /app/backups step (full backups, Task 6,
+ * Review Focus 1: a NAS mount where chown/chmod is refused).
+ *
+ * The real script is run under `sh`, on the host, with two things replaced:
+ * - its three fixed paths (/app/backups, /run/blackvault-secrets,
+ *   /run/secrets) point into a scratch folder (a text substitution on a COPY);
+ * - `id`, `chown`, `chmod` and `su-exec` are stubs first on PATH: `id -u`
+ *   says 0, chown/chmod can be told to refuse the backup folder (what a
+ *   network share does), and `su-exec <user> cmd` just runs cmd — as the
+ *   test's own user, so "not writable by the app user" is a real failed
+ *   write into a folder this user cannot write to.
+ * What this cannot show is the real image: busybox sh, real root, a real
+ * su-exec. scripts/ci/full-backup-entrypoint-linux.sh runs the same two
+ * refused cases in a container of the built image.
+ */
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+const ROOT = path.resolve(__dirname, "..");
+const skip = process.platform === "win32" || process.getuid?.() === 0;
+
+let tmp: string;
+let bin: string;
+let backups: string;
+let script: string;
+
+function stub(name: string, body: string) {
+  fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+}
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bv-entrypoint-"));
+  bin = path.join(tmp, "bin");
+  backups = path.join(tmp, "app-backups");
+  fs.mkdirSync(bin);
+  const text = fs
+    .readFileSync(path.join(ROOT, "scripts/docker-entrypoint.sh"), "utf8")
+    .replaceAll("/app/backups", backups)
+    .replaceAll("/run/blackvault-secrets", path.join(tmp, "src-secrets"))
+    .replaceAll("/run/secrets", path.join(tmp, "dst-secrets"));
+  expect(text).toContain(`BACKUPS=${backups}`);
+  script = path.join(tmp, "entrypoint.sh");
+  fs.writeFileSync(script, text);
+  stub("id", '[ "$1" = "-u" ] && { echo 0; exit 0; }; exec /usr/bin/id "$@"');
+  // Refuse (like a network share) when told to, but only for the backup folder: the key files keep working.
+  for (const tool of ["chown", "chmod"]) {
+    stub(
+      tool,
+      `echo "${tool} $*" >> "${tmp}/calls"
+for a in "$@"; do last=$a; done
+case ",$BV_REFUSE," in *,${tool},*) [ "$last" = "${backups}" ] && { echo "${tool}: Operation not permitted" >&2; exit 1; } ;; esac
+${tool === "chown" ? "exit 0" : `exec /bin/chmod "$@"`}`,
+    );
+  }
+  stub("su-exec", `echo "su-exec $1" >> "${tmp}/calls"; shift; exec "$@"`);
+});
+afterEach(() => {
+  if (fs.existsSync(backups) && fs.statSync(backups).isDirectory()) fs.chmodSync(backups, 0o700);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+function run(env: Record<string, string> = {}) {
+  const r = spawnSync("sh", [script, "sh", "-c", "echo APP-STARTED; exit 7"], {
+    encoding: "utf8",
+    env: { PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, ...env } as unknown as NodeJS.ProcessEnv,
+    timeout: 30_000,
+  });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, calls: fs.existsSync(path.join(tmp, "calls")) ? fs.readFileSync(path.join(tmp, "calls"), "utf8") : "" };
+}
+const started = (r: ReturnType<typeof run>) => {
+  // The command ran, as the app user, and its exit code is the container's.
+  expect(r.stdout).toBe("APP-STARTED\n");
+  expect(r.code).toBe(7);
+  expect(r.calls.trim().split("\n").pop()).toBe("su-exec nextjs:nodejs");
+};
+
+describe.skipIf(skip)("docker-entrypoint.sh: the /app/backups step", () => {
+  it("normal disk: creates the folder, chowns it to the app user, mode 0700, no warning, then starts the command", () => {
+    const r = run();
+    started(r);
+    expect(r.stderr).toBe("");
+    expect(fs.statSync(backups).mode & 0o777).toBe(0o700);
+    expect(r.calls).toContain(`chown nextjs:nodejs ${backups}`);
+    expect(r.calls).toContain(`chmod 700 ${backups}`);
+    expect(fs.readdirSync(backups)).toEqual([]); // the write test left nothing behind
+  });
+
+  it("Review Focus 1: chown AND chmod refused, but the app user can write → one clear WARNING, and it continues", () => {
+    fs.mkdirSync(backups, { mode: 0o755 });
+    const r = run({ BV_REFUSE: "chown,chmod" });
+    started(r);
+    const warnings = r.stderr.split("\n").filter(Boolean);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: could not set the owner and mode of the backup folder .*app-backups.*The app can write to it, so full backups will work/);
+    expect(fs.statSync(backups).mode & 0o777).toBe(0o755); // untouched
+    expect(fs.readdirSync(backups)).toEqual([]);
+  });
+
+  it("only chown refused, still writable → the warning names the owner only", () => {
+    const r = run({ BV_REFUSE: "chown" });
+    started(r);
+    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: could not set the owner of the backup folder /);
+    expect(r.stderr).not.toMatch(/owner and mode/);
+  });
+
+  it("Review Focus 1: chown and chmod refused and the app user CANNOT write → a WARNING naming the folder and BLACKVAULT_BACKUP_DIR, and the app STILL starts", () => {
+    fs.mkdirSync(backups, { mode: 0o500 });
+    const r = run({ BV_REFUSE: "chown,chmod" });
+    started(r);
+    const warnings = r.stderr.split("\n").filter(Boolean);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/^\[entrypoint\] WARNING: the backup folder .*app-backups is not writable by the app \(uid 1001\), and its owner and mode could not be changed\..*BLACKVAULT_BACKUP_DIR.*BlackVault starts anyway\.$/);
+  });
+
+  it("writability is TESTED, not inferred: chown and chmod both 'succeed' (a share that ignores them) but a write fails → still the not-writable WARNING", () => {
+    fs.mkdirSync(backups, { mode: 0o700 });
+    // chmod is refused silently here: the stub reports success without changing anything, like a share with fixed permissions.
+    stub("chmod", `echo "chmod $*" >> "${tmp}/calls"; exit 0`);
+    fs.chmodSync(backups, 0o500);
+    const r = run();
+    started(r);
+    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: the backup folder .* is not writable by the app \(uid 1001\)\. Full backups will fail/);
+  });
+
+  it("the folder cannot even be created → a WARNING, and the app still starts", () => {
+    fs.writeFileSync(backups, "a file where the folder should be");
+    const r = run();
+    started(r);
+    expect(r.stderr).toMatch(/^\[entrypoint\] WARNING: could not create the backup folder /);
+  });
+
+  it("the key step is unchanged and comes first: the key is copied, 0400, before the backup folder is touched; a symlinked key still refuses to start", () => {
+    const src = path.join(tmp, "src-secrets");
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, "blackvault_encryption_key"), "ab".repeat(32));
+    const r = run({ BV_REFUSE: "chown,chmod" });
+    started(r);
+    const copy = path.join(tmp, "dst-secrets", "blackvault_encryption_key");
+    expect(fs.readFileSync(copy, "utf8")).toBe("ab".repeat(32));
+    expect(fs.statSync(copy).mode & 0o777).toBe(0o400);
+    const calls = r.calls.trim().split("\n");
+    expect(calls.indexOf(`chmod 400 ${copy}`)).toBeLessThan(calls.indexOf(`chown nextjs:nodejs ${backups}`));
+
+    fs.rmSync(path.join(src, "blackvault_encryption_key"));
+    fs.symlinkSync("/etc/hosts", path.join(src, "blackvault_encryption_key"));
+    const bad = run();
+    expect(bad.code).toBe(1);
+    expect(bad.stdout).toBe("");
+    expect(bad.stderr).toMatch(/Refusing to start: secrets\/blackvault_encryption_key is a symbolic link/);
+  });
+
+  it("started as a non-root user: nothing is touched, the command just runs", () => {
+    stub("id", '[ "$1" = "-u" ] && { echo 1001; exit 0; }; exec /usr/bin/id "$@"');
+    const r = run();
+    expect(r.stdout).toBe("APP-STARTED\n");
+    expect(r.code).toBe(7);
+    expect(r.calls).toBe("");
+    expect(fs.existsSync(backups)).toBe(false);
+  });
+});
