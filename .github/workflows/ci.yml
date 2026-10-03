@@ -219,16 +219,17 @@ jobs:
           TZ_OVERRIDE: ${{ matrix.tz_override }}
         run: npm test
 
-      # The only real-database PostgreSQL test run in CI. One file, one server:
-      # these suites migrate and wipe the database they are given, so two of
-      # them must never share one concurrently. Proves the backup records are
-      # read under RepeatableRead (a READ COMMITTED read fails it).
-      - name: Real-database PostgreSQL test (backup records)
+      # The real-database PostgreSQL tests. They run one file at a time, each
+      # against its own freshly created database: they migrate and wipe the
+      # database they are given and encrypt rows under their own keys, so they
+      # must never share one. Includes the backup-records test, which fails if
+      # the records are read under READ COMMITTED.
+      - name: Real-database PostgreSQL tests
         if: matrix.pg_real_db
         env:
-          ENCRYPTION_REAL_DB_PG_URL: postgresql://postgres@localhost:5432/blackvault_test
+          PG_REAL_DB_ADMIN_URL: postgresql://postgres@localhost:5432/postgres
           TZ_OVERRIDE: ${{ matrix.tz_override }}
-        run: npm test -- src/lib/backup/records.real-db.test.ts
+        run: npm run test:pg-real-db
 
   # ---------------------------------------------------------------------------
   migration-drift:
