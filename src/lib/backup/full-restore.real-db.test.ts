@@ -45,15 +45,25 @@ vi.mock("@/lib/server/auth", () => ({
 }));
 
 // The shared record restore, wrapped so a test can fail the run right before it (= after staging).
-const coreHook = vi.hoisted(() => ({ failBefore: null as Error | null, calls: 0 }));
+const coreHook = vi.hoisted(() => ({ failBefore: null as Error | null, calls: 0, options: [] as unknown[] }));
 vi.mock("./restore-core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./restore-core")>();
   return {
     ...actual,
-    restoreBackupRecords: async (...args: Parameters<typeof actual.restoreBackupRecords>) => {
-      coreHook.calls += 1;
-      if (coreHook.failBefore) throw coreHook.failBefore;
-      return actual.restoreBackupRecords(...args);
+    // The engine prepares (validates, writes nothing) BEFORE its marker and writes after it:
+    // `calls` counts the writes, and `failBefore` fails the run right before one.
+    prepareBackupRestore: async (...args: Parameters<typeof actual.prepareBackupRestore>) => {
+      coreHook.options.push(args[1]);
+      const prepared = await actual.prepareBackupRestore(...args);
+      if (!prepared.ok) return prepared;
+      return {
+        ok: true as const,
+        write: async () => {
+          coreHook.calls += 1;
+          if (coreHook.failBefore) throw coreHook.failBefore;
+          return prepared.write();
+        },
+      };
     },
   };
 });
@@ -71,7 +81,7 @@ import { TarWriter } from "./tar";
 import { runFullBackup } from "./full-backup";
 import { FullBackupVerifyError, verifyFullBackup } from "./full-verify";
 import { acquireFullBackupLock, FullBackupAlreadyRunningError } from "./full-lock";
-import { FullRestoreError, runFullRestore } from "./full-restore";
+import { FULL_RESTORE_TRANSACTION_TIMEOUT_MS, FullRestoreError, runFullRestore } from "./full-restore";
 
 // Every test here spawns shell scripts or does real fsyncs. The default 5 s limit only guards against a hang, and on a
 // stalled machine it has failed tests that were doing nothing wrong; the engine calls keep their own 60 s race (`within`).
@@ -307,6 +317,7 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
     for (const d of [rootA, rootB, backups]) mkdirSync(d, { recursive: true });
     coreHook.failBefore = null;
     coreHook.calls = 0;
+    coreHook.options = [];
   });
 
   afterEach(() => {
@@ -324,6 +335,9 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
     const result = await restore(source.archive);
     expect(result).toMatchObject({ file: path.basename(source.archive), files: 3, bytes: IMG_A.length + IMG_BIG.length + DOC_C.length, preRestore: `.pre-restore-${STAMP}`, warnings: [] });
     expect(result.counts.firearms).toBe(2);
+    // M2: the command-line restore asks for a much longer write transaction than the browser's 30 s.
+    expect(FULL_RESTORE_TRANSACTION_TIMEOUT_MS).toBe(30 * 60 * 1000);
+    expect(coreHook.options).toEqual([{ logLabel: "full-restore", transactionTimeoutMs: FULL_RESTORE_TRANSACTION_TIMEOUT_MS }]);
 
     // Records: read back through the app client under key B, equal to what install A held.
     const after = JSON.parse(JSON.stringify(await within(20_000, collectBackupRecords())));
@@ -549,6 +563,18 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       const huge = Buffer.alloc(64 * 1024 * 1024 + 1, 0x20);
       await expectUntouched(() => craftArchive("hugemanifest.bvb", [["db.json", p.db], ["manifest.json", huge]]).then(restore), FullRestoreError, /manifest\.json is too large/);
     }, 120_000);
+
+    it("M3: a db.json that is not a valid backup payload is refused BEFORE the marker: no marker, the database step never starts, and the wrapper's rule reads 'untouched'", async () => {
+      await makeSource();
+      const p = await validParts([]);
+      const db = JSON.parse(p.db.toString("utf8"));
+      delete db.meta; // every table and count is right (the manifest check passes), but it is not a backup payload
+      const archive = await craftArchive("invalid-payload.bvb", [["db.json", Buffer.from(JSON.stringify(db))], ["manifest.json", p.manifest([])]]);
+      await expectUntouched(() => restore(archive), FullRestoreError, /^Invalid backup file\. .* Nothing was changed\.$/);
+      expect(markerExists()).toBe(false);
+      const state = sh([path.join(ROOT, "scripts/snapshot-restore.sh"), "state", rootB, STAMP]);
+      expect(state.stdout.trim()).toBe("untouched");
+    });
 
     it("db.json that the shared restore logic refuses (a content error): the transaction never commits", async () => {
       await makeSource();

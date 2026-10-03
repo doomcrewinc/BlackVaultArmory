@@ -13,7 +13,7 @@ import { EntryNameSet, printableName } from "./entry-names";
 import { acquireFullBackupLock } from "./full-lock";
 import { checkDbAgainstCounts, checkEntriesAgainstManifest } from "./full-verify";
 import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
-import { restoreBackupRecords } from "./restore-core";
+import { prepareBackupRestore } from "./restore-core";
 import { readTar } from "./tar";
 
 /**
@@ -33,11 +33,14 @@ import { readTar } from "./tar";
  *    so the manifest is only known once everything is staged.
  * 2. CHECK. Only after the stream ended cleanly: the staged set must equal
  *    `manifest.files` exactly (none missing, none extra), with matching sizes
- *    and sha256s, and db.json must hold the manifest's counts. Up to here
+ *    and sha256s, db.json must hold the manifest's counts, and it must be
+ *    a payload the shared restore logic accepts (`prepareBackupRestore`,
+ *    ./restore-core.ts: every check that needs no write). Up to here
  *    nothing but the staging folder exists; a failure removes it.
  * 3. DATABASE. Every backup model's rows are replaced in one transaction by
- *    `restoreBackupRecords` (./restore-core.ts, shared with the browser
- *    restore). If it fails, nothing was written.
+ *    that same logic (shared with the browser restore), with a much longer
+ *    time limit (FULL_RESTORE_TRANSACTION_TIMEOUT_MS). If it fails, nothing
+ *    was written.
  * 4. FOLDERS. The live `images/` and `documents/` are renamed into
  *    `<uploads>/.pre-restore-<ts>/` — with every file they hold, including
  *    files the backup does not have (Review Focus 4: nothing is deleted) —
@@ -85,6 +88,16 @@ const UPLOAD_FOLDERS = [
   { dir: "images" },
   { dir: "documents" },
 ] as const;
+
+/**
+ * The limit for the one write transaction: 30 minutes. The browser restore
+ * allows 30 s because a person is waiting on a request; here BlackVault is
+ * stopped, a snapshot exists and nobody else uses the database, so the only
+ * job of the limit is to end a transaction that is truly stuck. A large
+ * install on slow storage (a NAS, an SD card) needs minutes, not seconds,
+ * and with 30 s it failed every restore — cleanly, but every time.
+ */
+export const FULL_RESTORE_TRANSACTION_TIMEOUT_MS = 30 * 60 * 1000;
 
 const DB_ENTRY = "db.json";
 const MANIFEST_ENTRY = "manifest.json";
@@ -318,6 +331,12 @@ async function restoreLocked({ opts, file, fileName, root, staging, preRestoreNa
     const bytes = checkEntriesAgainstManifest(staged, m);
     checkDbAgainstCounts(db, m.counts);
     const payload: unknown = JSON.parse(db.toString("utf8"));
+    // Everything the shared restore logic can refuse WITHOUT writing (not a
+    // backup payload, a legacy value that cannot be read) is refused here,
+    // before the marker: a marker tells the wrapper to put the database back
+    // from its snapshot, and nothing has touched the database yet.
+    const prepared = await prepareBackupRestore(payload, { logLabel: "full-restore", transactionTimeoutMs: FULL_RESTORE_TRANSACTION_TIMEOUT_MS });
+    if (!prepared.ok) throw new FullRestoreError(`${prepared.error} Nothing was changed.`, false);
 
     // ── 3. Database: one transaction, through the shared restore logic ──
     // The marker first (ruling R24), durable before the transaction opens.
@@ -330,7 +349,7 @@ async function restoreLocked({ opts, file, fileName, root, staging, preRestoreNa
     }
     await fsyncDir(marker);
     await fsyncDir(root);
-    const restored = await restoreBackupRecords(payload, { logLabel: "full-restore" });
+    const restored = await prepared.write();
     if (!restored.ok) throw new FullRestoreError(`${restored.error} Nothing was changed.`, false);
     databaseReplaced = true;
 

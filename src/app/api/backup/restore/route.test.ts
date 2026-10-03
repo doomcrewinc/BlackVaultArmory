@@ -164,6 +164,25 @@ describe("POST /api/backup/restore", () => {
     for (const { key } of BACKUP_MODELS) expect(json.counts[key], key).toBe(1);
   });
 
+  it("M2: the browser restore keeps its 30 s write transaction; a caller's transactionTimeoutMs reaches prisma.$transaction", async () => {
+    await POST(restoreRequest(v11Payload()));
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.transaction.mock.calls[0][1]).toEqual({ timeout: 30000 });
+
+    const { prepareBackupRestore, restoreBackupRecords } = await import("@/lib/backup/restore-core");
+    mocks.transaction.mockClear();
+    expect((await restoreBackupRecords(v11Payload(), { transactionTimeoutMs: 1_800_000 })).ok).toBe(true);
+    expect(mocks.transaction.mock.calls[0][1]).toEqual({ timeout: 1_800_000 });
+
+    // The two halves: preparing writes nothing; a refused payload has no write at all.
+    mocks.transaction.mockClear();
+    const prepared = await prepareBackupRestore(v11Payload(), { transactionTimeoutMs: 1234 });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(prepared.ok && (await prepared.write()).ok).toBe(true);
+    expect(mocks.transaction.mock.calls[0][1]).toEqual({ timeout: 1234 });
+    expect(await prepareBackupRestore({ firearms: [] })).toEqual({ ok: false, status: 400, error: "Invalid backup file. Missing required fields or wrong format." });
+  });
+
   it("records exactly one RESTORE event with per-model counts", async () => {
     const response = await POST(restoreRequest(v11Payload()));
     const json = await response.json();

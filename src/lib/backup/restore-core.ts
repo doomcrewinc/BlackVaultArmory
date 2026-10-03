@@ -335,7 +335,22 @@ export type RestoreRecordsResult =
 export interface RestoreRecordsOptions {
   /** Prefix of the one error line logged when the write fails. Default: the browser route's. */
   logLabel?: string;
+  /**
+   * How long the one write transaction may run, in milliseconds. Default
+   * 30 000: the browser route's, where a person is waiting on a request.
+   * The command-line restore passes a much longer one (./full-restore.ts).
+   */
+  transactionTimeoutMs?: number;
 }
+
+/** The browser restore's limit for its write transaction. */
+export const DEFAULT_RESTORE_TRANSACTION_TIMEOUT_MS = 30_000;
+
+/**
+ * A payload that passed every check that needs no write: `write()` replaces
+ * the rows. Or the refusal (`ok: false`): nothing was, or will be, written.
+ */
+export type PreparedRestore = { ok: true; write: () => Promise<RestoreRecordsResult> } | { ok: false; status: 400 | 500; error: string };
 
 /**
  * Replaces every backup model's rows with those in `body` (a parsed backup
@@ -343,7 +358,20 @@ export interface RestoreRecordsOptions {
  * off for the whole replace and the date migration that follows it.
  */
 export async function restoreBackupRecords(body: unknown, opts: RestoreRecordsOptions = {}): Promise<RestoreRecordsResult> {
+  const prepared = await prepareBackupRestore(body, opts);
+  return prepared.ok ? prepared.write() : prepared;
+}
+
+/**
+ * The first half of `restoreBackupRecords`: validates and normalises `body`
+ * WITHOUT writing anything, and returns the write as a function. The full
+ * restore calls this before it leaves its "database step started" marker,
+ * so that a payload refused here never sends the live database through the
+ * wrapper's rollback (./full-restore.ts).
+ */
+export async function prepareBackupRestore(body: unknown, opts: RestoreRecordsOptions = {}): Promise<PreparedRestore> {
   const logLabel = opts.logLabel ?? "POST /api/backup/restore";
+  const transactionTimeoutMs = opts.transactionTimeoutMs ?? DEFAULT_RESTORE_TRANSACTION_TIMEOUT_MS;
   if (!isValidBackup(body)) {
     return { ok: false, status: 400, error: "Invalid backup file. Missing required fields or wrong format." };
   }
@@ -379,6 +407,11 @@ export async function restoreBackupRecords(body: unknown, opts: RestoreRecordsOp
   normalizeGearArmorGroups(rows);
   dropLegacyNfaDateAudits(rows);
 
+  return { ok: true, write: () => writeBackupRecords(rows, logLabel, transactionTimeoutMs) };
+}
+
+/** The second half: the one transaction. `rows` has been validated and normalised by `prepareBackupRestore`. */
+async function writeBackupRecords(rows: Record<string, unknown[]>, logLabel: string, transactionTimeoutMs: number): Promise<RestoreRecordsResult> {
   // Row-level auditing is off for the whole restore — the replace AND the
   // post-restore date migration — or every restored row (and every normalised
   // legacy date) would be logged as the admin's own edit. The restore is
@@ -403,7 +436,7 @@ export async function restoreBackupRecords(body: unknown, opts: RestoreRecordsOp
             if (rows[key].length) await delegates[delegate].createMany({ data: rows[key] });
           }
         },
-        { timeout: 30000 }
+        { timeout: transactionTimeoutMs }
       );
     } catch (error) {
       logRestoreError(logLabel, error, failingModel);
