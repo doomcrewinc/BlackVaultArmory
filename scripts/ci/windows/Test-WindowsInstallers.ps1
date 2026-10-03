@@ -89,11 +89,43 @@ if (Test-Path $csc) {
 }
 if (-not (Test-Path $StubExe)) { throw "could not build the docker stub at $StubExe" }
 Write-Host "docker stub built: $StubExe"
+# Where a REAL docker.exe sits on this machine. It matters: backup.bat and
+# restore.bat start docker from PowerShell, and Process.Start with a bare
+# name searches the Windows system folders BEFORE PATH - so a docker.exe in
+# System32 was started instead of the stub (first Windows run of BK1).
+Write-Host "real docker on this machine: $(@(& where.exe docker 2>$null) -join '; ')"
+
+# A harness error must never hide the scenarios after it. The first Windows
+# run of backup.bat died on a harness exception in its FIRST scenario (a
+# missing stdin record turned into $null), so twenty later scenarios never
+# ran and the script's own output was never printed. From here on, any
+# terminating error in a scenario is one FAIL line (with where it happened),
+# and the run goes on with the next statement - so the scenario's own
+# Show-EvidenceIfFailed still prints what the script said. The run still
+# ends with exit 1: the failure is counted.
+$script:TrapArmed = $true
+trap {
+  if (-not $script:TrapArmed) { break }
+  $script:Checks++
+  $where = if ($_.InvocationInfo) { "line $($_.InvocationInfo.ScriptLineNumber)" } else { "unknown line" }
+  $msg = "harness error at ${where}: $($_.Exception.Message)"
+  Write-Host "    FAIL $msg" -ForegroundColor Red
+  $script:Failures.Add($msg)
+  continue
+}
 
 function Assert([bool]$Condition, [string]$Message) {
   $script:Checks++
   if ($Condition) { Write-Host "    ok   $Message" }
   else { Write-Host "    FAIL $Message" -ForegroundColor Red; $script:Failures.Add($Message) }
+}
+
+# A file's bytes as base64, or "" when the file does not exist (never $null).
+function Get-FileBase64([string]$Path) {
+  if (-not (Test-Path $Path)) { return "" }
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($null -eq $bytes -or $bytes.Length -eq 0) { return "" }
+  return [Convert]::ToBase64String($bytes)
 }
 
 # Copies one repo file (a path relative to the repo root, sub-folders
@@ -135,7 +167,14 @@ function Invoke-Bat {
     [string]$Dir, [string]$Script, [string[]]$Answers = @(),
     [hashtable]$EnvVars = @{},
     [switch]$NoPad,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    # Task 6 (backup.bat): arguments for the script, already quoted for cmd.exe.
+    [string]$BatArgs = "",
+    # How the script is NAMED on the command line (default: its full path), and
+    # the folder cmd.exe starts in (default: -Dir). Together they start a script
+    # by a quoted RELATIVE name from another folder (scenario RS15).
+    [string]$InvokeAs = "",
+    [string]$WorkDir = ""
   )
   $answerFile = Join-Path $Dir "__answers.txt"
   # @() because an `if` that yields an empty array yields $null, and
@@ -181,8 +220,9 @@ function Invoke-Bat {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
     # /s: strip exactly the outer pair of quotes, keep the inner ones.
-    $psi.Arguments = "/d /s /c `"`"$Dir\$Script`" < `"$answerFile`" 2>&1`""
-    $psi.WorkingDirectory = $Dir
+    $batName = if ($InvokeAs) { $InvokeAs } else { "$Dir\$Script" }
+    $psi.Arguments = "/d /s /c `"`"$batName`" $BatArgs < `"$answerFile`" 2>&1`""
+    $psi.WorkingDirectory = if ($WorkDir) { $WorkDir } else { $Dir }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -205,6 +245,8 @@ function Invoke-Bat {
     $out += "`r`n[harness] TIMED OUT after $TimeoutSeconds s; process tree killed`r`n"
   }
   $stub = if (Test-Path $logFile) { (Get-Content $logFile -Raw) } else { "" }
+  if ($null -eq $stub) { $stub = "" }   # Get-Content -Raw of an empty file is $null
+  if ($null -eq $out) { $out = "" }
   return [pscustomobject]@{
     ExitCode = $code
     Output   = $out
@@ -1901,6 +1943,875 @@ Assert ((& git -C $work rev-parse HEAD) -ne $headBefore) "the pull succeeded"
 Assert ([IO.File]::ReadAllText($attrs) -eq "*.png binary`r`n") "the pre-existing attributes file was restored byte for byte"
 Show-EvidenceIfFailed $r
 
+# ══════════════════════════════════════════════════════════════════════════
+# backup.bat (full backups, Task 6)
+# ══════════════════════════════════════════════════════════════════════════
+# The docker stub stands in for the backup program: it records the argv it
+# was called with (the stub log), every byte it got on standard input
+# (BV_STUB_STDIN_FILE) and its whole environment (BV_STUB_ENV_FILE). That is
+# how "the passphrase reaches the program on stdin and nowhere else" is
+# checked on the real script. What the program itself does with --keep and
+# --verify is covered on Linux (scripts/full-backup-cli.test.ts).
+#
+# NOT covered here: the typed passphrase (Read-Host -AsSecureString, asked
+# twice, the mismatch refusal). The harness has no console - standard input
+# is always redirected - so only "no console and no --passphrase-file: exit 1
+# at once" can be run. The typed path shares everything after the prompt
+# (starting docker, writing the pipe, the exit code) with the file path.
+
+$BackupPass = " bat tëst 'pass' `"phrase`" %PATH% ^ & | * "
+$BackupOkLine = "BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261002-180405.bvb files=2 bytes=10 archive_bytes=99 skipped=0 unreadable=0"
+$BackupExec = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs"
+$BackupRun = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs"
+
+function New-BackupSandbox([string]$Name, [string[]]$EnvLines = @("PORT=3000", "BLACKVAULT_DB_PROVIDER=sqlite")) {
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("backup.bat", "docker-compose.yml")) { Copy-Item (Join-Path $RepoRoot $f) $dir }
+  [IO.File]::WriteAllText((Join-Path $dir ".env"), (($EnvLines -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+  return $dir
+}
+
+# Writes the passphrase file as UTF-8 without a byte-order mark and returns its path.
+function New-PassFile([string]$Dir, [string]$Content, [string]$Name = "pass.txt") {
+  $p = Join-Path $Dir $Name
+  [IO.File]::WriteAllBytes($p, (New-Object Text.UTF8Encoding($false)).GetBytes($Content))
+  return $p
+}
+
+function Invoke-Backup([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 120) {
+  $vars = @{ "BV_STUB_STDIN_FILE" = (Join-Path $Dir "__stdin.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt"); "BV_STUB_APP_RUNNING" = $null; "BV_STUB_BACKUP_EXIT" = $null; "BV_STUB_BACKUP_STDOUT" = $null; "BV_STUB_BACKUP_STDERR" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null }
+  foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
+  Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"] -ErrorAction SilentlyContinue
+  return Invoke-Bat -Dir $Dir -Script "backup.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds
+}
+
+function Get-BackupCalls([pscustomobject]$Result) {
+  return @($Result.StubLog -split "`r?`n" | Where-Object { $_ -match "full-backup\.mjs" })
+}
+
+# ---------------------------------------------------------------- scenario BK1
+Write-Scenario "backup.bat - --passphrase-file, app running: exec -T -u 1001:1001 with --keep 7; the file's bytes arrive on stdin unchanged; the passphrase is in no argv and no environment"
+$d = New-BackupSandbox "backup-running"
+$passBytesText = "$BackupPass`r`n`n"
+$pf = New-PassFile $d $passBytesText
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_BACKUP_STDOUT" = $BackupOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = @(Get-BackupCalls $r)
+Assert ($calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --keep 7") "exactly one backup call: '$BackupExec --keep 7' (got: $($calls -join ' || '))"
+Assert ($r.StubLog -match "compose ps --status running -q blackvault") "asked whether the app is running"
+$stdinFile = Join-Path $d "__stdin.bin"
+$expected = (New-Object Text.UTF8Encoding($false)).GetBytes($passBytesText)
+# Not `$got = if (...) {...} else { [byte[]]@() }`: an `if` that yields an
+# empty array yields $null, and ToBase64String($null) throws.
+Assert (Test-Path $stdinFile) "the backup program's standard input was recorded (it was started)"
+$gotLength = if (Test-Path $stdinFile) { (Get-Item $stdinFile).Length } else { -1 }
+Assert ((Get-FileBase64 $stdinFile) -eq [Convert]::ToBase64String($expected)) "stdin is the passphrase file byte for byte ($gotLength bytes, expected $($expected.Length)): nothing stripped, no byte-order mark added"
+Assert (-not $r.StubLog.Contains("bat t")) "the passphrase is in no docker argv"
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "" }
+Assert ($envDump.Contains("BV_DOCKER_ARGS=")) "the environment of the backup call was recorded"
+Assert (-not $envDump.Contains("bat t") -and -not $envDump.Contains("'pass'")) "the passphrase is not in the environment docker inherited"
+Assert ($r.Output.Contains($BackupOkLine)) "the program's OK line is passed through"
+Assert (-not $r.Output.Contains("bat t")) "the passphrase is never printed"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK2
+Write-Scenario "backup.bat - app stopped: a one-off container, 'run --rm -T' with no --user and no --no-deps; --keep is passed through normalised"
+$d = New-BackupSandbox "backup-stopped"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--keep 03 --passphrase-file `"$pf`""
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = @(Get-BackupCalls $r)
+Assert ($calls.Count -eq 1 -and $calls[0] -eq "$BackupRun --keep 3") "exactly one backup call: '$BackupRun --keep 3' (got: $($calls -join ' || '))"
+Assert ($r.StubLog -notmatch "--user|--no-deps") "no --user and no --no-deps"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$BackupPass`n") "the passphrase arrived on stdin"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK3
+Write-Scenario "backup.bat - no --passphrase-file and no console (Task Scheduler): exits 1 at once with one clear line, docker never called, nothing waits"
+$d = New-BackupSandbox "backup-no-console"
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$r = Invoke-Backup $d "" @{ "BV_STUB_APP_RUNNING" = "1" } 60
+$sw.Stop()
+Assert ($r.ExitCode -eq 1) "exits 1, not a timeout (got $($r.ExitCode))"
+Assert ($sw.Elapsed.TotalSeconds -lt 30) "returned promptly ($([int]$sw.Elapsed.TotalSeconds) s)"
+Assert ($r.Output -match "ERROR: no passphrase: standard input is not a console") "says why"
+Assert ($r.Output -match "--passphrase-file") "says what to do"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK4
+Write-Scenario "backup.bat - the lock: the program's exit 2 is passed through unchanged, from exec and from a one-off container"
+$d = New-BackupSandbox "backup-exit2"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_BACKUP_EXIT" = "2"; "BV_STUB_BACKUP_STDERR" = "full-backup: Another full backup is already running (pid 7 on abc)." }
+Assert ($r.ExitCode -eq 2) "exec: exits 2 (got $($r.ExitCode))"
+Assert ($r.Output -match "Another full backup is already running") "the program's message is shown"
+Assert ($r.Output -notmatch "ERROR:") "the wrapper adds no error line of its own"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_BACKUP_EXIT" = "2" }
+Assert ($r.ExitCode -eq 2) "run: exits 2 (got $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK5
+Write-Scenario "backup.bat - exit codes: the program's 1 stays 1; anything else becomes 1 with one ERROR line"
+$d = New-BackupSandbox "backup-exit-codes"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_BACKUP_EXIT" = "1"; "BV_STUB_BACKUP_STDERR" = "full-backup: The backup folder /app/backups is not writable (EACCES)." }
+Assert ($r.ExitCode -eq 1) "exit 1 stays 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "The backup folder /app/backups is not writable") "the program's message is shown"
+Assert ($r.Output -notmatch "ended unexpectedly") "nothing added for exit 1"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_BACKUP_EXIT" = "137" }
+Assert ($r.ExitCode -eq 1) "exit 137 becomes 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: the backup command ended unexpectedly \(exit 137\)") "says the command ended unexpectedly"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK6
+Write-Scenario "backup.bat - a bad --keep, --keep with --verify, a missing or empty passphrase file, an unknown argument: exit 1 before docker is touched"
+$d = New-BackupSandbox "backup-bad-args"
+$pf = New-PassFile $d "$BackupPass`n"
+# "1;2": Windows CI (fa9f32f) showed for /f drops a value whose first
+# character AFTER its leading delimiters is ";", not only one that starts
+# with it - the same hole as "a;b.bvb" in BK9. It is passed in quotes:
+# unquoted, cmd.exe itself splits the argument at the semicolon.
+foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000", "`"1;2`"")) {
+  $r = Invoke-Backup $d "--keep $bad --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+  Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep $bad refused, docker never invoked (exit $($r.ExitCode))"
+  Show-EvidenceIfFailed $r
+}
+$r = Invoke-Backup $d "--keep `";3`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep `";3`" (a leading semicolon, for /f's eol character) refused, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--verify x.bvb --keep 2 --passphrase-file `"$pf`""
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep cannot be used with --verify" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep with --verify refused (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$(Join-Path $d 'nope.txt')`""
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: cannot read the passphrase file" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "a missing passphrase file is refused (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$empty = New-PassFile $d "" "empty.txt"
+$r = Invoke-Backup $d "--passphrase-file `"$empty`""
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: the passphrase file .* is empty" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "an empty passphrase file is refused (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase typed-here-by-mistake"
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: unknown argument") "an unknown argument is refused (exit $($r.ExitCode))"
+Assert (-not $r.Output.Contains("typed-here-by-mistake")) "and is not echoed back"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK7
+Write-Scenario "backup.bat - Docker Compose too old: exit 1 with one line, the backup program never started"
+$d = New-BackupSandbox "backup-old-compose"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BlackVault needs Docker Compose v2\.20 or newer") "explains the v2.20 requirement"
+Assert (@(Get-BackupCalls $r).Count -eq 0) "the backup program was never started"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK8
+Write-Scenario "backup.bat - --verify: a bare name, and a path inside the backup folder (default, DATA_DIR, BLACKVAULT_BACKUP_DIR), map to the file name; no --keep is passed"
+$name = "blackvault-full-20261002-180405.bvb"
+$d = New-BackupSandbox "backup-verify"
+$pf = New-PassFile $d "$BackupPass`n"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\backups") | Out-Null
+$r = Invoke-Backup $d "--verify $name --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "bare name: '$BackupExec --verify $name' (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--verify `"$(Join-Path $d "data\backups\$name")`" --passphrase-file `"$pf`""
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupRun --verify $name") "absolute path in the default folder, app stopped: '$BackupRun --verify $name' (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--verify data\backups\$name --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "relative path (the harness runs it from the install folder) maps too (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+
+$dataDir = Join-Path $Sandboxes "backup verify data"
+$nas = Join-Path $Sandboxes "backup-verify-nas"
+New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "backups"), $nas | Out-Null
+$d = New-BackupSandbox "backup-verify-datadir" @("DATA_DIR=$dataDir")
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $dataDir "backups\$name")`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "follows DATA_DIR (a path with a space) (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+$d = New-BackupSandbox "backup-verify-nas-env" @("DATA_DIR=$dataDir", "BLACKVAULT_BACKUP_DIR=$nas")
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $nas $name)`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "follows BLACKVAULT_BACKUP_DIR (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--verify `"$(Join-Path $dataDir "backups\$name")`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1 -and @(Get-BackupCalls $r).Count -eq 0) "with BLACKVAULT_BACKUP_DIR set, DATA_DIR\backups is no longer the backup folder (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK9
+Write-Scenario "backup.bat - --verify with a path OUTSIDE the backup folder, or a name that is not a file name: exit 1, the backup program never started"
+$d = New-BackupSandbox "backup-verify-outside"
+$pf = New-PassFile $d "$BackupPass`n"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\backups\sub") | Out-Null
+foreach ($outside in @((Join-Path $Sandboxes $name), (Join-Path $d "data\$name"), (Join-Path $d "data\backups\sub\$name"), "..\$name")) {
+  $r = Invoke-Backup $d "--verify `"$outside`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+  Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --verify: .* is not in the backup folder" -and @(Get-BackupCalls $r).Count -eq 0) "refused: $outside (exit $($r.ExitCode))"
+  Show-EvidenceIfFailed $r
+}
+# Fix round 1: for /f skips a value that starts with ";" (its default eol
+# character), so ";a b.bvb" used to pass the character check and reach the
+# backup program as extra arguments. A leading ";" is refused outright.
+foreach ($badName in @("-x.bvb", "a b.bvb", "a;b.bvb", ";a b.bvb", ";x.bvb")) {
+  $r = Invoke-Backup $d "--verify `"$badName`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+  Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --verify: that is not a backup file name" -and @(Get-BackupCalls $r).Count -eq 0) "refused as a name: $badName (exit $($r.ExitCode))"
+  Show-EvidenceIfFailed $r
+}
+
+# --------------------------------------------------------------- scenario BK10
+Write-Scenario "backup.bat - BLACKVAULT_* set in the console do not reach docker; BLACKVAULT_BACKUP_TIMEOUT ends a run that takes too long with exit 1"
+$d = New-BackupSandbox "backup-env-timeout"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_DIR" = "C:\somewhere\else"; "BLACKVAULT_DATABASE_URL" = "file:./dev.db" }
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "MISSING" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($envDump -ne "MISSING" -and $envDump -notmatch "BLACKVAULT_BACKUP_DIR=|BLACKVAULT_DATABASE_URL=") "docker compose would read those keys from .env only"
+Show-EvidenceIfFailed $r
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_BACKUP_SLEEP_MS" = "30000"; "BLACKVAULT_BACKUP_TIMEOUT" = "2" } 90
+$sw.Stop()
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: the backup did not finish within 2 seconds \(BLACKVAULT_BACKUP_TIMEOUT\)") "says the limit was reached"
+Assert ($sw.Elapsed.TotalSeconds -lt 25) "did not wait for the program to finish ($([int]$sw.Elapsed.TotalSeconds) s)"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = ";5 x" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a limit starting with a semicolon is refused before the program starts (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "5;5" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a limit with a semicolon after a digit is refused before the program starts (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "6h" }
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a non-numeric limit is refused before the program starts (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario BK11
+# Windows CI (269a53f): the argument parser used a bare `shift`, which moves
+# the arguments into %0 too, so `cd /d "%~dp0"` went to the folder of the
+# LAST argument - the passphrase file. Every scenario above keeps that file
+# in the install folder, which hid it.
+Write-Scenario "backup.bat - the passphrase file lives in ANOTHER folder: the script still works from its own folder (.env is read there)"
+$elsewhere = Join-Path $Sandboxes "backup-pass-elsewhere-secrets"
+$nas2 = Join-Path $Sandboxes "backup-pass-elsewhere-nas"
+New-Item -ItemType Directory -Force -Path $elsewhere, $nas2 | Out-Null
+$d = New-BackupSandbox "backup-pass-elsewhere" @("BLACKVAULT_BACKUP_DIR=$nas2")
+$pf = New-PassFile $elsewhere "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $nas2 $name)`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "BLACKVAULT_BACKUP_DIR was read from the .env beside the script (exit $($r.ExitCode); got: $($calls -join ' || '))"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$BackupPass`n") "the passphrase arrived on stdin"
+Show-EvidenceIfFailed $r
+
+# ══════════════════════════════════════════════════════════════════════════
+# restore.bat (full restore, Task 7)
+# ══════════════════════════════════════════════════════════════════════════
+# REAL here: restore.bat and scripts\db-snapshot.bat (the snapshot is really
+# copied into backups\). STUBBED: the check program (full-backup.mjs
+# --verify, knobs BV_STUB_BACKUP_*), the restore program (full-restore.mjs,
+# knobs BV_STUB_RESTORE_*), psql, and the rollback container
+# (/bv-snapshot-restore.sh, knob BV_STUB_ROLLBACK_EXIT). So these scenarios
+# prove the ORDER of the docker calls, what is passed, where the passphrase
+# goes and the exit codes. They do NOT prove what the rollback does to files:
+# scripts/snapshot-restore.sh runs inside a Linux container, and is proven
+# on Linux (src/lib/backup/full-restore.real-db.test.ts,
+# scripts/full-restore-wrapper.test.ts).
+#
+# NOT covered here: the typed passphrase and the typed RESTORE confirmation
+# (the harness has no console; standard input is always redirected). Only
+# "no console: exit 1 at once" can be run for both.
+#
+# restore.bat starts docker through the SAME PowerShell line as backup.bat.
+# Ruling R27: ONE PowerShell process reads the passphrase once, runs the
+# check, then steps 5-7 (restore.bat again, in a child cmd.exe), then the
+# restore. What these scenarios prove of that: both programs get the
+# passphrase file's bytes on stdin (RS1), the docker calls keep their order
+# through the child (RS1, RS2, RS7), a refusal in the child stops the restore
+# and is reported once (RS8), and a failed check never reaches the child
+# (RS4). That the PROMPT appears once cannot be run here.
+# Every scenario below prints the script's whole output and the stub log
+# when one of its checks fails (Show-EvidenceIfFailed).
+
+$RestoreName = "blackvault-full-20261002-180405.bvb"
+$RestoreVerify = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify $RestoreName"
+$RestoreOkLine = "BLACKVAULT_FULL_RESTORE_OK file=$RestoreName files=2 bytes=10 pre_restore=.pre-restore-20261003-000000"
+
+function New-RestoreSandbox([string]$Name, [switch]$Postgres) {
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("restore.bat", "docker-compose.yml", "scripts\db-snapshot.bat", "scripts\snapshot-restore.sh")) { Copy-RepoFile $f $dir }
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "data\db") | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $dir "data\backups") | Out-Null
+  Add-UploadsSeed $dir
+  if ($Postgres) {
+    $envLines = @("COMPOSE_PROFILES=postgres", "BLACKVAULT_DB_PROVIDER=postgres", "BLACKVAULT_POSTGRES_PASSWORD=x", "BLACKVAULT_DATABASE_URL=postgresql://blackvault:x@db:5432/blackvault")
+  } else {
+    Set-Content -Path (Join-Path $dir "data\db\vault.db") -Value "the database as it was" -NoNewline -Encoding Ascii
+    $envLines = @("PORT=3000", "BLACKVAULT_DB_PROVIDER=sqlite")
+  }
+  [IO.File]::WriteAllText((Join-Path $dir ".env"), (($envLines -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+  return $dir
+}
+
+function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 180, [string]$InvokeAs = "", [string]$WorkDir = "") {
+  $vars = @{
+    "BV_STUB_STDIN_FILE" = (Join-Path $Dir "__stdin-verify.bin"); "BV_STUB_RESTORE_STDIN_FILE" = (Join-Path $Dir "__stdin-restore.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt")
+    "BV_STUB_BACKUP_EXIT" = $null; "BV_STUB_BACKUP_STDOUT" = $null; "BV_STUB_BACKUP_STDERR" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null
+    "BV_STUB_RESTORE_EXIT" = $null; "BV_STUB_RESTORE_STDOUT" = $null; "BV_STUB_RESTORE_STDERR" = $null; "BV_STUB_ROLLBACK_EXIT" = $null
+    "BV_STUB_RESTORE_MARKER_DIR" = $null; "BV_STUB_RESTORE_RECOVERY_COPY" = (Join-Path $Dir "__recovery-during.txt"); "DATA_DIR" = $null
+    "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
+    "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
+  }
+  foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
+  Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
+  return Invoke-Bat -Dir $Dir -Script "restore.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds -InvokeAs $InvokeAs -WorkDir $WorkDir
+}
+
+# The stub log's lines without the Compose version probes.
+function Get-RestoreSteps([pscustomobject]$Result) {
+  return @($Result.StubLog -split "`r?`n" | Where-Object { $_ -and $_ -ne "compose version --short" -and $_ -notmatch "^ENV " })
+}
+
+# Index of the first step matching the regular expression; -1 when absent.
+function Get-StepIndex([string[]]$Steps, [string]$Pattern) {
+  for ($i = 0; $i -lt $Steps.Count; $i++) { if ($Steps[$i] -match $Pattern) { return $i } }
+  return -1
+}
+
+# The restore-<time>-RECOVERY.txt files in backups\ (ruling R25).
+function Get-RecoveryFiles([string]$Dir) {
+  return @(Get-Backups $Dir | Where-Object { $_ -match '^restore-\d{8}-\d{6}-RECOVERY\.txt$' })
+}
+
+# The HOST uploads folder of a restore sandbox: where the stub leaves the
+# "database step started" marker (ruling R24) when a scenario asks for it.
+function Get-UploadsDir([string]$Dir) { return (Join-Path $Dir "data\uploads") }
+
+$RestoreCallPattern = '^compose run --rm -T --name blackvault-restore-(\d{8}-\d{6}) blackvault node dist/scripts/full-restore\.mjs --stamp \1 ' + [regex]::Escape($RestoreName) + '$'
+
+# ---------------------------------------------------------------- scenario RS1
+Write-Scenario "restore.bat - success (SQLite): check, stop, snapshot, restore, start - in that order; the passphrase file reaches BOTH programs on stdin; it is in no argv and no environment"
+$d = New-RestoreSandbox "restore-ok"
+$passBytesText = "$BackupPass`r`n`n"
+$pf = New-PassFile $d $passBytesText
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iVerify = Get-StepIndex $steps ([regex]::Escape($RestoreVerify) + '$')
+$iStop = Get-StepIndex $steps '^compose stop blackvault$'
+$iRestore = Get-StepIndex $steps $RestoreCallPattern
+$iUp = Get-StepIndex $steps '^compose up -d$'
+$during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::ReadAllText((Join-Path $d "__recovery-during.txt")) } else { "" }
+Assert ($during -match "BlackVault restore \d{8}-\d{6}: RECOVERY") "R25: the recovery file existed WHILE the restore ran"
+Assert ($during -match "database: backups\\blackvault-\d{8}-\d{6}\.db" -and $during -match "docker stop blackvault-restore-\d{8}-\d{6}" -and $during -match "/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}") "R25: it names the snapshot, the container to stop, and the rollback commands"
+Assert ($during -match "/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}" -and $during -match "complete\s+The restore FINISHED" -and $during -match "started\s+The restore had reached the database" -and $during -match "untouched\s+The restore never reached the database") "R28: it tells the three states apart, and how to find out which one it is"
+Assert ($during -match "(?m)^  docker compose run [^\r\n]* /bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6} && docker compose run [^\r\n]* /bv-snapshot-restore\.sh sqlite [^\r\n]* && docker compose run [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}\s*$") "the rollback is ONE command line joined with &&: clear-marker runs only if the uploads and the database lines worked"
+Assert ($during -notmatch "(?m)^  docker compose run [^&\r\n]* /bv-snapshot-restore\.sh clear-marker ") "clear-marker is never a line of its own"
+Assert ($r.Output.Contains("How to put it back is in")) "R25: it was printed before the restore started"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: it is gone after a successful restore"
+Assert ($iVerify -eq 0) "the first call is the check: '$RestoreVerify' (index $iVerify)"
+Assert ($iStop -gt $iVerify -and $iRestore -gt $iStop -and $iUp -gt $iRestore) "order: check ($iVerify), stop ($iStop), restore in a NAMED container ($iRestore), start ($iUp)"
+Assert (@($steps | Where-Object { $_ -match "full-restore\.mjs|full-backup\.mjs" } | Where-Object { $_ -match "--user|--no-deps" }).Count -eq 0) "the two program calls have no --user and no --no-deps"
+Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore" }).Count -eq 0) "no rollback container was started"
+$snaps = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' })
+Assert ($snaps.Count -eq 1) "the database snapshot was taken into backups\ before the restore (found: $($snaps -join ', '))"
+Assert (@(Get-UploadsBackups $d).Count -eq 1) "the uploads snapshot was taken"
+Assert (-not (Test-Path (Join-Path $d "backups\.uploads-snapshot-marker"))) "the uploads-snapshot marker was cleared"
+$expected = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($passBytesText))
+Assert ((Get-FileBase64 (Join-Path $d "__stdin-verify.bin")) -eq $expected) "the check program got the passphrase file byte for byte on stdin"
+Assert ((Get-FileBase64 (Join-Path $d "__stdin-restore.bin")) -eq $expected) "the restore program got the passphrase file byte for byte on stdin"
+Assert (-not $r.StubLog.Contains("bat t")) "the passphrase is in no docker argv"
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "" }
+Assert ($envDump.Contains("BV_DOCKER_ARGS=")) "the environment of the program call was recorded"
+Assert (-not $envDump.Contains("bat t") -and -not $envDump.Contains("'pass'")) "the passphrase is not in the environment docker inherited"
+Assert ($r.Output.Contains($RestoreOkLine)) "the restore program's OK line is passed through"
+Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
+Assert (-not $r.Output.Contains("bat t")) "the passphrase is never printed"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS2
+Write-Scenario "restore.bat - the restore fails AFTER reaching the database (marker present, SQLite): uploads, database, clear the marker, start - in that order; exit 1; the last line says nothing is changed"
+$d = New-RestoreSandbox "restore-fails"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed."; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp \d{8}-\d{6} '
+$stamp = if ($iRestore -ge 0 -and $steps[$iRestore] -match '--stamp (\d{8}-\d{6}) ') { $Matches[1] } else { "" }
+$dbSnap = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }) | Select-Object -First 1
+$upSnap = @(Get-UploadsBackups $d) | Select-Object -First 1
+$iDb = Get-StepIndex $steps ('--user 0:0 --entrypoint /bin/sh .*backups:/bv-backups:ro .*snapshot-restore\.sh:/bv-snapshot-restore\.sh:ro blackvault /bv-snapshot-restore\.sh sqlite /bv-backups/' + [regex]::Escape("$dbSnap") + ' /app/data/vault\.db /app/uploads ' + [regex]::Escape($stamp) + '$')
+$iUploads = Get-StepIndex $steps ('blackvault /bv-snapshot-restore\.sh uploads /app/uploads ' + [regex]::Escape($stamp) + ' /bv-backups/' + [regex]::Escape("$upSnap") + '\s*$')
+$iUp = Get-StepIndex $steps '^compose up -d$'
+Assert ($iRestore -ge 0 -and $stamp) "the restore program was started with a stamp ($stamp)"
+$iClear = Get-StepIndex $steps ('blackvault /bv-snapshot-restore\.sh clear-marker /app/uploads ' + [regex]::Escape($stamp) + '\s*$')
+Assert ($iUploads -gt $iRestore) "first the uploads are put back from backups\$upSnap with the same stamp (index $iUploads)"
+Assert ($iDb -gt $iUploads) "then the database is put back from backups\$dbSnap, as root, backups mounted read-only (index $iDb)"
+Assert ($iClear -gt $iDb) "then the marker is cleared (index $iClear)"
+Assert ($iUp -gt $iClear) "then BlackVault is started (index $iUp)"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: the recovery file is gone after a successful rollback"
+Assert ($r.Output -match "ERROR: the restore failed \(the reason is above\)\. The database and the uploads were put back from the snapshot taken before it \(backups\\blackvault-\d{8}-\d{6}\.db\), so nothing is changed\. BlackVault was started again\.") "the last line says it was rolled back and nothing is changed"
+Assert ($r.Output.Contains("full-restore: [stub] failed.")) "the program's own reason is shown"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS3
+Write-Scenario "restore.bat - the rollback itself fails: BlackVault is NOT started; the snapshot and the commands to put it back are printed"
+$d = New-RestoreSandbox "restore-rollback-fails"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "137"; "BV_STUB_ROLLBACK_EXIT" = "1"; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose up -d$') -eq -1) "BlackVault was NOT started"
+Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore\.sh (sqlite|uploads) " }).Count -eq 2) "both rollback steps were attempted"
+Assert ($r.Output.Contains("ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started. What to do is in")) "says the rollback failed, the app was not started, and where the recovery file is"
+Assert (@(Get-RecoveryFiles $d).Count -eq 1) "R25: the recovery file stays after a failed rollback"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh clear-marker') -eq -1) "the marker is not cleared after a failed rollback"
+Assert ($r.Output -match "database: backups\\blackvault-\d{8}-\d{6}\.db") "names the database snapshot"
+Assert ($r.Output -match "uploads:\s+backups\\uploads-\d{8}-\d{6}") "names the uploads snapshot"
+Assert ($r.Output -match "docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh .* /bv-snapshot-restore\.sh sqlite /bv-backups/blackvault-\d{8}-\d{6}\.db /app/data/vault\.db") "prints the command that puts the database back"
+Assert ($r.Output -match "/bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6}") "prints the command that puts the uploads back"
+$dbSnap = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }) | Select-Object -First 1
+Assert ($dbSnap -and ([IO.File]::ReadAllText((Join-Path $d "backups\$dbSnap")) -eq "the database as it was")) "the snapshot itself is intact"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS4
+Write-Scenario "restore.bat - the backup does not pass the check (wrong passphrase, damaged file): exit 1, BlackVault never stopped, nothing snapshotted"
+$d = New-RestoreSandbox "restore-verify-fails"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_BACKUP_EXIT" = "1"; "BV_STUB_BACKUP_STDERR" = "full-backup: Wrong passphrase, or the backup is damaged." }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ($steps.Count -eq 1 -and $steps[0] -eq $RestoreVerify) "the check is the only docker call (got: $($steps -join ' || '))"
+Assert ($r.Output.Contains("ERROR: the backup $RestoreName did not pass the check (the reason is on the line above). Nothing was changed; BlackVault was not stopped.")) "says nothing was changed and the app was not stopped"
+Assert (-not (Test-Path (Join-Path $d "backups"))) "no snapshot folder was created"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS5
+Write-Scenario "restore.bat - R21 and no console: without --yes, or without --passphrase-file, it stops before docker is ever called"
+$d = New-RestoreSandbox "restore-guards"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --passphrase-file `"$pf`"" @{} 60
+Assert ($r.ExitCode -eq 1) "no --yes: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: a restore replaces all data and must be confirmed, but standard input is not a console. Add --yes to confirm. Nothing was done.")) "no --yes: says to add --yes"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "no --yes: docker was never called"
+Show-EvidenceIfFailed $r
+$r = Invoke-Restore $d "$RestoreName --yes" @{} 60
+Assert ($r.ExitCode -eq 1) "no --passphrase-file: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: no passphrase: standard input is not a console") "no --passphrase-file: says there is nobody to ask"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "no --passphrase-file: docker was never called"
+Show-EvidenceIfFailed $r
+$r = Invoke-Restore $d "--yes --passphrase-file `"$pf`"" @{} 60
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: no backup file was given") "no file: exit 1 with a usage line (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Restore $d "$RestoreName --passphrase typed-by-mistake --yes" @{} 60
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: unknown argument" -and -not $r.Output.Contains("typed-by-mistake")) "an unknown option is refused and never echoed (exit $($r.ExitCode))"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never called"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS6
+Write-Scenario "restore.bat - the file: a path inside the backup folder maps to its name; a path outside it, or a bad name, is refused before anything runs"
+$d = New-RestoreSandbox "restore-file"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "data\backups\$RestoreName --yes --passphrase-file `"$pf`""
+Assert ($r.ExitCode -eq 0) "a relative path into the backup folder: exits 0 (got $($r.ExitCode))"
+Assert ((Get-StepIndex @(Get-RestoreSteps $r) ([regex]::Escape($RestoreVerify) + '$')) -eq 0) "it was mapped to the file name"
+Show-EvidenceIfFailed $r
+foreach ($outside in @((Join-Path $d $RestoreName), "data\$RestoreName", "C:\Windows\win.ini")) {
+  $r = Invoke-Restore $d "`"$outside`" --yes --passphrase-file `"$pf`""
+  Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: restore: .* is not in the backup folder") "outside the backup folder is refused: $outside (exit $($r.ExitCode))"
+  Assert (@(Get-RestoreSteps $r).Count -eq 0) "nothing was run for $outside"
+  Show-EvidenceIfFailed $r
+}
+foreach ($badName in @("a&b.bvb", ";x.bvb", "a b.bvb", "a;b.bvb")) {
+  $r = Invoke-Restore $d "`"$badName`" --yes --passphrase-file `"$pf`""
+  Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: restore: that is not a backup file name") "a bad file name is refused: $badName (exit $($r.ExitCode))"
+  Assert (@(Get-RestoreSteps $r).Count -eq 0) "nothing was run for $badName"
+  Show-EvidenceIfFailed $r
+}
+
+# ---------------------------------------------------------------- scenario RS7
+Write-Scenario "restore.bat - PostgreSQL, the restore fails after reaching the database (marker present): the uploads, then the dump is loaded into a NEW database and swapped in, then start"
+$d = New-RestoreSandbox "restore-postgres" -Postgres
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$psql = 'compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault'
+$iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp '
+$iDump = Get-StepIndex $steps '^compose exec -T db pg_dump -U blackvault -d blackvault$'
+$iCreate = Get-StepIndex $steps ('^' + [regex]::Escape("$psql -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault") + '$')
+$iLoad = Get-StepIndex $steps ('^' + [regex]::Escape("$psql -d blackvault_rollback --single-transaction -f -") + '$')
+$iSwap = Get-StepIndex $steps ('^' + [regex]::Escape("$psql -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault") + '$')
+$iUploads = Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-'
+Assert ($iDump -ge 0 -and $iDump -lt $iRestore) "the snapshot (pg_dump) was taken before the restore (dump $iDump, restore $iRestore)"
+Assert ($iUploads -gt $iRestore) "first the uploads (index $iUploads)"
+Assert ($iCreate -gt $iUploads -and $iLoad -gt $iCreate -and $iSwap -gt $iLoad) "then: new database ($iCreate), load in one transaction ($iLoad), swap ($iSwap)"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh clear-marker') -gt $iSwap) "then the marker is cleared"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh sqlite') -eq -1) "no SQLite file copy on PostgreSQL"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last (last call: $($steps | Select-Object -Last 1))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS8
+Write-Scenario "restore.bat - no snapshot, no restore: a failing snapshot, or no database yet, stops before the restore program and starts BlackVault again"
+$d = New-RestoreSandbox "restore-no-db"
+Remove-Item -Force (Join-Path $d "data\db\vault.db")
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`""
+Assert ($r.ExitCode -eq 1) "no database yet: exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'full-restore\.mjs') -eq -1) "no database yet: the restore program was never started"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "no database yet: BlackVault was started again"
+Assert ($r.Output -match "ERROR: there is no database to snapshot yet") "no database yet: says so"
+Show-EvidenceIfFailed $r
+$d = New-RestoreSandbox "restore-snapshot-fails"
+# A FILE named backups: db-snapshot.bat cannot create its folder and fails.
+Set-Content -Path (Join-Path $d "backups") -Value "in the way" -Encoding Ascii
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`""
+Assert ($r.ExitCode -eq 1) "snapshot fails: exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'full-restore\.mjs') -eq -1) "snapshot fails: the restore program was never started"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "snapshot fails: BlackVault was started again"
+Assert ($r.Output.Contains("ERROR: the snapshot before the restore failed (see above), so the restore did not start. Nothing was changed.")) "snapshot fails: says nothing was changed"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "snapshot fails: the database file is untouched"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS9
+Write-Scenario "restore.bat - R24: the restore fails BEFORE reaching the database (no marker, SQLite): only the uploads are checked; NO database rollback command; the database file is untouched"
+$d = New-RestoreSandbox "restore-fails-early"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] refused. Nothing was changed." }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads /app/uploads ') -gt (Get-StepIndex $steps $RestoreCallPattern)) "the uploads are checked against the snapshot"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh (sqlite|clear-marker)') -eq -1 -and (Get-StepIndex $steps 'psql') -eq -1) "no database rollback command was issued"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started again"
+Assert ($r.Output.Contains("ERROR: the restore failed (the reason is above). It had not reached the database, which was not touched; the uploads were checked against the snapshot. Nothing is changed. BlackVault was started again.")) "the last line says the database was not touched"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "the recovery file is gone"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS10
+Write-Scenario "restore.bat - R25: a recovery file left by an earlier restore blocks a new one before docker is called; DATA_DIR set in the console and different from .env is refused too"
+$d = New-RestoreSandbox "restore-blocked"
+$pf = New-PassFile $d "$BackupPass`n"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "backups") | Out-Null
+Set-Content -Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt") -Value "left by an earlier restore" -Encoding Ascii
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{} 60
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: an earlier restore did not finish cleanly: a restore-\[time\]-RECOVERY\.txt file is still in .*\\backups\. Read it") "says an earlier restore did not finish, and to read the file"
+Assert (@(Get-RestoreSteps $r).Count -eq 0) "docker was not asked to do anything"
+Assert (Test-Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt")) "the earlier file is left alone"
+Show-EvidenceIfFailed $r
+Remove-Item -Force (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt")
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "DATA_DIR" = "C:\somewhere\else" } 60
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: DATA_DIR is set in this console and is not the DATA_DIR in \.env") "a different DATA_DIR in the console is refused (exit $($r.ExitCode))"
+Assert (@(Get-RestoreSteps $r).Count -eq 0) "docker was not asked to do anything"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS11
+Write-Scenario "restore.bat - R24 on PostgreSQL: the restore fails before reaching the database (no marker): not one psql command"
+$d = New-RestoreSandbox "restore-postgres-early" -Postgres
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'psql') -eq -1) "no psql command: the database is never dropped"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads ') -ge 0) "the uploads are checked"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started again"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS12
+# Task 7 re-review, item 3. restore.bat used to call this state "started" and
+# put the PostgreSQL database back; had the restore in fact finished, that
+# gave old records with new files. Now, as restore.sh: nothing blindly.
+Write-Scenario "restore.bat - the uploads folder is not there to look into (PostgreSQL): how far the restore got is unknown, so NOTHING is rolled back, BlackVault is NOT started, the recovery file stays and is shown"
+$d = New-RestoreSandbox "restore-state-unknown" -Postgres
+Remove-Item -Recurse -Force (Get-UploadsDir $d)
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed." }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp '
+Assert ($iRestore -ge 0) "the restore program was started (index $iRestore)"
+Assert ((Get-StepIndex $steps 'psql') -eq -1) "not one psql command: the database is not put back blindly"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh') -eq -1) "no rollback container was started"
+Assert ($iRestore -ge 0 -and $iRestore -eq ($steps.Count - 1)) "BlackVault was NOT started: the restore program is the last docker call (last call: $($steps | Select-Object -Last 1))"
+Assert ($r.Output -match "how far it got could not be found out: the uploads folder .*\\uploads is not there to look into\. Nothing is rolled back blindly\.") "says how far it got is unknown and nothing is rolled back blindly"
+Assert ($r.Output.Contains("BlackVault was NOT started. What to do is in")) "says the app was not started and points at the recovery file"
+Assert ($r.Output -match "/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}") "the recovery text (how to ask for the state inside a container) is shown"
+Assert (@(Get-RecoveryFiles $d).Count -eq 1) "the recovery file stays"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS13
+# Ruling R27: BV_RESTORE_PHASE is how the PowerShell step re-enters
+# restore.bat for steps 5-7. Left set in a console, it must not send a
+# user's run into the middle of the script.
+Write-Scenario "restore.bat - BV_RESTORE_PHASE set in the console: refused with one line before docker is called"
+$d = New-RestoreSandbox "restore-phase-set"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_RESTORE_PHASE" = "prepare" } 60
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BV_RESTORE_PHASE is set in this console") "says why"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never called"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS14
+# Windows CI (269a53f): see BK11. In restore.bat the bare `shift` also made
+# %~f0 the passphrase file, which is what the PowerShell step starts for
+# steps 5-7 - so cmd.exe "ran" a .txt file and the restore never went on.
+Write-Scenario "restore.bat - the passphrase file lives in ANOTHER folder: the whole restore still runs from the script's own folder"
+$elsewhere = Join-Path $Sandboxes "restore-pass-elsewhere-secrets"
+New-Item -ItemType Directory -Force -Path $elsewhere | Out-Null
+$d = New-RestoreSandbox "restore-pass-elsewhere"
+$pf = New-PassFile $elsewhere "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0 -and (Get-StepIndex $steps $RestoreCallPattern) -gt (Get-StepIndex $steps '^compose stop blackvault$')) "check, stop, restore - in that order"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last"
+Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
+Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS15
+# cmd.exe works out %~f0 again from the CURRENT folder when the script was
+# started by a quoted, relative name. restore.bat read %~f0 AFTER its
+# `cd /d "%~dp0"`, so started as "bv\restore.bat" from the folder above, the
+# path it handed to the PowerShell step for steps 5-7 was ...\bv\bv\restore.bat:
+# the check passed, the child could not be started, and the user was told the
+# backup "did not pass the check". The path is now read before the folder changes.
+Write-Scenario "restore.bat - started by a quoted RELATIVE name from the parent folder: steps 5-7 still run (the script's own path is read before the folder changes)"
+$d = New-RestoreSandbox "restore-relative-quoted"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine } 180 "restore-relative-quoted\restore.bat" $Sandboxes
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "did not pass the check") "does not claim the backup failed its check"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0 -and (Get-StepIndex $steps $RestoreCallPattern) -gt (Get-StepIndex $steps '^compose stop blackvault$')) "check, stop, restore - in that order"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last"
+Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
+Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Show-EvidenceIfFailed $r
+
+# ══════════════════════════════════════════════════════════════════════════
+# reencrypt-files.bat (Task 8)
+# ══════════════════════════════════════════════════════════════════════════
+# REAL here: reencrypt-files.bat. STUBBED: docker - `compose ps`, `compose
+# stop`, `compose start`, and the re-encryption program (any `compose run ...
+# dist/scripts/reencrypt-files.mjs`, knobs BV_STUB_REENCRYPT_*). So these
+# scenarios prove the ORDER of the docker calls, that the old key file's bytes
+# reach the program on standard input and are in no argv and no environment,
+# whether BlackVault is started again, and the exit codes. What the program
+# does to files is proven on Linux (src/lib/files/reencrypt.real-fs.test.ts,
+# scripts/reencrypt-files-cli.test.ts).
+#
+# The old key file is handed over by the SAME PowerShell line as a passphrase
+# file in backup.bat (BK1-BK11 above).
+
+$OldKey = "5a17c0de" * 8
+$ReencryptCall = "compose run --rm -T blackvault node dist/scripts/reencrypt-files.mjs"
+$ReencryptOkLine = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0 stopped=0"
+$ReencryptNothingLine = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0 stopped=0"
+$ReencryptWhenRunning = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall || compose start blackvault"
+$ReencryptWhenStopped = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall"
+
+function New-ReencryptSandbox([string]$Name) {
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("reencrypt-files.bat", "docker-compose.yml")) { Copy-Item (Join-Path $RepoRoot $f) $dir }
+  [IO.File]::WriteAllText((Join-Path $dir ".env"), "PORT=3000`r`nBLACKVAULT_DB_PROVIDER=sqlite`r`n", [Text.Encoding]::ASCII)
+  return $dir
+}
+
+function Invoke-Reencrypt([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 120) {
+  $vars = @{
+    "BV_STUB_REENCRYPT_STDIN_FILE" = (Join-Path $Dir "__stdin.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt")
+    "BV_STUB_REENCRYPT_EXIT" = $null; "BV_STUB_REENCRYPT_STDOUT" = $null; "BV_STUB_REENCRYPT_STDERR" = $null
+    "BV_STUB_APP_RUNNING" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null; "BV_LIMIT" = $null; "BV_PASSFILE" = $null
+    "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
+  }
+  foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
+  Remove-Item -Force $vars["BV_STUB_REENCRYPT_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"] -ErrorAction SilentlyContinue
+  return Invoke-Bat -Dir $Dir -Script "reencrypt-files.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds
+}
+
+# The docker calls of one run, without the Compose version probe, joined with " || ".
+function Get-ReencryptCalls([pscustomobject]$Result) {
+  return (@(Get-RestoreSteps $Result) -join " || ")
+}
+
+# ---------------------------------------------------------------- scenario RF1
+Write-Scenario "reencrypt-files.bat - BlackVault running: ps, stop, the program in a one-off container, start; the old key file's bytes arrive on stdin unchanged and are in no argv and no environment; the key file is untouched"
+$d = New-ReencryptSandbox "reencrypt-running"
+$keyText = "$OldKey`r`n"
+$kf = New-PassFile $d $keyText "old.key"
+$keyBefore = Get-FileBase64 $kf
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = Get-ReencryptCalls $r
+Assert ($calls -eq $ReencryptWhenRunning) "the docker calls, in order: $ReencryptWhenRunning (got: $calls)"
+Assert ($r.StubLog -notmatch "--user|--no-deps|compose exec") "a one-off container with no --user and no --no-deps; never exec"
+$stdinFile = Join-Path $d "__stdin.bin"
+$expected = (New-Object Text.UTF8Encoding($false)).GetBytes($keyText)
+Assert (Test-Path $stdinFile) "the program's standard input was recorded (it was started)"
+$gotLength = if (Test-Path $stdinFile) { (Get-Item $stdinFile).Length } else { -1 }
+Assert ((Get-FileBase64 $stdinFile) -eq [Convert]::ToBase64String($expected)) "stdin is the old key file byte for byte ($gotLength bytes, expected $($expected.Length)): nothing stripped, no byte-order mark added"
+Assert (-not $r.StubLog.Contains("5a17c0de")) "the old key is in no docker argv"
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "" }
+Assert ($envDump.Contains("BV_DOCKER_ARGS=")) "the environment of the program's call was recorded"
+Assert (-not $envDump.Contains("5a17c0de")) "the old key is not in the environment docker inherited"
+Assert (-not $r.Output.Contains("5a17c0de")) "the old key is never printed"
+Assert ($r.Output.Contains($ReencryptOkLine)) "the program's line is passed through"
+Assert ($r.Output.Contains("Done. Keep the old key file until BlackVault has started and your photos and documents open. BlackVault was started again.")) "says it is done and that BlackVault was started again"
+Assert ((Test-Path $kf) -and ((Get-FileBase64 $kf) -eq $keyBefore)) "the old key file is still there, byte for byte"
+Assert (@(Get-ChildItem -Force $d | Where-Object { $_.Name -notmatch '^(__.*|\.env|docker-compose\.yml|reencrypt-files\.bat|old\.key)$' }).Count -eq 0) "nothing was written into the install folder"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF2
+Write-Scenario "reencrypt-files.bat - BlackVault NOT running: stopped anyway, the program runs, and it is NOT started - said plainly"
+$d = New-ReencryptSandbox "reencrypt-stopped"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = Get-ReencryptCalls $r
+Assert ($calls -eq $ReencryptWhenStopped) "the docker calls, in order, with no start: $ReencryptWhenStopped (got: $calls)"
+Assert ($r.Output.Contains("BlackVault was not running before, so it was NOT started. Start it with: docker compose up -d")) "says it was not started, and how to start it"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$OldKey`n") "the old key arrived on stdin"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF3
+Write-Scenario "reencrypt-files.bat - the program's exit 3 (no file under the old key; also the second run) is passed through; BlackVault is started again if it was running"
+$d = New-ReencryptSandbox "reencrypt-exit3"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_EXIT" = "3"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptNothingLine; "BV_STUB_REENCRYPT_STDERR" = "reencrypt-files: nothing to do: no uploaded file is encrypted with the old key (key id 02d449a3)." }
+Assert ($r.ExitCode -eq 3) "exits 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains($ReencryptNothingLine)) "the program's line is passed through"
+Assert ($r.Output -match "nothing to do: no uploaded file is encrypted with the old key") "the program's reason is shown"
+Assert ($r.Output.Contains("Nothing was changed. BlackVault was started again.")) "says nothing was changed and that BlackVault was started again"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "started again: $ReencryptWhenRunning (got: $(Get-ReencryptCalls $r))"
+Assert ($r.Output -notmatch "ERROR:") "no ERROR line: nothing failed"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_EXIT" = "3" }
+Assert ($r.ExitCode -eq 3) "not running before: exits 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("Nothing was changed. BlackVault was not running before, so it was NOT started.")) "and says it was NOT started"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenStopped) "no start (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF4
+Write-Scenario "reencrypt-files.bat - exit codes: the program's 1 stays 1; anything else becomes 1 with one ERROR line; both say whether BlackVault was started"
+$d = New-ReencryptSandbox "reencrypt-exit-codes"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_EXIT" = "1"; "BV_STUB_REENCRYPT_STDERR" = "reencrypt-files: Could not write documents/d.pdf (ENOSPC); it was left as it was." }
+Assert ($r.ExitCode -eq 1) "exit 1 stays 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Could not write documents/d\.pdf \(ENOSPC\)") "the program's message is shown"
+Assert ($r.Output.Contains("ERROR: the re-encryption did not complete. The lines above say why, and whether running reencrypt-files.bat again will continue or the files named there must be restored or moved out first. BlackVault was started again.")) "says it did not complete, points at the program's own lines for what to do, and says BlackVault was started again"
+Assert ($r.Output -notmatch "again to continue") "does not promise that running it again continues (a file that cannot be converted would fail again)"
+Assert ($r.Output -notmatch "ended unexpectedly") "nothing added for exit 1"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_EXIT" = "137" }
+Assert ($r.ExitCode -eq 1) "exit 137 becomes 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: the re-encryption command ended unexpectedly \(exit 137\)") "says the command ended unexpectedly"
+Assert ($r.Output.Contains("BlackVault was not running before, so it was NOT started.")) "and that BlackVault was NOT started"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF5
+Write-Scenario "reencrypt-files.bat - a missing or empty old key file, or a folder: exit 3 before docker is touched; no --from-key-file or an unknown argument: exit 1, never echoed"
+$d = New-ReencryptSandbox "reencrypt-bad-args"
+$r = Invoke-Reencrypt $d "--from-key-file `"$(Join-Path $d 'nope.key')`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: cannot read the old key file" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "a missing old key file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$empty = New-PassFile $d "" "empty.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$empty`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: the old key file .* is empty" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "an empty old key file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$d`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: cannot read the old key file" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "a folder instead of a file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d ""
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: no old key file was given" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "no --from-key-file: exit 1, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file"
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --from-key-file needs a path" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--from-key-file without a value: exit 1 (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key $OldKey"
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: unknown argument") "an unknown argument is refused (exit $($r.ExitCode))"
+Assert (-not $r.Output.Contains("5a17c0de")) "and is not echoed back (it could be a key)"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF6
+# See BK11: a bare `shift` in the argument parser would move the key file's
+# path into %0, and `cd /d "%~dp0"` would then go to the key file's folder.
+Write-Scenario "reencrypt-files.bat - the old key file lives in ANOTHER folder: the script still works from its own folder"
+$elsewhere = Join-Path $Sandboxes "reencrypt-key-elsewhere-secrets"
+New-Item -ItemType Directory -Force -Path $elsewhere | Out-Null
+$d = New-ReencryptSandbox "reencrypt-key-elsewhere"
+$kf = New-PassFile $elsewhere "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "the docker calls, in order (got: $(Get-ReencryptCalls $r))"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$OldKey`n") "the old key arrived on stdin"
+Assert (@(Get-ChildItem -Force $elsewhere).Count -eq 1) "nothing was written beside the key file"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF7
+Write-Scenario "reencrypt-files.bat - stop fails: exit 1 and the program is never started; the restart fails after a good run, or after a run that changed nothing: exit 1, saying only starting BlackVault failed (ruling R31)"
+$d = New-ReencryptSandbox "reencrypt-stop-start-fail"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.ExitCode -eq 1) "stop fails: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: could not stop BlackVault. Nothing was changed; BlackVault was left as it was.")) "says so"
+Assert ((Get-ReencryptCalls $r) -eq "compose ps --status running -q blackvault || compose stop blackvault") "the program was never started, nothing was started (got: $(Get-ReencryptCalls $r))"
+Assert (-not (Test-Path (Join-Path $d "__stdin.bin"))) "the old key was handed to nothing"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "start"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 1) "the restart fails after a good run: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains($ReencryptOkLine)) "the program's own line still says OK"
+Assert ($r.Output.Contains("ERROR: the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "says the re-encryption itself completed and only the start failed, with the command"
+Assert (-not $r.Output.Contains("BlackVault was started again.") -and -not $r.Output.Contains("Done.")) "and does not claim it was started, or that all is done"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "the start was attempted once (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "start"; "BV_STUB_REENCRYPT_EXIT" = "3"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptNothingLine }
+Assert ($r.ExitCode -eq 1) "the restart fails after a run that changed nothing: exits 1, not 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: nothing was changed, and only starting BlackVault again failed. BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "says nothing was changed and only the start failed, with the command"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF8
+Write-Scenario "reencrypt-files.bat - Docker Compose too old: exit 1 before anything is stopped; BLACKVAULT_* and BV_LIMIT set in the console do not reach or limit the run"
+$d = New-ReencryptSandbox "reencrypt-compose-env"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0"; "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BlackVault needs Docker Compose v2\.20 or newer") "explains the v2.20 requirement"
+Assert ((Get-ReencryptCalls $r) -eq "") "nothing was stopped or run (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_DATABASE_URL" = "file:./dev.db"; "BLACKVAULT_UPLOADS_SNAPSHOT" = "backups\uploads-x"; "BV_LIMIT" = "1"; "BV_STUB_BACKUP_SLEEP_MS" = "4000"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "MISSING" }
+Assert ($r.ExitCode -eq 0) "exits 0: a BV_LIMIT of 1 second in the console did not cut a 4 second run short (got $($r.ExitCode))"
+Assert ($envDump -ne "MISSING" -and $envDump -notmatch "BLACKVAULT_DATABASE_URL=|BLACKVAULT_UPLOADS_SNAPSHOT=") "docker compose would read those keys from .env only"
+Assert ($r.Output -notmatch "did not finish within") "no time-limit message"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
@@ -1908,5 +2819,5 @@ if ($script:Failures.Count -gt 0) {
   foreach ($f in $script:Failures) { Write-Host "  FAILED: $f" -ForegroundColor Red }
   exit 1
 }
-Write-Host "install.bat, update.bat, rotate-key.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
+Write-Host "install.bat, update.bat, rotate-key.bat, backup.bat, restore.bat, reencrypt-files.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
 exit 0

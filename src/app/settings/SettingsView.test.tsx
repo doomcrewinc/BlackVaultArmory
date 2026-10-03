@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SettingsView } from "./SettingsView";
 
 type DirectAccess = { allowed: boolean; source: "env" | "setting" };
@@ -497,5 +497,199 @@ describe("SettingsView — sealed backup creation", () => {
     await waitFor(() => expect(backupCalls).toHaveLength(1));
     expect(JSON.parse(String(backupCalls[0].body))).toEqual({ passphrase: "correct horse battery" });
     await waitFor(() => expect(screen.getByText("blackvault-backup-20260930.sealed.json")).toBeTruthy());
+  });
+});
+
+describe("SettingsView - full backup panel", () => {
+  const IDLE = { state: "idle", filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 };
+  const PASS = "correct horse battery";
+
+  /** A status endpoint the test steps through, and a POST it can observe. */
+  function stubFullBackup(statuses: object[], post: { status: number; body: object } = { status: 202, body: { jobId: "j1" } }) {
+    let i = 0;
+    const posts: RequestInit[] = [];
+    let statusCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/backup/full/status") {
+          statusCalls += 1;
+          const s = statuses[Math.min(i, statuses.length - 1)];
+          i += 1;
+          return { ok: true, json: async () => s } as Response;
+        }
+        if (url === "/api/backup/full" && init?.method === "POST") {
+          posts.push(init);
+          return { ok: post.status < 300, status: post.status, json: async () => post.body } as Response;
+        }
+        throw new Error(`unexpected fetch: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    return { posts, statusCalls: () => statusCalls };
+  }
+
+  async function renderPanel(isAdmin = true) {
+    const { FullBackupPanel } = await import("@/components/settings/FullBackupPanel");
+    render(<FullBackupPanel isAdmin={isAdmin} />);
+  }
+  const type = (id: string, value: string) => fireEvent.change(document.getElementById(id)!, { target: { value } });
+  const tick = (ms = 1000) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
+  afterEach(() => vi.useRealTimers());
+
+  it("is rendered inside the Settings page for an admin, with new-password fields", async () => {
+    stubFetch({ allowed: false, source: "setting" });
+    await renderLoaded(true);
+    expect(screen.getByTestId("full-backup-panel")).toBeTruthy();
+    expect(document.getElementById("fullBackupPassphrase")).toHaveAttribute("autocomplete", "new-password");
+    expect(document.getElementById("fullBackupPassphraseConfirm")).toHaveAttribute("autocomplete", "new-password");
+  });
+
+  it("a mismatched confirm blocks the request", async () => {
+    const { posts } = stubFullBackup([IDLE]);
+    await renderPanel();
+    type("fullBackupPassphrase", PASS);
+    type("fullBackupPassphraseConfirm", PASS + "x");
+    fireEvent.click(screen.getByRole("button", { name: /start full backup/i }));
+    expect(await screen.findByText("Passphrases do not match.")).toBeTruthy();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("a short passphrase blocks the request", async () => {
+    const { posts } = stubFullBackup([IDLE]);
+    await renderPanel();
+    type("fullBackupPassphrase", "short");
+    type("fullBackupPassphraseConfirm", "short");
+    fireEvent.click(screen.getByRole("button", { name: /start full backup/i }));
+    expect(await screen.findByText(/at least 12 characters\.$/, { selector: "p" })).toBeTruthy();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("sends the passphrase, clears both fields, then shows each phase with its own bar and stops polling at the end", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const run = (extra: object) => ({ jobId: "j1", state: "running", ...extra });
+    const stub = stubFullBackup([
+      IDLE,
+      run({ phase: "writing", filesDone: 2, filesTotal: 4, bytesDone: 50, bytesTotal: 100 }),
+      run({ phase: "verifying", filesDone: 0, filesTotal: 4, bytesDone: 0, bytesTotal: 4000 }),
+      { jobId: "j1", state: "succeeded", file: "blackvault-full-20261002-180405.bvb", files: 4, bytes: 4000, skipped: [], warnings: [] },
+    ]);
+    await renderPanel();
+    type("fullBackupPassphrase", PASS);
+    type("fullBackupPassphraseConfirm", PASS);
+    fireEvent.click(screen.getByRole("button", { name: /start full backup/i }));
+    await waitFor(() => expect(stub.posts).toHaveLength(1));
+    expect(JSON.parse(String(stub.posts[0].body))).toEqual({ passphrase: PASS });
+    expect(document.getElementById("fullBackupPassphrase")).toHaveValue("");
+    expect(document.getElementById("fullBackupPassphraseConfirm")).toHaveValue("");
+
+    await tick();
+    expect(screen.getByRole("progressbar", { name: "Writing the archive" })).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText("2 of 4 files")).toBeTruthy();
+
+    await tick();
+    // New phase, new bar: restarts at 0 under a new label rather than jumping.
+    expect(screen.getByRole("progressbar", { name: "Verifying the archive" })).toHaveAttribute("aria-valuenow", "0");
+
+    await tick();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText("Backup complete")).toBeTruthy();
+    expect(screen.getByText("blackvault-full-20261002-180405.bvb")).toBeTruthy();
+    expect(screen.getByText(/4 files, 3\.9 KB of uploads/)).toBeTruthy();
+
+    const calls = stub.statusCalls();
+    await tick(5000);
+    expect(stub.statusCalls()).toBe(calls); // no polling once the job is done
+  });
+
+  it("picks up a job that is already running on page load", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    stubFullBackup([{ jobId: "j9", state: "running", phase: "writing", filesDone: 1, filesTotal: 10, bytesDone: 10, bytesTotal: 100 }]);
+    await renderPanel();
+    expect(await screen.findByRole("progressbar", { name: "Writing the archive" })).toHaveAttribute("aria-valuenow", "10");
+    expect(screen.getByRole("button", { name: /backup running/i })).toBeDisabled();
+  });
+
+  it("a backup that skipped an unreadable file is flagged as incomplete; vanished files and warnings are shown", async () => {
+    stubFullBackup([
+      {
+        jobId: "j1", state: "succeeded", file: "blackvault-full-20261002-180405.bvb", files: 1, bytes: 10,
+        skipped: [
+          { path: "files/documents/b.pdf", reason: "unreadable: EACCES", kind: "unreadable" },
+          { path: "files/images/a.jpg", reason: "vanished", kind: "vanished" },
+        ],
+        warnings: ["The folder could not be fsynced."],
+      },
+    ]);
+    await renderPanel();
+    expect(await screen.findByText("Backup finished, but it is INCOMPLETE")).toBeTruthy();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("1 file was unreadable and is NOT in this backup.");
+    expect(alert).toHaveTextContent("files/documents/b.pdf");
+    expect(alert).toHaveTextContent("EACCES");
+    expect(screen.getByText(/1 file was deleted while the backup ran/)).toBeTruthy();
+    expect(screen.getByText("files/images/a.jpg")).toBeTruthy();
+    expect(screen.getByText("The folder could not be fsynced.")).toBeTruthy();
+  });
+
+  it("a failed job renders its error", async () => {
+    stubFullBackup([{ jobId: "j1", state: "failed", filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, error: "The backup folder /app/backups is not writable (EACCES)." }]);
+    await renderPanel();
+    expect(await screen.findByText(/backup folder \/app\/backups is not writable/)).toBeTruthy();
+  });
+
+  it("a 409 from the server shows its message", async () => {
+    stubFullBackup([IDLE], { status: 409, body: { error: "A full backup is already running." } });
+    await renderPanel();
+    type("fullBackupPassphrase", PASS);
+    type("fullBackupPassphraseConfirm", PASS);
+    fireEvent.click(screen.getByRole("button", { name: /start full backup/i }));
+    expect(await screen.findByText("A full backup is already running.")).toBeTruthy();
+  });
+
+  it("stops polling and says so when the status endpoint keeps failing (e.g. 401)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url !== "/api/backup/full/status") throw new Error(`unexpected fetch: ${url}`);
+        calls += 1;
+        if (calls === 1) {
+          return { ok: true, json: async () => ({ jobId: "j", state: "running", phase: "writing", filesDone: 0, filesTotal: 2, bytesDone: 0, bytesTotal: 10 }) } as Response;
+        }
+        return { ok: false, status: 401, json: async () => ({ error: "Authentication required" }) } as Response;
+      }),
+    );
+    await renderPanel();
+    await screen.findByRole("progressbar");
+    await tick(10_000);
+    expect(screen.getByText(/Could not read the backup status/)).toBeTruthy();
+    const after = calls;
+    expect(after).toBeLessThanOrEqual(6); // 1 good + a handful of failures, not one per second forever
+    await tick(10_000);
+    expect(calls).toBe(after);
+  });
+
+  it("does not keep polling after a failed read when the last known state was not running", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return { ok: false, status: 401, json: async () => ({}) } as Response;
+      }),
+    );
+    await renderPanel();
+    await tick(10_000);
+    expect(calls).toBe(1);
+  });
+
+  it("a non-admin does not poll the status endpoint and cannot start a backup", async () => {
+    const stub = stubFullBackup([IDLE]);
+    await renderPanel(false);
+    expect(stub.statusCalls()).toBe(0);
+    expect(screen.getByRole("button", { name: /start full backup/i })).toBeDisabled();
   });
 });

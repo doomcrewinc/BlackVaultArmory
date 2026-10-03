@@ -49,6 +49,9 @@ services:
     volumes:
       - blackvault-dev-data:/app/data
       - blackvault-dev-uploads:/app/uploads
+      # Full backups. A named volume, like the two above (docker-compose.yml
+      # uses a host folder, BLACKVAULT_BACKUP_DIR).
+      - blackvault-dev-backups:/app/backups
       # Same key wiring as docker-compose.yml (see the comment there).
       - type: bind
         source: ./secrets
@@ -69,3 +72,4 @@ volumes:
   blackvault-dev-postgres:
   blackvault-dev-data:
   blackvault-dev-uploads:
+  blackvault-dev-backups:

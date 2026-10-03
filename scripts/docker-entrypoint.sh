@@ -27,7 +27,8 @@
 #
 # When the container is started as a non-root user (`--user`, compose
 # `user:`), nothing is copied: the command runs as-is and reads whatever key
-# file it is given, as before. When /run/blackvault-secrets is not mounted
+# file it is given, as before. (That is why backup.sh's one-off container is
+# NOT started with --user: it needs this script's root step for the key.) When /run/blackvault-secrets is not mounted
 # (plain `docker run`, a Swarm secret at /run/secrets/...), nothing is copied
 # either and /run/secrets is left alone.
 set -eu
@@ -62,6 +63,63 @@ if [ -d "$SRC" ]; then
     chown nextjs:nodejs "$DST/$name"
     chmod 400 "$DST/$name"
   done
+fi
+
+# The full-backup folder (full-backups spec, section 2). docker-compose.yml
+# mounts BLACKVAULT_BACKUP_DIR (default <DATA_DIR>/backups) here; Docker
+# creates a missing host folder owned by root, so it is given to the app user
+# (uid 1001), mode 0700, before the drop to that user.
+#
+# Nothing in this block may stop the container from starting: backups are not
+# a reason to refuse startup. Every step is the condition of an `if`, so
+# `set -e` never sees a failure here.
+#
+# On a NAS mount (NFS with root squash, SMB) chown or chmod is refused. That
+# is fine as long as the app user can write there anyway, so that is TESTED,
+# by creating and removing a file as that user; mode bits are not trusted
+# (an ACL, a squashed uid or a read-only mount all make them lie). When it
+# cannot write, the Settings button and backup.sh fail with a message that
+# names the folder; BlackVault itself runs normally.
+#
+# chmod 700 runs ONLY after chown succeeded. chmod needs just "the caller
+# owns the folder", so it can succeed where chown is refused (root owns the
+# mount but may not chown it: capabilities dropped, an NFSv4 id-mapping
+# refusal, a share mounted uid=0). 0700 with an owner that is not the app
+# user would lock the app out of a folder it could write to through its
+# group/other bits, and the change would stay on the share. So after a
+# refused chown the mode is left exactly as it is, and the warning says so.
+BACKUPS=/app/backups
+backups_ok=1
+if ! mkdir -p "$BACKUPS" 2>/dev/null; then
+  backups_ok=0
+  echo "[entrypoint] WARNING: could not create the backup folder $BACKUPS. Full backups will fail until it exists; BlackVault starts anyway." >&2
+fi
+if [ "$backups_ok" = 1 ]; then
+  refused=""
+  if chown nextjs:nodejs "$BACKUPS" 2>/dev/null; then
+    chmod 700 "$BACKUPS" 2>/dev/null || refused="mode"
+  else
+    refused="owner"
+  fi
+  case "$refused" in
+    owner) note="could not set the owner of the backup folder $BACKUPS (a network share usually refuses this), so its mode was left as it is." ;;
+    mode) note="could not set the mode of the backup folder $BACKUPS (a network share usually refuses this)." ;;
+    *) note="" ;;
+  esac
+  probe="$BACKUPS/.blackvault-write-test.$$"
+  if su-exec nextjs:nodejs sh -c ': > "$1" && rm -f "$1"' sh "$probe" 2>/dev/null; then
+    if [ -n "$note" ]; then
+      echo "[entrypoint] WARNING: $note The app can write to it, so full backups will work; who else can read that folder is decided by the share, not by BlackVault." >&2
+    fi
+  else
+    rm -f "$probe" 2>/dev/null || true
+    case "$refused" in
+      owner) why="; its owner could not be changed, so its mode was left as it is" ;;
+      mode) why="; its mode could not be changed" ;;
+      *) why="" ;;
+    esac
+    echo "[entrypoint] WARNING: the backup folder $BACKUPS is not writable by the app (uid 1001)$why. Full backups will fail until the folder mounted there (BLACKVAULT_BACKUP_DIR, default <DATA_DIR>/backups) is writable by uid 1001. BlackVault starts anyway." >&2
+  fi
 fi
 
 exec su-exec nextjs:nodejs "$@"

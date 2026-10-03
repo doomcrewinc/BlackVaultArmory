@@ -8,6 +8,7 @@
 # Host build artefacts and dependencies — rebuilt inside the image.
 node_modules
 .next
+dist
 tsconfig.tsbuildinfo
 
 # Local databases, backups and runtime data.

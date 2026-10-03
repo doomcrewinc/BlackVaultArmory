@@ -186,7 +186,8 @@ exit /b 1
 :: scripts invoke; there is no pwsh dependency), follows a directory
 :: symlink/junction by default and could escape the uploads folder entirely.
 :: Like scripts/uploads-snapshot.sh, the walk also skips the app's own
-:: .pre-encryption-* snapshot folders (plain text, already a copy) and every
+:: .pre-encryption-* snapshot folders (plain text, already a copy), a full
+:: restore's .restore-* and .pre-restore-* folders, and every
 :: *.tmp / *.rot file (half-written or mid-rotation work files).
 :: The same walk also copies: a single PowerShell call both counts and
 :: copies every other non-reparse-point file, and prints that count on success, so
@@ -228,7 +229,7 @@ if errorlevel 1 goto :uploads_acl_failed
 set "UPLOADS_COPIED="
 set "BV_UP_SRC=!UPLOADS_SRC!"
 set "BV_UP_DST=!UPLOADS_PARTIAL!"
-for /f "usebackq delims=" %%N in (`powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $count = 0; function Copy-BVTree([string]$s, [string]$d) { Get-ChildItem -LiteralPath $s -Force | ForEach-Object { if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }; if ($_.PSIsContainer -and $_.Name -like '.pre-encryption-*') { return }; if (-not $_.PSIsContainer -and ($_.Name -like '*.tmp' -or $_.Name -like '*.rot')) { return }; $dp = Join-Path $d $_.Name; if ($_.PSIsContainer) { New-Item -ItemType Directory -Force -Path $dp | Out-Null; Copy-BVTree $_.FullName $dp } else { [IO.File]::WriteAllBytes($dp, [byte[]]@()); Copy-Item -LiteralPath $_.FullName -Destination $dp -Force; $script:count++ } } }; try { Copy-BVTree $env:BV_UP_SRC $env:BV_UP_DST; Write-Output $count } catch { Write-Error $_; exit 1 }" 2^>nul`) do set "UPLOADS_COPIED=%%N"
+for /f "usebackq delims=" %%N in (`powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $count = 0; function Copy-BVTree([string]$s, [string]$d) { Get-ChildItem -LiteralPath $s -Force | ForEach-Object { if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }; if ($_.PSIsContainer -and ($_.Name -like '.pre-encryption-*' -or $_.Name -like '.restore-*' -or $_.Name -like '.pre-restore-*')) { return }; if (-not $_.PSIsContainer -and ($_.Name -like '*.tmp' -or $_.Name -like '*.rot')) { return }; $dp = Join-Path $d $_.Name; if ($_.PSIsContainer) { New-Item -ItemType Directory -Force -Path $dp | Out-Null; Copy-BVTree $_.FullName $dp } else { [IO.File]::WriteAllBytes($dp, [byte[]]@()); Copy-Item -LiteralPath $_.FullName -Destination $dp -Force; $script:count++ } } }; try { Copy-BVTree $env:BV_UP_SRC $env:BV_UP_DST; Write-Output $count } catch { Write-Error $_; exit 1 }" 2^>nul`) do set "UPLOADS_COPIED=%%N"
 set "BV_UP_SRC="
 set "BV_UP_DST="
 if not defined UPLOADS_COPIED (

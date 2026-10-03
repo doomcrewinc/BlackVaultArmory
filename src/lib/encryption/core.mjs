@@ -4,10 +4,12 @@ import {
   createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, scryptSync,
 } from "node:crypto";
 import * as nodeFs from "node:fs";
+import { Transform } from "node:stream";
 
 export const FIELD_PREFIX = "bv2:";
 export const DEFAULT_KEY_FILE = "/run/secrets/blackvault_encryption_key";
 export const SEAL_FORMAT = "blackvault-sealed-backup";
+export const BVB_FORMAT = "blackvault-full-backup";
 const GENERATE_HINT = "Generate one with: openssl rand -hex 32";
 
 export class EncryptionKeyError extends Error {
@@ -244,4 +246,221 @@ export function openBackup(passphrase, envelope) {
   } catch {
     throw new SealError("WRONG_PASSPHRASE_OR_DAMAGED", "Wrong passphrase or damaged file.");
   }
+}
+
+// ---- streaming full backups (BVB1) ----
+// Spec: docs/superpowers/specs/2026-10-02-full-backups-design.md §1.
+//
+// Wire format:
+//   uint32be(headerLen) ‖ header (canonical JSON, headerLen bytes) ‖ chunk_0 ‖ … ‖ chunk_n
+//   chunk_i = AES-256-GCM(ciphertext) ‖ 16-byte tag; no other framing bytes.
+//   nonce_i = noncePrefix (8 B) ‖ uint32be(i);   AAD_i = header bytes ‖ uint32be(i) ‖ final (0x00 | 0x01)
+//   Every non-final chunk holds exactly chunkSize plaintext bytes; the final chunk holds
+//   1..chunkSize bytes (an input ending exactly on a boundary seals its last FULL chunk as
+//   final). Only an empty input yields a 0-byte final chunk (16 bytes: the tag alone).
+//
+// How the opener knows which chunk is final WITHOUT a flag byte on the wire or a double
+// decrypt: it mirrors the sealer's hold-back. A sealed chunk is decrypted as non-final
+// only once at least one byte beyond it has arrived (a non-final chunk is always
+// followed by another chunk); whatever remains at end-of-stream is decrypted as final.
+// Only on the error path (the final decrypt fails) is it retried as non-final, purely to
+// report TRUNCATED rather than WRONG_PASSPHRASE_OR_DAMAGED.
+// Plaintext is pushed only after decipher.final() has verified the chunk's tag.
+const BVB_CIPHER = "aes-256-gcm-stream";
+const BVB_CHUNK = 1048576;
+const BVB_TAG = 16;
+const BVB_MAX_HEADER = 4096;
+const BVB_MAX_COUNTER = 0xffffffff;
+
+// Byte FIFO over a list of Buffers, so small writes are not re-concatenated per write.
+// Consumed entries are skipped with a head index (Array#shift is O(entries) once the
+// array is large, which made 1-byte writes quadratic); the array is compacted when the
+// consumed prefix is both large and at least half the array, so compaction is amortised O(1).
+class ByteQueue {
+  constructor() { this.bufs = []; this.head = 0; this.length = 0; }
+  push(b) { if (b.length) { this.bufs.push(b); this.length += b.length; } }
+  take(n) {
+    const out = Buffer.allocUnsafe(n);
+    let off = 0;
+    while (off < n) {
+      const b = this.bufs[this.head];
+      const k = Math.min(b.length, n - off);
+      b.copy(out, off, 0, k);
+      off += k;
+      if (k === b.length) { this.bufs[this.head] = undefined; this.head += 1; } else this.bufs[this.head] = b.subarray(k);
+    }
+    this.length -= n;
+    if (this.head === this.bufs.length) { this.bufs = []; this.head = 0; }
+    else if (this.head > 1024 && this.head * 2 > this.bufs.length) { this.bufs = this.bufs.slice(this.head); this.head = 0; }
+    return out;
+  }
+}
+
+function bvbNonce(prefix, counter) {
+  const n = Buffer.alloc(12);
+  prefix.copy(n, 0);
+  n.writeUInt32BE(counter, 8);
+  return n;
+}
+function bvbAad(headerBytes, counter, final) {
+  const t = Buffer.alloc(5);
+  t.writeUInt32BE(counter, 0);
+  t[4] = final ? 1 : 0;
+  return Buffer.concat([headerBytes, t]);
+}
+
+/** The passphrase floor: NFC-normalised, at least 12 code points. Throws SealError PASSPHRASE_TOO_SHORT. Exported so callers validate with the same rule the sealer enforces. */
+export function requirePassphrase(passphrase) {
+  if (Array.from(String(passphrase).normalize("NFC")).length < MIN_PASSPHRASE) {
+    throw new SealError("PASSPHRASE_TOO_SHORT", `Passphrase must be at least ${MIN_PASSPHRASE} characters.`);
+  }
+}
+
+export function createBackupSealer(passphrase) {
+  requirePassphrase(passphrase);
+  const salt = randomBytes(16);
+  const prefix = randomBytes(8);
+  const key = passKey(passphrase, salt, KDF);
+  const header = {
+    format: BVB_FORMAT, version: 1, kdf: { ...KDF, salt: b64u(salt) },
+    cipher: BVB_CIPHER, noncePrefix: b64u(prefix), chunkSize: BVB_CHUNK,
+  };
+  const headerBytes = Buffer.from(canonicalJson(header), "utf8");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(headerBytes.length);
+  const q = new ByteQueue();
+  let counter = 0;
+  const sealChunk = (plain, final) => {
+    if (counter > BVB_MAX_COUNTER) throw new SealError("UNSUPPORTED", "Backup too large for BVB1.");
+    const c = createCipheriv("aes-256-gcm", key, bvbNonce(prefix, counter), { authTagLength: BVB_TAG });
+    c.setAAD(bvbAad(headerBytes, counter, final));
+    const out = Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]);
+    counter += 1;
+    return out;
+  };
+  const t = new Transform({
+    transform(data, _enc, cb) {
+      try {
+        q.push(data);
+        // Strictly greater: a full chunk is held back until a byte beyond it proves it is not last.
+        while (q.length > BVB_CHUNK) this.push(sealChunk(q.take(BVB_CHUNK), false));
+        cb();
+      } catch (e) { cb(e); }
+    },
+    flush(cb) {
+      try {
+        this.push(sealChunk(q.take(q.length), true)); // 0..chunkSize bytes, always present
+        cb();
+      } catch (e) { cb(e); }
+    },
+  });
+  t.push(Buffer.concat([len, headerBytes]));
+  return t;
+}
+
+function parseBvbHeader(headerBytes) {
+  let h;
+  try { h = JSON.parse(headerBytes.toString("utf8")); } catch { h = null; }
+  const k = h?.kdf ?? {};
+  // Validate BEFORE deriving: attacker-chosen scrypt params would otherwise pin CPU/RAM.
+  if (!h || typeof h !== "object" || Array.isArray(h)
+      || h.format !== BVB_FORMAT || h.version !== 1 || h.cipher !== BVB_CIPHER || h.chunkSize !== BVB_CHUNK
+      || k.name !== "scrypt" || k.N !== KDF.N || k.r !== KDF.r || k.p !== KDF.p
+      || typeof k.salt !== "string" || typeof h.noncePrefix !== "string"
+      || Object.keys(h).length !== 6 || Object.keys(k).length !== 5) {
+    throw new SealError("UNSUPPORTED", "Unsupported or malformed full backup.");
+  }
+  // Strict base64url: Buffer.from(…, "base64url") silently skips junk characters, so require
+  // the alphabet only and an exact round-trip (rejects padding, spaces, non-zero spare bits).
+  const strictB64u = (v) => (typeof v === "string" && /^[A-Za-z0-9_-]+$/.test(v) && b64u(unb64u(v)) === v
+    ? unb64u(v) : Buffer.alloc(0));
+  const salt = strictB64u(k.salt);
+  const prefix = strictB64u(h.noncePrefix);
+  // Canonical-form check: the raw bytes are the AAD, and this also rejects duplicate keys.
+  if (salt.length !== 16 || prefix.length !== 8 || canonicalJson(h) !== headerBytes.toString("utf8")) {
+    throw new SealError("UNSUPPORTED", "Unsupported or malformed full backup.");
+  }
+  return { salt, prefix };
+}
+
+export function createBackupOpener(passphrase) {
+  const SEALED = BVB_CHUNK + BVB_TAG;
+  const q = new ByteQueue();
+  let headerLen = -1;
+  let headerBytes = null;
+  let key = null;
+  let prefix = null;
+  let counter = 0;
+  const damaged = () => new SealError("WRONG_PASSPHRASE_OR_DAMAGED", "Wrong passphrase or damaged file.");
+  const truncated = () => new SealError("TRUNCATED", "Backup file is incomplete (it ends before the last chunk).");
+  // Returns the verified plaintext, or null if the tag does not verify.
+  const tryOpen = (sealed, final) => {
+    try {
+      const d = createDecipheriv("aes-256-gcm", key, bvbNonce(prefix, counter), { authTagLength: BVB_TAG });
+      d.setAAD(bvbAad(headerBytes, counter, final));
+      d.setAuthTag(sealed.subarray(sealed.length - BVB_TAG));
+      return Buffer.concat([d.update(sealed.subarray(0, sealed.length - BVB_TAG)), d.final()]);
+    } catch { return null; }
+  };
+  const readHeader = () => {
+    if (headerLen < 0 && q.length >= 4) {
+      headerLen = q.take(4).readUInt32BE(0);
+      if (headerLen < 2 || headerLen > BVB_MAX_HEADER) {
+        throw new SealError("UNSUPPORTED", "Unsupported or malformed full backup.");
+      }
+    }
+    if (headerLen >= 0 && !headerBytes && q.length >= headerLen) {
+      const bytes = q.take(headerLen);
+      const h = parseBvbHeader(bytes);
+      headerBytes = bytes;
+      prefix = h.prefix;
+      key = passKey(passphrase, h.salt, KDF); // derived exactly once
+    }
+  };
+  return new Transform({
+    transform(data, _enc, cb) {
+      try {
+        q.push(data);
+        readHeader();
+        if (key) {
+          // More than one sealed chunk buffered → the first one cannot be the final chunk.
+          while (q.length > SEALED) {
+            if (counter > BVB_MAX_COUNTER) throw damaged();
+            const plain = tryOpen(q.take(SEALED), false);
+            if (!plain) throw damaged();
+            counter += 1;
+            this.push(plain);
+          }
+        }
+        cb();
+      } catch (e) { cb(e); }
+    },
+    flush(cb) {
+      try {
+        readHeader();
+        if (!key) {
+          // Never got a full header: not a BVB1 file at all, or cut inside the header.
+          throw headerLen < 0 && q.length < 4 && q.length > 0
+            ? new SealError("UNSUPPORTED", "Unsupported or malformed full backup.")
+            : truncated();
+        }
+        if (q.length < BVB_TAG) throw truncated();
+        const sealed = q.take(q.length);
+        const plain = tryOpen(sealed, true);
+        if (!plain) {
+          if (tryOpen(sealed, false)) throw truncated();
+          // M-1: once a chunk has verified the passphrase is proven right, so do not say
+          // "wrong passphrase". A cut inside the last chunk, damage to it, and trailing bytes
+          // after it are indistinguishable here; keep the DAMAGED code, say so in the message.
+          if (counter > 0) {
+            throw new SealError("WRONG_PASSPHRASE_OR_DAMAGED",
+              "Backup file is damaged or incomplete (its last part is cut off, altered, or followed by extra bytes).");
+          }
+          throw damaged();
+        }
+        this.push(plain);
+        cb();
+      } catch (e) { cb(e); }
+    },
+  });
 }

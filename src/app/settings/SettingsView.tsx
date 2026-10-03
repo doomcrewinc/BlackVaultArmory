@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import { SectionCard } from "@/components/shared/SectionCard";
 import { StatusMessage } from "@/components/shared/StatusMessage";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { FullBackupPanel } from "@/components/settings/FullBackupPanel";
 import { SettingToggleCard } from "@/components/settings/SettingToggleCard";
 import {
   AdminsOnlyNote,
@@ -557,6 +558,8 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                 <StatusMessage tone="error" message={backupError} />
               )}
             </div>
+
+            <FullBackupPanel isAdmin={isAdmin} />
 
             {/* Restore from Backup */}
             <div className="rounded-lg border border-vault-border bg-vault-bg p-4 flex flex-col gap-3">

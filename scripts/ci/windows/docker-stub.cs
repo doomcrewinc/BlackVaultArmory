@@ -54,6 +54,52 @@
 //                            Lets a scenario act at an exact point — after the
 //                            .bat has written .new, before the key-file swap
 //                            (e.g. lock .new so the SECOND move fails).
+//   BV_STUB_APP_RUNNING      full backups (Task 6): "1" makes `compose ps --status
+//                            running -q blackvault` print a container id (the
+//                            app is running); anything else prints nothing.
+//                            A `ps` WITHOUT --status keeps printing the table
+//                            the installers grep.
+//   BV_STUB_STDIN_FILE       full backups: the backup program's call (any
+//                            `compose exec|run ... dist/scripts/full-backup.mjs`)
+//                            writes every byte it was given on standard input
+//                            to this file - the only place a passphrase may
+//                            arrive.
+//   BV_STUB_ENV_FILE         full backups: that call also writes its whole
+//                            environment here (NAME=value per line), to prove
+//                            the passphrase is not in it.
+//   BV_STUB_BACKUP_STDOUT / BV_STUB_BACKUP_STDERR
+//                            lines that call prints.
+//   BV_STUB_BACKUP_EXIT      its exit code; unset => 0.
+//   BV_STUB_BACKUP_SLEEP_MS  it sleeps this long before exiting.
+//   BV_STUB_RESTORE_STDIN_FILE / BV_STUB_RESTORE_STDOUT / BV_STUB_RESTORE_STDERR /
+//   BV_STUB_RESTORE_EXIT     full restore (Task 7): the same four knobs for the
+//                            restore program's call (any `compose run ...
+//                            dist/scripts/full-restore.mjs`). restore.bat's
+//                            CHECK step is the backup program with --verify,
+//                            so it is driven by the BV_STUB_BACKUP_* knobs.
+//   BV_STUB_RESTORE_MARKER_DIR  full restore (ruling R24): the HOST uploads folder.
+//                            When set, the restore program's call creates
+//                            <dir>\.restore-<stamp>.db-started there (<stamp>
+//                            from its --stamp argument): "the database step
+//                            was reached".
+//   BV_STUB_RESTORE_RECOVERY_COPY  full restore (ruling R25): a file path. The
+//                            restore program's call copies the first
+//                            backups\restore-*-RECOVERY.txt it finds (in the
+//                            current folder) there: what is on disk WHILE the
+//                            restore runs.
+//   BV_STUB_REENCRYPT_STDIN_FILE / BV_STUB_REENCRYPT_STDOUT / BV_STUB_REENCRYPT_STDERR /
+//   BV_STUB_REENCRYPT_EXIT   reencrypt-files (Task 8): the same four knobs for
+//                            the re-encryption program's call (any `compose run
+//                            ... dist/scripts/reencrypt-files.mjs`). The stdin
+//                            file is the only place the OLD KEY may arrive;
+//                            BV_STUB_ENV_FILE records that call's environment
+//                            too. `compose stop` / `compose start` are failed
+//                            with BV_STUB_FAIL_ON, as for rotate-key.bat.
+//   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
+//                            (any call naming /bv-snapshot-restore.sh);
+//                            unset/"0" => 0. The stub does NOT run the script:
+//                            what it does to real files is proven on Linux
+//                            (src/lib/backup/full-restore.real-db.test.ts).
 //
 // Task 4: `compose up` also appends a line "ENV BLACKVAULT_UPLOADS_SNAPSHOT=
 // [<value>]" to BV_STUB_LOG, reporting what update.bat passed through its own
@@ -111,8 +157,106 @@ internal static class DockerStub
             return 0;
         }
 
+        // Full backups (Task 6): the backup program, through exec or run.
+        // Handled before everything else so BV_STUB_FAIL_ON / BV_STUB_RUN_EXIT
+        // (the rotation's knobs) never apply to it.
+        // Full restore (Task 7): the restore program takes the same path,
+        // with its own knobs (BV_STUB_RESTORE_*).
+        // reencrypt-files (Task 8): the re-encryption program, the same path
+        // again with its own knobs (BV_STUB_REENCRYPT_*).
+        bool isRestoreProgram = Array.IndexOf(args, "dist/scripts/full-restore.mjs") >= 0;
+        bool isReencryptProgram = Array.IndexOf(args, "dist/scripts/reencrypt-files.mjs") >= 0;
+        string programKnobs = isReencryptProgram ? "BV_STUB_REENCRYPT_" : (isRestoreProgram ? "BV_STUB_RESTORE_" : "BV_STUB_BACKUP_");
+        if (Array.IndexOf(args, "dist/scripts/full-backup.mjs") >= 0 || isRestoreProgram || isReencryptProgram)
+        {
+            byte[] input;
+            using (Stream stdin = Console.OpenStandardInput())
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                stdin.CopyTo(buffer);
+                input = buffer.ToArray();
+            }
+            string stdinFile = Environment.GetEnvironmentVariable(isReencryptProgram ? "BV_STUB_REENCRYPT_STDIN_FILE" : (isRestoreProgram ? "BV_STUB_RESTORE_STDIN_FILE" : "BV_STUB_STDIN_FILE"));
+            if (!string.IsNullOrEmpty(stdinFile))
+            {
+                File.WriteAllBytes(stdinFile, input);
+            }
+            string envFile = Environment.GetEnvironmentVariable("BV_STUB_ENV_FILE");
+            if (!string.IsNullOrEmpty(envFile))
+            {
+                System.Text.StringBuilder dump = new System.Text.StringBuilder();
+                foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+                {
+                    dump.Append(entry.Key).Append('=').Append(entry.Value).Append('\n');
+                }
+                File.WriteAllText(envFile, dump.ToString(), new System.Text.UTF8Encoding(false));
+            }
+            if (isRestoreProgram)
+            {
+                string markerDir = Environment.GetEnvironmentVariable("BV_STUB_RESTORE_MARKER_DIR");
+                int stampAt = Array.IndexOf(args, "--stamp");
+                if (!string.IsNullOrEmpty(markerDir) && stampAt >= 0 && stampAt + 1 < args.Length)
+                {
+                    Directory.CreateDirectory(Path.Combine(markerDir, ".restore-" + args[stampAt + 1] + ".db-started"));
+                }
+                string recoveryCopy = Environment.GetEnvironmentVariable("BV_STUB_RESTORE_RECOVERY_COPY");
+                if (!string.IsNullOrEmpty(recoveryCopy) && Directory.Exists("backups"))
+                {
+                    string[] found = Directory.GetFiles("backups", "restore-*-RECOVERY.txt");
+                    if (found.Length > 0)
+                    {
+                        File.Copy(found[0], recoveryCopy, true);
+                    }
+                }
+            }
+            string sleepMs = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_SLEEP_MS");
+            int ms;
+            if (!string.IsNullOrEmpty(sleepMs) && int.TryParse(sleepMs, out ms))
+            {
+                System.Threading.Thread.Sleep(ms);
+            }
+            string backupOut = Environment.GetEnvironmentVariable(programKnobs + "STDOUT");
+            if (!string.IsNullOrEmpty(backupOut))
+            {
+                Console.WriteLine(backupOut);
+            }
+            string backupErr = Environment.GetEnvironmentVariable(programKnobs + "STDERR");
+            if (!string.IsNullOrEmpty(backupErr))
+            {
+                Console.Error.WriteLine(backupErr);
+            }
+            string backupExit = Environment.GetEnvironmentVariable(programKnobs + "EXIT");
+            int backupCode;
+            return (!string.IsNullOrEmpty(backupExit) && int.TryParse(backupExit, out backupCode)) ? backupCode : 0;
+        }
+
+        // Full restore (Task 7): the rollback container. Handled before the
+        // generic `run` branch so the rotation's knobs never apply to it.
+        if (Array.IndexOf(args, "/bv-snapshot-restore.sh") >= 0)
+        {
+            string rollbackExit = Environment.GetEnvironmentVariable("BV_STUB_ROLLBACK_EXIT");
+            int rollbackCode;
+            if (!string.IsNullOrEmpty(rollbackExit) && int.TryParse(rollbackExit, out rollbackCode) && rollbackCode != 0)
+            {
+                Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_ROLLBACK_EXIT)");
+                return rollbackCode;
+            }
+            Console.WriteLine("[stub] docker " + joined);
+            return 0;
+        }
+
         if (string.Equals(sub, "ps", StringComparison.OrdinalIgnoreCase))
         {
+            // Full backups (Task 6): `ps --status running -q blackvault` is
+            // how backup.bat asks "is the app running?".
+            if (Array.IndexOf(args, "--status") >= 0)
+            {
+                if (Environment.GetEnvironmentVariable("BV_STUB_APP_RUNNING") == "1")
+                {
+                    Console.WriteLine("0123456789ab");
+                }
+                return 0;
+            }
             // The scripts pipe this into `findstr /i "healthy running"`.
             Console.WriteLine("NAME                STATUS");
             Console.WriteLine("blackvault-app      Up 4 seconds (healthy)");

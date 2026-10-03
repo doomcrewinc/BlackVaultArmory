@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/server/auth";
-import { BACKUP_MODELS } from "@/lib/backup/models";
+import { buildBackupPayload, collectBackupRecords } from "@/lib/backup/records";
 import { recordEventBestEffort } from "@/lib/audit/events";
 import { sealBackup, SealError } from "@/lib/encryption/core.mjs";
 import fs from "fs";
 import path from "path";
-
-type ReadDelegate = { findMany: () => Promise<unknown[]> };
-const delegates = prisma as unknown as Record<string, ReadDelegate>;
 
 /**
  * Sealed backups (field-encryption spec §3, "Backup UI"/"Sealed backup
@@ -42,24 +39,16 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Sequential queries — connection_limit=1 means Promise.all would deadlock
-    const backupData: Record<string, unknown[]> = {};
-    for (const { delegate, key } of BACKUP_MODELS) {
-      backupData[key] = await delegates[delegate].findMany();
-    }
+    // Shared with the full-backup engine (src/lib/backup/records.ts): one
+    // definition of "the records a backup holds". Queries run sequentially —
+    // connection_limit=1 means Promise.all would deadlock.
+    const backupData = await collectBackupRecords();
     const settings = await prisma.appSettings.findUnique({ where: { id: "singleton" } });
 
     const now = new Date();
     const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 
-    const meta = {
-      version: "1.1",
-      createdAt: now.toISOString(),
-      includeUploads: settings?.includeUploadsInBackup ?? true,
-      counts: Object.fromEntries(Object.entries(backupData).map(([k, v]) => [k, v.length])),
-    };
-
-    const payload = { meta, ...backupData };
+    const payload = buildBackupPayload(backupData, { now, includeUploads: settings?.includeUploadsInBackup ?? true });
     const json = JSON.stringify(payload, null, 2);
 
     let sealed: string;

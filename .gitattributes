@@ -13,3 +13,8 @@ scripts/docker-entrypoint.sh text eol=lf
 # The pre-release (develop 663523c) update.bat, kept byte for byte (CRLF) for the
 # README-recovery scenarios: no end-of-line conversion on any platform.
 scripts/fixtures/update.bat.develop-663523c -text
+
+# Runs inside the Linux container, mounted from the checkout by restore.sh AND
+# restore.bat (the rollback after a failed full restore). A CRLF copy on
+# Windows would not run under the container's /bin/sh.
+scripts/snapshot-restore.sh text eol=lf

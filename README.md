@@ -1133,7 +1133,7 @@ first such file and its key id (`… is encrypted with key <id>, not the current
 Restarting, or running the rotation again, does not help: the database is already bound to the
 current key, and the rotation only accepts files under the current or the new key.
 
-To recover:
+To recover, pick one:
 
 - **Move the files aside.** Move every file the log names out of `<DATA_DIR>/uploads` (on
   Linux with `sudo`: they belong to uid 1001) and start again; repeat until it starts. Keep
@@ -1149,8 +1149,60 @@ To recover:
   5. Restore your backup (**Settings → Backup**). If you want a new key, rotate afterwards
      (see **Rotation**).
 
-Re-encrypting files from another key into the current one is not supported yet (planned: spec
-3c). Without the key that encrypted them, those files cannot be opened.
+- **Re-encrypt them, if you still have the key that encrypted them** — for example
+  `secrets/blackvault_encryption_key.old-<timestamp>` after a rotation, or the key file of the
+  machine the folder came from. Run, from the BlackVault folder:
+
+  ```bash
+  ./reencrypt-files.sh --from-key-file <path to the old key file>
+  ```
+
+  **Windows:**
+
+  ```bat
+  reencrypt-files.bat --from-key-file <path to the old key file>
+  ```
+
+  What it does:
+
+  1. It stops BlackVault.
+  2. In a one-off container, every file under `uploads/images` and `uploads/documents` that is
+     encrypted with the old key is decrypted with it, encrypted with the current key, and
+     replaced in one step. Files already under the current key are skipped, so running it twice
+     is safe. Files that are not encrypted are left as they are.
+  3. Files under any **other** key are left as they are too, each with a `WARNING:` line.
+     BlackVault still refuses to start while one of those is in the folder: move it out, or run
+     the tool again with the key that encrypted it.
+  4. It starts BlackVault again **only if it was running** when you ran the tool. The last line
+     says whether it was started; if not, start it with `docker compose up -d`.
+
+  **It takes no snapshot.** The files are rewritten in place, and the tool keeps no copy of the
+  uploads folder. If you want a way back, copy `<DATA_DIR>/uploads` somewhere else first (on Linux
+  with `sudo`: the files belong to uid 1001).
+
+  **It only looks under `uploads/images` and `uploads/documents`**, where BlackVault itself puts
+  files. A file under the old key that was placed anywhere else in the uploads folder is not
+  converted, and BlackVault will still refuse to start on it: move it out.
+
+  The old key file is only read: the tool never deletes, moves or changes a key file, and it
+  deletes no uploaded file. The key is handed to the program on its standard input, never on a
+  command line or in an environment variable.
+
+  If it stops part-way (a full disk, a closed terminal), every file is whole, under the old key
+  or the current one. Run it again: it continues with the files still under the old key.
+  **After an interrupted run BlackVault stays stopped**, even if it was running before.
+
+  Exit codes:
+
+  | Code | Meaning |
+  |---|---|
+  | 0 | At least one file was under the old key, and all of them were re-encrypted. |
+  | 3 | Nothing was changed: no file is under the old key (a second run answers this too), or the old key file is missing, empty, not a key, or is this install's current key. |
+  | 1 | Failed; the lines above the last one say why, and whether running it again will continue. Also: the tool finished — whether it re-encrypted files or found nothing to do — but BlackVault was running before and could not be started again (the last line says so). |
+
+  **Keep the old key file until BlackVault has started and your photos and documents open.**
+
+Without the key that encrypted them, those files cannot be recovered.
 
 ### Known limitations of file encryption
 
@@ -1160,10 +1212,11 @@ Re-encrypting files from another key into the current one is not supported yet (
 - **A plain file that happens to start with the four bytes `BVF1`** is treated as encrypted and is
   never encrypted. Its "header" is almost never a valid one, so BlackVault then refuses to start
   and names the file as damaged: move it out of the uploads folder and start again.
-- **Files are not in backups yet.** **Settings → Backup** still holds only file paths, not the
-  files themselves (planned: spec 3c). Copy `<DATA_DIR>/uploads` yourself — on Linux with `sudo`,
-  since the files belong to uid 1001 — and keep the key with it: the copy cannot be read without
-  it, and a BlackVault started with a different key refuses to start on those files.
+- **The JSON backup does not hold files.** The download in **Settings → Backup** still holds
+  only file paths. A **full backup** holds the files themselves (see **Full backups**). If you
+  copy `<DATA_DIR>/uploads` yourself instead — on Linux with `sudo`, since the files belong to
+  uid 1001 — keep the key with it: the copy cannot be read without it, and a BlackVault started
+  with a different key refuses to start on those files.
 - **No per-item access control.** Any signed-in user can open any photo or document, as before.
 - **PostgreSQL: the app keeps running while the update copies the uploads folder.** An upload
   made during that copy makes the snapshot's file count disagree, and the update stops before
@@ -1200,10 +1253,13 @@ You can change this by editing `DATA_DIR` in the `.env` file before first run.
 
 ### Backing up your data
 
-**Easiest, works for both databases, safe while running:** in BlackVault go to
-**Settings → Backup** and save a backup. It downloads a JSON file with every record. Keep it
-together with a copy of `data/uploads` (your images and documents), `.env` and the encryption
-key file — the uploaded files are encrypted and cannot be read without that key (see
+**Everything in one file:** a **full backup** holds the records *and* the uploaded photos and
+documents, and restores onto any machine. See **Full backups** below.
+
+**Records only, works for both databases, safe while running:** in BlackVault go to
+**Settings → Backup** and save a backup. It downloads a JSON file with every record. It does not
+hold your images and documents: keep it together with a copy of `data/uploads`, `.env` and the
+encryption key file — the uploaded files are encrypted and cannot be read without that key (see
 **Encrypted Files** above).
 
 This backup does **not** include accounts (users, passwords, sessions or invite/reset links)
@@ -1238,6 +1294,269 @@ On Linux, `data/postgres` is owned by the database container, so a plain `cp -r`
 *permission denied*; `sudo cp -a` copies it and keeps its ownership, which PostgreSQL needs.
 The same goes for `data/uploads` on both databases: since this release its files are mode 600
 and owned by the app's user (uid 1001), which is why the SQLite commands use `sudo cp -a` too.
+
+---
+
+### Full backups (records, photos and documents)
+
+A **full backup** is one file, `blackvault-full-<date>-<time>.bvb`, holding every inventory record
+**and** every uploaded photo and document, sealed with a passphrase you choose. That file and its
+passphrase rebuild the whole install, on this machine or another one — including one with a
+**different** encryption key: the files are stored decrypted inside the sealed archive, so a full
+backup does not depend on `secrets/blackvault_encryption_key`.
+
+Like the JSON backup above, it does **not** include accounts, settings or the audit log.
+
+**Without the passphrase a full backup cannot be opened, by anyone.** It must be at least 12
+characters. BlackVault never stores it.
+
+#### Where full backups are kept
+
+BlackVault writes them into its **backup folder**: `<DATA_DIR>/backups` (by default
+`./data/backups`). To use another disk or a NAS mount, set `BLACKVAULT_BACKUP_DIR` in `.env` and
+run `docker compose up -d`:
+
+```
+BLACKVAULT_BACKUP_DIR=/mnt/nas/blackvault-backups
+```
+
+- The files are mode 600 and belong to the app's user (uid 1001), in a folder that is mode 700. On
+  Linux, list or copy them with `sudo`.
+- The date and time in the file name are **UTC**, not your local time.
+- **BlackVault never copies a backup anywhere else.** A backup that sits on the same disk as the
+  data protects against a mistake, not against losing the disk: copy the `.bvb` files off this
+  machine yourself.
+- This is not the `backups/` folder next to `docker-compose.yml`. That one holds the plain
+  snapshots that `update`, `rotate-key` and `restore` take before they change anything.
+
+#### From the browser
+
+**Settings → Backup → Full Backup (database + files)**, admins only. Type the passphrase twice and
+press **Start Full Backup**.
+
+- The backup runs on the server and keeps running if you close the page. The file is saved in the
+  backup folder; it is **not** downloaded.
+- The progress bar has two phases, **Writing the archive** and then **Verifying the archive**
+  (the whole file is read back and checked before it gets its final name), each with
+  `<n> of <m> files`.
+- **Backup complete** shows the file name, the number of files and their size.
+- **Backup finished, but it is INCOMPLETE** means some uploaded files could not be read (a damaged
+  file, a file name a backup cannot hold). They are listed, each with the reason, and they are
+  **not** in the backup. Fix or remove them and make another backup.
+- Files deleted while the backup ran are listed separately. That is normal on a running install.
+- Only one full backup runs at a time. The button never deletes an older backup.
+
+#### From the command line
+
+From the BlackVault folder:
+
+```bash
+./backup.sh
+```
+
+**Windows:**
+
+```bat
+backup.bat
+```
+
+It asks for the passphrase twice, without showing it, and works whether BlackVault is running or
+stopped. On success it prints one line:
+
+```
+BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261003-031500.bvb files=412 bytes=5368709120 archive_bytes=5369123456 skipped=0 unreadable=0
+```
+
+`unreadable` above 0 means the backup is **incomplete**: each file left out has a `WARNING:` line
+above it. Look at `WARNING:` lines even when the command succeeded.
+
+| Option | What it does |
+|---|---|
+| `--passphrase-file <path>` | Reads the passphrase from a file instead of asking. The file's content is the passphrase, minus one line ending at the very end (and a UTF-8 byte order mark at the very start, if the editor wrote one). The file must be saved as UTF-8 text: see [the passphrase file](#a-nightly-backup-with-cron) below. The passphrase is never put on a command line or into an environment variable. |
+| `--keep <n>` | After the new backup has been written **and verified**, deletes the oldest full backups beyond the newest `<n>`. Default 7. If the backup fails, nothing is deleted. If the new backup is **incomplete** (`unreadable` above 0), nothing is deleted either: an older backup may be the only one that still holds the file. It prints `WARNING: old backups were kept because this backup is incomplete`, and the folder grows until the file is repaired or removed. Only files named exactly `blackvault-full-<date>-<time>.bvb` count: a copy you renamed is never deleted. The deleting happens inside the container, because on Linux the files belong to uid 1001. |
+| `--verify <file>` | Checks one backup: decrypts the whole archive and compares every file with its checksum. Writes nothing. `<file>` is a file name in the backup folder, or a path to a file in that folder. Asks for the passphrase once. |
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Done. |
+| 1 | Failed. One line says why. Nothing was deleted, and no half-written backup is left. |
+| 2 | Another full backup is already running. |
+
+Without `--passphrase-file` and without a terminal (cron, Task Scheduler) it stops at once with
+exit 1 instead of waiting for someone to type.
+
+There is no time limit by default. Set the environment variable `BLACKVAULT_BACKUP_TIMEOUT` to a
+number of seconds to stop waiting after that long.
+
+#### A nightly backup with cron
+
+```
+30 3 * * * cd /home/you/BlackVaultArmory && ./backup.sh --passphrase-file /home/you/.blackvault-backup-passphrase --keep 14 >> /home/you/blackvault-backup.log 2>&1
+```
+
+The passphrase file:
+
+- Create it with `chmod 600`, readable only by the user the cron job runs as.
+- **Do not keep it in the backup folder, in `data/`, or anywhere that is copied along with the
+  backups.** Whoever has a backup file and the passphrase file can read everything in it.
+- A scheduled backup needs the file on the machine when it runs. If you can, keep it off the
+  BlackVault host otherwise — for example on a mount that is only there while the backup runs —
+  and run backups you start yourself without a file at all.
+- **Keep a second copy of the passphrase somewhere else** (a password manager). If the file is
+  lost with the machine, the backups you copied off-site cannot be opened.
+- **Save it as UTF-8 text**, the passphrase on one line. A backup made from the file then opens
+  with the same passphrase typed at the prompt. A file in another encoding (UTF-16, for example)
+  is refused with `the passphrase is not UTF-8 text`, before anything is done.
+- **Windows:** do not create it with `>` or `Out-File` in Windows PowerShell 5.1; they write
+  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell:
+
+  ```powershell
+  [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", (Read-Host "Passphrase"))
+  ```
+
+Check the log, or the exit code, now and then: a cron job that has been failing for a month is
+not a backup.
+
+#### Backup folder on a NAS
+
+- **If the share is not mounted, the backups go to the local disk.** Docker creates a missing
+  folder for a bind mount. When `/mnt/nas` is not mounted at the moment BlackVault starts, Docker
+  creates `/mnt/nas/blackvault-backups` on the local disk and every backup lands there, without an
+  error. Check where the files really are after the first backup, and after a reboot.
+- **Shares that refuse `chown`** (NFS with root squash, SMB). At start BlackVault tries to give
+  the backup folder to uid 1001 with mode 700. When the share refuses, it leaves the folder's mode
+  alone and prints a `[entrypoint] WARNING:` line in `docker compose logs blackvault`. If the app
+  can write there anyway, backups work; who else can read the folder is then decided by the share,
+  not by BlackVault. If it cannot, BlackVault still starts, and the button and `backup.sh` fail
+  with a message that names the folder: make it writable by uid 1001.
+- **Shares without hard links.** A finished backup gets its final name with a hard link, which
+  cannot replace an existing file. Where the share has no hard links BlackVault renames instead.
+  The only difference: two backups running at once and finishing in the same second could then
+  replace one another, and the lock normally prevents two from running.
+- **FAT and exFAT disks, and shares where the app does not own its files.** If the folder is
+  mounted for another user (`uid=0`, say) but everyone may write, BlackVault can create the
+  backup but cannot set its mode to 600. The backup is still made, verified and usable; a
+  `WARNING:` says that who else can read the file is decided by the mount options. Mounting
+  the disk for the app's user (`uid=1001,gid=1001,fmask=0177,dmask=0077`) avoids the warning.
+  **On such a folder anyone who can read the disk or the share can copy the backup file.** Its
+  header (the salt and the key-derivation settings) is not secret, so the copy can be attacked
+  by guessing passphrases at leisure: the passphrase is the only protection. Choose a long one.
+  If BlackVault can neither set the lock file's time nor rewrite it there, a `WARNING:` says
+  that another backup or restore may not see this one as running: do not start a second one
+  while a long backup or restore runs on that folder.
+
+---
+
+### Restoring a full backup
+
+A full restore is done from the command line, with BlackVault stopped. (The browser's
+**Restore** in **Settings → Backup** is still there, for the small JSON backups that hold records
+only.)
+
+**It replaces everything a backup holds:** every inventory record and every uploaded photo and
+document. Accounts, settings and the audit log are not in a backup and are kept as they are.
+
+1. Put the `.bvb` file into the backup folder: `<DATA_DIR>/backups`, or the folder
+   `BLACKVAULT_BACKUP_DIR` names if you set it. On Linux, with the default folder:
+
+   ```bash
+   sudo install -o 1001 -g 1001 -m 600 /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
+   ```
+
+2. From the BlackVault folder:
+
+   ```bash
+   ./restore.sh blackvault-full-20261003-031500.bvb
+   ```
+
+   **Windows:**
+
+   ```bat
+   restore.bat blackvault-full-20261003-031500.bvb
+   ```
+
+It asks for the passphrase once (`--passphrase-file <path>` works as in `backup.sh`). What it then
+does, in this order:
+
+1. **Checks the backup**, in a one-off container: a full decrypt, every file against its
+   checksum. A wrong passphrase or a damaged or cut-off file stops here. Nothing was changed and
+   BlackVault was not stopped.
+2. **Asks you to type `RESTORE`.** `--yes` skips the question. Without a terminal there is nobody
+   to ask, so `--yes` is then required; without it the script stops before anything is checked.
+3. **Stops BlackVault and takes a snapshot** of the database and the uploads folder into
+   `backups/` (next to `docker-compose.yml`). If the snapshot fails, BlackVault is started again
+   and nothing was changed.
+4. **Restores**, in a one-off container. The backup's files are written, encrypted with **this**
+   install's key, into `uploads/.restore-<time>/`. The database records are replaced in one
+   transaction. Then the current `images/` and `documents/` folders are moved into
+   `uploads/.pre-restore-<time>/` and the restored ones take their place.
+5. **Starts BlackVault.** The restore is recorded in the audit log.
+
+BlackVault is stopped from step 3 until step 5.
+
+**Restoring onto a different key** needs nothing extra. A new install has its own key; the
+restore encrypts the files and the serial numbers with it. You do not need the old machine's key
+file.
+
+**If step 4 fails, the install is put back automatically**, BlackVault is started again and the
+script exits 1. The uploads are always put back and compared with the snapshot. The database is
+put back from the snapshot only if the restore had reached its database step; otherwise it was
+never touched and is left alone. If the rollback itself fails, BlackVault is **not** started and
+the script says what to do.
+
+**The recovery file.** Just before step 4 the script prints, and writes to
+`backups/restore-<time>-RECOVERY.txt`, where the snapshot is and the exact commands that put it
+back by hand. It is deleted when the restore has succeeded or the automatic rollback has worked.
+If you find one, either the script did not end by itself (it was interrupted, the terminal was
+closed, the machine restarted) or the automatic rollback failed, which the script says before it
+exits. Either way BlackVault is stopped and the install may be half restored. Read the file and
+follow it. **While one exists, a new restore refuses to start.**
+
+**`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
+restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
+uses as much disk as those files did. Once you have checked the restored install, delete it, and
+the snapshot in `backups/` (on Linux with `sudo`).
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Restored. |
+| 1 | Failed. The last lines say which of four it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
+
+---
+
+### Known limitations of full backups
+
+- **A backup is a point in time.** It holds the records as they were when it read them. A file
+  uploaded while it runs is not in it; a file deleted while it runs is listed as skipped.
+- **No incremental backups.** Every backup is a complete copy. Manage the space with `--keep`.
+- **Every backup is read twice.** The archive is written, then read back in full and checked,
+  before it gets its final name, so a backup takes roughly twice as long as writing it alone. A
+  file in the backup folder named `blackvault-full-….bvb` has therefore been verified once.
+- **The passphrase is needed for every run.** A scheduled backup needs a passphrase file; see
+  above for where to keep it.
+- **Full restore is command-line only.**
+- **A damaged upload does not fail the backup.** A file that cannot be read or decrypted is left
+  out, loudly (`WARNING:`, `unreadable=` in the result line, the red box in Settings), so that one
+  bad file does not block every backup of everything else. Such a backup is incomplete.
+- **Files with names a restore would refuse are left out the same way:** hidden files and
+  folders, `*.tmp` and `*.rot`, names with control characters, and one of two names that differ
+  only in upper/lower case or Unicode form (`A.jpg` and `a.jpg`), and paths too long for the
+  archive (a file name over 100 bytes, or the folders in front of it over 155). The names BlackVault gives its
+  own uploads are not like that; this is about files placed in the uploads folder by hand. Only `uploads/images` and
+  `uploads/documents` are backed up.
+- **"Already running" can outlast a crash.** The lock is a file in the backup folder that a
+  running backup refreshes every 30 seconds. If a backup is killed (a crash, a restart of the
+  machine), the next one can answer "already running" for up to 5 minutes although nothing runs.
+  The lock only prevents two backups from loading the machine at once; a backup's correctness
+  does not depend on it.
+- **Windows: `restore.bat` cannot catch Ctrl-C or a closed window.** `restore.sh` stops the
+  restore container and shows the recovery text when it is interrupted; on Windows the recovery
+  file is all there is. Do not interrupt a restore.
+- **Windows: the typed prompts are not covered by automated tests.** `backup.bat` and
+  `restore.bat` are tested with `--passphrase-file` and `--yes` only, and against a stand-in for
+  Docker; typing the passphrase and `RESTORE` at a console is not.
+- **Recovering files that are under another key needs that key.** See **Files encrypted with a
+  different key**.
 
 ---
 
@@ -1409,6 +1728,11 @@ documents. Copy `secrets/blackvault_encryption_key` across too, into the new fol
 `secrets/` before running the installer (an existing key file is kept as it is):
 the uploaded files are encrypted with it, and BlackVault refuses to start on files encrypted
 with a different key.
+
+**Or move with a full backup, and no key file:** make a full backup on the old machine, install
+BlackVault on the new one and let it start once, then copy the `.bvb` file into the new
+machine's backup folder and run `./restore.sh` (see **Restoring a full backup**). The new
+install keeps its own key. Accounts and settings are not in a backup: set them up again.
 
 **Step 2 —** Download and extract BlackVault on the new machine
 
