@@ -270,6 +270,128 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(fs.readdirSync(backups)).toEqual([]);
   });
 
+  describe("--keep (ruling R18: pruning runs here, in the same invocation as the backup)", () => {
+    const backupFiles = () => fs.readdirSync(backups).filter((n) => /^blackvault-full-\d{8}-\d{6}\.bvb$/.test(n)).sort();
+    /** Makes `n` good backups with the bare CLI (no --keep) and returns their names, oldest first. */
+    function seed(n: number): string[] {
+      for (let i = 0; i < n; i++) {
+        const r = cli(["--dir", backups]);
+        expect(r.status, r.stderr).toBe(0);
+      }
+      const files = backupFiles();
+      expect(files).toHaveLength(n); // the bare CLI never deletes anything
+      return files;
+    }
+    const preloadFile = (name: string, lines: string[]) => {
+      const p = path.join(tmp, `${name}-${seq}.cjs`);
+      fs.writeFileSync(p, lines.join("\n"));
+      return p;
+    };
+    const cliWithPreload = (preload: string, args: string[]) => {
+      const r = spawnSync(process.execPath, ["--require", preload, bundle, ...args], { cwd: ROOT, env: childEnv, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+      return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+
+    it("keep=2 with 4 good backups deletes exactly the 2 oldest, after the new one verified; stdout is still exactly the one OK line", () => {
+      const old = seed(3);
+      const strangers = ["blackvault-full-20200101-000000-offsite.bvb", "blackvault-full-20200101-000000.bvb.bak", "notes.txt"];
+      for (const s of strangers) fs.writeFileSync(path.join(backups, s), "not a backup of ours");
+
+      const r = cli(["--dir", backups, "--keep", "2"]);
+      expect(r.status, r.stderr).toBe(0);
+      const m = OK_LINE.exec(r.stdout);
+      expect(m, r.stdout).not.toBeNull();
+      const created = m![1];
+      expect(old).not.toContain(created);
+      // 4 good files existed when pruning ran; the 2 oldest are gone, in order.
+      expect(r.stderr.split("\n").filter(Boolean)).toEqual([`full-backup: deleted old backup ${old[0]}`, `full-backup: deleted old backup ${old[1]}`]);
+      expect(backupFiles()).toEqual([old[2], created]);
+      expect(fs.readdirSync(backups).sort()).toEqual([...strangers, old[2], created].sort());
+      for (const f of [old[2], created]) expect(cli(["--dir", backups, "--verify", f]).status).toBe(0);
+    });
+
+    it("a corrupted newest file (the new backup fails its verify): NOTHING is deleted, exit 1, empty stdout, no new .bvb", () => {
+      const old = seed(3);
+      const before = old.map((f) => fs.readFileSync(path.join(backups, f)));
+      // Preloaded into the child: the sealed work file is damaged on disk
+      // right before the engine verifies it (verify's first step is a stat).
+      const preload = preloadFile("corrupt-partial", [
+        'const fs = require("node:fs");',
+        "const realStat = fs.promises.stat.bind(fs.promises);",
+        "fs.promises.stat = async (p, ...rest) => {",
+        '  if (String(p).endsWith(".bvb.partial")) {',
+        '    const fd = fs.openSync(String(p), "r+");',
+        "    const size = fs.fstatSync(fd).size;",
+        "    const byte = Buffer.alloc(1);",
+        "    fs.readSync(fd, byte, 0, 1, size - 40);",
+        "    byte[0] ^= 0xff;",
+        "    fs.writeSync(fd, byte, 0, 1, size - 40);",
+        "    fs.closeSync(fd);",
+        "  }",
+        "  return realStat(p, ...rest);",
+        "};",
+      ]);
+      const r = cliWithPreload(preload, ["--dir", backups, "--keep", "1"]);
+      expect(r.status).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toMatch(/^full-backup: .*(damaged|incomplete|verif)/i); // it failed in the verify step, not earlier
+      expect(r.stderr).not.toContain("deleted old backup");
+      expect(fs.readdirSync(backups).sort()).toEqual(old); // nothing deleted, nothing new, no .partial, no lock
+      old.forEach((f, i) => expect(fs.readFileSync(path.join(backups, f)).equals(before[i])).toBe(true));
+    });
+
+    it("the backup fails before anything is written (lock held): exit 2 and nothing is deleted", () => {
+      const old = seed(2);
+      const lock = path.join(backups, ".full-backup.lock");
+      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), hostname: os.hostname(), token: "holder" }));
+      const r = cli(["--dir", backups, "--keep", "1"]);
+      expect(r.status).toBe(2);
+      expect(backupFiles()).toEqual(old);
+    });
+
+    it("an old backup that cannot be deleted is a WARNING naming it; the run still exits 0 and the others are deleted", () => {
+      const old = seed(3);
+      const preload = preloadFile("unlink-eacces", [
+        'const fs = require("node:fs");',
+        "const realUnlink = fs.promises.unlink.bind(fs.promises);",
+        "fs.promises.unlink = async (p) => {",
+        `  if (String(p).endsWith(${JSON.stringify(old[0])})) throw Object.assign(new Error("EACCES: permission denied, unlink"), { code: "EACCES", syscall: "unlink" });`,
+        "  return realUnlink(p);",
+        "};",
+      ]);
+      const r = cliWithPreload(preload, ["--dir", backups, "--keep", "1"]);
+      expect(r.status, r.stderr).toBe(0);
+      const created = OK_LINE.exec(r.stdout)![1];
+      const lines = r.stderr.split("\n").filter(Boolean);
+      expect(lines).toHaveLength(3);
+      expect(lines).toContain(`full-backup: deleted old backup ${old[1]}`);
+      expect(lines).toContain(`full-backup: deleted old backup ${old[2]}`);
+      expect(lines.find((l) => l.startsWith("WARNING: "))).toMatch(new RegExp(`${old[0].replace(/\./g, "\\.")}.*EACCES`));
+      expect(backupFiles()).toEqual([old[0], created]);
+    });
+
+    it.each(["0", "-1", "1.5", "seven", "2e3", "1000000"])("--keep %s is refused before any work: exit 1, nothing created or deleted, stdin not even needed, the value not echoed", (value) => {
+      const old = seed(1);
+      const r = cli(["--dir", backups, "--keep", value], "");
+      expect(r.status).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toMatch(/^full-backup: --keep needs a whole number/);
+      if (value !== "0" && value !== "-1") expect(r.stderr).not.toContain(value);
+      expect(fs.readdirSync(backups)).toEqual(old);
+    });
+
+    it("--keep without a value, and --keep together with --verify, are refused", () => {
+      const old = seed(1);
+      const bare = cli(["--dir", backups, "--keep"]);
+      expect(bare.status).toBe(1);
+      expect(bare.stderr).toMatch(/--keep needs a value/);
+      const both = cli(["--dir", backups, "--keep", "1", "--verify", old[0]]);
+      expect(both.status).toBe(1);
+      expect(both.stderr).toMatch(/--keep cannot be used with --verify/);
+      expect(fs.readdirSync(backups)).toEqual(old);
+    });
+  });
+
   it.runIf(!!process.env.RUN_SLOW_TESTS)(
     "RSS: a child process running only the backup engine over 2 GiB of uploads peaks under 300 MB on Linux (512 MB elsewhere)",
     async () => {

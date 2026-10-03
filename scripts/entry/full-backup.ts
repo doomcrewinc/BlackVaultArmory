@@ -2,7 +2,7 @@
  * The full-backup CLI (spec 3c §2). Bundled by scripts/build-scripts.mjs to
  * dist/scripts/full-backup.mjs and run inside the app container as uid 1001:
  *
- *   node dist/scripts/full-backup.mjs [--dir <folder>]            make a backup
+ *   node dist/scripts/full-backup.mjs [--dir <folder>] [--keep <n>]   make a backup
  *   node dist/scripts/full-backup.mjs [--dir <folder>] --verify <file>
  *
  * This is the contract backup.sh / backup.bat build on:
@@ -15,6 +15,16 @@
  * --verify    Stream-decrypts <file> and checks every file's sha256 against
  *             the manifest. Writes nothing. A bare file name is looked up in
  *             the backup folder; a path is used as given.
+ * --keep <n>  After THIS run's backup has been verified and published, delete
+ *             the oldest published backups beyond the newest <n>
+ *             (src/lib/backup/full-prune.ts has the exact rules). <n> is a
+ *             whole number, 1 or more; anything else is refused before any
+ *             work. It runs here, inside the container, because the host
+ *             user cannot list or delete the app user's 0600 files (ruling
+ *             R18). Without --keep nothing is ever deleted: backup.sh passes
+ *             its default of 7, the Settings button never passes it. If the
+ *             backup fails (a failed verify included) nothing is deleted and
+ *             the exit code is 1. Not allowed together with --verify.
  *
  * STDOUT      Exactly one line on success, nothing on failure:
  *               BLACKVAULT_FULL_BACKUP_OK file=<name> files=<n> bytes=<n> archive_bytes=<n> skipped=<n> unreadable=<n>
@@ -31,7 +41,9 @@
  *             `WARNING: <n> file(s) could not be read ... NOT in this backup.`
  *             `WARNING: <message>` too when the backup was written and
  *             verified but the folder could not be fsynced afterwards.
- *             The exit code is still 0.
+ *             With --keep: `full-backup: deleted old backup <name>` per
+ *             deleted file, and `WARNING: <message>` for one that could not
+ *             be deleted. The exit code is still 0.
  *
  * EXIT CODE   0 ok · 1 failed · 2 another backup is already running.
  *
@@ -40,6 +52,7 @@
  */
 import path from "node:path";
 import { DEFAULT_FULL_BACKUP_DIR, FullBackupAlreadyRunningError } from "@/lib/backup/full-lock";
+import { parseKeep, pruneFullBackups } from "@/lib/backup/full-prune";
 import { verifyFullBackup } from "@/lib/backup/full-verify";
 
 const EXIT_OK = 0;
@@ -51,23 +64,29 @@ class UsageError extends Error {}
 interface Args {
   dir: string;
   verify: string | null;
+  /** How many published backups to keep; null = never delete anything. */
+  keep: number | null;
 }
 
+const USAGE = "Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file>; the passphrase is read from standard input.";
+
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dir: DEFAULT_FULL_BACKUP_DIR, verify: null };
+  const args: Args = { dir: DEFAULT_FULL_BACKUP_DIR, verify: null, keep: null };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (flag === "--dir" || flag === "--verify") {
+    if (flag === "--dir" || flag === "--verify" || flag === "--keep") {
       const value = argv[++i];
       if (!value) throw new UsageError(`${flag} needs a value.`);
       if (flag === "--dir") args.dir = value;
-      else args.verify = value;
+      else if (flag === "--verify") args.verify = value;
+      else args.keep = parseKeep(value); // throws (without echoing the value) unless a whole number >= 1
     } else {
       // Deliberately does not echo the argument back: if someone puts a
       // passphrase on the command line by mistake, it must not be repeated.
-      throw new UsageError("unknown argument. Usage: full-backup [--dir <folder>] [--verify <file>]; the passphrase is read from standard input.");
+      throw new UsageError(`unknown argument. ${USAGE}`);
     }
   }
+  if (args.verify !== null && args.keep !== null) throw new UsageError(`--keep cannot be used with --verify. ${USAGE}`);
   return args;
 }
 
@@ -119,6 +138,19 @@ async function main(): Promise<number> {
     console.log(
       `BLACKVAULT_FULL_BACKUP_OK file=${result.file} files=${result.files} bytes=${result.bytes} archive_bytes=${result.archiveBytes} skipped=${result.skipped.length} unreadable=${unreadable}`,
     );
+    // --keep. Reached only when runFullBackup RESOLVED: this run's archive
+    // was verified and published as result.file. A failed backup or a failed
+    // verify threw above, so nothing is deleted and the exit code is 1.
+    // Nothing here can fail the run: the new backup exists and has verified.
+    if (args.keep !== null) {
+      try {
+        const pruned = await pruneFullBackups(dir, args.keep, result.file);
+        for (const name of pruned.deleted) console.error(`full-backup: deleted old backup ${name}`);
+        for (const warning of pruned.warnings) console.error(`WARNING: ${oneLine(warning)}`);
+      } catch (e) {
+        console.error(`WARNING: old backups were not cleaned up (${oneLine(e instanceof Error ? e.message : String(e))}).`);
+      }
+    }
     return EXIT_OK;
   } finally {
     await prisma.$disconnect().catch(() => undefined);
