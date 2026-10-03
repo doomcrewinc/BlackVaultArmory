@@ -177,13 +177,32 @@ describe("full-backup CLI (bundled, plain node)", () => {
   it("exits 2 when another backup holds the lock, and creates nothing", () => {
     const lock = path.join(backups, ".full-backup.lock");
     // This test process: alive for as long as the child runs.
-    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: "holder" }));
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), hostname: os.hostname(), token: "holder" }));
     const r = cli(["--dir", backups]);
     expect(r.status).toBe(2);
     expect(r.stdout).toBe("");
     expect(r.stderr).toMatch(/^full-backup: Another full backup is already running/);
     expect(fs.readdirSync(backups)).toEqual([".full-backup.lock"]);
     expect(JSON.parse(fs.readFileSync(lock, "utf8")).token).toBe("holder");
+  });
+
+  it("R10: a lock from ANOTHER host with a fresh heartbeat → exit 2; once its heartbeat is over 5 minutes old it is reclaimed and the backup runs", () => {
+    const lock = path.join(backups, ".full-backup.lock");
+    // pid 1 exists in every container and on this machine: a pid check alone would call this live forever.
+    fs.writeFileSync(lock, JSON.stringify({ pid: 1, startedAt: new Date().toISOString(), hostname: "another-container", token: "theirs" }));
+    const blocked = cli(["--dir", backups]);
+    expect(blocked.status).toBe(2);
+    expect(blocked.stderr).toMatch(/already running \(pid 1 on another-container/);
+
+    const old = new Date(Date.now() - 6 * 60_000);
+    fs.utimesSync(lock, old, old);
+    const started = Date.now();
+    const ok = cli(["--dir", backups]);
+    expect(ok.status).toBe(0);
+    expect(OK_LINE.test(ok.stdout)).toBe(true);
+    expect(fs.readdirSync(backups)).toHaveLength(1); // the .bvb only: lock and reclaim guard are gone
+    // The 30 s heartbeat timer did not keep the process alive.
+    expect(Date.now() - started).toBeLessThan(15_000);
   });
 
   it("a missing backup folder: exit 1 with a message that names the folder", () => {

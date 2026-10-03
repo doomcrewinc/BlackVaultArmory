@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream";
 
@@ -383,7 +384,7 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
 
   it("a lock held by another live process blocks the run and creates nothing", async () => {
     const lock = path.join(backups, FULL_BACKUP_LOCK_NAME);
-    writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString(), token: "other" }));
+    writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString(), hostname: os.hostname(), token: "other" }));
     await expect(run()).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
     expect(backupFolder()).toEqual([FULL_BACKUP_LOCK_NAME]);
     expect(await events()).toHaveLength(0);
@@ -391,7 +392,7 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
 
   it("a stale lock with a dead pid is reclaimed, and a leftover .partial from the crashed run is removed", async () => {
     await seedUploads();
-    writeFileSync(path.join(backups, FULL_BACKUP_LOCK_NAME), JSON.stringify({ pid: deadPid(), startedAt: "2026-01-01T00:00:00.000Z", token: "x" }));
+    writeFileSync(path.join(backups, FULL_BACKUP_LOCK_NAME), JSON.stringify({ pid: deadPid(), startedAt: "2026-01-01T00:00:00.000Z", hostname: os.hostname(), token: "x" }));
     writeFileSync(path.join(backups, "blackvault-full-20260101-000000.bvb.partial"), "half a backup");
     const result = await run();
     expect(backupFolder()).toEqual([result.file]);
