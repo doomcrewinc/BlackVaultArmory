@@ -330,6 +330,12 @@ beforeEach(() => {
     `#!/bin/bash\nif [ -n "\${BV_STUB_DATE:-}" ] && [ "$*" = "-u +%Y%m%d-%H%M%S" ]; then echo "$BV_STUB_DATE"; else PATH=/bin:/usr/bin exec date "$@"; fi\n`,
     { mode: 0o755 },
   );
+  // `sync`, recorded instead of run: what was on disk when it was called, and whether the restore program had been started.
+  fs.writeFileSync(
+    path.join(bin, "sync"),
+    `#!/bin/bash\n{ echo "sync $*"; ls backups/restore-*-RECOVERY.txt 2>/dev/null; echo "restore-started=$(grep -c full-restore.mjs "${rec}/calls")"; } >> "${rec}/sync"\n[ "\${BV_STUB_SYNC_FAIL:-}" = 1 ] && exit 1\nexit 0\n`,
+    { mode: 0o755 },
+  );
   // `uname`, so that a test can choose the system db-snapshot.sh believes it runs on (BV_STUB_UNAME).
   fs.writeFileSync(path.join(bin, "uname"), `#!/bin/bash\nif [ -n "\${BV_STUB_UNAME:-}" ] && [ "$*" = "-s" ]; then echo "$BV_STUB_UNAME"; else PATH=/bin:/usr/bin exec uname "$@"; fi\n`, { mode: 0o755 });
 });
@@ -690,6 +696,40 @@ describe.skipIf(isWindows)("restore.sh", () => {
       // …and, for the two other states, the uploads line by itself.
       expect(printedCommands(during).map((c) => (c.includes("psql") ? "chain" : modesOf(c)))).toEqual(["state", "chain", "uploads", "rm"]);
       expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault WITH (FORCE)' -c 'ALTER DATABASE blackvault_rollback RENAME TO blackvault'`);
+    });
+
+    it("is flushed to disk (the file and its folder) after it is written and BEFORE the restore program starts", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code, r.stderr).toBe(0);
+      // One `sync`, with no arguments (the form every system has), with the file already there and the restore not yet started.
+      expect(lines(read("sync"))).toEqual(["sync ", `backups/restore-${stampOf()}-RECOVERY.txt`, "restore-started=0"]);
+      expect(r.stderr).not.toContain("WARNING: 'sync' failed");
+      // On the script: the flush follows the write directly, before the text is shown and before the restore's trap and program.
+      const sh = lines(fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8")).filter((l) => !l.trimStart().startsWith("#"));
+      const write = sh.indexOf('if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then');
+      const flush = sh.findIndex((l) => l.startsWith("sync || "));
+      expect(write).toBeGreaterThan(0);
+      expect(sh.slice(write, flush)).toEqual([
+        'if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then',
+        "  trap - INT TERM HUP",
+        '  PASSPHRASE=""',
+        '  rm -f "$RECOVERY_FILE"',
+        '  start_app || echo "WARNING: BlackVault did not start again; start it by hand: $COMPOSE up -d" >&2',
+        '  die "could not write the recovery file $RECOVERY_FILE, so the restore did not start. Nothing was changed."',
+        "fi",
+      ]);
+      expect(flush).toBeLessThan(sh.indexOf("trap interrupted INT TERM HUP"));
+      expect(flush).toBeLessThan(sh.findIndex((l) => l.includes("dist/scripts/full-restore.mjs")));
+      expect(sh.filter((l) => /^\s*sync\b/.test(l))).toHaveLength(1);
+    });
+
+    it("the flush fails: one WARNING, and the restore goes on (the file was written; only its durability is in doubt)", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_SYNC_FAIL: "1" } });
+      expect(r.code, r.stderr).toBe(0);
+      expect(lines(r.stderr).filter((l) => l.includes("'sync' failed"))).toEqual([
+        `WARNING: 'sync' failed, so backups/restore-${stampOf()}-RECOVERY.txt may not be on the disk yet. After a power cut during the restore it could be missing: the snapshot it names would still be in backups/.`,
+      ]);
+      expect(steps().some((c) => RESTORE.test(c))).toBe(true);
     });
 
     it("the recovery file cannot be written: the restore does not start; BlackVault is started again; nothing changed", () => {

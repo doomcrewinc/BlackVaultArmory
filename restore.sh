@@ -43,8 +43,8 @@
 # rollback itself fails, BlackVault is NOT started.
 #
 # THE RECOVERY FILE. Before step 4 this script prints, and writes to
-# backups/restore-<time>-RECOVERY.txt, where the snapshot is and the exact
-# commands that put it back by hand. If this script dies (the terminal
+# backups/restore-<time>-RECOVERY.txt (and flushes to disk with `sync`),
+# where the snapshot is and the exact commands that put it back by hand. If this script dies (the terminal
 # closes, the machine restarts), that file is what tells you the install may
 # be half restored and how to undo it. It is deleted when the restore
 # succeeds or the automatic rollback has worked; while one exists, this
@@ -493,6 +493,12 @@ if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then
   start_app || echo "WARNING: BlackVault did not start again; start it by hand: $COMPOSE up -d" >&2
   die "could not write the recovery file $RECOVERY_FILE, so the restore did not start. Nothing was changed."
 fi
+# The recovery file has to survive a power cut during the restore: it is all
+# that says the install may be half restored. bash cannot fsync one file, and
+# nothing beyond the standard tools is assumed here (Linux, macOS), so this
+# is the plain `sync` command: it writes out everything that is waiting,
+# which includes this file, its folder and the snapshot just taken.
+sync || echo "WARNING: 'sync' failed, so $RECOVERY_FILE may not be on the disk yet. After a power cut during the restore it could be missing: the snapshot it names would still be in backups/." >&2
 {
   echo ""
   echo "If this script is interrupted from here on, the install may be half restored."
