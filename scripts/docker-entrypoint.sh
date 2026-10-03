@@ -71,8 +71,8 @@ fi
 # (uid 1001), mode 0700, before the drop to that user.
 #
 # Nothing in this block may stop the container from starting: backups are not
-# a reason to refuse startup. Every step is the condition of an `if`, so
-# `set -e` never sees a failure here.
+# a reason to refuse startup. Every step is the condition of an `if` or the
+# left side of `||`, so `set -e` never sees a failure here.
 #
 # On a NAS mount (NFS with root squash, SMB) chown or chmod is refused. That
 # is fine as long as the app user can write there anyway, so that is TESTED,
@@ -119,6 +119,35 @@ if [ "$backups_ok" = 1 ]; then
       *) why="" ;;
     esac
     echo "[entrypoint] WARNING: the backup folder $BACKUPS is not writable by the app (uid 1001)$why. Full backups will fail until the folder mounted there (BLACKVAULT_BACKUP_DIR, default <DATA_DIR>/backups) is writable by uid 1001. BlackVault starts anyway." >&2
+  fi
+
+  # Is anything mounted there? Without a mount the folder is part of the
+  # container's own filesystem, and every backup in it goes when the
+  # container is recreated (an update does that). docker-compose.yml always
+  # mounts it; a plain `docker run` without -v does not.
+  #
+  # Read from the kernel's mount table, /proc/self/mountinfo, whose fifth
+  # field is the mount point: a bind mount, a named volume and a tmpfs are
+  # each a line of their own there. Comparing device numbers (`mountpoint`,
+  # `stat -c %d`) is not used: a bind mount from the filesystem the
+  # container's own files are on has the same device number as its parent.
+  # A mount over a parent folder (/app) counts too: what is written under it
+  # is kept. The answer is trusted only when the table also lists the root,
+  # which every mount table does: an unreadable or unrecognised table, or an
+  # awk that is missing or fails, gives no answer, and then nothing is said.
+  MOUNTINFO=/proc/self/mountinfo
+  mounted=""
+  if [ -r "$MOUNTINFO" ]; then
+    mounted=$(awk -v dir="$BACKUPS" '
+      $5 == "/" { root = 1; next }
+      index(dir "/", $5 "/") == 1 { found = 1 }
+      END { if (!root) print "unknown"; else if (found) print "yes"; else print "no" }
+    ' "$MOUNTINFO" 2>/dev/null) || mounted=""
+  fi
+  if [ "$mounted" = "no" ]; then
+    # shellcheck disable=SC2016 # printed as it is written in docker-compose.yml, not expanded here
+    compose_line='- ${BLACKVAULT_BACKUP_DIR:-${DATA_DIR:-./data}/backups}:'"$BACKUPS"
+    echo "[entrypoint] WARNING: no folder is mounted at $BACKUPS, so full backups written there are lost when the container is recreated. Mount a folder there: docker-compose.yml does it with the line \"$compose_line\" (set BLACKVAULT_BACKUP_DIR in .env to choose the folder); with docker run, add -v <folder>:$BACKUPS. BlackVault starts anyway." >&2
   fi
 fi
 

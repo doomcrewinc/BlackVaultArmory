@@ -3,8 +3,10 @@
  * Review Focus 1: a NAS mount where chown/chmod is refused).
  *
  * The real script is run under `sh`, on the host, with two things replaced:
- * - its three fixed paths (/app/backups, /run/blackvault-secrets,
- *   /run/secrets) point into a scratch folder (a text substitution on a COPY);
+ * - its fixed paths (/app/backups, /run/blackvault-secrets, /run/secrets,
+ *   /proc/self/mountinfo) point into a scratch folder (a text substitution on
+ *   a COPY). The scratch mountinfo does not exist unless a test writes it, so
+ *   the mount check finds nothing to read and says nothing;
  * - `id`, `chown`, `chmod` and `su-exec` are stubs first on PATH: `id -u`
  *   says 0, chown/chmod can be told to refuse the backup folder (what a
  *   network share does), and `su-exec <user> cmd` just runs cmd — as the
@@ -41,7 +43,8 @@ beforeEach(() => {
     .readFileSync(path.join(ROOT, "scripts/docker-entrypoint.sh"), "utf8")
     .replaceAll("/app/backups", backups)
     .replaceAll("/run/blackvault-secrets", path.join(tmp, "src-secrets"))
-    .replaceAll("/run/secrets", path.join(tmp, "dst-secrets"));
+    .replaceAll("/run/secrets", path.join(tmp, "dst-secrets"))
+    .replaceAll("/proc/self/mountinfo", path.join(tmp, "mountinfo"));
   expect(text).toContain(`BACKUPS=${backups}`);
   script = path.join(tmp, "entrypoint.sh");
   fs.writeFileSync(script, text);
@@ -168,6 +171,74 @@ describe.skipIf(skip)("docker-entrypoint.sh: the /app/backups step", () => {
     expect(bad.code).toBe(1);
     expect(bad.stdout).toBe("");
     expect(bad.stderr).toMatch(/Refusing to start: secrets\/blackvault_encryption_key is a symbolic link/);
+  });
+
+  describe("is a folder mounted at /app/backups?", () => {
+    // One line of /proc/self/mountinfo: field 5 is the mount point.
+    const mountLine = (id: number, mountPoint: string, source = "/dev/sda1") =>
+      `${id} 1 8:1 / ${mountPoint} rw,relatime - ext4 ${source} rw\n`;
+    const ROOT_LINE = mountLine(100, "/", "overlay");
+    const mountinfo = (text: string) => fs.writeFileSync(path.join(tmp, "mountinfo"), text);
+    const NOT_MOUNTED = /^\[entrypoint\] WARNING: no folder is mounted at .*app-backups, so full backups written there are lost when the container is recreated\..*BLACKVAULT_BACKUP_DIR.*:\/.*app-backups.*BlackVault starts anyway\.$/;
+
+    it("not a mount point → ONE warning that names BLACKVAULT_BACKUP_DIR and the compose line, and the app starts", () => {
+      mountinfo(ROOT_LINE + mountLine(101, "/proc") + mountLine(102, `${backups}-other`) + mountLine(103, path.join(backups, "below")));
+      const r = run();
+      started(r);
+      const warnings = r.stderr.split("\n").filter(Boolean);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(NOT_MOUNTED);
+      expect(warnings[0]).toContain("${BLACKVAULT_BACKUP_DIR:-${DATA_DIR:-./data}/backups}:");
+    });
+
+    it("a mount point (a bind mount or a named volume) → no warning", () => {
+      mountinfo(ROOT_LINE + mountLine(101, backups));
+      const r = run();
+      started(r);
+      expect(r.stderr).toBe("");
+    });
+
+    it("a folder mounted over a parent of it → no warning: what is written there is kept too", () => {
+      mountinfo(ROOT_LINE + mountLine(101, path.dirname(backups)));
+      const r = run();
+      started(r);
+      expect(r.stderr).toBe("");
+    });
+
+    it("the mount table cannot be read (no /proc) → no warning, and the app starts", () => {
+      const r = run();
+      started(r);
+      expect(r.stderr).toBe("");
+    });
+
+    it("the mount table does not even list the root (not the format this reads) → no warning, and the app starts", () => {
+      mountinfo("something else entirely\n");
+      const r = run();
+      started(r);
+      expect(r.stderr).toBe("");
+    });
+
+    it.each([
+      ["fails", 'echo "awk: boom" >&2; exit 2'],
+      ["is missing", "exit 127"],
+      ["prints nonsense", "echo maybe"],
+    ])("the detection command %s → no crash, no warning, and the app starts", (_what, body) => {
+      mountinfo(ROOT_LINE);
+      stub("awk", body);
+      const r = run();
+      started(r);
+      expect(r.stderr).toBe("");
+    });
+
+    it("the folder could not be created → only that warning, not this one too", () => {
+      mountinfo(ROOT_LINE);
+      fs.writeFileSync(backups, "a file where the folder should be");
+      const r = run();
+      started(r);
+      const warnings = r.stderr.split("\n").filter(Boolean);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/could not create the backup folder/);
+    });
   });
 
   it("started as a non-root user: nothing is touched, the command just runs", () => {
