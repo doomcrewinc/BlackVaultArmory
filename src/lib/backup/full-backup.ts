@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fsp } from "node:fs";
-import type { Dirent } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -10,6 +9,7 @@ import { createBackupSealer } from "@/lib/encryption/core.mjs";
 import { getFieldKeys } from "@/lib/encryption/keys";
 import { snapshotStamp } from "@/lib/encryption/pre-encryption-snapshot";
 import { FileAtRestError, readDecryptedFile, uploadsRoot } from "@/lib/files/storage";
+import { listUploads } from "@/lib/files/upload-walk";
 import { APP_VERSION } from "@/lib/version";
 import { EntryNameSet, printableName } from "./entry-names";
 import { acquireFullBackupLock, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
@@ -59,12 +59,6 @@ export { DEFAULT_FULL_BACKUP_DIR };
 export const FULL_BACKUP_PREFIX = "blackvault-full-";
 export const FULL_BACKUP_SUFFIX = ".bvb";
 const PARTIAL_SUFFIX = ".partial";
-
-/** The two folders under the uploads root that hold user files, and where each goes in the archive. */
-const UPLOAD_FOLDERS = [
-  { dir: "images", archive: "files/images" },
-  { dir: "documents", archive: "files/documents" },
-] as const;
 
 /** Directory-fsync failures some platforms/filesystems raise instead of succeeding (same list as storage.ts). */
 const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
@@ -144,12 +138,6 @@ export interface FullBackupSkipped extends ManifestSkippedEntry {
   kind: "vanished" | "unreadable";
 }
 
-interface UploadEntry {
-  abs: string;
-  archivePath: string;
-  diskSize: number;
-}
-
 const codeOf = (e: unknown): string | undefined => (e as NodeJS.ErrnoException | null)?.code;
 
 /**
@@ -175,51 +163,6 @@ function classifyReadFailure(e: unknown): { kind: FullBackupSkipped["kind"]; rea
     return { kind: "unreadable", reason: `unreadable: could not be read (${fsError.code})` };
   }
   return null;
-}
-
-/** `*.tmp` (an interrupted writeAtomic), `*.rot` (key rotation staging) and hidden entries are never backed up. */
-function isExcludedName(name: string): boolean {
-  return name.startsWith(".") || name.endsWith(".tmp") || name.endsWith(".rot");
-}
-
-/**
- * Every regular file under `<root>/images` and `<root>/documents`, in a
- * stable order. Hidden entries (which covers `.pre-encryption-*`,
- * `.restore-*` and `.pre-restore-*` folders), `*.tmp`, `*.rot` and symlinks —
- * to files or to folders — are left out; a symlink is never followed. A
- * folder that is missing (no uploads yet) or disappears mid-walk is empty.
- */
-async function listUploads(root: string): Promise<UploadEntry[]> {
-  const found: UploadEntry[] = [];
-  async function visit(dir: string, archiveDir: string): Promise<void> {
-    let entries: Dirent[];
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch (e) {
-      if (codeOf(e) === "ENOENT" || codeOf(e) === "ENOTDIR") return;
-      throw e;
-    }
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    for (const e of entries) {
-      if (isExcludedName(e.name) || e.isSymbolicLink()) continue;
-      const abs = path.join(dir, e.name);
-      const archivePath = `${archiveDir}/${e.name}`;
-      if (e.isDirectory()) await visit(abs, archivePath);
-      else if (e.isFile()) {
-        // A file gone between readdir and lstat stays listed: reading it
-        // below is what records it as skipped.
-        const diskSize = await fsp.lstat(abs).then((s) => s.size, () => 0);
-        found.push({ abs, archivePath, diskSize });
-      }
-    }
-  }
-  for (const { dir, archive } of UPLOAD_FOLDERS) {
-    const top = path.join(root, dir);
-    // The top folder itself must be a real folder, not a link to one.
-    const stat = await fsp.lstat(top).catch(() => null);
-    if (stat?.isDirectory()) await visit(top, archive);
-  }
-  return found;
 }
 
 async function assertBackupDirWritable(dir: string): Promise<void> {
