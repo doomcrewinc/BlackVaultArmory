@@ -2193,10 +2193,11 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_STDIN_FILE" = (Join-Path $Dir "__stdin-verify.bin"); "BV_STUB_RESTORE_STDIN_FILE" = (Join-Path $Dir "__stdin-restore.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt")
     "BV_STUB_BACKUP_EXIT" = $null; "BV_STUB_BACKUP_STDOUT" = $null; "BV_STUB_BACKUP_STDERR" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null
     "BV_STUB_RESTORE_EXIT" = $null; "BV_STUB_RESTORE_STDOUT" = $null; "BV_STUB_RESTORE_STDERR" = $null; "BV_STUB_ROLLBACK_EXIT" = $null
+    "BV_STUB_RESTORE_MARKER_DIR" = $null; "BV_STUB_RESTORE_RECOVERY_COPY" = (Join-Path $Dir "__recovery-during.txt"); "DATA_DIR" = $null
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
-  Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"] -ErrorAction SilentlyContinue
+  Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
   return Invoke-Bat -Dir $Dir -Script "restore.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds
 }
 
@@ -2210,6 +2211,17 @@ function Get-StepIndex([string[]]$Steps, [string]$Pattern) {
   for ($i = 0; $i -lt $Steps.Count; $i++) { if ($Steps[$i] -match $Pattern) { return $i } }
   return -1
 }
+
+# The restore-<time>-RECOVERY.txt files in backups\ (ruling R25).
+function Get-RecoveryFiles([string]$Dir) {
+  return @(Get-Backups $Dir | Where-Object { $_ -match '^restore-\d{8}-\d{6}-RECOVERY\.txt$' })
+}
+
+# The HOST uploads folder of a restore sandbox: where the stub leaves the
+# "database step started" marker (ruling R24) when a scenario asks for it.
+function Get-UploadsDir([string]$Dir) { return (Join-Path $Dir "data\uploads") }
+
+$RestoreCallPattern = '^compose run --rm -T --name blackvault-restore-(\d{8}-\d{6}) blackvault node dist/scripts/full-restore\.mjs --stamp \1 ' + [regex]::Escape($RestoreName) + '$'
 
 # A file's bytes as base64, or "" when the file does not exist (never $null).
 function Get-FileBase64([string]$Path) {
@@ -2229,10 +2241,15 @@ Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 $steps = @(Get-RestoreSteps $r)
 $iVerify = Get-StepIndex $steps ([regex]::Escape($RestoreVerify) + '$')
 $iStop = Get-StepIndex $steps '^compose stop blackvault$'
-$iRestore = Get-StepIndex $steps ('^compose run --rm -T blackvault node dist/scripts/full-restore\.mjs --stamp \d{8}-\d{6} ' + [regex]::Escape($RestoreName) + '$')
+$iRestore = Get-StepIndex $steps $RestoreCallPattern
 $iUp = Get-StepIndex $steps '^compose up -d$'
+$during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::ReadAllText((Join-Path $d "__recovery-during.txt")) } else { "" }
+Assert ($during -match "BlackVault restore \d{8}-\d{6}: RECOVERY") "R25: the recovery file existed WHILE the restore ran"
+Assert ($during -match "database: backups\\blackvault-\d{8}-\d{6}\.db" -and $during -match "docker stop blackvault-restore-\d{8}-\d{6}" -and $during -match "/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}") "R25: it names the snapshot, the container to stop, and the rollback commands"
+Assert ($r.Output.Contains("How to put it back is in")) "R25: it was printed before the restore started"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: it is gone after a successful restore"
 Assert ($iVerify -eq 0) "the first call is the check: '$RestoreVerify' (index $iVerify)"
-Assert ($iStop -gt $iVerify -and $iRestore -gt $iStop -and $iUp -gt $iRestore) "order: check ($iVerify), stop ($iStop), restore ($iRestore), start ($iUp)"
+Assert ($iStop -gt $iVerify -and $iRestore -gt $iStop -and $iUp -gt $iRestore) "order: check ($iVerify), stop ($iStop), restore in a NAMED container ($iRestore), start ($iUp)"
 Assert (@($steps | Where-Object { $_ -match "full-restore\.mjs|full-backup\.mjs" } | Where-Object { $_ -match "--user|--no-deps" }).Count -eq 0) "the two program calls have no --user and no --no-deps"
 Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore" }).Count -eq 0) "no rollback container was started"
 $snaps = @(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' })
@@ -2254,10 +2271,10 @@ Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario RS2
-Write-Scenario "restore.bat - the restore fails (SQLite): rollback database, rollback uploads, start - in that order; exit 1; the last line says nothing is changed"
+Write-Scenario "restore.bat - the restore fails AFTER reaching the database (marker present, SQLite): uploads, database, clear the marker, start - in that order; exit 1; the last line says nothing is changed"
 $d = New-RestoreSandbox "restore-fails"
 $pf = New-PassFile $d "$BackupPass`n"
-$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed." }
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed."; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 $steps = @(Get-RestoreSteps $r)
 $iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp \d{8}-\d{6} '
@@ -2268,9 +2285,12 @@ $iDb = Get-StepIndex $steps ('--user 0:0 --entrypoint /bin/sh .*backups:/bv-back
 $iUploads = Get-StepIndex $steps ('blackvault /bv-snapshot-restore\.sh uploads /app/uploads ' + [regex]::Escape($stamp) + ' /bv-backups/' + [regex]::Escape("$upSnap") + '\s*$')
 $iUp = Get-StepIndex $steps '^compose up -d$'
 Assert ($iRestore -ge 0 -and $stamp) "the restore program was started with a stamp ($stamp)"
-Assert ($iDb -gt $iRestore) "then the database is put back from backups\$dbSnap, as root, backups mounted read-only (index $iDb)"
-Assert ($iUploads -gt $iDb) "then the uploads are put back from backups\$upSnap with the same stamp (index $iUploads)"
-Assert ($iUp -gt $iUploads) "then BlackVault is started (index $iUp)"
+$iClear = Get-StepIndex $steps ('blackvault /bv-snapshot-restore\.sh clear-marker /app/uploads ' + [regex]::Escape($stamp) + '\s*$')
+Assert ($iUploads -gt $iRestore) "first the uploads are put back from backups\$upSnap with the same stamp (index $iUploads)"
+Assert ($iDb -gt $iUploads) "then the database is put back from backups\$dbSnap, as root, backups mounted read-only (index $iDb)"
+Assert ($iClear -gt $iDb) "then the marker is cleared (index $iClear)"
+Assert ($iUp -gt $iClear) "then BlackVault is started (index $iUp)"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "R25: the recovery file is gone after a successful rollback"
 Assert ($r.Output -match "ERROR: the restore failed \(the reason is above\)\. The database and the uploads were put back from the snapshot taken before it \(backups\\blackvault-\d{8}-\d{6}\.db\), so nothing is changed\. BlackVault was started again\.") "the last line says it was rolled back and nothing is changed"
 Assert ($r.Output.Contains("full-restore: [stub] failed.")) "the program's own reason is shown"
 Show-EvidenceIfFailed $r
@@ -2279,12 +2299,14 @@ Show-EvidenceIfFailed $r
 Write-Scenario "restore.bat - the rollback itself fails: BlackVault is NOT started; the snapshot and the commands to put it back are printed"
 $d = New-RestoreSandbox "restore-rollback-fails"
 $pf = New-PassFile $d "$BackupPass`n"
-$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "137"; "BV_STUB_ROLLBACK_EXIT" = "1" }
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "137"; "BV_STUB_ROLLBACK_EXIT" = "1"; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 $steps = @(Get-RestoreSteps $r)
 Assert ((Get-StepIndex $steps '^compose up -d$') -eq -1) "BlackVault was NOT started"
 Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore\.sh (sqlite|uploads) " }).Count -eq 2) "both rollback steps were attempted"
-Assert ($r.Output.Contains("ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started.")) "says the rollback failed and the app was not started"
+Assert ($r.Output.Contains("ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started. What to do is in")) "says the rollback failed, the app was not started, and where the recovery file is"
+Assert (@(Get-RecoveryFiles $d).Count -eq 1) "R25: the recovery file stays after a failed rollback"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh clear-marker') -eq -1) "the marker is not cleared after a failed rollback"
 Assert ($r.Output -match "database: backups\\blackvault-\d{8}-\d{6}\.db") "names the database snapshot"
 Assert ($r.Output -match "uploads:\s+backups\\uploads-\d{8}-\d{6}") "names the uploads snapshot"
 Assert ($r.Output -match "docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh .* /bv-snapshot-restore\.sh sqlite /bv-backups/blackvault-\d{8}-\d{6}\.db /app/data/vault\.db") "prints the command that puts the database back"
@@ -2350,10 +2372,10 @@ foreach ($badName in @("a&b.bvb", ";x.bvb", "a b.bvb")) {
 }
 
 # ---------------------------------------------------------------- scenario RS7
-Write-Scenario "restore.bat - PostgreSQL, the restore fails: the dump is loaded into a NEW database, swapped in, then the uploads, then start"
+Write-Scenario "restore.bat - PostgreSQL, the restore fails after reaching the database (marker present): the uploads, then the dump is loaded into a NEW database and swapped in, then start"
 $d = New-RestoreSandbox "restore-postgres" -Postgres
 $pf = New-PassFile $d "$BackupPass`n"
-$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1" }
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 $steps = @(Get-RestoreSteps $r)
 $psql = 'compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault'
@@ -2364,8 +2386,9 @@ $iLoad = Get-StepIndex $steps ('^' + [regex]::Escape("$psql -d blackvault_rollba
 $iSwap = Get-StepIndex $steps ('^' + [regex]::Escape("$psql -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault") + '$')
 $iUploads = Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-'
 Assert ($iDump -ge 0 -and $iDump -lt $iRestore) "the snapshot (pg_dump) was taken before the restore (dump $iDump, restore $iRestore)"
-Assert ($iCreate -gt $iRestore -and $iLoad -gt $iCreate -and $iSwap -gt $iLoad) "new database ($iCreate), load in one transaction ($iLoad), swap ($iSwap)"
-Assert ($iUploads -gt $iSwap) "then the uploads (index $iUploads)"
+Assert ($iUploads -gt $iRestore) "first the uploads (index $iUploads)"
+Assert ($iCreate -gt $iUploads -and $iLoad -gt $iCreate -and $iSwap -gt $iLoad) "then: new database ($iCreate), load in one transaction ($iLoad), swap ($iSwap)"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh clear-marker') -gt $iSwap) "then the marker is cleared"
 Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh sqlite') -eq -1) "no SQLite file copy on PostgreSQL"
 Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last (last call: $($steps | Select-Object -Last 1))"
 Show-EvidenceIfFailed $r
@@ -2393,6 +2416,51 @@ Assert ((Get-StepIndex $steps 'full-restore\.mjs') -eq -1) "snapshot fails: the 
 Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "snapshot fails: BlackVault was started again"
 Assert ($r.Output.Contains("ERROR: the snapshot before the restore failed (see above), so the restore did not start. Nothing was changed.")) "snapshot fails: says nothing was changed"
 Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "snapshot fails: the database file is untouched"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RS9
+Write-Scenario "restore.bat - R24: the restore fails BEFORE reaching the database (no marker, SQLite): only the uploads are checked; NO database rollback command; the database file is untouched"
+$d = New-RestoreSandbox "restore-fails-early"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] refused. Nothing was changed." }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads /app/uploads ') -gt (Get-StepIndex $steps $RestoreCallPattern)) "the uploads are checked against the snapshot"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh (sqlite|clear-marker)') -eq -1 -and (Get-StepIndex $steps 'psql') -eq -1) "no database rollback command was issued"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started again"
+Assert ($r.Output.Contains("ERROR: the restore failed (the reason is above). It had not reached the database, which was not touched; the uploads were checked against the snapshot. Nothing is changed. BlackVault was started again.")) "the last line says the database was not touched"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "the recovery file is gone"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS10
+Write-Scenario "restore.bat - R25: a recovery file left by an earlier restore blocks a new one before docker is called; DATA_DIR set in the console and different from .env is refused too"
+$d = New-RestoreSandbox "restore-blocked"
+$pf = New-PassFile $d "$BackupPass`n"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "backups") | Out-Null
+Set-Content -Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt") -Value "left by an earlier restore" -Encoding Ascii
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{} 60
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: an earlier restore did not finish cleanly: a restore-\[time\]-RECOVERY\.txt file is still in .*\\backups\. Read it") "says an earlier restore did not finish, and to read the file"
+Assert (@(Get-RestoreSteps $r).Count -eq 0) "docker was not asked to do anything"
+Assert (Test-Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt")) "the earlier file is left alone"
+Show-EvidenceIfFailed $r
+Remove-Item -Force (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt")
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "DATA_DIR" = "C:\somewhere\else" } 60
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: DATA_DIR is set in this console and is not the DATA_DIR in \.env") "a different DATA_DIR in the console is refused (exit $($r.ExitCode))"
+Assert (@(Get-RestoreSteps $r).Count -eq 0) "docker was not asked to do anything"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS11
+Write-Scenario "restore.bat - R24 on PostgreSQL: the restore fails before reaching the database (no marker): not one psql command"
+$d = New-RestoreSandbox "restore-postgres-early" -Postgres
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps 'psql') -eq -1) "no psql command: the database is never dropped"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh uploads ') -ge 0) "the uploads are checked"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started again"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report

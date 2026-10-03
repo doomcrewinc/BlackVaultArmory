@@ -526,9 +526,11 @@ describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the
     const unexpected = lines.filter((l) => !ALLOWED.some((re) => re.test(l)));
     expect(unexpected).toEqual([]);
     expect(lines.length).toBeGreaterThanOrEqual(15);
-    // Exactly one place sends it anywhere, and it is the shared one.
-    expect(lines.filter((l) => l.includes("|") && !l.includes("||"))).toEqual([`printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`]);
-    expect(codeOf("scripts/backup-common.sh")).toContain(`printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`);
+    // It is sent anywhere in exactly two places, both this one line and both in the shared file:
+    // bv_run_with_passphrase and its background twin bv_run_with_passphrase_waited (restore.sh's restore step).
+    const SEND = `printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`;
+    expect(lines.filter((l) => l.includes("|") && !l.includes("||"))).toEqual([SEND, SEND]);
+    expect(codeOf("scripts/backup-common.sh").filter((l) => l === SEND)).toHaveLength(2);
     // restore.sh and backup.sh only ever clear it (backup.sh also compares the two typed answers).
     expect(codeOf("restore.sh").filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l)).every((l) => l === 'PASSPHRASE=""')).toBe(true);
   });

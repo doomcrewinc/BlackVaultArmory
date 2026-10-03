@@ -18,9 +18,9 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS8) and by the static checks at the end of this file.
+ * (scenarios RS1–RS11) and by the static checks at the end of this file.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,7 +36,7 @@ const PASS = " restore tëst 'pass' \"phrase\" $HOME `id` \\n * ";
 const NAME = "blackvault-full-20261002-180405.bvb";
 const OK_LINE = `BLACKVAULT_FULL_RESTORE_OK file=${NAME} files=2 bytes=10 pre_restore=.pre-restore-20261003-000000`;
 const VERIFY = `compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify ${NAME}`;
-const RESTORE = /^compose run --rm -T blackvault node dist\/scripts\/full-restore\.mjs --stamp (\d{8}-\d{6}) blackvault-full-20261002-180405\.bvb$/;
+const RESTORE = /^compose run --rm -T --name blackvault-restore-(\d{8}-\d{6}) blackvault node dist\/scripts\/full-restore\.mjs --stamp \1 blackvault-full-20261002-180405\.bvb$/;
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
 let tmp: string;
@@ -52,7 +52,7 @@ printf '%s\\n' "$*" >> "${rec}/calls"
 env >> "${rec}/env"
 ps -Ao args >> "${rec}/ps" 2>/dev/null
 if [ -n "\${BV_STUB_FAIL_ON:-}" ]; then
-  case " $* " in *" $BV_STUB_FAIL_ON "*) echo "[stub] failing on purpose: $*" >&2; exit 1 ;; esac
+  case " $* " in *" $BV_STUB_FAIL_ON "*) [ "\${BV_STUB_FAIL_ON}" = "--single-transaction" ] && cat > /dev/null; echo "[stub] failing on purpose: $*" >&2; exit 1 ;; esac
 fi
 dd=$(sed -n 's/^DATA_DIR=//p' .env | tail -n 1); dd=\${dd:-./data}
 # Container paths → the scratch install.
@@ -62,12 +62,16 @@ case "$*" in
   "compose config --images blackvault") echo "blackvault-blackvault" ;;
   *"/bv-uploads-snapshot.sh /app/uploads /bv-backups "*)
     for a in "$@"; do name=$a; done
-    sh scripts/uploads-snapshot.sh "$dd/uploads" backups "$name"; exit $? ;;
+    sh scripts/uploads-snapshot.sh "$dd/uploads" backups "$name"; rc=$?
+    # After the snapshot: the host user can no longer create a file in backups/.
+    [ "\${BV_STUB_LOCK_BACKUPS:-}" = 1 ] && chmod 500 backups
+    exit $rc ;;
   *"/bv-snapshot-restore.sh "*)
-    [ "\${BV_STUB_ROLLBACK:-}" = fail ] && { echo "ERROR: could not restore from the snapshot: [stub] refused" >&2; exit 1; }
+    case " $* " in *" \${BV_STUB_ROLLBACK_FAIL:-none} "*) echo "ERROR: could not restore from the snapshot: [stub] refused" >&2; exit 1 ;; esac
     args=(); seen=0
     for a in "$@"; do
       if [ "$seen" = 1 ]; then args+=("$(map "$a")"); fi
+      chmod 755 "$dd/uploads" 2>/dev/null
       [ "$a" = "/bv-snapshot-restore.sh" ] && seen=1
     done
     sh scripts/snapshot-restore.sh "\${args[@]}"; exit $? ;;
@@ -78,22 +82,45 @@ case "$*" in
     exit "\${BV_STUB_VERIFY_EXIT:-0}" ;;
   *"dist/scripts/full-restore.mjs"*)
     cat > "${rec}/stdin-restore"
+    [ "\${BV_STUB_HIDE_UPLOADS:-}" = 1 ] && chmod 000 "$dd/uploads"
     stamp=""; prev=""; for a in "$@"; do [ "$prev" = "--stamp" ] && stamp=$a; prev=$a; done
+    # What is on disk WHILE the restore runs: the recovery file (ruling R25).
+    cat backups/restore-*-RECOVERY.txt > "${rec}/recovery-during" 2>/dev/null
+    marker() { mkdir -p "$dd/uploads/.restore-$stamp.db-started" && : > "$dd/uploads/.restore-$stamp.db-started/started"; }
+    swap_images() {
+      mkdir -p "$dd/uploads/.pre-restore-$stamp"
+      mv "$dd/uploads/images" "$dd/uploads/.pre-restore-$stamp/images"
+      mkdir -p "$dd/uploads/images"
+      printf 'restored' > "$dd/uploads/images/from-backup.jpg"
+    }
     case "\${BV_STUB_RESTORE:-ok}" in
       ok) echo "${OK_LINE}"; exit 0 ;;
-      refuse) echo "full-restore: [stub] refused. Nothing was changed." >&2; exit 1 ;;
+      # Refused while staging: the database step was never reached, so NO marker.
+      refuse)
+        mkdir -p "$dd/uploads/.restore-$stamp/images"; printf 'staged' > "$dd/uploads/.restore-$stamp/images/x.jpg"
+        echo "full-restore: [stub] refused. Nothing was changed." >&2; exit 1 ;;
+      # The database step started (marker), the transaction rolled back: nothing actually changed.
+      dbfail) marker; echo "full-restore: [stub] the database step failed." >&2; exit 1 ;;
       crash)
         # What a restore killed mid-way leaves behind.
-        printf 'REPLACED BY THE FAILED RESTORE' > "$dd/db/vault.db"
-        printf 'hot journal' > "$dd/db/vault.db-journal"
-        mkdir -p "$dd/uploads/.restore-$stamp/documents" "$dd/uploads/.pre-restore-$stamp"
+        marker
+        [ -f "$dd/db/vault.db" ] && printf 'REPLACED BY THE FAILED RESTORE' > "$dd/db/vault.db"
+        [ -f "$dd/db/vault.db" ] && printf 'hot journal' > "$dd/db/vault.db-journal"
+        mkdir -p "$dd/uploads/.restore-$stamp/documents"
         printf 'staged' > "$dd/uploads/.restore-$stamp/documents/from-backup.pdf"
-        mv "$dd/uploads/images" "$dd/uploads/.pre-restore-$stamp/images"
-        mkdir -p "$dd/uploads/images"
-        printf 'restored' > "$dd/uploads/images/from-backup.jpg"
+        swap_images
         printf 'damaged' > "$dd/uploads/documents/doc1.pdf"
         echo "full-restore: [stub] killed." >&2; exit 137 ;;
+      # Everything in place and the marker removed, but the exit status is lost (the container died on the way out).
+      complete)
+        swap_images
+        mv "$dd/uploads/documents" "$dd/uploads/.pre-restore-$stamp/documents"; mkdir -p "$dd/uploads/documents"
+        echo "${OK_LINE}"; exit 137 ;;
+      hang) echo $$ > "${rec}/restore.pid"; exec sleep 25 ;;
     esac ;;
+  "stop blackvault-restore-"*) [ -f "${rec}/restore.pid" ] && kill "$(cat "${rec}/restore.pid")" 2>/dev/null; exit 0 ;;
+  "ps -aq --filter name=^blackvault-restore-"*) [ "\${BV_STUB_CONTAINER_STUCK:-}" = 1 ] && echo "0123456789ab"; exit 0 ;;
+  "compose stop blackvault") [ -n "\${BV_STUB_STOP_SLEEP:-}" ] && { : > "${rec}/stopping"; sleep "$BV_STUB_STOP_SLEEP"; } ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
   "compose exec -T db psql"*) cat >> "${rec}/psql-stdin" ;;
 esac
@@ -241,14 +268,27 @@ afterEach(() => {
 });
 
 describe.skipIf(isWindows)("restore.sh", () => {
+  const ROLLBACK = () => `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups:ro -v ${app}/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro blackvault /bv-snapshot-restore.sh`;
+  const PSQL = "compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
+  const backupsDir = () => fs.readdirSync(path.join(app, "backups")).sort();
+  const dbSnapName = () => backupsDir().find((n) => /^blackvault-\d{8}-\d{6}\.(db|sql)$/.test(n))!;
+  const upSnapName = () => backupsDir().find((n) => n.startsWith("uploads-"))!;
+  const recoveryFiles = () => backupsDir().filter((n) => n.endsWith("-RECOVERY.txt"));
+  const stampOf = () => RESTORE.exec(steps().find((c) => RESTORE.test(c))!)![1];
+  /** The calls after the restore program's. */
+  const afterRestore = () => steps().slice(steps().findIndex((c) => RESTORE.test(c)) + 1);
+  const pgInstall = () => {
+    fs.rmSync(path.join(app, "data"), { recursive: true });
+    seedInstall("postgres");
+  };
+
   describe("the command sequence", () => {
     it("success (SQLite): verify → stop → snapshot → restore → start, in exactly that order; stdout is the restore program's one line", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
       expect(r.code, r.stderr).toBe(0);
       expect(r.stdout).toBe(`${OK_LINE}\n`);
       const s = steps();
-      const stamp = RESTORE.exec(s[6])?.[1];
-      expect(stamp, s.join("\n")).toBeDefined();
+      const stamp = stampOf();
       const snap = s[5].split(" ").at(-1)!;
       expect(s).toEqual([
         VERIFY,
@@ -258,17 +298,16 @@ describe.skipIf(isWindows)("restore.sh", () => {
         "compose config --images blackvault",
         "image inspect blackvault-blackvault",
         `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups -v ${app}/scripts/uploads-snapshot.sh:/bv-uploads-snapshot.sh:ro blackvault /bv-uploads-snapshot.sh /app/uploads /bv-backups ${snap}`,
-        `compose run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp ${stamp} ${NAME}`,
+        // The one-off restore container has a NAME (so an interrupted wrapper can stop it), and still no --user / --no-deps.
+        `compose run --rm -T --name blackvault-restore-${stamp} blackvault node dist/scripts/full-restore.mjs --stamp ${stamp} ${NAME}`,
         "compose up -d",
       ]);
-      // No --user / --no-deps on the two program calls: the entrypoint places the key as root; PostgreSQL must be up.
       expect(s[0]).not.toMatch(/--user|--no-deps/);
       expect(s[6]).not.toMatch(/--user|--no-deps/);
-      // The snapshot exists, the marker is gone, and the output names both.
-      const backups = fs.readdirSync(path.join(app, "backups")).sort();
-      expect(backups).toEqual([expect.stringMatching(/^blackvault-\d{8}-\d{6}\.db$/), snap]);
+      // The snapshot exists, the marker file of db-snapshot.sh is gone, the recovery file was removed, and the output names both snapshots.
+      expect(backupsDir()).toEqual([expect.stringMatching(/^blackvault-\d{8}-\d{6}\.db$/), snap]);
       expect(r.stderr).toContain(`.pre-restore-${stamp}/`);
-      expect(r.stderr).toContain(`backups/${backups[0]} and backups/${snap}`);
+      expect(r.stderr).toContain(`backups/${dbSnapName()} and backups/${snap}`);
     });
 
     it("the passphrase file's bytes reach BOTH programs on stdin unchanged, and the passphrase is in no argv, environment or process list", () => {
@@ -279,107 +318,255 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(fs.readFileSync(path.join(rec, "stdin-restore")).equals(bytes)).toBe(true);
       expectPassphraseOnlyOnStdin();
     });
+  });
 
-    it("a FAILING restore (SQLite): … → restore → rollback database → rollback uploads → start; exit 1; the install is byte-identical to before", () => {
+  describe("R24: the database is rolled back only when the restore had reached it (its marker exists)", () => {
+    it("SQLite, killed after the marker: uploads FIRST (staging goes, space is freed), then the database, then the marker, then start; byte-identical to before", () => {
       const before = install();
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash" } });
       expect(r.code).toBe(1);
       expect(r.stdout).toBe("");
-      const s = steps();
-      const stamp = RESTORE.exec(s[6])?.[1];
-      const dbSnap = fs.readdirSync(path.join(app, "backups")).find((n) => n.endsWith(".db"))!;
-      const upSnap = fs.readdirSync(path.join(app, "backups")).find((n) => n.startsWith("uploads-"))!;
-      const rollback = `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups:ro -v ${app}/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro blackvault /bv-snapshot-restore.sh`;
-      expect(s.slice(6)).toEqual([
-        `compose run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp ${stamp} ${NAME}`,
-        `${rollback} sqlite /bv-backups/${dbSnap} /app/data/vault.db`,
-        `${rollback} uploads /app/uploads ${stamp} /bv-backups/${upSnap}`,
+      const stamp = stampOf();
+      expect(afterRestore()).toEqual([
+        `${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`,
+        `${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db`,
+        `${ROLLBACK()} clear-marker /app/uploads ${stamp}`,
         "compose up -d",
       ]);
-      // Byte-identical: the database file, every upload (the .tmp work file included), no journal, no .restore-/.pre-restore- folder.
+      // Byte-identical: the database file, every upload (the .tmp work file included), no journal, no .restore-/.pre-restore- folder, no marker.
       expect(install()).toEqual(before);
       expect(r.stderr).toContain("Moved the previous images folder back into place.");
       expect(r.stderr).toContain("copied back from the snapshot: documents/doc1.pdf");
       expect(lines(r.stderr).at(-1)).toBe(
-        `ERROR: the restore failed (the reason is above). The database and the uploads were put back from the snapshot taken before it (backups/${dbSnap}), so nothing is changed. BlackVault was started again.`,
+        `ERROR: the restore failed (the reason is above). The database and the uploads were put back from the snapshot taken before it (backups/${dbSnapName()}), so nothing is changed. BlackVault was started again.`,
       );
+      expect(recoveryFiles()).toEqual([]);
     });
 
-    it("a restore the program refuses cleanly (exit 1): the snapshot is still put back, and the app started", () => {
+    it("SQLite, failed BEFORE the marker (refused while staging): NO database-rollback command is issued; the database file is not touched; staging is removed", () => {
       const before = install();
+      const dbPath = path.join(app, "data/db/vault.db");
+      const dbBefore = { sha: sha(fs.readFileSync(dbPath)), mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino };
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse" } });
       expect(r.code).toBe(1);
-      expect(steps().filter((c) => c.includes("/bv-snapshot-restore.sh")).map((c) => c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0])).toEqual(["sqlite", "uploads"]);
-      expect(steps().at(-1)).toBe("compose up -d");
+      expect(afterRestore()).toEqual([`${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
+      expect(read("calls")).not.toMatch(/bv-snapshot-restore\.sh (sqlite|clear-marker)|psql/);
+      expect({ sha: sha(fs.readFileSync(dbPath)), mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino }).toEqual(dbBefore); // not even rewritten
+      expect(install()).toEqual(before);
+      expect(lines(r.stderr).at(-1)).toBe(
+        "ERROR: the restore failed (the reason is above). It had not reached the database, which was not touched; the uploads were checked against the snapshot. Nothing is changed. BlackVault was started again.",
+      );
+      expect(recoveryFiles()).toEqual([]);
+    });
+
+    it("the database step had started and failed without changing anything: the marker is there, so the database IS put back", () => {
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "dbfail" } });
+      expect(r.code).toBe(1);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["uploads", "sqlite", "clear-marker", "compose up -d"]);
       expect(install()).toEqual(before);
     });
 
-    it("the rollback itself fails: BlackVault is NOT started, and the output says where the snapshot is and exactly what to run", () => {
-      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK: "fail" } });
-      expect(r.code).toBe(1);
-      expect(steps()).not.toContain("compose up -d");
-      const dbSnap = fs.readdirSync(path.join(app, "backups")).find((n) => n.endsWith(".db"))!;
-      const upSnap = fs.readdirSync(path.join(app, "backups")).find((n) => n.startsWith("uploads-"))!;
-      const stamp = RESTORE.exec(steps()[6])![1];
-      expect(r.stderr).toContain("ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started.");
-      expect(r.stderr).toContain(`database: backups/${dbSnap}`);
-      expect(r.stderr).toContain(`uploads:  backups/${upSnap}`);
-      const rollback = `docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups:ro -v ${app}/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro blackvault /bv-snapshot-restore.sh`;
-      expect(r.stderr).toContain(`${rollback} sqlite /bv-backups/${dbSnap} /app/data/vault.db`);
-      expect(r.stderr).toContain(`${rollback} uploads /app/uploads ${stamp} /bv-backups/${upSnap}`);
-      expect(r.stderr).toContain("docker compose up -d");
-      // The snapshot itself is intact.
-      expect(fs.readFileSync(path.join(app, "backups", dbSnap), "utf8")).toBe("the database as it was before the restore");
-    });
-
-    it("the printed manual commands really work: run by hand after a failed rollback, they return the install to before", () => {
-      const before = install();
-      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK: "fail" } });
-      expect(r.code).toBe(1);
-      expect(install()).not.toEqual(before);
-      const commands = lines(r.stderr).map((l) => l.trim()).filter((l) => l.startsWith("docker compose run") && l.includes("/bv-snapshot-restore.sh"));
-      expect(commands).toHaveLength(2);
-      for (const command of commands) {
-        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
-        expect(done.status, done.stderr).toBe(0);
-      }
-      expect(install()).toEqual(before);
-    });
-
-    it("PostgreSQL: the snapshot is a pg_dump; a failing restore loads it into a NEW database in one transaction, then swaps it in", () => {
-      fs.rmSync(path.join(app, "data"), { recursive: true });
-      seedInstall("postgres");
+    it("PostgreSQL, failed BEFORE the marker: not one psql command; the database is never dropped", () => {
+      pgInstall();
       const before = install();
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse" } });
       expect(r.code).toBe(1);
-      const s = steps();
-      const at = s.findIndex((c) => RESTORE.test(c));
-      const stamp = RESTORE.exec(s[at])![1];
-      const upSnap = fs.readdirSync(path.join(app, "backups")).find((n) => n.startsWith("uploads-"))!;
-      const psql = "compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
-      expect(s.slice(0, at)).toEqual(expect.arrayContaining(["compose up -d --wait db", "compose exec -T db pg_dump -U blackvault -d blackvault"]));
-      expect(s.slice(at + 1)).toEqual([
+      expect(afterRestore()).toEqual([`${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
+      expect(read("calls")).not.toMatch(/psql|DROP DATABASE|clear-marker/);
+      expect(install()).toEqual(before);
+    });
+
+    it("PostgreSQL, after the marker: the uploads, then the dump is loaded into a NEW database in one transaction and swapped in, then the marker, then start", () => {
+      pgInstall();
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash" } });
+      expect(r.code).toBe(1);
+      const stamp = stampOf();
+      expect(steps().slice(0, steps().findIndex((c) => RESTORE.test(c)))).toEqual(expect.arrayContaining(["compose up -d --wait db", "compose exec -T db pg_dump -U blackvault -d blackvault"]));
+      expect(afterRestore()).toEqual([
+        `${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`,
         "compose up -d --wait db",
-        `${psql} -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault`,
-        `${psql} -d blackvault_rollback --single-transaction -f -`,
-        `${psql} -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault`,
-        `compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v ${app}/backups:/bv-backups:ro -v ${app}/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro blackvault /bv-snapshot-restore.sh uploads /app/uploads ${stamp} /bv-backups/${upSnap}`,
+        `${PSQL} -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault`,
+        `${PSQL} -d blackvault_rollback --single-transaction -f -`,
+        `${PSQL} -d postgres -c DROP DATABASE IF EXISTS blackvault WITH (FORCE) -c ALTER DATABASE blackvault_rollback RENAME TO blackvault`,
+        `${ROLLBACK()} clear-marker /app/uploads ${stamp}`,
         "compose up -d",
       ]);
       expect(read("psql-stdin")).toBe("-- stub pg_dump of blackvault\n"); // the dump, on the loading psql's stdin
       expect(install()).toEqual(before);
     });
 
-    it("PostgreSQL: if the dump does not load, the live database is never dropped; BlackVault is not started and the manual commands are printed", () => {
-      fs.rmSync(path.join(app, "data"), { recursive: true });
-      seedInstall("postgres");
-      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse", BV_STUB_FAIL_ON: "--single-transaction" } });
+    it("PostgreSQL: if the dump does not load, the live database is never dropped; BlackVault is not started; the recovery file stays", () => {
+      pgInstall();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_FAIL_ON: "--single-transaction" } });
       expect(r.code).toBe(1);
       expect(read("calls")).not.toContain("DROP DATABASE IF EXISTS blackvault WITH");
+      expect(read("calls")).not.toContain("clear-marker");
       expect(steps()).not.toContain("compose up -d");
       expect(r.stderr).toContain("ERROR: the restore failed AND the automatic rollback failed");
+      expect(recoveryFiles()).toHaveLength(1);
       expect(r.stderr).toMatch(/docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault -d blackvault_rollback --single-transaction -f - < backups\/blackvault-\d{8}-\d{6}\.sql/);
+      expect(fs.existsSync(path.join(app, `data/uploads/.restore-${stampOf()}.db-started`))).toBe(true); // still says: the database must be put back
     });
+
+    it("the uploads folder cannot be looked into from the host: not knowing counts as 'the database may have changed', and it is put back", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse", BV_STUB_HIDE_UPLOADS: "1" } });
+      expect(r.code).toBe(1);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["uploads", "sqlite", "clear-marker", "compose up -d"]);
+    });
+
+    it("the program had FINISHED but its exit status was lost (no marker, .pre-restore-<time> in place): nothing is rolled back; BlackVault is started; exit 0 with a WARNING", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete" } });
+      expect(r.code, r.stderr).toBe(0);
+      expect(afterRestore()).toEqual(["compose up -d"]);
+      expect(r.stderr).toMatch(/WARNING: the restore program ended with exit 137, but it had FINISHED/);
+      expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
+      expect(recoveryFiles()).toEqual([]);
+    });
+  });
+
+  describe("R25: the recovery file", () => {
+    it("exists WHILE the restore runs, names the snapshot, and is gone after a success", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code, r.stderr).toBe(0);
+      const during = read("recovery-during");
+      const stamp = stampOf();
+      expect(during).toContain(`BlackVault restore ${stamp}: RECOVERY`);
+      expect(during).toContain(`  database: backups/${dbSnapName()}`);
+      expect(during).toContain(`  uploads:  backups/${upSnapName()}`);
+      expect(during).toContain(`  docker stop blackvault-restore-${stamp}`);
+      expect(during).toContain(`  docker ps -a --filter name=blackvault-restore-${stamp}`);
+      expect(during).toContain(`  docker ${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`);
+      expect(during).toContain(`  docker ${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db`);
+      expect(during).toContain(`  docker ${ROLLBACK()} clear-marker /app/uploads ${stamp}`);
+      expect(during).toContain(`     ./data/uploads/.restore-${stamp}.db-started`);
+      expect(during).toContain(`  rm backups/restore-${stamp}-RECOVERY.txt`);
+      // It was also PRINTED before the restore started.
+      expect(r.stderr).toContain(during);
+      expect(r.stderr.indexOf(during)).toBeLessThan(r.stderr.indexOf("Restoring "));
+      expect(recoveryFiles()).toEqual([]);
+    });
+
+    it("the rollback itself fails: BlackVault is NOT started; the file stays, is printed, and BLOCKS a second restore until it is dealt with", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK_FAIL: "sqlite" } });
+      expect(r.code).toBe(1);
+      expect(steps()).not.toContain("compose up -d");
+      expect(read("calls")).not.toContain("clear-marker");
+      const stamp = stampOf();
+      const file = `restore-${stamp}-RECOVERY.txt`;
+      expect(recoveryFiles()).toEqual([file]);
+      expect(r.stderr).toContain(`ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started. What to do is in ${app}/backups/${file}:`);
+      expect(r.stderr.split("What to do is in")[1]).toContain(fs.readFileSync(path.join(app, "backups", file), "utf8"));
+      if (process.platform !== "win32") expect(fs.statSync(path.join(app, "backups", file)).mode & 0o777).toBe(0o600);
+      // The snapshot itself is intact.
+      expect(fs.readFileSync(path.join(app, "backups", dbSnapName()), "utf8")).toBe("the database as it was before the restore");
+
+      fs.rmSync(path.join(rec, "calls"));
+      const again = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(again.code).toBe(1);
+      expect(lines(again.stderr)).toEqual([
+        `ERROR: an earlier restore did not finish cleanly: ${app}/backups/${file} is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done.`,
+      ]);
+      expect(steps()).toEqual([]); // not even the check
+    });
+
+    it("its commands really work: run by hand after a failed rollback — in a checkout whose path has a SPACE — they return the install to before, marker and file included", () => {
+      const spaced = path.join(path.dirname(app), "my vault");
+      fs.renameSync(app, spaced);
+      app = spaced;
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK_FAIL: "uploads" } });
+      expect(r.code).toBe(1);
+      expect(install()).not.toEqual(before);
+      const file = path.join(app, "backups", recoveryFiles()[0]);
+      const text = fs.readFileSync(file, "utf8");
+      expect(text).toContain(`Run these from '${app}', in this order.`);
+      const commands = lines(text).filter((l) => /^ {2}(docker compose run|rm) /.test(l)).map((l) => l.trim());
+      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["uploads", "sqlite", "clear-marker", "rm"]);
+      expect(commands[0]).toContain(`-v '${app}/backups:/bv-backups:ro'`);
+      for (const command of commands) {
+        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
+        expect(done.status, `${command}\n${done.stderr}`).toBe(0);
+      }
+      expect(install()).toEqual(before);
+      expect(recoveryFiles()).toEqual([]);
+    });
+
+    it("PostgreSQL: the file holds the psql commands, with the dump path quoted", () => {
+      pgInstall();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code, r.stderr).toBe(0);
+      const during = read("recovery-during");
+      expect(during).toContain("  docker compose up -d --wait db");
+      expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)' -c 'CREATE DATABASE blackvault_rollback OWNER blackvault'`);
+      expect(during).toMatch(/ {2}docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault -d blackvault_rollback --single-transaction -f - < backups\/blackvault-\d{8}-\d{6}\.sql\n/);
+      expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault WITH (FORCE)' -c 'ALTER DATABASE blackvault_rollback RENAME TO blackvault'`);
+    });
+
+    it("the recovery file cannot be written: the restore does not start; BlackVault is started again; nothing changed", () => {
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_LOCK_BACKUPS: "1" } });
+      fs.chmodSync(path.join(app, "backups"), 0o700);
+      expect(r.code).toBe(1);
+      expect(steps().some((c) => RESTORE.test(c))).toBe(false);
+      expect(steps().at(-1)).toBe("compose up -d");
+      expect(lines(r.stderr).at(-1)).toMatch(/^ERROR: could not write the recovery file backups\/restore-\d{8}-\d{6}-RECOVERY\.txt, so the restore did not start\. Nothing was changed\.$/);
+      expect(install()).toEqual(before);
+    });
+  });
+
+  describe("interrupted (R25)", () => {
+    /** Starts restore.sh, waits for `marker` to appear in the record folder, sends `signal` to the wrapper ONLY, and resolves with how it ended. */
+    async function runAndSignal(marker: string, signal: NodeJS.Signals, env: Record<string, string>) {
+      const child = spawn("bash", [path.join(app, "restore.sh"), NAME, "--yes", "--passphrase-file", passFile()], { cwd: app, env: baseEnv(env), stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (d) => (stderr += d));
+      const started = Date.now();
+      while (!fs.existsSync(path.join(rec, marker)) && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 25));
+      expect(fs.existsSync(path.join(rec, marker)), `exit=${child.exitCode} signal=${child.signalCode} calls=${JSON.stringify(calls())} stderr=${JSON.stringify(stderr)}`).toBe(true);
+      const sentAt = Date.now();
+      child.kill(signal);
+      const code = await new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
+      return { code, stderr, ms: Date.now() - sentAt };
+    }
+
+    it.each(["SIGTERM", "SIGHUP", "SIGINT"] as NodeJS.Signals[])("%s while the restore runs: the restore container is stopped BY NAME and seen to be gone, then the recovery text is shown; the file stays; BlackVault is not started", async (signal) => {
+      const r = await runAndSignal("restore.pid", signal, { BV_STUB_RESTORE: "hang" });
+      expect(r.code).toBe(1);
+      expect(r.ms).toBeLessThan(10_000); // at once: not after the 25 s the container would have run
+      const stamp = stampOf();
+      expect(afterRestore()).toEqual([`stop blackvault-restore-${stamp}`, `ps -aq --filter name=^blackvault-restore-${stamp}$`]);
+      const tail = r.stderr.slice(r.stderr.indexOf("ERROR: the restore was interrupted."));
+      expect(tail).toContain("ERROR: the restore was interrupted. BlackVault is stopped and the install may be half restored.");
+      expect(tail).toContain("The restore container is gone.");
+      expect(tail).toContain(`To put the install back as it was, follow ${app}/backups/restore-${stamp}-RECOVERY.txt:`);
+      expect(tail).toContain(fs.readFileSync(path.join(app, "backups", `restore-${stamp}-RECOVERY.txt`), "utf8"));
+      expect(steps()).not.toContain("compose up -d");
+    }, 120_000);
+
+    it("the container cannot be seen to be gone: the text says NOT to run the rollback commands yet", async () => {
+      const r = await runAndSignal("restore.pid", "SIGTERM", { BV_STUB_RESTORE: "hang", BV_STUB_CONTAINER_STUCK: "1" });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`WARNING: could not confirm that the restore container blackvault-restore-${stampOf()} has stopped. Do NOT run the commands of steps 2 to 4 until step 1's 'docker ps' lists nothing.`);
+      expect(r.stderr).not.toContain("The restore container is gone.");
+    }, 120_000);
+
+    it("interrupted while BlackVault is being stopped (before the restore started): BlackVault is started again and the message says nothing was changed; no recovery file", async () => {
+      const before = install();
+      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "2" });
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([VERIFY, "compose stop blackvault", "compose up -d"]);
+      expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed; BlackVault was started again.");
+      expect(install()).toEqual(before);
+      expect(fs.existsSync(path.join(app, "backups"))).toBe(false);
+    }, 120_000);
+
+    it("…and if it cannot be started again, the message says plainly that it is STOPPED", async () => {
+      const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "2", BV_STUB_FAIL_ON: "up" });
+      expect(r.code).toBe(1);
+      expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed, but BlackVault is STOPPED: start it with: docker compose up -d");
+    }, 120_000);
   });
 
   describe("refused with nothing changed", () => {
@@ -547,7 +734,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS8). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS11). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -591,40 +778,82 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(uses.length).toBeGreaterThanOrEqual(5);
   });
 
-  it("the steps are in the spec's order, and the two program calls match restore.sh's (no --user, no --no-deps)", () => {
+  it("the steps are in the spec's order, and the two program calls match restore.sh's (no --user, no --no-deps; the restore container is named)", () => {
     const order = [
+      'if not exist "backups\\restore-*-RECOVERY.txt" goto :no_recovery_pending',
       'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"',
       'set /p "BV_CONFIRM=Type RESTORE to continue: "',
       "%COMPOSE% stop blackvault 1>&2",
       'call scripts\\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1',
-      'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
+      "call :write_recovery",
+      'set "BV_DOCKER_ARGS=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
       ":rollback",
     ].map((l) => code.indexOf(l));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(code).toContain('set "BV_CONTAINER=blackvault-restore-!BV_STAMP!"');
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
     expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-backup.mjs --verify "$NAME")');
-    expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp "$STAMP" "$NAME")');
+    expect(sh).toContain('CMD=($COMPOSE run --rm -T --name "$CONTAINER" blackvault node dist/scripts/full-restore.mjs --stamp "$STAMP" "$NAME")');
+    expect(sh).toContain('CONTAINER="blackvault-restore-$STAMP"');
   });
 
-  it("the rollback uses the same commands as restore.sh: snapshot-restore.sh as root with backups read-only, and psql into a new database before the swap", () => {
+  it("R24: the database is put back only when the marker exists (or the uploads folder is not there to look into); the uploads go first; the marker is cleared last", () => {
+    // The gate, in the order it is evaluated: complete < started; a missing uploads folder counts as started.
+    const at = code.indexOf('set "BV_STATE=untouched"');
+    expect(code.slice(at, at + 6)).toEqual([
+      'set "BV_STATE=untouched"',
+      'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\" set "BV_STATE=complete"',
+      'if exist "!BV_MARKER!\\" set "BV_STATE=started"',
+      'if not exist "!BV_HOST_UPLOADS!\\" set "BV_STATE=started"',
+      'if not "!BV_STATE!"=="complete" goto :rollback',
+      ">&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back.",
+    ]);
+    expect(code).toContain('set "BV_MARKER=!BV_HOST_UPLOADS!\\.restore-!BV_STAMP!.db-started"');
     const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
     const psql = "%COMPOSE% exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
     const expected = [
+      `${container} uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! 1>&2`,
+      'if not "!BV_STATE!"=="started" goto :rollback_checked',
       `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" 1>&2`,
       `${psql} -d blackvault_rollback --single-transaction -f - < "!BV_DB_SNAPSHOT!" >nul`,
       `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" 1>&2`,
       `${container} sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db 1>&2`,
-      `${container} uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! 1>&2`,
+      ":rolled_back",
+      'if not "!BV_STATE!"=="started" goto :marker_cleared',
+      `${container} clear-marker /app/uploads !BV_STAMP! 1>&2`,
     ].map((l) => code.indexOf(l));
     expect(expected.every((i) => i > code.indexOf(":rollback"))).toBe(true);
     expect([...expected].sort((a, b) => a - b)).toEqual(expected);
-    // After a failed rollback the app is not started: the only `up -d` calls are before :rollback, and after :rolled_back.
+    // After a failed rollback the app is not started: no `up -d` between :rollback and :rolled_back except PostgreSQL's `up -d --wait db`.
     const ups = code.map((l, i) => (l === "%COMPOSE% up -d 1>&2" ? i : -1)).filter((i) => i >= 0);
     expect(ups.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
-    expect(ups.some((i) => i > code.indexOf(":rolled_back"))).toBe(true);
+    expect(ups.some((i) => i > code.indexOf(":rolled_back") && i < code.indexOf(":start_app_or_warn"))).toBe(true);
     // The script the container runs must reach Windows checkouts with LF endings.
     expect(fs.readFileSync(path.join(ROOT, ".gitattributes"), "utf8")).toContain("scripts/snapshot-restore.sh text eol=lf");
+  });
+
+  it("R25: the recovery file is written before the restore, deleted on success and after a good rollback, kept and shown after a failed one; it holds restore.sh's steps", () => {
+    const write = code.slice(code.indexOf(":write_recovery"), code.indexOf(":run_with_passphrase"));
+    const text = write.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
+    expect(text).toContain("  docker stop !BV_CONTAINER!");
+    expect(text).toContain("  docker ps -a --filter name=!BV_CONTAINER!");
+    expect(text).toContain("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!");
+    expect(text).toContain("  !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db");
+    expect(text).toContain('  !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!"');
+    expect(text).toContain("  !BV_RB! clear-marker /app/uploads !BV_STAMP!");
+    expect(text).toContain('     "!BV_MARKER!"');
+    expect(text.join("\n")).toContain("A batch file cannot catch Ctrl-C or a closed");
+    // Paths in the commands are quoted (a checkout path with spaces).
+    expect(write).toContain('set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"');
+    // No exclamation mark in the text itself: with delayed expansion on it would be eaten.
+    for (const l of text) expect(l.replace(/!BV_[A-Z_]+!|!CD!/g, "")).not.toContain("!");
+    // Deleted in exactly two places (success / completed, and after a good rollback); never between :rollback and :rolled_back.
+    const dels = code.map((l, i) => (l === 'del /f /q "!BV_RECOVERY!" >nul 2>&1' ? i : -1)).filter((i) => i >= 0);
+    expect(dels).toHaveLength(3); // + the one that clears a stale file before writing
+    expect(dels.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
+    expect(code.indexOf('type "!BV_RECOVERY!" 1>&2')).toBeGreaterThan(0);
+    expect(code.filter((l) => l === 'type "!BV_RECOVERY!" 1>&2')).toHaveLength(2); // before the restore, and after a failed rollback
   });
 
   it("every for /f character check on a user value is guarded against a leading ';', and it never pauses", () => {
@@ -636,13 +865,13 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS8) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS11) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 8; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 11; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# --------------------------------------------------------------------- report"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
-    expect(runs.length).toBeGreaterThanOrEqual(14);
+    expect(runs.length).toBeGreaterThanOrEqual(17);
     expect(evidence.length).toBe(runs.length);
     const stub = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/docker-stub.cs"), "utf8");
     expect(stub).toContain('"dist/scripts/full-restore.mjs"');

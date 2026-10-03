@@ -31,9 +31,10 @@ bv_check_passphrase_source() {
 }
 
 # bv_compose_setup: sets COMPOSE (or stops), clears the BLACKVAULT_* keys
-# docker compose must read from .env only, and sets HOST_BACKUP_DIR.
+# docker compose must read from .env only, and sets HOST_BACKUP_DIR and
+# HOST_DATA_DIR (the DATA_DIR of .env, default ./data).
 bv_compose_setup() {
-  local version env_data_dir
+  local version
   version=$(docker compose version --short 2>/dev/null) || version=""
   compose_version_ok "$version" ||
     die "BlackVault needs Docker Compose v$COMPOSE_MIN_VERSION or newer, run as 'docker compose' (found: ${version:-none}). Nothing was done."
@@ -44,15 +45,31 @@ bv_compose_setup() {
   # container must not inherit an uploads-snapshot marker (see rotate-key.sh).
   unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_BACKUP_DIR BLACKVAULT_UPLOADS_SNAPSHOT
 
+  # NOT named DATA_DIR: if the user's shell exports DATA_DIR, assigning it
+  # here would change the value docker compose interpolates into every mount.
+  HOST_DATA_DIR=$(env_value DATA_DIR)
+  HOST_DATA_DIR="${HOST_DATA_DIR:-./data}"
   # The backup folder on the HOST: the same expression docker-compose.yml
   # mounts at /app/backups. A relative path is relative to this folder.
   HOST_BACKUP_DIR=$(env_value BLACKVAULT_BACKUP_DIR)
   if [ -z "$HOST_BACKUP_DIR" ]; then
-    # NOT named DATA_DIR: if the user's shell exports DATA_DIR, assigning it
-    # here would change the value docker compose interpolates into every mount.
-    env_data_dir=$(env_value DATA_DIR)
-    HOST_BACKUP_DIR="${env_data_dir:-./data}/backups"
+    HOST_BACKUP_DIR="$HOST_DATA_DIR/backups"
   fi
+}
+
+# One argument, quoted for a POSIX shell only when it needs it: for printing
+# a command the user can paste (a checkout path may hold spaces).
+bv_shell_quote() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_./:=@%+,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+# bv_quote_cmd ARG...: the whole command on one line, each argument quoted as needed.
+bv_quote_cmd() {
+  local arg out=""
+  for arg in "$@"; do out="$out${out:+ }$(bv_shell_quote "$arg")"; done
+  printf '%s\n' "$out"
 }
 
 # Physical absolute path of a folder. The backup folder is mode 0700 and
@@ -138,4 +155,22 @@ bv_run_with_passphrase() {
     printf '%s' "$PASSPHRASE" | "${CMD[@]}"
     RC=${PIPESTATUS[1]}
   fi
+}
+
+# bv_run_with_passphrase_waited: the same, but the command runs in the
+# background and is waited for. bash runs a trap only once the foreground
+# command has ended; `wait` is interrupted at once. restore.sh uses this for
+# the restore itself, so that its INT/TERM/HUP trap can stop the restore
+# container immediately instead of after it has finished.
+bv_run_with_passphrase_waited() {
+  if [ -n "$PASSFILE" ]; then
+    "${CMD[@]}" < "$PASSFILE" &
+  else
+    {
+      printf '%s' "$PASSPHRASE" | "${CMD[@]}"
+      exit "${PIPESTATUS[1]}"
+    } &
+  fi
+  wait $!
+  RC=$?
 }

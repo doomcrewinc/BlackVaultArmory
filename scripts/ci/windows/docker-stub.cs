@@ -77,6 +77,16 @@
 //                            dist/scripts/full-restore.mjs`). restore.bat's
 //                            CHECK step is the backup program with --verify,
 //                            so it is driven by the BV_STUB_BACKUP_* knobs.
+//   BV_STUB_RESTORE_MARKER_DIR  full restore (ruling R24): the HOST uploads folder.
+//                            When set, the restore program's call creates
+//                            <dir>\.restore-<stamp>.db-started there (<stamp>
+//                            from its --stamp argument): "the database step
+//                            was reached".
+//   BV_STUB_RESTORE_RECOVERY_COPY  full restore (ruling R25): a file path. The
+//                            restore program's call copies the first
+//                            backups\restore-*-RECOVERY.txt it finds (in the
+//                            current folder) there: what is on disk WHILE the
+//                            restore runs.
 //   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
 //                            (any call naming /bv-snapshot-restore.sh);
 //                            unset/"0" => 0. The stub does NOT run the script:
@@ -169,6 +179,24 @@ internal static class DockerStub
                     dump.Append(entry.Key).Append('=').Append(entry.Value).Append('\n');
                 }
                 File.WriteAllText(envFile, dump.ToString(), new System.Text.UTF8Encoding(false));
+            }
+            if (isRestoreProgram)
+            {
+                string markerDir = Environment.GetEnvironmentVariable("BV_STUB_RESTORE_MARKER_DIR");
+                int stampAt = Array.IndexOf(args, "--stamp");
+                if (!string.IsNullOrEmpty(markerDir) && stampAt >= 0 && stampAt + 1 < args.Length)
+                {
+                    Directory.CreateDirectory(Path.Combine(markerDir, ".restore-" + args[stampAt + 1] + ".db-started"));
+                }
+                string recoveryCopy = Environment.GetEnvironmentVariable("BV_STUB_RESTORE_RECOVERY_COPY");
+                if (!string.IsNullOrEmpty(recoveryCopy) && Directory.Exists("backups"))
+                {
+                    string[] found = Directory.GetFiles("backups", "restore-*-RECOVERY.txt");
+                    if (found.Length > 0)
+                    {
+                        File.Copy(found[0], recoveryCopy, true);
+                    }
+                }
             }
             string sleepMs = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_SLEEP_MS");
             int ms;
