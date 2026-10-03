@@ -38,6 +38,13 @@ ENV DB_PROVIDER=sqlite
 ENV BUILD_DATABASE_URL="file:/tmp/prisma-build.db"
 RUN npm run build
 
+# Bundles the TypeScript CLI engines (scripts/entry/*.ts — full-backup,
+# full-restore, reencrypt-files as they land) into dist/scripts/*.mjs with
+# esbuild. @prisma/client and .prisma/* stay external (scripts/build-scripts.mjs),
+# so they resolve against the RUNNER stage's own node_modules/@prisma and
+# node_modules/.prisma below, not whatever the builder stage generated here.
+RUN npm run build:scripts
+
 # ─── Stage 3: Production runner ───────────────────────────────────────────────
 FROM node:24-alpine AS runner
 
@@ -74,6 +81,12 @@ COPY --from=builder /app/scripts/admin-reset-link.mjs ./scripts/admin-reset-link
 COPY --from=builder /app/scripts/rotate-encryption-key.mjs ./scripts/rotate-encryption-key.mjs
 COPY --from=builder /app/src/lib/encryption/core.mjs ./src/lib/encryption/core.mjs
 COPY --from=builder /app/src/lib/encryption/compaction.mjs ./src/lib/encryption/compaction.mjs
+
+# The CLI engines bundled above (full-backup, full-restore, reencrypt-files),
+# run as `node dist/scripts/<name>.mjs`. @prisma/client and .prisma/* are left
+# external by the bundler, so they resolve against node_modules/@prisma and
+# node_modules/.prisma, copied in below.
+COPY --from=builder /app/dist/scripts ./dist/scripts
 
 # Copies the encryption key from the host's secrets/ folder to a tmpfs
 # readable by nextjs, then drops to nextjs (see the script's header).

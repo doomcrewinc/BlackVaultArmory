@@ -20,6 +20,10 @@
 # production
 /build
 
+# esbuild CLI script bundles (scripts/build-scripts.mjs → dist/scripts/*.mjs),
+# plus its test's own scratch output dirs under the same root (dist/bv-test-out-*)
+/dist/
+
 # misc
 .DS_Store
 *.pem
