@@ -77,7 +77,8 @@ export const PRE_RESTORE_PREFIX = ".pre-restore-";
  * commit on purpose: a commit whose acknowledgement was lost must still be
  * rolled back. This module removes it only when the whole restore succeeded;
  * after a failure it stays, for the wrapper (which removes it once its
- * rollback has worked). A hidden folder named `.restore-*`: the startup scan,
+ * rollback has worked). While one exists the app refuses to start
+ * (assertNoUnfinishedRestore in ../files/startup.ts). A hidden folder named `.restore-*`: the startup scan,
  * the uploads snapshot and the backup walk all skip it.
  */
 export const DB_STEP_MARKER_SUFFIX = ".db-started";
@@ -380,7 +381,13 @@ async function restoreLocked({ opts, file, fileName, root, staging, preRestoreNa
       await fsp.rm(marker, { recursive: true });
       await fsyncDir(root);
     } catch (e) {
-      warnings.push(`The restore finished, but its marker ${marker} could not be removed (${codeOf(e) ?? messageOf(e)}). It can be deleted.`);
+      // Not a detail: the app's start refuses while any marker exists
+      // (assertNoUnfinishedRestore in ../files/startup.ts).
+      warnings.push(
+        `The restore finished, but its marker ${marker} could not be removed (${codeOf(e) ?? messageOf(e)}). ` +
+          "BlackVault refuses to start while that marker exists. restore.sh and restore.bat remove it before they start " +
+          "BlackVault; if you ran this program yourself, delete that folder before you start BlackVault.",
+      );
     }
     try {
       await fsp.rmdir(staging);

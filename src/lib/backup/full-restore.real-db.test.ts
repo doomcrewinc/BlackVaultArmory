@@ -788,6 +788,24 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect(existsSync(path.join(rootB, `.restore-${STAMP}`))).toBe(false);
     });
 
+    it("the marker cannot be removed once everything is in place: the restore still succeeds, and its warning says BlackVault will not start until the marker is gone, and who removes it", async () => {
+      const { source } = await scenario();
+      const realRm = fsp.rm.bind(fsp);
+      vi.spyOn(fsp, "rm").mockImplementation((async (p: Parameters<typeof fsp.rm>[0], o?: Parameters<typeof fsp.rm>[1]) => {
+        if (String(p).endsWith(".db-started")) throw Object.assign(new Error("injected: EACCES"), { code: "EACCES" });
+        return realRm(p, o);
+      }) as never);
+      const result = await restore(source.archive);
+      const marker = path.join(rootB, MARKER);
+      expect(result.warnings).toEqual([
+        `The restore finished, but its marker ${marker} could not be removed (EACCES). BlackVault refuses to start while that marker exists. ` +
+          "restore.sh and restore.bat remove it before they start BlackVault; if you ran this program yourself, delete that folder before you start BlackVault.",
+      ]);
+      expect(markerExists()).toBe(true);
+      vi.restoreAllMocks();
+      await expect(assertNoUnfinishedRestore({ env: { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv })).rejects.toThrow(marker);
+    });
+
     it("a leftover marker for the same stamp refuses a new run before anything is staged; an OLDER run's marker is never removed by a later run", async () => {
       const { source, before } = await scenario();
       mkdirSync(path.join(rootB, MARKER));

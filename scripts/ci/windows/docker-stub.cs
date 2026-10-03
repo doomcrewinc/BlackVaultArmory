@@ -108,6 +108,11 @@
 //                            unset/"0" => 0. The stub does NOT run the script:
 //                            what it does to real files is proven on Linux
 //                            (src/lib/backup/full-restore.real-db.test.ts).
+//   BV_STUB_CLEAR_MARKER_EXIT  full restore: exit code of the rollback
+//                            container for `/bv-snapshot-restore.sh
+//                            clear-marker ...` ONLY (the other modes keep
+//                            BV_STUB_ROLLBACK_EXIT); unset/"0" => that knob
+//                            decides. The stub never removes the marker.
 //   BV_STUB_HANDOFF_READONLY full restore: "1" makes `compose stop` mark the
 //                            file named by BV_HANDOFF (restore.bat's handoff
 //                            file, inherited through the environment) as
@@ -278,6 +283,13 @@ internal static class DockerStub
             {
                 Console.WriteLine(stateAnswer);
                 return 0;
+            }
+            string clearExit = Environment.GetEnvironmentVariable("BV_STUB_CLEAR_MARKER_EXIT");
+            int clearCode;
+            if (modeAt < args.Length && args[modeAt] == "clear-marker" && !string.IsNullOrEmpty(clearExit) && int.TryParse(clearExit, out clearCode) && clearCode != 0)
+            {
+                Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_CLEAR_MARKER_EXIT)");
+                return clearCode;
             }
             string rollbackExit = Environment.GetEnvironmentVariable("BV_STUB_ROLLBACK_EXIT");
             int rollbackCode;

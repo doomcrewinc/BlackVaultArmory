@@ -1520,7 +1520,10 @@ step and was neither finished nor put back leaves its marker, `uploads/.restore-
 and while that marker exists BlackVault exits at startup with a message that names it. Follow
 `backups/restore-<time>-RECOVERY.txt`: its step 3 puts the install back and ends by clearing the
 marker. If that file is already gone, only the marker is left: delete the marker folder itself
-(on Linux with `sudo`) and start BlackVault again.
+(on Linux with `sudo`) and start BlackVault again. The restore script follows the same rule: it
+removes its own marker before it starts BlackVault, and if it cannot, it does not start BlackVault,
+exits 1 and prints the command that removes the marker. A marker left by an earlier restore stops
+a new restore before anything is checked, with the command that removes it.
 
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
@@ -1530,7 +1533,7 @@ the snapshot in `backups/` (on Linux with `sudo`).
 | Exit code | Meaning |
 |---|---|
 | 0 | Restored. |
-| 1 | Failed. The last lines say which of four it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
+| 1 | Failed. The last lines say which of five it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the restore had finished (or the install was put back) but the restore's marker could not be removed — then BlackVault was **not started**: run the command the last line prints, then `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
 
 ---
 

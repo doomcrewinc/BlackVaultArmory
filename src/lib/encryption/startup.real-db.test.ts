@@ -1100,6 +1100,26 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       }
     });
 
+    it("a wrong key AND a leftover restore marker: the wrong key is what is reported", async () => {
+      await seedPlaintext();
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register()); // encrypts, and creates the key check
+      expect(exit).not.toHaveBeenCalled();
+      const before = await rawSnapshot();
+      leaveRestoreMarker();
+      try {
+        vi.mocked(console.error).mockClear();
+        await withKey(OTHER_KEY, () => within(30_000, register()));
+        expect(exit).toHaveBeenCalledWith(1);
+        const lines = vi.mocked(console.error).mock.calls.flat().join("\n");
+        expect(lines).toMatch(/^\[encryption\] Wrong encryption key: this database was encrypted with key /);
+        expect(lines).not.toContain("restore");
+        expect(await rawSnapshot()).toBe(before);
+      } finally {
+        removeUploads();
+      }
+    }, 90_000);
+
     // ── 10 (Task 7, carry N4) ── the first start that encrypts takes its own snapshot ──
     const snapshotsInDbDir = () =>
       readdirSync(ctx.dir).filter((n) => /^pre-encryption-\d{8}-\d{6}(-\d+)?\.db$/.test(n));

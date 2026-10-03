@@ -42,6 +42,13 @@
 # means the database was never touched, and it is left alone. If the
 # rollback itself fails, BlackVault is NOT started.
 #
+# THE MARKER AND STARTING. BlackVault refuses to start while a marker is in
+# the uploads folder. So this script removes its own marker before it starts
+# BlackVault, after a restore that finished and after a rollback that worked;
+# when the marker cannot be removed it does not start BlackVault, exits 1 and
+# prints the command that removes it. A marker left by an EARLIER restore
+# (one with no recovery file) stops this script before anything is checked.
+#
 # THE RECOVERY FILE. Before step 4 this script prints, and writes to
 # backups/restore-<time>-RECOVERY.txt (and flushes to disk with `sync`),
 # where the snapshot is and the exact commands that put it back by hand.
@@ -159,6 +166,56 @@ for f in backups/restore-*-RECOVERY.txt; do
   [ -e "$f" ] || continue
   die "an earlier restore did not finish cleanly: $PWD/$f is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done."
 done
+
+# docker-compose.yml mounts <DATA_DIR>/uploads at /app/uploads. The restore
+# program's marker and its .pre-restore folder are here, seen from the host
+# (restore_state says when the host is asked, and when a container is).
+HOST_UPLOADS_DIR="$HOST_DATA_DIR/uploads"
+
+# The rollback's file work: scripts/snapshot-restore.sh as root in a one-off
+# container, backups/ mounted read-only. The script is mounted from this
+# checkout, like scripts/uploads-snapshot.sh in db-snapshot.sh.
+SNAPSHOT_RESTORE=($COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh
+  -v "$PWD/backups:/bv-backups:ro"
+  -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
+  blackvault /bv-snapshot-restore.sh)
+
+host_can_enter() {
+  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
+}
+
+# The stamp of every restore marker (.restore-<time>.db-started) in the
+# uploads folder, one per line. From the host when it can enter that folder;
+# otherwise from inside a container, as root. A folder that is not there has
+# none. When neither can say, nothing is printed: the check of this run's own
+# names, further down, stops the restore in that case.
+leftover_marker_stamps() {
+  local m
+  if host_can_enter "$HOST_UPLOADS_DIR"; then
+    for m in "$HOST_UPLOADS_DIR"/.restore-*.db-started; do
+      if [ -e "$m" ] || [ -L "$m" ]; then
+        m=${m##*/.restore-}
+        printf '%s\n' "${m%.db-started}"
+      fi
+    done
+  elif [ -e "$HOST_UPLOADS_DIR" ]; then
+    # The container mounts backups/; if Docker had to create that folder it
+    # would belong to root, and the snapshot could not be written into it.
+    mkdir -p backups 2> /dev/null
+    "${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> /dev/null || true
+  fi
+}
+
+# BlackVault refuses to start while any restore marker is in the uploads
+# folder, whichever restore left it. With a recovery file the check above has
+# already stopped this run; a marker WITHOUT one was left by a restore nobody
+# can put back from here any more. It is never removed silently, and a
+# restore is never run on top of it: BlackVault could not be started
+# afterwards, neither after a success nor after a rollback.
+for OLD_STAMP in $(leftover_marker_stamps); do
+  die "an earlier restore ($OLD_STAMP) left its marker $HOST_UPLOADS_DIR/.restore-$OLD_STAMP.db-started, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove the marker first with:  $(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$OLD_STAMP")  Then run the restore again. Nothing was done."
+done
+
 bv_backup_file_name restore "$FILE"
 NAME=$BACKUP_FILE_NAME
 PROVIDER=$(provider_from_env)
@@ -202,23 +259,12 @@ STAMP="$(date -u +%Y%m%d-%H%M%S)"
 RECOVERY_FILE="backups/restore-$STAMP-RECOVERY.txt"
 # The one-off restore container gets a name, so that it can be stopped by name.
 CONTAINER="blackvault-restore-$STAMP"
-# docker-compose.yml mounts <DATA_DIR>/uploads at /app/uploads. The restore
-# program's marker and its .pre-restore folder are here, seen from the host
-# (restore_state says when the host is asked, and when a container is).
-HOST_UPLOADS_DIR="$HOST_DATA_DIR/uploads"
 MARKER_HOST="$HOST_UPLOADS_DIR/.restore-$STAMP.db-started"
 
 start_app() {
   $COMPOSE up -d >&2
 }
 
-# The rollback's file work: scripts/snapshot-restore.sh as root in a one-off
-# container, backups/ mounted read-only. The script is mounted from this
-# checkout, like scripts/uploads-snapshot.sh in db-snapshot.sh.
-SNAPSHOT_RESTORE=($COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh
-  -v "$PWD/backups:/bv-backups:ro"
-  -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
-  blackvault /bv-snapshot-restore.sh)
 PSQL=($COMPOSE exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault)
 PG_NEW=(-d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault")
 PG_LOAD=(-d blackvault_rollback --single-transaction -f -)
@@ -281,10 +327,6 @@ container_restore_state() {
   esac
 }
 
-host_can_enter() {
-  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
-}
-
 host_restore_state() {
   local pre="$HOST_UPLOADS_DIR/.pre-restore-$STAMP"
   if ! host_can_enter "$HOST_UPLOADS_DIR"; then
@@ -307,6 +349,55 @@ restore_state() {
   seen=$(container_restore_state)
   [ "$seen" != "unknown" ] || seen=$(host_restore_state)
   echo "$seen"
+}
+
+# Removes this run's marker, as root in a one-off container (the marker
+# belongs to the app user).
+clear_marker() {
+  "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$STAMP" >&2
+}
+
+clear_marker_command() {
+  bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$STAMP"
+}
+
+# After a restore that finished: can this run's marker still be there? The
+# host answers when it can enter the uploads folder. When it cannot, only a
+# state of `complete` (asked inside a container: no marker) rules it out.
+marker_may_be_left() {
+  if host_can_enter "$HOST_UPLOADS_DIR"; then
+    [ -e "$MARKER_HOST" ] || [ -L "$MARKER_HOST" ]
+  else
+    [ "$STATE" != "complete" ]
+  fi
+}
+
+# What replaces the recovery file when the restore FINISHED and only its
+# marker could not be removed.
+marker_left_text() {
+  echo "BlackVault restore $STAMP: ONE STEP LEFT"
+  echo ""
+  echo "restore.sh restored $NAME completely: the records and the files are the"
+  echo "backup's, and nothing has to be put back. Only the restore's marker,"
+  echo "  $MARKER_HOST"
+  echo "could not be removed. BlackVault refuses to start while that marker exists,"
+  echo "so restore.sh did not start it."
+  echo ""
+  echo "Run these from $(bv_shell_quote "$PWD"), in this order."
+  echo ""
+  echo "1. Remove the marker:"
+  echo "  $(clear_marker_command)"
+  echo ""
+  echo "2. Start BlackVault, check it, then delete this file (while it exists, a new"
+  echo "   restore refuses to start):"
+  echo "  $COMPOSE up -d"
+  echo "  rm $(bv_shell_quote "$RECOVERY_FILE")"
+  echo ""
+  echo "The install as it was before the restore is still in this snapshot:"
+  echo "  database: $DB_SNAPSHOT"
+  echo "  uploads:  ${UPLOADS_SNAPSHOT:-(no uploads snapshot was recorded)}"
+  echo "The photos and documents that were here before are also in"
+  echo "<uploads folder>/.pre-restore-$STAMP/."
 }
 
 # Ruling R25. Where the snapshot is and exactly what to run, for when this
@@ -560,10 +651,22 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 if [ "$RC" -eq 0 ] || [ "$STATE" = "complete" ]; then
-  rm -f "$RECOVERY_FILE" || echo "WARNING: could not delete $RECOVERY_FILE; delete it by hand, or the next restore will refuse to start." >&2
-  if [ -e "$MARKER_HOST" ]; then
-    echo "WARNING: the restore finished but left its marker $MARKER_HOST. It can be deleted (it belongs to the app user: use sudo on Linux)." >&2
+  # The restore program removes its marker as its last step. If that failed
+  # (it says so in a warning and still exits 0), the marker is removed here,
+  # as root, BEFORE BlackVault is started: BlackVault refuses to start while
+  # a marker exists. If it cannot be removed, BlackVault is not started; the
+  # recovery file is replaced by one that says what is left to do (the one
+  # written before the restore would put the old install back).
+  if marker_may_be_left; then
+    echo "The restore finished but left its marker $MARKER_HOST. Removing it..." >&2
+    if ! clear_marker; then
+      if ! (umask 077 && marker_left_text > "$RECOVERY_FILE"); then
+        echo "WARNING: could not rewrite $RECOVERY_FILE. Do NOT follow its step 3: it would put the old install back. Only the command below is needed." >&2
+      fi
+      die "the restore is complete and was NOT rolled back, but its marker $MARKER_HOST could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Remove the marker with:  $(clear_marker_command)  Then start BlackVault: $COMPOSE up -d  The same is in $PWD/$RECOVERY_FILE."
+    fi
   fi
+  rm -f "$RECOVERY_FILE" || echo "WARNING: could not delete $RECOVERY_FILE; delete it by hand, or the next restore will refuse to start." >&2
   echo "Starting BlackVault..." >&2
   if ! start_app; then
     die "the restore is complete and was NOT rolled back, but BlackVault did not start. Check the logs ($COMPOSE logs blackvault) and start it by hand: $COMPOSE up -d"
@@ -600,9 +703,11 @@ if [ "$ROLLED_BACK" -ne 1 ]; then
   cat "$RECOVERY_FILE" >&2
   exit 1
 fi
-if [ "$STATE" = "started" ]; then
-  "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$STAMP" >&2 ||
-    echo "WARNING: everything was put back, but the marker $MARKER_HOST could not be removed. Delete it by hand (it belongs to the app user: use sudo on Linux)." >&2
+# BlackVault refuses to start while the marker exists, so it is started only
+# once the marker is gone. The recovery file stays when it is not: its step 3
+# changes nothing that is already back, and ends by removing the marker.
+if [ "$STATE" = "started" ] && ! clear_marker; then
+  die "the restore failed (exit $RC; the reason is above). The database and the uploads were put back from the snapshot taken before it ($DB_SNAPSHOT), but the marker $MARKER_HOST could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Remove the marker with:  $(clear_marker_command)  Then start BlackVault: $COMPOSE up -d  and delete $PWD/$RECOVERY_FILE (while it exists, a new restore refuses to start)."
 fi
 rm -f "$RECOVERY_FILE" || echo "WARNING: could not delete $RECOVERY_FILE; delete it by hand, or the next restore will refuse to start." >&2
 echo "Starting BlackVault..." >&2

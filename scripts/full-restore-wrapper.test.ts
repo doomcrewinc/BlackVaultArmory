@@ -18,7 +18,7 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS19) and by the static checks at the end of this file.
+ * (scenarios RS1–RS23) and by the static checks at the end of this file.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -90,6 +90,8 @@ case "$*" in
     exit $rc ;;
   *"/bv-snapshot-restore.sh "*)
     case " $* " in *" \${BV_STUB_ROLLBACK_FAIL:-none} "*) echo "ERROR: could not restore from the snapshot: [stub] refused" >&2; exit 1 ;; esac
+    # The question asked before anything else (markers) leaves the folder as closed to the host as it was.
+    mode=""; case " $* " in *" markers "*) mode=$(stat -c %a "$dd/uploads" 2>/dev/null || stat -f %Lp "$dd/uploads") ;; esac
     args=(); seen=0
     for a in "$@"; do
       if [ "$seen" = 1 ]; then args+=("$(map "$a")"); fi
@@ -99,6 +101,7 @@ case "$*" in
     # "root in the container" can enter a folder the host user cannot (BV_STUB_HIDE_PRE); the host still cannot afterwards.
     [ "\${BV_STUB_HIDE_PRE:-}" = 1 ] && chmod 700 "$dd"/uploads/.pre-restore-* 2>/dev/null
     sh scripts/snapshot-restore.sh "\${args[@]}"; rc=$?
+    [ -n "$mode" ] && chmod "$mode" "$dd/uploads"
     [ "\${BV_STUB_HIDE_PRE:-}" = 1 ] && chmod 000 "$dd"/uploads/.pre-restore-* 2>/dev/null
     exit $rc ;;
   *"dist/scripts/full-backup.mjs --verify"*)
@@ -126,6 +129,8 @@ case "$*" in
     finish() { if [ "\${BV_STUB_THEN_HANG:-}" = 1 ]; then echo $$ > "${rec}/restore.pid.tmp"; mv "${rec}/restore.pid.tmp" "${rec}/restore.pid"; exec sleep 120; fi; exit "$1"; }
     case "\${BV_STUB_RESTORE:-ok}" in
       ok) echo "${OK_LINE}"; exit 0 ;;
+      # The restore finished (exit 0, the OK line) but could not remove its own marker.
+      ok-marker-left) marker; swap_images; echo "${OK_LINE}"; exit 0 ;;
       # Refused while staging: the database step was never reached, so NO marker.
       refuse)
         mkdir -p "$dd/uploads/.restore-$stamp/images"; printf 'staged' > "$dd/uploads/.restore-$stamp/images/x.jpg"
@@ -826,8 +831,131 @@ describe.skipIf(isWindows)("restore.sh", () => {
   });
 
   // Re-review minor 3.
+  /**
+   * BlackVault refuses to start while a restore marker (.restore-<time>.db-started) is in the uploads
+   * folder. So the wrapper never starts it, and never tells anyone to, while one can still be there.
+   */
+  describe("BlackVault is never started while a restore marker exists", () => {
+    const markerOf = (stamp: string) => path.join(app, "data/uploads", `.restore-${stamp}.db-started`);
+    const clearCommand = (stamp: string) => `docker ${ROLLBACK()} clear-marker /app/uploads ${stamp}`;
+    /** Runs one printed command line (the stub docker stands in for docker). */
+    const runPrinted = (command: string, env: Record<string, string> = {}) => spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(env), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
+
+    it("the restore finished but left its marker: the wrapper removes it, as root in a container, BEFORE it starts BlackVault; exit 0", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "ok-marker-left" } });
+      expect(r.code, r.stderr).toBe(0);
+      const stamp = stampOf();
+      expect(afterRestore()).toEqual([`${ROLLBACK()} clear-marker /app/uploads ${stamp}`, "compose up -d"]);
+      expect(fs.existsSync(markerOf(stamp))).toBe(false);
+      expect(recoveryFiles()).toEqual([]);
+      expect(r.stdout).toBe(`${OK_LINE}\n`);
+      expect(r.stderr).toContain(`The restore finished but left its marker ./data/uploads/.restore-${stamp}.db-started. Removing it...`);
+      expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored"); // nothing was rolled back
+    });
+
+    it("…and the marker cannot be removed: BlackVault is NOT started, exit 1; the message names the marker and the exact command; the recovery file now says only that, and its command works", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "ok-marker-left", BV_STUB_ROLLBACK_FAIL: "clear-marker" } });
+      expect(r.code).toBe(1);
+      const stamp = stampOf();
+      expect(steps()).not.toContain("compose up -d");
+      expect(afterRestore()).toEqual([`${ROLLBACK()} clear-marker /app/uploads ${stamp}`]);
+      expect(fs.existsSync(markerOf(stamp))).toBe(true);
+      expect(lines(r.stderr).at(-1)).toBe(
+        `ERROR: the restore is complete and was NOT rolled back, but its marker ./data/uploads/.restore-${stamp}.db-started could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. ` +
+          `Remove the marker with:  ${clearCommand(stamp)}  Then start BlackVault: docker compose up -d  The same is in ${app}/backups/restore-${stamp}-RECOVERY.txt.`,
+      );
+      // The recovery file is kept (the app's own refusal points at it), but no longer says how to put the OLD install back.
+      const file = `restore-${stamp}-RECOVERY.txt`;
+      expect(recoveryFiles()).toEqual([file]);
+      const text = fs.readFileSync(path.join(app, "backups", file), "utf8");
+      expect(text).toContain(`BlackVault restore ${stamp}: ONE STEP LEFT`);
+      expect(text).toContain(`  ${clearCommand(stamp)}\n`);
+      expect(text).toContain("  docker compose up -d\n");
+      expect(text).not.toMatch(/ (uploads|sqlite) \/|psql/);
+      expect(text).toContain(`  database: backups/${dbSnapName()}`);
+      expect(fs.statSync(path.join(app, "backups", file)).mode & 0o777).toBe(0o600);
+      // A second restore is refused while that file exists.
+      fs.rmSync(path.join(rec, "calls"));
+      expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(1);
+      expect(steps()).toEqual([]);
+      // The printed command, run as it stands, removes the marker and nothing else.
+      const cleared = runPrinted(clearCommand(stamp));
+      expect(cleared.status, cleared.stderr).toBe(0);
+      expect(fs.existsSync(markerOf(stamp))).toBe(false);
+      expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
+    });
+
+    it("the rollback worked but the marker cannot be removed: BlackVault is NOT started, exit 1; the recovery file stays as it was written, and following it finishes the job", () => {
+      const before = install();
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK_FAIL: "clear-marker" } });
+      expect(r.code).toBe(1);
+      const stamp = stampOf();
+      expect(steps()).not.toContain("compose up -d");
+      expect(fs.existsSync(markerOf(stamp))).toBe(true);
+      expect(lines(r.stderr).at(-1)).toBe(
+        `ERROR: the restore failed (exit 137; the reason is above). The database and the uploads were put back from the snapshot taken before it (backups/${dbSnapName()}), but the marker ./data/uploads/.restore-${stamp}.db-started could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. ` +
+          `Remove the marker with:  ${clearCommand(stamp)}  Then start BlackVault: docker compose up -d  and delete ${app}/backups/restore-${stamp}-RECOVERY.txt (while it exists, a new restore refuses to start).`,
+      );
+      const file = `restore-${stamp}-RECOVERY.txt`;
+      expect(recoveryFiles()).toEqual([file]);
+      const text = fs.readFileSync(path.join(app, "backups", file), "utf8");
+      expect(text).toContain(`BlackVault restore ${stamp}: RECOVERY`);
+      // Step 3 of that file, as printed: everything is already back, so it changes nothing but the marker.
+      const chain = text.slice(text.indexOf("\n", text.indexOf("3. Put it back.")));
+      const step3 = chain.split("\n").filter((l) => l.includes("/bv-snapshot-restore.sh ")).map((l) => l.trim()).join(" ");
+      const done = runPrinted(step3);
+      expect(done.status, done.stderr).toBe(0);
+      expect(fs.existsSync(markerOf(stamp))).toBe(false);
+      fs.rmSync(path.join(app, "backups", file));
+      expect(install()).toEqual(before);
+    });
+
+    it("a marker left by an EARLIER restore, with no recovery file: refused before anything is checked, stopped or changed; the message names the marker and the command that removes it", () => {
+      const before = install();
+      fs.mkdirSync(markerOf("20250101-000000"));
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(steps()).toEqual([]);
+      expect(lines(r.stderr)).toEqual([
+        "ERROR: an earlier restore (20250101-000000) left its marker ./data/uploads/.restore-20250101-000000.db-started, and its recovery file is gone. BlackVault refuses to start while that marker exists, so it could not be started after this restore either. " +
+          `If you mean to replace what is in this install with the backup, remove the marker first with:  ${clearCommand("20250101-000000")}  Then run the restore again. Nothing was done.`,
+      ]);
+      // The command as printed removes it, and then the restore runs and BlackVault is started.
+      const cleared = runPrinted(clearCommand("20250101-000000"));
+      expect(cleared.status, cleared.stderr).toBe(0);
+      expect(install()).toEqual(before);
+      fs.rmSync(path.join(rec, "calls"));
+      const again = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(again.code, again.stderr).toBe(0);
+      expect(steps().at(-1)).toBe("compose up -d");
+    });
+
+    it("…also when the host cannot enter the uploads folder: the container is asked for the markers", () => {
+      fs.mkdirSync(markerOf("20250101-000000"));
+      fs.chmodSync(path.join(app, "data/uploads"), 0o000);
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`]);
+      expect(lines(r.stderr).at(-1)).toMatch(/^ERROR: an earlier restore \(20250101-000000\) left its marker .*clear-marker \/app\/uploads 20250101-000000 {2}Then run the restore again\. Nothing was done\.$/);
+    });
+
+    it("the recovery text never has BlackVault started before the marker is cleared: the only `up -d` of the app is step 4, after step 3's chain has ended with clear-marker", () => {
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_ROLLBACK_FAIL: "sqlite" } });
+      expect(r.code).toBe(1);
+      const text = fs.readFileSync(path.join(app, "backups", recoveryFiles()[0]), "utf8");
+      const starts = lines(text).map((l, i) => (l.trim() === "docker compose up -d" ? i : -1)).filter((i) => i >= 0);
+      expect(starts).toHaveLength(1);
+      const lastClear = lines(text).map((l) => l.includes(" clear-marker ")).lastIndexOf(true);
+      expect(lastClear).toBeGreaterThan(-1);
+      expect(starts[0]).toBeGreaterThan(lastClear);
+      expect(lines(text)[starts[0] - 1]).toBe("4. Start BlackVault, check it, then delete this file:");
+    });
+  });
+
   describe("a time stamp that is already taken", () => {
-    it.each([".pre-restore-20270101-000000", ".restore-20270101-000000.db-started"])("%s already exists: refused before BlackVault is stopped — never reported as a completed restore", (leftover) => {
+    it.each([".pre-restore-20270101-000000"])("%s already exists: refused before BlackVault is stopped — never reported as a completed restore", (leftover) => {
       const before = install();
       fs.mkdirSync(path.join(app, "data/uploads", leftover));
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000" } });
@@ -842,17 +970,14 @@ describe.skipIf(isWindows)("restore.sh", () => {
     });
 
     // I1: the same blind spot before the run. The host cannot enter the uploads folder, so the container is asked.
-    it.each([
-      [".pre-restore-20270101-000000/images", "complete"],
-      [".restore-20270101-000000.db-started", "started"],
-    ])("the uploads folder cannot be entered from the host and %s is there: the container is asked, and the restore is refused before BlackVault is stopped", (leftover) => {
+    it.each([[".pre-restore-20270101-000000/images", "complete"]])("the uploads folder cannot be entered from the host and %s is there: the container is asked, and the restore is refused before BlackVault is stopped", (leftover) => {
       fs.mkdirSync(path.join(app, "data/uploads", leftover), { recursive: true });
       fs.chmodSync(path.join(app, "data/uploads"), 0o000);
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000" } });
       fs.chmodSync(path.join(app, "data/uploads"), 0o755);
       expect(r.code).toBe(1);
       expect(r.stdout).toBe("");
-      expect(steps()).toEqual([VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
+      expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`, VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
       expect(lines(r.stderr).at(-1)).toBe(
         "ERROR: an earlier restore with the same time stamp (20270101-000000) left its .pre-restore folder or its marker in the uploads folder. Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped.",
       );
@@ -863,7 +988,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000", BV_STUB_ROLLBACK_FAIL: "state" } });
       fs.chmodSync(path.join(app, "data/uploads"), 0o755);
       expect(r.code).toBe(1);
-      expect(steps()).toEqual([VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
+      expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`, VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
       expect(lines(r.stderr).at(-1)).toMatch(/^ERROR: could not check the uploads folder .* Nothing was changed; BlackVault was not stopped\.$/);
     });
   });
@@ -1313,7 +1438,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS19). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS23). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -1516,7 +1641,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       ":rolled_back",
       'if not "!BV_STATE!"=="started" goto :marker_cleared',
       `${container} clear-marker /app/uploads !BV_STAMP! 1>&2`,
-    ].map((l) => code.indexOf(l));
+    ].map((l) => code.indexOf(l, code.indexOf(":rollback"))); // the success path clears a leftover marker too, further up
     expect(expected.every((i) => i > code.indexOf(":rollback"))).toBe(true);
     expect([...expected].sort((a, b) => a - b)).toEqual(expected);
     // After a failed rollback the app is not started: no `up -d` between :rollback and :rolled_back except PostgreSQL's `up -d --wait db`.
@@ -1528,7 +1653,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   });
 
   it("R25: the recovery file is written before the restore, deleted on success and after a good rollback, kept and shown after a failed one; it holds restore.sh's steps", () => {
-    const write = code.slice(code.indexOf(":write_recovery"), code.indexOf(":run_with_passphrase"));
+    const write = code.slice(code.indexOf(":write_recovery"), code.indexOf(":write_marker_left"));
     const text = write.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
     expect(text).toContain("  docker stop !BV_CONTAINER!");
     expect(text).toContain("  docker ps -a --filter name=!BV_CONTAINER!");
@@ -1578,10 +1703,85 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     }
     // Deleted in exactly two places (success / completed, and after a good rollback); never between :rollback and :rolled_back.
     const dels = code.map((l, i) => (l === 'del /f /q "!BV_RECOVERY!" >nul 2>&1' ? i : -1)).filter((i) => i >= 0);
-    expect(dels).toHaveLength(4); // + the one that clears a stale file before writing, + the one after a handoff that could not be written (nothing was changed yet)
+    expect(dels).toHaveLength(5); // + the one that clears a stale file before writing, + the one after a handoff that could not be written (nothing was changed yet), + the one before the file is replaced by the marker-left text
     expect(dels.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
     expect(code.indexOf('type "!BV_RECOVERY!" 1>&2')).toBeGreaterThan(0);
     expect(code.filter((l) => l === 'type "!BV_RECOVERY!" 1>&2')).toHaveLength(2); // before the restore, and after a failed rollback
+  });
+
+  it("BlackVault is never started while a restore marker exists: an older marker stops the run up front; this run's marker is cleared before `up -d`, and if it cannot be, the script exits 1 without starting", () => {
+    const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
+    const clear = `${container} clear-marker /app/uploads !BV_STAMP! 1>&2`;
+    const at = (line: string, from = 0) => code.indexOf(line, from);
+    const inOrder = (linesInOrder: string[], from: number) => {
+      const found = linesInOrder.map((l) => at(l, from));
+      expect(found.every((i) => i >= from), JSON.stringify(found)).toBe(true);
+      expect([...found].sort((a, b) => a - b)).toEqual(found);
+      return found;
+    };
+    // 1. An older restore's marker (any stamp): looked for right after the recovery-file check, before the backup is even checked.
+    const upFront = inOrder(
+      [
+        ":no_recovery_pending",
+        'set "BV_OLD_MARKER="',
+        'for /d %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do set "BV_OLD_MARKER=%%~nxM"',
+        "if not defined BV_OLD_MARKER goto :no_old_marker",
+        'set "BV_OLD_STAMP=!BV_OLD_MARKER:~9,-11!"',
+      ],
+      0,
+    );
+    expect(".restore-".length).toBe(9);
+    expect(".db-started".length).toBe(11);
+    const refusal = code[upFront[4] + 1];
+    expect(refusal).toMatch(/^>&2 echo ERROR: an earlier restore \(!BV_OLD_STAMP!\) left its marker !BV_HOST_DATA!\\uploads\\!BV_OLD_MARKER!, and its recovery file is gone\. BlackVault refuses to start while that marker exists/);
+    expect(refusal).toContain('docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_OLD_STAMP!  Then run the restore again. Nothing was done.');
+    expect(code.slice(upFront[4] + 2, upFront[4] + 4)).toEqual(["exit /b 1", ":no_old_marker"]);
+    expect(upFront[4]).toBeLessThan(code.findIndex((l) => l.includes("full-backup.mjs --verify")));
+
+    // 2. After a restore that finished: the marker is cleared before the app is started; if that fails, no `up -d`.
+    const done = inOrder(
+      [
+        ":restore_done",
+        'if not exist "!BV_MARKER!\\" goto :restore_marker_gone',
+        clear,
+        "if not errorlevel 1 goto :restore_marker_gone",
+        "call :write_marker_left",
+      ],
+      at(":restore_done"),
+    );
+    expect(code[done[4] + 1]).toMatch(/^>&2 echo ERROR: the restore is complete and was NOT rolled back, but its marker !BV_MARKER! could not be removed, and BlackVault refuses to start while that marker exists\. BlackVault was NOT started\. Remove the marker with: {2}!BV_CLEAR_CMD! {2}Then start BlackVault: docker compose up -d {2}The same is in !CD!\\!BV_RECOVERY!\.$/);
+    expect(code.slice(done[4] + 2, done[4] + 4)).toEqual(["exit /b 1", ":restore_marker_gone"]);
+    expect(at("%COMPOSE% up -d 1>&2", at(":restore_done"))).toBeGreaterThan(at(":restore_marker_gone"));
+
+    // 3. After a rollback that worked: the same rule; the recovery file is not deleted on that path.
+    const rolled = inOrder([":rolled_back", 'if not "!BV_STATE!"=="started" goto :marker_cleared', clear, "if not errorlevel 1 goto :marker_cleared"], at(":rolled_back"));
+    expect(code[rolled[3] + 1]).toMatch(/^>&2 echo ERROR: the restore failed \(the reason is above\)\. The database and the uploads were put back from the snapshot taken before it \(!BV_DB_SNAPSHOT!\), but the marker !BV_MARKER! could not be removed, and BlackVault refuses to start while that marker exists\. BlackVault was NOT started\. Remove the marker with: {2}!BV_CLEAR_CMD! {2}Then start BlackVault: docker compose up -d {2}and delete !CD!\\!BV_RECOVERY! \(while it exists, a new restore refuses to start\)\.$/);
+    expect(code.slice(rolled[3] + 2, rolled[3] + 4)).toEqual(["exit /b 1", ":marker_cleared"]);
+    expect(at("%COMPOSE% up -d 1>&2", at(":rolled_back"))).toBeGreaterThan(at(":marker_cleared"));
+
+    // The printed command is the one the script runs, and is set before either path can use it.
+    expect(at('set "BV_CLEAR_CMD=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP!"')).toBeLessThan(at(":restore_done"));
+    expect(code.findIndex((l) => l.startsWith('set "BV_CLEAR_CMD='))).toBeGreaterThan(at(":restore_ran"));
+    // Nothing tells the user that a marker may simply be left, or deleted at leisure.
+    expect(text).not.toMatch(/It can be deleted|Delete it by hand/);
+
+    // The text that replaces the recovery file: restore.sh's, with the same two steps; nothing in it puts the old install back.
+    const left = code.slice(at(":write_marker_left"), at(":run_with_passphrase"));
+    const leftText = left.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
+    expect(left[1]).toBe('del /f /q "!BV_RECOVERY!" >nul 2>&1');
+    expect(leftText[0]).toBe("BlackVault restore !BV_STAMP!: ONE STEP LEFT");
+    expect(leftText.indexOf("  !BV_CLEAR_CMD!")).toBeGreaterThan(leftText.indexOf("1. Remove the marker:"));
+    expect(leftText.indexOf("  docker compose up -d")).toBeGreaterThan(leftText.indexOf("  !BV_CLEAR_CMD!"));
+    expect(leftText.join("\n")).not.toMatch(/ (uploads|sqlite) \/|psql/);
+    for (const l of leftText) {
+      expect(l.replace(/!BV_[A-Z_]+!|!CD!/g, "")).not.toContain("!");
+      expect(l).not.toMatch(/[&<>|^%]/);
+    }
+    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+    for (const l of ["could not be removed. BlackVault refuses to start while that marker exists,", "1. Remove the marker:", "The install as it was before the restore is still in this snapshot:"]) {
+      expect(leftText).toContain(l);
+      expect(sh).toContain(`echo "${l}"`);
+    }
   });
 
   it("every for /f character check on a user value is guarded against a ';' anywhere in it, and it never pauses", () => {
@@ -1593,9 +1793,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS19) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS23) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 19; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 23; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
@@ -1612,6 +1812,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(stub).toContain('"BV_STUB_STATE_ANSWER"');
     // RS19 makes the handoff append fail (the stub marks the file read-only while the child phase runs).
     expect(stub).toContain('"BV_STUB_HANDOFF_READONLY"');
+    // RS20–RS23: a marker that is still there. The stub can refuse clear-marker alone.
+    expect(stub).toContain('"BV_STUB_CLEAR_MARKER_EXIT"');
+    expect(section).toContain('"BV_STUB_CLEAR_MARKER_EXIT" = "1"');
     expect(section).toContain('"BV_STUB_HANDOFF_READONLY" = "1"');
   });
 });

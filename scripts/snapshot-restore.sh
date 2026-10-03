@@ -4,6 +4,7 @@
 # restore.bat run it when a full restore fails (full-backups spec §3 step 5).
 #
 #   snapshot-restore.sh state   UPLOADS STAMP
+#   snapshot-restore.sh markers UPLOADS
 #   snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]
 #   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]
 #   snapshot-restore.sh clear-marker UPLOADS STAMP
@@ -61,6 +62,9 @@
 #             only steps 1 and 2 run.
 #          The folders db-snapshot.sh leaves out are left out here too:
 #          .pre-encryption-*, .restore-*, .pre-restore-*, *.tmp, *.rot.
+#
+# markers  prints the stamp of every marker UPLOADS/.restore-<ts>.db-started,
+#          one per line; nothing when there is none. Changes nothing.
 #
 # clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
 #          restore program leaves just before its database step (ruling R24).
@@ -161,6 +165,17 @@ case "$MODE" in
     exit 0
     ;;
   uploads) ;;
+  markers)
+    UP=${2:?usage: snapshot-restore.sh markers UPLOADS}
+    [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
+    for m in "$UP"/.restore-*.db-started; do
+      if [ -e "$m" ] || [ -L "$m" ]; then
+        m=${m##*/.restore-}
+        echo "${m%.db-started}"
+      fi
+    done
+    exit 0
+    ;;
   clear-marker)
     UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
@@ -196,7 +211,7 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "usage: snapshot-restore.sh state UPLOADS STAMP | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
+    echo "usage: snapshot-restore.sh state UPLOADS STAMP | markers UPLOADS | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
     exit 2
     ;;
 esac

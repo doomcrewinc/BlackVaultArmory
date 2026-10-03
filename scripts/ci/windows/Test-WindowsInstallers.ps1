@@ -2275,7 +2275,7 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
     "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
     "BV_STUB_LOCK_EXIT" = $null; "BV_STUB_LOCK_STDOUT" = $null; "BV_STUB_LOCK_STDERR" = $null
-    "BV_STUB_STATE_ANSWER" = $null; "BV_STUB_HANDOFF_READONLY" = $null
+    "BV_STUB_STATE_ANSWER" = $null; "BV_STUB_HANDOFF_READONLY" = $null; "BV_STUB_CLEAR_MARKER_EXIT" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
@@ -2786,6 +2786,100 @@ Show-EvidenceIfFailed $r
 # The same install, with nothing in the way: the restore now runs.
 $r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
 Assert ($r.ExitCode -eq 0 -and $r.Output.Contains("Restore complete.")) "a second restore, with a writable handoff, runs to the end (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# BlackVault refuses to start while a restore marker (.restore-<time>.db-started)
+# is in the uploads folder. RS20-RS23: restore.bat never starts it, and never
+# tells anyone to, while one can still be there. The stub does not run
+# snapshot-restore.sh, so a clear-marker that "works" leaves the folder on
+# disk: what is proven here is the ORDER of the calls, what is printed, the
+# exit code and the recovery file. That the script really removes the marker
+# is proven on Linux (scripts/full-restore-wrapper.test.ts).
+$ClearMarkerPattern = '--user 0:0 --entrypoint /bin/sh .*backups:/bv-backups:ro .*snapshot-restore\.sh:/bv-snapshot-restore\.sh:ro blackvault /bv-snapshot-restore\.sh clear-marker /app/uploads '
+
+# --------------------------------------------------------------- scenario RS20
+Write-Scenario "restore.bat - the restore finished but left its marker: the marker is cleared, as root in a container, BEFORE BlackVault is started; exit 0"
+$d = New-RestoreSandbox "restore-marker-left"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+$iRestore = Get-StepIndex $steps 'full-restore\.mjs --stamp \d{8}-\d{6} '
+$stamp = if ($iRestore -ge 0 -and $steps[$iRestore] -match '--stamp (\d{8}-\d{6}) ') { $Matches[1] } else { "" }
+$iClear = Get-StepIndex $steps ($ClearMarkerPattern + [regex]::Escape($stamp) + '\s*$')
+$iUp = Get-StepIndex $steps '^compose up -d$'
+Assert ($iRestore -ge 0 -and $stamp) "the restore program was started with a stamp ($stamp)"
+Assert ($iClear -gt $iRestore) "the marker is cleared after the restore program (index $iClear)"
+Assert ($iUp -gt $iClear) "and only then is BlackVault started (index $iUp)"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh (sqlite|uploads) ') -eq -1 -and (Get-StepIndex $steps 'psql') -eq -1) "nothing is rolled back"
+Assert ($r.Output -match "The restore finished but left its marker .*\.restore-\d{8}-\d{6}\.db-started\. Removing it\.\.\.") "says that it removes the marker"
+Assert ($r.Output.Contains("Restore complete.")) "reports the restore as complete"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "the recovery file is gone"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS21
+Write-Scenario "restore.bat - the restore finished, its marker is left and CANNOT be cleared: BlackVault is NOT started; exit 1; the message names the marker and the command; the recovery file says only that"
+$d = New-RestoreSandbox "restore-marker-stuck"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d); "BV_STUB_CLEAR_MARKER_EXIT" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps ($ClearMarkerPattern + '\d{8}-\d{6}\s*$')) -ge 0) "clearing the marker was attempted"
+Assert ((Get-StepIndex $steps '^compose up -d$') -eq -1) "BlackVault was NOT started"
+Assert ((Get-StepIndex $steps 'bv-snapshot-restore\.sh (sqlite|uploads) ') -eq -1) "nothing is rolled back"
+Assert ($r.Output -match "ERROR: the restore is complete and was NOT rolled back, but its marker .*\.restore-\d{8}-\d{6}\.db-started could not be removed, and BlackVault refuses to start while that marker exists\. BlackVault was NOT started\. Remove the marker with:  docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh .* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}  Then start BlackVault: docker compose up -d  The same is in .*backups\\restore-\d{8}-\d{6}-RECOVERY\.txt\.") "the last line names the marker, the exact command and the file"
+Assert (-not $r.Output.Contains("Restore complete.")) "does not report 'Restore complete.'"
+$recovery = @(Get-RecoveryFiles $d)
+Assert ($recovery.Count -eq 1) "the recovery file is kept (BlackVault's own refusal points at it)"
+$left = if ($recovery.Count -eq 1) { [IO.File]::ReadAllText((Join-Path $d "backups\$($recovery[0])")) } else { "" }
+Assert ($left -match "^BlackVault restore \d{8}-\d{6}: ONE STEP LEFT") "it now starts with ONE STEP LEFT"
+Assert ($left -match "(?m)^  docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}\r?$") "it holds the clear-marker command on a line of its own"
+Assert ($left -match "(?m)^  docker compose up -d\r?$") "then the command that starts BlackVault"
+Assert ($left -notmatch "bv-snapshot-restore\.sh (sqlite|uploads) " -and $left -notmatch "psql") "nothing in it puts the old install back"
+Assert ($left -match "database: backups\\blackvault-\d{8}-\d{6}\.db") "it still names the snapshot"
+Show-EvidenceIfFailed $r
+# While that file exists, a new restore refuses to start.
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 1 -and $r.Output.Contains("an earlier restore did not finish cleanly")) "a second restore is refused while the file exists (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS22
+Write-Scenario "restore.bat - the rollback worked but the marker CANNOT be cleared: BlackVault is NOT started; exit 1; the recovery file stays as it was written"
+$d = New-RestoreSandbox "restore-rollback-marker-stuck"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_EXIT" = "1"; "BV_STUB_RESTORE_STDERR" = "full-restore: [stub] failed."; "BV_STUB_RESTORE_MARKER_DIR" = (Get-UploadsDir $d); "BV_STUB_CLEAR_MARKER_EXIT" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert (@($steps | Where-Object { $_ -match "bv-snapshot-restore\.sh (sqlite|uploads) " }).Count -eq 2) "both rollback steps ran"
+Assert ((Get-StepIndex $steps ($ClearMarkerPattern + '\d{8}-\d{6}\s*$')) -ge 0) "clearing the marker was attempted"
+Assert ((Get-StepIndex $steps '^compose up -d$') -eq -1) "BlackVault was NOT started"
+Assert ($r.Output -match "ERROR: the restore failed \(the reason is above\)\. The database and the uploads were put back from the snapshot taken before it \(backups\\blackvault-\d{8}-\d{6}\.db\), but the marker .*\.restore-\d{8}-\d{6}\.db-started could not be removed, and BlackVault refuses to start while that marker exists\. BlackVault was NOT started\. Remove the marker with:  docker compose run [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}  Then start BlackVault: docker compose up -d  and delete .*backups\\restore-\d{8}-\d{6}-RECOVERY\.txt \(while it exists, a new restore refuses to start\)\.") "the last line says what was put back, names the marker, the exact command and the file"
+Assert ($r.Output -notmatch "BlackVault was started again") "does not claim BlackVault was started"
+$recovery = @(Get-RecoveryFiles $d)
+Assert ($recovery.Count -eq 1) "the recovery file stays"
+$kept = if ($recovery.Count -eq 1) { [IO.File]::ReadAllText((Join-Path $d "backups\$($recovery[0])")) } else { "" }
+Assert ($kept -match "^BlackVault restore \d{8}-\d{6}: RECOVERY" -and $kept -match " && docker compose run [^&\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}\r?\n") "it is the file written before the restore: its step 3 ends by clearing the marker"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS23
+Write-Scenario "restore.bat - a marker left by an EARLIER restore, with no recovery file: refused before anything is checked, stopped or changed; the message names the marker and the command that removes it"
+$d = New-RestoreSandbox "restore-old-marker"
+$pf = New-PassFile $d "$BackupPass`n"
+$oldMarker = Join-Path (Get-UploadsDir $d) ".restore-20250101-000000.db-started"
+New-Item -ItemType Directory -Force -Path $oldMarker | Out-Null
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ($steps.Count -eq 0) "docker was asked to do nothing: not the check, not the stop (calls: $($steps.Count))"
+Assert ($r.Output -match "ERROR: an earlier restore \(20250101-000000\) left its marker .*uploads\\\.restore-20250101-000000\.db-started, and its recovery file is gone\. BlackVault refuses to start while that marker exists") "names the older restore and its marker"
+Assert ($r.Output -match "remove the marker first with:  docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads 20250101-000000  Then run the restore again\. Nothing was done\.") "gives the exact command, for that stamp, and says nothing was done"
+Assert (Test-Path $oldMarker) "the marker was not removed by the script"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Show-EvidenceIfFailed $r
+# With the marker gone, the same restore runs to the end.
+Remove-Item -Recurse -Force $oldMarker
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0 -and $r.Output.Contains("Restore complete.")) "once the marker is removed the restore runs to the end (exit $($r.ExitCode))"
 Show-EvidenceIfFailed $r
 
 # ══════════════════════════════════════════════════════════════════════════
