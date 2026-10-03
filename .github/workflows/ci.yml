@@ -52,6 +52,8 @@ jobs:
   verify:
     name: Lint, types and build
     runs-on: ubuntu-latest
+    # The memory test below writes and re-reads a 2 GiB archive.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -118,6 +120,18 @@ jobs:
         env:
           RUN_SERVER_TESTS: "1"
         run: npx vitest run src/app/api/backup/restore/route.c1.proxy-body-size.test.ts
+
+      # Gated off by default (scripts/full-backup-cli.test.ts, it.runIf): a
+      # child process running only the full-backup engine over 2 GiB of
+      # uploads must peak under 300 MB of resident memory. That cap is the
+      # spec's and is asserted on Linux only (512 MB elsewhere: macOS counts
+      # freed pages), so THIS step is the only place the real bound is ever
+      # checked. If it fails, the engine's memory use grew: do not raise the
+      # cap, find what now buffers.
+      - name: Full-backup memory test (2 GiB under 300 MB RSS)
+        env:
+          RUN_SLOW_TESTS: "1"
+        run: npx vitest run scripts/full-backup-cli.test.ts
 
   # ---------------------------------------------------------------------------
   test:
@@ -321,6 +335,14 @@ jobs:
     # where to put one), and that rotate-key.sh rotates end to end. The script
     # does everything as a separate uid-1234 user: the runner's own user is
     # uid 1001, which would mask the problem.
+    #
+    # Full backups (spec 3c) are proven here too, in the two steps after it,
+    # because they need the same things: the image this job builds, a host
+    # user that is not uid 1001, and the install the first script leaves
+    # behind. backup.sh, restore.sh (with a restore that fails after its
+    # database step and is rolled back) and reencrypt-files.sh run against
+    # real containers on SQLite and on PostgreSQL; nothing is stubbed. The
+    # job's name is kept: it is the name of a status check.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -328,6 +350,16 @@ jobs:
 
       - name: Install, start, rotate as a non-root host user
         run: ./scripts/ci/encryption-key-linux.sh
+
+      # A backup folder whose owner cannot be changed (a NAS share): the
+      # entrypoint warns and starts anyway, and a real backup then works when
+      # the app can write there and fails naming the folder when it cannot.
+      - name: Full backups, the entrypoint and a backup folder that refuses chown
+        run: ./scripts/ci/full-backup-entrypoint-linux.sh app-blackvault
+
+      # Takes over the install the first step left (its header has the list).
+      - name: Full backups, backup / restore / rollback / re-encrypt (SQLite and PostgreSQL)
+        run: ./scripts/ci/full-backup-linux.sh
 
   # ---------------------------------------------------------------------------
   docker-image:
