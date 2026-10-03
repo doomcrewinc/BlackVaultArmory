@@ -108,6 +108,51 @@ describe("buildScripts", () => {
     expect(out.trim()).toBe("function");
   });
 
+  it("bundles the REAL app Prisma client (@/lib/prisma, which loads the client with require()) and it connects and queries under plain node", async () => {
+    fs.writeFileSync(
+      path.join(entryDir, "app-client-probe.ts"),
+      [
+        'import { prisma } from "@/lib/prisma";',
+        "async function main() {",
+        '  const rows = (await prisma.$queryRawUnsafe("SELECT 41 + 1 AS answer")) as Array<{ answer: number | bigint }>;',
+        "  console.log(JSON.stringify({ answer: Number(rows[0].answer) }));",
+        "  await prisma.$disconnect();",
+        "}",
+        "main().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });",
+      ].join("\n"),
+    );
+
+    await buildScripts({ entryDir, outDir });
+
+    // Scratch SQLite file, never the dev database. cwd is the repo root (as
+    // /app is in the image) so the generated client finds its engine.
+    const dbFile = path.join(tmp, "scratch.db");
+    const out = execFileSync(process.execPath, [path.join(outDir, "app-client-probe.mjs")], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        DB_PROVIDER: "sqlite",
+        DATABASE_URL: `file:${dbFile}?connection_limit=1`,
+      },
+    });
+    expect(JSON.parse(out.trim().split("\n").pop()!)).toEqual({ answer: 42 });
+  });
+
+  it("emits a real require for the Postgres branch too: the externalised require(\"@prisma/client\") is not left to esbuild's throwing __require shim", async () => {
+    fs.writeFileSync(
+      path.join(entryDir, "app-client-pg.ts"),
+      ['import "@/lib/prisma";'].join("\n"),
+    );
+    await buildScripts({ entryDir, outDir });
+    const bundle = fs.readFileSync(path.join(outDir, "app-client-pg.mjs"), "utf8");
+    expect(bundle).toContain('require("@prisma/client")');
+    expect(bundle).toContain("createRequire");
+    // The banner's `require` must be declared before the shim consults it.
+    expect(bundle.indexOf("createRequire")).toBeLessThan(bundle.indexOf("__require"));
+  });
+
   it("builds multiple entries independently, named after their entry file", async () => {
     fs.writeFileSync(path.join(entryDir, "a.ts"), 'console.log("a");');
     fs.writeFileSync(path.join(entryDir, "b.ts"), 'console.log("b");');

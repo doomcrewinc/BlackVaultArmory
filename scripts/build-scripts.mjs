@@ -69,6 +69,17 @@ export async function buildScripts({ entryDir = DEFAULT_ENTRY_DIR, outDir = DEFA
       // which is what lets a test build a probe from a temp directory.
       tsconfig: TSCONFIG,
       external: ["@prisma/client", ".prisma/*"],
+      // src/lib/prisma.ts loads the client with require(".prisma/client-sqlite")
+      // / require("@prisma/client"). In an ESM bundle esbuild turns those into
+      // its __require shim, which throws "Dynamic require ... is not
+      // supported" unless a real `require` is in scope. The banner provides
+      // one. The import alias is namespaced (__bvCreateRequire) so it cannot
+      // collide with a name the bundle declares; `require` itself must keep
+      // that exact name because the shim looks it up via `typeof require`
+      // (esbuild never emits a top-level declaration called `require`).
+      banner: {
+        js: 'import { createRequire as __bvCreateRequire } from "node:module"; const require = __bvCreateRequire(import.meta.url);',
+      },
       logLevel: "silent",
     });
     built.push(outfile);
