@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildManifest, parseManifest, MANIFEST_FORMAT_VERSION, ManifestError, type Manifest } from "./manifest";
+import { buildManifest, parseManifest, MANIFEST_FORMAT_VERSION, MAX_MANIFEST_BYTES, ManifestError, type Manifest } from "./manifest";
 
 function validInput() {
   return {
@@ -127,5 +127,86 @@ describe("parseManifest", () => {
     const built = buildManifest(validInput()) as unknown as { skipped: Array<Record<string, unknown>> };
     delete built.skipped[0].reason;
     expect(() => parseManifest(JSON.stringify(built))).toThrow(/reason/);
+  });
+});
+
+describe("manifest strictness (review M6)", () => {
+  function parseWith(mutate: (m: Record<string, unknown>) => void): Manifest {
+    const m = JSON.parse(JSON.stringify(buildManifest(validInput()))) as Record<string, unknown>;
+    mutate(m);
+    return parseManifest(JSON.stringify(m));
+  }
+
+  it.each(["2026", "March 7, 2026", "2026-10-02", "2026-10-02T12:00:00Z", "2026-10-02T12:00:00.000+00:00", "2026-02-30T00:00:00.000Z", " 2026-10-02T12:00:00.000Z"])(
+    "rejects createdAt %j",
+    (createdAt) => {
+      expect(() => buildManifest({ ...validInput(), createdAt })).toThrow(/createdAt/);
+      expect(() => parseWith((m) => (m.createdAt = createdAt))).toThrow(/createdAt/);
+    },
+  );
+
+  it("accepts exactly what toISOString produces", () => {
+    const iso = new Date().toISOString();
+    expect(buildManifest({ ...validInput(), createdAt: iso }).createdAt).toBe(iso);
+  });
+
+  it.each([
+    "../../etc/x",
+    "/etc/x",
+    "files/images/../../x",
+    "files/images/./a.jpg",
+    "files/images//a.jpg",
+    "files/images/",
+    "files/images/a\\b.jpg",
+    "files/other/a.jpg",
+    "files/imagesX/a.jpg",
+    "db.json",
+    "manifest.json",
+  ])("rejects files[].path %j", (bad) => {
+    const input = validInput();
+    input.files[0].path = bad;
+    expect(() => buildManifest(input)).toThrow(/files\[0\]\.path/);
+    expect(() => parseWith((m) => ((m.files as Array<Record<string, unknown>>)[0].path = bad))).toThrow(/files\[0\]\.path/);
+  });
+
+  it("accepts nested paths under files/images/ and files/documents/", () => {
+    const input = validInput();
+    input.files[0].path = "files/images/2026/10/a.jpg";
+    expect(buildManifest(input).files[0].path).toBe("files/images/2026/10/a.jpg");
+  });
+
+  it("rejects duplicate files[].path values", () => {
+    const input = validInput();
+    input.files[1].path = input.files[0].path;
+    expect(() => buildManifest(input)).toThrow(/duplicate/);
+    expect(() => parseWith((m) => {
+      const files = m.files as Array<Record<string, unknown>>;
+      files[1].path = files[0].path;
+    })).toThrow(/duplicate/);
+  });
+
+  it.each([1e300, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects files[].size %j", (size) => {
+    const input = validInput();
+    input.files[0].size = size;
+    expect(() => buildManifest(input)).toThrow(/size/);
+  });
+
+  it.each([1e300, 2.5, Number.MAX_SAFE_INTEGER + 1])("rejects a count of %j", (count) => {
+    const input = validInput();
+    input.counts.Firearm = count;
+    expect(() => buildManifest(input)).toThrow(/counts/);
+  });
+
+  it("rejects a __proto__ key in counts instead of dropping it", () => {
+    const text = JSON.stringify(buildManifest(validInput())).replace('"counts":{', '"counts":{"__proto__":5,');
+    expect(text).toContain('"__proto__":5');
+    expect(() => parseManifest(text)).toThrow(/__proto__/);
+    const counts = JSON.parse('{"__proto__":1,"Firearm":2}') as Record<string, number>;
+    expect(() => buildManifest({ ...validInput(), counts })).toThrow(/__proto__/);
+  });
+
+  it("exports MAX_MANIFEST_BYTES = 64 MiB and rejects a larger manifest before parsing", () => {
+    expect(MAX_MANIFEST_BYTES).toBe(64 * 1024 * 1024);
+    expect(() => parseManifest(Buffer.alloc(MAX_MANIFEST_BYTES + 1, 0x20))).toThrow(/MAX_MANIFEST_BYTES|too large/);
   });
 });

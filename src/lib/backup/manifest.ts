@@ -1,6 +1,10 @@
+import { validateEntryPath } from "./tar";
+
 /**
- * The full backup's `manifest.json` — the first entry in the plaintext ustar
- * stream (spec §1 "Plaintext stream"). It records what a restore should find
+ * The full backup's `manifest.json` — the LAST entry in the plaintext ustar
+ * stream (order: db.json, files/..., manifest.json; controller ruling in fix
+ * round 1, overriding the spec's "first", so the engine can hash files while
+ * streaming them and record files that vanish mid-run). It records what a restore should find
  * inside the archive: per-model row counts, and every file's path, size and
  * sha256, plus any file that vanished mid-backup (`skipped`).
  *
@@ -13,6 +17,16 @@
  * touches key material, matching the rule that crypto lives only in
  * `core.mjs`.
  */
+
+/**
+ * Upper bound on `manifest.json`'s size. `readTar` allows entries up to
+ * ~8 GiB, so callers must check the entry's declared tar size against this
+ * BEFORE buffering it; `parseManifest` also refuses anything larger.
+ */
+export const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
+
+/** Every `files[].path` lives under one of these. */
+const FILE_PATH_ROOTS = ["files/images/", "files/documents/"] as const;
 
 /** Bumped only if the manifest shape changes incompatibly. `parseManifest` rejects anything else. */
 export const MANIFEST_FORMAT_VERSION = 1;
@@ -63,33 +77,57 @@ function validateNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
-function validateIsoDate(value: unknown, field: string): string {
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-    fail(`manifest.${field} must be an ISO 8601 date string`);
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** Exactly the shape `Date.prototype.toISOString()` produces, and a real date (no Feb 30). */
+function validateIsoTimestamp(value: unknown, field: string): string {
+  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    fail(`manifest.${field} must be a full ISO-8601 UTC timestamp like 2026-10-02T12:00:00.000Z`);
   }
   return value;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function validateCounts(value: unknown): Record<string, number> {
   if (!isPlainObject(value)) fail("manifest.counts must be an object");
   const counts: Record<string, number> = {};
   for (const [key, count] of Object.entries(value)) {
-    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
-      fail(`manifest.counts.${key} must be a non-negative integer`);
+    // JSON.parse makes "__proto__" an own key; assigning it below would set
+    // the prototype instead (silently dropping the count). Reject it.
+    if (key === "__proto__") fail("manifest.counts must not contain a __proto__ key");
+    if (!isNonNegativeSafeInteger(count)) {
+      fail(`manifest.counts.${key} must be a non-negative safe integer`);
     }
     counts[key] = count;
   }
   return counts;
 }
 
+/** The tar reader's path rule, plus: the path must sit under files/images/ or files/documents/. */
+function validateFilePath(value: unknown, field: string): string {
+  const path = validateNonEmptyString(value, field);
+  try {
+    validateEntryPath(path);
+  } catch (err) {
+    fail(`manifest.${field} is not a valid archive path: ${(err as Error).message}`);
+  }
+  if (!FILE_PATH_ROOTS.some((root) => path.startsWith(root))) {
+    fail(`manifest.${field} must start with ${FILE_PATH_ROOTS.join(" or ")}: ${path}`);
+  }
+  return path;
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 function validateFileEntry(value: unknown, index: number): ManifestFileEntry {
   if (!isPlainObject(value)) fail(`manifest.files[${index}] must be an object`);
-  const path = validateNonEmptyString(value.path, `files[${index}].path`);
+  const path = validateFilePath(value.path, `files[${index}].path`);
   const size = value.size;
-  if (typeof size !== "number" || !Number.isInteger(size) || size < 0) {
-    fail(`manifest.files[${index}].size must be a non-negative integer`);
+  if (!isNonNegativeSafeInteger(size)) {
+    fail(`manifest.files[${index}].size must be a non-negative safe integer`);
   }
   const sha256 = value.sha256;
   if (typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
@@ -107,7 +145,13 @@ function validateSkippedEntry(value: unknown, index: number): ManifestSkippedEnt
 
 function validateFiles(value: unknown): ManifestFileEntry[] {
   if (!Array.isArray(value)) fail("manifest.files must be an array");
-  return value.map((entry, i) => validateFileEntry(entry, i));
+  const files = value.map((entry, i) => validateFileEntry(entry, i));
+  const seen = new Set<string>();
+  files.forEach((file, i) => {
+    if (seen.has(file.path)) fail(`manifest.files[${i}].path is a duplicate: ${file.path}`);
+    seen.add(file.path);
+  });
+  return files;
 }
 
 function validateSkipped(value: unknown): ManifestSkippedEntry[] {
@@ -122,7 +166,7 @@ export function buildManifest(input: BuildManifestInput): Manifest {
   const manifest: Manifest = {
     formatVersion: MANIFEST_FORMAT_VERSION,
     appVersion: validateNonEmptyString(input.appVersion, "appVersion"),
-    createdAt: validateIsoDate(createdAtRaw, "createdAt"),
+    createdAt: validateIsoTimestamp(createdAtRaw, "createdAt"),
     keyIdAtBackup: validateNonEmptyString(input.keyIdAtBackup, "keyIdAtBackup"),
     counts: validateCounts(input.counts),
     files: validateFiles(input.files),
@@ -131,8 +175,12 @@ export function buildManifest(input: BuildManifestInput): Manifest {
   return manifest;
 }
 
-/** Parses and validates `manifest.json`'s bytes (or text). Rejects malformed JSON, a wrong shape, and any `formatVersion` other than the one this build understands. */
+/** Parses and validates `manifest.json`'s bytes (or text). Rejects input over `MAX_MANIFEST_BYTES`, malformed JSON, a wrong shape, and any `formatVersion` other than the one this build understands. */
 export function parseManifest(data: Buffer | string): Manifest {
+  const byteLength = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data, "utf8");
+  if (byteLength > MAX_MANIFEST_BYTES) {
+    fail(`manifest.json is too large (${byteLength} bytes, over MAX_MANIFEST_BYTES ${MAX_MANIFEST_BYTES})`);
+  }
   const text = Buffer.isBuffer(data) ? data.toString("utf8") : data;
 
   let parsed: unknown;
@@ -155,7 +203,7 @@ export function parseManifest(data: Buffer | string): Manifest {
   return {
     formatVersion,
     appVersion: validateNonEmptyString(parsed.appVersion, "appVersion"),
-    createdAt: validateIsoDate(parsed.createdAt, "createdAt"),
+    createdAt: validateIsoTimestamp(parsed.createdAt, "createdAt"),
     keyIdAtBackup: validateNonEmptyString(parsed.keyIdAtBackup, "keyIdAtBackup"),
     counts: validateCounts(parsed.counts),
     files: validateFiles(parsed.files),
