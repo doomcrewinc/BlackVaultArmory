@@ -69,7 +69,9 @@
 :: file in the TEMP folder (BV_HANDOFF): two paths, no secret. The same file says how
 :: far things got: no file = the check did not pass; a file without its
 :: `ready` line = step 2 or 3 stopped, and said why; `ready` = the restore
-:: program was started, and the exit code is the restore program's.
+:: program was started, and the exit code is the restore program's. The
+:: child checks that its `ready` line really is in the file before it lets
+:: the restore start.
 :: With no --passphrase-file and no console this script stops at once.
 ::
 :: --yes: without a console there is nobody to type RESTORE, so --yes is
@@ -421,13 +423,28 @@ type "!BV_RECOVERY!" 1>&2
 >&2 echo ----------------------------------------------------------------------
 >&2 echo.
 
->&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...
 :: Hand the snapshot paths back, and say "ready": from here on the restore
 :: program counts as started.
 >>"!BV_HANDOFF!" echo db=!BV_DB_SNAPSHOT!
 >>"!BV_HANDOFF!" echo uploads=!BV_UPLOADS_SNAPSHOT!
 >>"!BV_HANDOFF!" echo ready=1
+:: The script the user started reads `ready` as "the restore program ran". An
+:: append that failed (a full TEMP disk, a file that can no longer be
+:: written) does not stop a batch file by itself, and exiting 0 without the
+:: line would run the restore and then throw its result away: no start, no
+:: rollback, no message. So the line is looked for in the file, and without
+:: it this phase stops here. Nothing was changed yet: the recovery file is
+:: removed again and BlackVault is started.
+findstr /x /c:"ready=1" "!BV_HANDOFF!" >nul 2>&1
+if errorlevel 1 goto :handoff_failed
+>&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...
 exit /b 0
+:handoff_failed
+del /f /q "!BV_RECOVERY!" >nul 2>&1
+if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.
+call :start_app_or_warn
+>&2 echo ERROR: could not write to !BV_HANDOFF! (its ready line is missing), so the restore did not start. Nothing was changed.
+exit /b 1
 
 :: ====================================================================
 :: Back in the script the user started. BV_RC is the PowerShell step's exit

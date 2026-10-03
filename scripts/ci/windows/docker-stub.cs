@@ -108,6 +108,11 @@
 //                            unset/"0" => 0. The stub does NOT run the script:
 //                            what it does to real files is proven on Linux
 //                            (src/lib/backup/full-restore.real-db.test.ts).
+//   BV_STUB_HANDOFF_READONLY full restore: "1" makes `compose stop` mark the
+//                            file named by BV_HANDOFF (restore.bat's handoff
+//                            file, inherited through the environment) as
+//                            read-only, so that restore.bat's later appends
+//                            to it fail.
 //   BV_STUB_STATE_ANSWER     full restore: what the rollback container prints
 //                            for `/bv-snapshot-restore.sh state ...` (started /
 //                            complete / untouched), exit 0. Unset => the
@@ -356,6 +361,16 @@ internal static class DockerStub
                     }
                     System.Threading.Thread.Sleep(100);
                 }
+            }
+        }
+
+        if (string.Equals(sub, "stop", StringComparison.OrdinalIgnoreCase) &&
+            Environment.GetEnvironmentVariable("BV_STUB_HANDOFF_READONLY") == "1")
+        {
+            string handoff = Environment.GetEnvironmentVariable("BV_HANDOFF");
+            if (!string.IsNullOrEmpty(handoff) && File.Exists(handoff))
+            {
+                File.SetAttributes(handoff, File.GetAttributes(handoff) | FileAttributes.ReadOnly);
             }
         }
 

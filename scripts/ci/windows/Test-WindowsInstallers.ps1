@@ -2275,7 +2275,7 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
     "BV_STUB_APP_RUNNING" = $null; "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
     "BV_RESTORE_PHASE" = $null; "BV_HANDOFF" = $null
     "BV_STUB_LOCK_EXIT" = $null; "BV_STUB_LOCK_STDOUT" = $null; "BV_STUB_LOCK_STDERR" = $null
-    "BV_STUB_STATE_ANSWER" = $null
+    "BV_STUB_STATE_ANSWER" = $null; "BV_STUB_HANDOFF_READONLY" = $null
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
@@ -2755,6 +2755,38 @@ if ($steps.Count -eq 7) {
 }
 Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The system cannot find the file specified") "state 'started': the line is valid at a command prompt and the dump file was found"
 Show-EvidenceIfFailed $c
+
+# --------------------------------------------------------------- scenario RS19
+# Steps 5-7 run in a child cmd.exe that hands back, through a small file in
+# TEMP, where the snapshot is and a `ready` line. The stub makes that file
+# read-only while the child runs (at `compose stop`), so the three appends
+# fail. A batch file does not stop on a failed redirection: without the check
+# the child would exit 0, the restore would RUN, and the script the user
+# started, finding no `ready` line, would exit 1 with BlackVault stopped,
+# the recovery file left behind and no message.
+Write-Scenario "restore.bat - the handoff file cannot be written: the restore program never runs; exit 1 with one clear line; BlackVault is started again; no recovery file is left"
+$d = New-RestoreSandbox "restore-handoff-fails"
+$pf = New-PassFile $d "$BackupPass`n"
+$handoffsBefore = @(Get-ChildItem -Path $env:TEMP -Filter "blackvault-restore-handoff-*.txt" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_HANDOFF_READONLY" = "1"; "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0) "it had got as far as stopping BlackVault (so the handoff file existed and was made read-only)"
+Assert ((Get-StepIndex $steps 'full-restore\.mjs') -eq -1) "the restore program was never started"
+Assert (-not (Test-Path (Join-Path $d "__stdin-restore.bin"))) "the restore program was never given the passphrase"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault was started again (last call: $($steps | Select-Object -Last 1))"
+Assert ($r.Output -match "ERROR: could not write to .*blackvault-restore-handoff-\d+\.txt \(its ready line is missing\), so the restore did not start\. Nothing was changed\.") "one line says the handoff could not be written and nothing was changed"
+Assert ($r.Output -notmatch "did not pass the check") "does not claim the backup failed its check"
+Assert (-not $r.Output.Contains($RestoreOkLine) -and -not $r.Output.Contains("Restore complete.")) "does not claim a restore"
+Assert (@(Get-RecoveryFiles $d).Count -eq 0) "the recovery file was removed again: the next restore is not blocked"
+Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+$handoffsAfter = @(Get-ChildItem -Path $env:TEMP -Filter "blackvault-restore-handoff-*.txt" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+Assert (@($handoffsAfter | Where-Object { $handoffsBefore -notcontains $_ }).Count -eq 0) "the read-only handoff file was still removed from TEMP"
+Show-EvidenceIfFailed $r
+# The same install, with nothing in the way: the restore now runs.
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0 -and $r.Output.Contains("Restore complete.")) "a second restore, with a writable handoff, runs to the end (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
 
 # ══════════════════════════════════════════════════════════════════════════
 # reencrypt-files.bat (Task 8)

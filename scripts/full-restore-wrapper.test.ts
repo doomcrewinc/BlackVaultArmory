@@ -18,7 +18,7 @@
  * scripts/full-restore-cli.test.ts.
  *
  * restore.bat is covered by scripts/ci/windows/Test-WindowsInstallers.ps1
- * (scenarios RS1–RS18) and by the static checks at the end of this file.
+ * (scenarios RS1–RS19) and by the static checks at the end of this file.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1313,7 +1313,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
 
 /**
  * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
- * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS18). These
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS19). These
  * are the properties that can be read off the file on any platform. The
  * first of them is the one that matters most: batch cannot include another
  * file, so what restore.bat shares with backup.bat is a COPY, and it must be
@@ -1455,6 +1455,32 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     }
   });
 
+  it("the handoff's `ready` line is looked for in the file before the child phase says 'go on': if the write failed, the restore never runs", () => {
+    // The script the user started takes `ready` to mean "the restore program ran". If the append failed and the child
+    // still exited 0, the restore would run and its result would be thrown away: no start, no rollback, no message.
+    const at = code.indexOf('>>"!BV_HANDOFF!" echo ready=1');
+    expect(code.slice(at, at + 11)).toEqual([
+      '>>"!BV_HANDOFF!" echo ready=1',
+      'findstr /x /c:"ready=1" "!BV_HANDOFF!" >nul 2>&1',
+      "if errorlevel 1 goto :handoff_failed",
+      ">&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...",
+      "exit /b 0",
+      // Nothing was changed yet: the recovery file must not stay (it would block the next restore), and BlackVault is started again.
+      ":handoff_failed",
+      'del /f /q "!BV_RECOVERY!" >nul 2>&1',
+      'if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.',
+      "call :start_app_or_warn",
+      ">&2 echo ERROR: could not write to !BV_HANDOFF! (its ready line is missing), so the restore did not start. Nothing was changed.",
+      "exit /b 1",
+    ]);
+    // It is the child phase's ONLY way to say "go on".
+    const phase = code.slice(code.indexOf(":prepare_phase"), code.indexOf(":programs_returned"));
+    expect(phase.filter((l) => /^exit \/b 0$/.test(l.trim()))).toHaveLength(1);
+    expect(phase.filter((l) => /exit \/b 0/.test(l))).toEqual(["exit /b 0"]);
+    // …and PowerShell starts the restore only when the child exited 0.
+    expect(powershellStep(code)[0]).toContain("$b.WaitForExit(); if ($b.ExitCode -ne 0) { exit 1 } };");
+  });
+
   it("R24: the database is put back only when the marker exists; an uploads folder that is not there to look into rolls NOTHING back; the uploads go first; the marker is cleared last", () => {
     // The gate, in the order it is evaluated: complete < started < unknown (a missing uploads folder; Task 7 re-review item 3).
     const at = code.indexOf('set "BV_STATE=untouched"');
@@ -1552,7 +1578,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     }
     // Deleted in exactly two places (success / completed, and after a good rollback); never between :rollback and :rolled_back.
     const dels = code.map((l, i) => (l === 'del /f /q "!BV_RECOVERY!" >nul 2>&1' ? i : -1)).filter((i) => i >= 0);
-    expect(dels).toHaveLength(3); // + the one that clears a stale file before writing
+    expect(dels).toHaveLength(4); // + the one that clears a stale file before writing, + the one after a handoff that could not be written (nothing was changed yet)
     expect(dels.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
     expect(code.indexOf('type "!BV_RECOVERY!" 1>&2')).toBeGreaterThan(0);
     expect(code.filter((l) => l === 'type "!BV_RECOVERY!" 1>&2')).toHaveLength(2); // before the restore, and after a failed rollback
@@ -1567,13 +1593,13 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS18) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS19) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 18; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 19; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
-    expect(runs.length).toBeGreaterThanOrEqual(21);
+    expect(runs.length).toBeGreaterThanOrEqual(22);
     expect(evidence.length).toBe(runs.length);
     const stub = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/docker-stub.cs"), "utf8");
     expect(stub).toContain('"dist/scripts/full-restore.mjs"');
@@ -1584,5 +1610,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(section).toContain('foreach ($state in @("complete", "untouched")) {');
     expect(section).toContain('$c = Invoke-CmdLine $d $chain "started"');
     expect(stub).toContain('"BV_STUB_STATE_ANSWER"');
+    // RS19 makes the handoff append fail (the stub marks the file read-only while the child phase runs).
+    expect(stub).toContain('"BV_STUB_HANDOFF_READONLY"');
+    expect(section).toContain('"BV_STUB_HANDOFF_READONLY" = "1"');
   });
 });
