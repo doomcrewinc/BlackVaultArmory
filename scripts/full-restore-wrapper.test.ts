@@ -1058,6 +1058,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     ].map((l) => code.indexOf(l));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // %~f0 must still be this script when BV_BETWEEN is set: arguments are shifted with `shift /1` only.
+    expect(code.filter((l) => /^\s*shift\b/i.test(l))).toEqual(Array(4).fill("shift /1"));
     // The child is entered only through BV_RESTORE_PHASE, checked before anything else runs.
     expect(code.filter((l) => l !== "")[1]).toBe("if defined BV_RESTORE_PHASE goto :prepare_phase");
     // The PowerShell step: the second call only after the first and the step in between both exited 0;
@@ -1192,9 +1194,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS13) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS14) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 13; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 14; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# --------------------------------------------------------------------- report"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];

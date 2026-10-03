@@ -623,6 +623,22 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
     expect(code.slice(at - 2, at)).toEqual(['set "BV_DOCKER_ARGS_2="', 'set "BV_BETWEEN="']);
   });
 
+  // Windows CI (269a53f): with console code page 65001, Process.Start's own StreamWriter put a UTF-8
+  // byte-order mark on docker's standard input before the passphrase (48 bytes arrived, 45 were sent).
+  it("drops the console input encoding's preamble before docker is started, so no byte-order mark precedes the passphrase", () => {
+    const ps = code.filter((l) => l.startsWith('powershell -NoProfile -Command "'))[0];
+    const guard = "if ([Console]::InputEncoding.GetPreamble().Length -gt 0) { [Console]::InputEncoding = New-Object Text.UTF8Encoding $false };";
+    expect(ps).toContain(guard);
+    expect(ps.indexOf(guard)).toBeLessThan(ps.indexOf("[Diagnostics.Process]::Start("));
+  });
+
+  // Windows CI (269a53f): a bare `shift` also shifts %0, so `cd /d "%~dp0"` went to the passphrase
+  // file's folder and restore.bat's %~f0 was the passphrase file.
+  it("parses its arguments with `shift /1`, so %~dp0 stays this script's folder", () => {
+    expect(code.filter((l) => /^\s*shift\b/i.test(l))).toEqual(Array(6).fill("shift /1"));
+    expect(code.indexOf('cd /d "%~dp0"')).toBeGreaterThan(code.lastIndexOf("shift /1"));
+  });
+
   it("builds the same two docker commands as backup.sh, and maps exit codes the same way", () => {
     expect(code).toContain('set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
     expect(code).toContain('if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
