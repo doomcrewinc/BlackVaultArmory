@@ -327,6 +327,81 @@ describe("full-backup CLI (bundled, plain node)", () => {
       for (const f of [old[2], created]) expect(cli(["--dir", backups, "--verify", f]).status).toBe(0);
     });
 
+    describe("R36: a backup that left out an unreadable file is incomplete, so --keep deletes nothing", () => {
+      const KEPT_WARNING = "WARNING: old backups were kept because this backup is incomplete";
+      /** An uploads root with `good` readable images and `bad` damaged ones (real files, really undecryptable). */
+      async function uploadsWith(name: string, good: number, bad: number): Promise<string> {
+        const root = path.join(tmp, `${name}-${seq}`);
+        fs.mkdirSync(path.join(root, "images"), { recursive: true });
+        for (let i = 0; i < good; i++) await writeEncryptedFile(path.join(root, "images", `good-${i}.jpg`), IMG);
+        for (let i = 0; i < bad; i++) {
+          const file = path.join(root, "images", `corrupt-${i}.jpg`);
+          await writeEncryptedFile(file, IMG);
+          const bytes = fs.readFileSync(file);
+          bytes[bytes.length - 40] ^= 0xff;
+          fs.writeFileSync(file, bytes);
+        }
+        return root;
+      }
+      const cliOn = (uploadsRoot: string, args: string[]) => {
+        const r = spawnSync(process.execPath, [bundle, ...args], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: uploadsRoot }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+        return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+      };
+
+      it("one unreadable file + --keep 1 with older backups present: nothing is deleted, the warning is printed, exit 0", async () => {
+        const old = seed(3);
+        const before = old.map((f) => fs.readFileSync(path.join(backups, f)));
+        const r = cliOn(await uploadsWith("uploads-one-bad", 1, 1), ["--dir", backups, "--keep", "1"]);
+        expect(r.status, r.stderr).toBe(0);
+        const m = OK_LINE.exec(r.stdout);
+        expect(m, r.stdout).not.toBeNull();
+        expect(m!.slice(2)).toEqual(["1", String(IMG.length), m![4], "1", "1"]);
+        expect(r.stderr.split("\n").filter(Boolean)).toEqual([
+          "WARNING: skipped files/images/corrupt-0.jpg: unreadable: could not be decrypted (AUTH_FAILED)",
+          "WARNING: 1 file could not be read and is NOT in this backup.",
+          KEPT_WARNING,
+        ]);
+        expect(backupFiles()).toEqual([...old, m![1]].sort());
+        old.forEach((f, i) => expect(fs.readFileSync(path.join(backups, f)).equals(before[i])).toBe(true));
+      });
+
+      it("EVERY file unreadable + --keep 1: a verified backup with 0 files, nothing is deleted, the warning is printed, exit 0", async () => {
+        const old = seed(2);
+        const r = cliOn(await uploadsWith("uploads-all-bad", 0, 3), ["--dir", backups, "--keep", "1"]);
+        expect(r.status, r.stderr).toBe(0);
+        const m = OK_LINE.exec(r.stdout);
+        expect(m, r.stdout).not.toBeNull();
+        expect(m!.slice(2)).toEqual(["0", "0", m![4], "3", "3"]);
+        const lines = r.stderr.split("\n").filter(Boolean);
+        expect(lines).toHaveLength(5);
+        expect(lines[3]).toBe("WARNING: 3 files could not be read and are NOT in this backup.");
+        expect(lines[4]).toBe(KEPT_WARNING);
+        expect(r.stderr).not.toContain("deleted old backup");
+        expect(backupFiles()).toEqual([...old, m![1]].sort());
+      });
+
+      it("a file that only VANISHED while the backup ran does not count: pruning runs as before", async () => {
+        const old = seed(2);
+        const root = await uploadsWith("uploads-vanish", 2, 0);
+        // Preloaded into the child: the first read of good-1.jpg finds it gone (deleted after it was listed).
+        const preload = preloadFile("vanish", [
+          'const fs = require("node:fs");',
+          "const realReadFile = fs.promises.readFile.bind(fs.promises);",
+          "fs.promises.readFile = async (p, ...rest) => {",
+          '  if (String(p).endsWith("good-1.jpg")) { try { fs.unlinkSync(String(p)); } catch {} }',
+          "  return realReadFile(p, ...rest);",
+          "};",
+        ]);
+        const r = spawnSync(process.execPath, ["--require", preload, bundle, "--dir", backups, "--keep", "1"], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: root }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+        expect(r.status, r.stderr).toBe(0);
+        const m = OK_LINE.exec(r.stdout);
+        expect(m, r.stdout).not.toBeNull();
+        expect(m!.slice(5)).toEqual(["1", "0"]); // skipped=1 (vanished), unreadable=0
+        expect(r.stderr).not.toContain(KEPT_WARNING);
+        expect(backupFiles()).toEqual([m![1]]);
+      });
+    });
+
     it("a corrupted newest file (the new backup fails its verify): NOTHING is deleted, exit 1, empty stdout, no new .bvb", () => {
       const old = seed(3);
       const before = old.map((f) => fs.readFileSync(path.join(backups, f)));

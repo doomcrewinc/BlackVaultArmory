@@ -24,7 +24,10 @@
  *             R18). Without --keep nothing is ever deleted: backup.sh passes
  *             its default of 7, the Settings button never passes it. If the
  *             backup fails (a failed verify included) nothing is deleted and
- *             the exit code is 1. Not allowed together with --verify.
+ *             the exit code is 1. Nothing is deleted either when the new
+ *             backup is incomplete (`unreadable` is not 0, ruling R36): the
+ *             older backups may be the only ones holding those files. Not
+ *             allowed together with --verify.
  *
  * STDOUT      Exactly one line on success, nothing on failure:
  *               BLACKVAULT_FULL_BACKUP_OK file=<name> files=<n> bytes=<n> archive_bytes=<n> skipped=<n> unreadable=<n>
@@ -43,7 +46,9 @@
  *             verified but the folder could not be fsynced afterwards.
  *             With --keep: `full-backup: deleted old backup <name>` per
  *             deleted file, and `WARNING: <message>` for one that could not
- *             be deleted. The exit code is still 0.
+ *             be deleted; or the one line
+ *             `WARNING: old backups were kept because this backup is incomplete`.
+ *             The exit code is still 0.
  *
  * EXIT CODE   0 ok · 1 failed · 2 another backup is already running.
  *
@@ -142,7 +147,15 @@ async function main(): Promise<number> {
     // was verified and published as result.file. A failed backup or a failed
     // verify threw above, so nothing is deleted and the exit code is 1.
     // Nothing here can fail the run: the new backup exists and has verified.
-    if (args.keep !== null) {
+    // Ruling R36: a backup that left out a file it could not read is
+    // INCOMPLETE, and the older backups may be the only ones that hold that
+    // file — so nothing is deleted, however many there are. (A fault that
+    // hits every file would otherwise replace every good backup with an
+    // empty one, one night at a time.) A file that only vanished while the
+    // backup ran does not count: it was deleted by the user.
+    if (args.keep !== null && unreadable > 0) {
+      console.error("WARNING: old backups were kept because this backup is incomplete");
+    } else if (args.keep !== null) {
       try {
         const pruned = await pruneFullBackups(dir, args.keep, result.file);
         for (const name of pruned.deleted) console.error(`full-backup: deleted old backup ${name}`);
