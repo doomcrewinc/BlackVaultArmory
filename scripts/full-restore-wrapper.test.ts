@@ -27,8 +27,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The default 5 s limit only guards against a hang; every run of the script below has its own 60 s limit (spawnSync).
-vi.setConfig({ testTimeout: 120_000 });
+// These two limits only guard against a real hang. They are far above anything a test asserts (the
+// "at once" bounds below are explicit `toBeLessThan` checks on measured times, and the stub's longest
+// sleep is 120 s), because on a stalled machine a 60 s limit on each script run was itself what failed.
+const SPAWN_LIMIT_MS = 900_000;
+const TEST_LIMIT_MS = 1_200_000;
+vi.setConfig({ testTimeout: TEST_LIMIT_MS });
 
 const ROOT = path.resolve(__dirname, "..");
 const isWindows = process.platform === "win32";
@@ -188,6 +192,34 @@ function baseEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 const read = (name: string) => (fs.existsSync(path.join(rec, name)) ? fs.readFileSync(path.join(rec, name), "utf8") : "");
 const calls = () => read("calls").split("\n").filter(Boolean);
 const lines = (text: string) => text.split("\n").filter(Boolean);
+/**
+ * The recovery text's commands EXACTLY AS PRINTED: every line indented by two spaces that starts a
+ * command, with the lines of an && chain (each ends in " &&") kept together as the one command they are.
+ */
+function printedCommands(text: string): string[] {
+  const out: string[] = [];
+  let open = false;
+  for (const l of lines(text)) {
+    if (!/^ {2}(docker |rm )/.test(l)) {
+      if (open) throw new Error(`an && chain is cut off by: ${l}`);
+      continue;
+    }
+    if (/^ {2}docker (stop|ps) |^ {2}docker compose (stop blackvault|up -d)$/.test(l)) continue; // steps 1 and 4
+    if (open) out[out.length - 1] += `\n${l.trim()}`;
+    else out.push(l.trim());
+    open = l.endsWith(" &&");
+  }
+  if (open) throw new Error("the last && chain never ends");
+  return out;
+}
+/** "rm", or the snapshot-restore.sh modes a printed command runs, joined as its chain is. */
+const modesOf = (command: string) =>
+  command.startsWith("rm ")
+    ? "rm"
+    : command
+        .split(" &&\n")
+        .map((c) => c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0])
+        .join(" && ");
 /** Calls without the Compose version probe (restore.sh and db-snapshot.sh each make one). */
 const steps = () => calls().filter((c) => c !== "compose version --short");
 
@@ -196,7 +228,7 @@ function run(args: string[], opts: RunOpts = {}) {
     cwd: opts.cwd ?? app,
     env: baseEnv(opts.env),
     encoding: "utf8",
-    timeout: 60_000,
+    timeout: SPAWN_LIMIT_MS,
     ...(opts.devNull ? { stdio: ["ignore", "pipe", "pipe"] as const } : { input: "" }),
   });
   return { code: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr };
@@ -207,7 +239,7 @@ function runOnTty(args: string[], answers: string[], env: Record<string, string>
   fs.writeFileSync(helper, PTY_HELPER);
   const answersFile = path.join(tmp, "answers");
   fs.writeFileSync(answersFile, answers.join("\n"));
-  const r = spawnSync("python3", [helper, answersFile, "bash", path.join(app, "restore.sh"), ...args], { cwd: app, env: baseEnv(env), encoding: "utf8", timeout: 60_000 });
+  const r = spawnSync("python3", [helper, answersFile, "bash", path.join(app, "restore.sh"), ...args], { cwd: app, env: baseEnv(env), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -542,11 +574,11 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const file = path.join(app, "backups", recoveryFiles()[0]);
       const text = fs.readFileSync(file, "utf8");
       expect(text).toContain(`Run these from '${app}', in this order.`);
-      const commands = lines(text).filter((l) => /^ {2}(docker compose run|rm) /.test(l)).map((l) => l.trim());
-      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["state", "uploads", "sqlite", "clear-marker", "rm"]);
+      const commands = printedCommands(text);
+      expect(commands.map(modesOf)).toEqual(["state", "uploads && sqlite && clear-marker", "rm"]);
       expect(commands[0]).toContain(`-v '${app}/backups:/bv-backups:ro'`);
       for (const command of commands) {
-        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
+        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
         expect(done.status, `${command}\n${done.stderr}`).toBe(0);
       }
       expect(install()).toEqual(before);
@@ -560,7 +592,12 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const during = read("recovery-during");
       expect(during).toContain("  docker compose up -d --wait db");
       expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)' -c 'CREATE DATABASE blackvault_rollback OWNER blackvault'`);
-      expect(during).toMatch(/ {2}docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault -d blackvault_rollback --single-transaction -f - < backups\/blackvault-\d{8}-\d{6}\.sql\n/);
+      expect(during).toMatch(/ {2}docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault -d blackvault_rollback --single-transaction -f - < backups\/blackvault-\d{8}-\d{6}\.sql &&\n/);
+      // One && chain from the uploads to clear-marker (the marker is cleared only if every line above worked)…
+      const chain = printedCommands(during).find((c) => c.includes("psql"))!;
+      expect(chain.split(" &&\n").map((l) => (l.includes("/bv-snapshot-restore.sh ") ? modesOf(l) : l.includes("psql") ? "psql" : l))).toEqual(["uploads", "docker compose up -d --wait db", "psql", "psql", "psql", "clear-marker"]);
+      // …and, for the two other states, the uploads line by itself.
+      expect(printedCommands(during).map((c) => (c.includes("psql") ? "chain" : modesOf(c)))).toEqual(["state", "chain", "uploads", "rm"]);
       expect(during).toContain(`  docker ${PSQL} -d postgres -c 'DROP DATABASE IF EXISTS blackvault WITH (FORCE)' -c 'ALTER DATABASE blackvault_rollback RENAME TO blackvault'`);
     });
 
@@ -590,14 +627,14 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(tail).toContain(`To put the install back as it was, follow ${app}/backups/restore-${stamp}-RECOVERY.txt:`);
       expect(tail).toContain(fs.readFileSync(path.join(app, "backups", `restore-${stamp}-RECOVERY.txt`), "utf8"));
       expect(steps()).not.toContain("compose up -d");
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("the container cannot be seen to be gone: the text says NOT to run the rollback commands yet", async () => {
       const r = await runAndSignal("restore.pid", "SIGTERM", { BV_STUB_RESTORE: "hang", BV_STUB_CONTAINER_STUCK: "1" });
       expect(r.code).toBe(1);
       expect(r.stderr).toContain(`WARNING: could not confirm that the restore container blackvault-restore-${stampOf()} has stopped. Do NOT run the commands of steps 2 to 4 until step 1's 'docker ps' lists nothing.`);
       expect(r.stderr).not.toContain("The restore container is gone.");
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("interrupted while BlackVault is being stopped (before the restore started): BlackVault is started again and the message says nothing was changed; no recovery file", async () => {
       const before = install();
@@ -611,13 +648,13 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed; BlackVault was started again.");
       expect(install()).toEqual(before);
       expect(recoveryFiles()).toEqual([]);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("…and if it cannot be started again, the message says plainly that it is STOPPED", async () => {
       const r = await runAndSignal("stopping", "SIGTERM", { BV_STUB_STOP_SLEEP: "3", BV_STUB_FAIL_ON: "up" });
       expect(r.code).toBe(1);
       expect(lines(r.stderr).at(-1)).toBe("ERROR: interrupted before the restore started. Nothing was changed, but BlackVault is STOPPED: start it with: docker compose up -d");
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     // Re-review minor 2: `docker stop` finds nothing when the container was never created; the `compose run` CLIENT must not live on and create it.
     it("the container does not exist yet: the docker client the wrapper started is killed, so it cannot create the container after the trap has reported it gone", async () => {
@@ -628,7 +665,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(alive(client)).toBe(false);
       expect(r.stderr).toContain("The restore container is gone.");
       expect(afterRestore()).toEqual([`stop blackvault-restore-${stampOf()}`, `ps -aq --filter name=^blackvault-restore-${stampOf()}$`]);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     // Re-review minor 6.
     it("interrupted during the snapshot: db-snapshot.sh's uploads marker is not left behind, there is no recovery file, and BlackVault is started again", async () => {
@@ -642,7 +679,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(install()).toEqual(before);
       // A second restore is not blocked.
       expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(0);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("the early handler also removes a recovery file already written (the window between writing it and starting the restore)", () => {
       // That window holds only `echo`/`cat`; no test can land a signal in it. Pinned on the script instead.
@@ -689,11 +726,11 @@ describe.skipIf(isWindows)("restore.sh", () => {
       return fs.readFileSync(path.join(app, "backups", recoveryFiles()[0]), "utf8");
     }
     function runPrinted(text: string) {
-      const commands = lines(text).filter((l) => /^ {2}(docker compose run|rm) /.test(l)).map((l) => l.trim());
-      expect(commands.map((c) => (c.startsWith("rm ") ? "rm" : c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0]))).toEqual(["state", "uploads", "sqlite", "clear-marker", "rm"]);
+      const commands = printedCommands(text);
+      expect(commands.map(modesOf)).toEqual(["state", "uploads && sqlite && clear-marker", "rm"]);
       let out = "";
       for (const command of commands) {
-        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: 60_000 });
+        const done = spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
         expect(done.status, `${command}\n${done.stderr}`).toBe(0);
         out += done.stdout + done.stderr;
       }
@@ -712,7 +749,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(install()).toEqual(restored); // byte for byte: database, restored folders, .pre-restore-<time>
       expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
       expect(recoveryFiles()).toEqual([]);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("(b) STARTED (marker present, killed mid-way): rolled back to exactly what was there before", async () => {
       const before = install();
@@ -723,7 +760,45 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(out).toContain("Moved the previous images folder back into place.");
       expect(install()).toEqual(before);
       expect(recoveryFiles()).toEqual([]);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
+
+    // Task 7 re-review, new breakage 1: run after a line that failed, clear-marker removed the only thing
+    // that says "the database step was reached", and the half-rolled-back install then read as untouched.
+    it("(b2) STARTED, and the database line FAILS: the chain stops there — the marker is still present and `state` still says started; run again, it finishes the job", async () => {
+      const before = install();
+      const text = await wrapperDies("crash");
+      const [state, chain, rm] = printedCommands(text);
+      expect(modesOf(chain)).toBe("uploads && sqlite && clear-marker");
+      const sh = (command: string, env: Record<string, string> = {}) => spawnSync("bash", ["-c", command], { cwd: app, env: baseEnv(env), encoding: "utf8", timeout: SPAWN_LIMIT_MS });
+      expect(sh(state).stdout.trim()).toBe("started");
+      const stamp = /\/bv-snapshot-restore\.sh state \/app\/uploads (\d{8}-\d{6})/.exec(state)![1];
+      const marker = path.join(app, "data/uploads", `.restore-${stamp}.db-started`);
+      fs.rmSync(path.join(rec, "calls"));
+      const failed = sh(chain, { BV_STUB_ROLLBACK_FAIL: "sqlite" });
+      expect(failed.status).not.toBe(0);
+      expect(failed.stderr).toContain("ERROR: could not restore from the snapshot: [stub] refused");
+      // The uploads line ran, the database line failed, and clear-marker was NOT run.
+      expect(steps().map((c) => c.split("/bv-snapshot-restore.sh ")[1].split(" ")[0])).toEqual(["uploads", "sqlite"]);
+      expect(fs.existsSync(marker)).toBe(true);
+      expect(sh(state).stdout.trim()).toBe("started");
+      expect(install()).not.toEqual(before); // the database is still the failed restore's
+      // The same line again, this time with nothing in the way: everything is back and the marker is gone.
+      const again = sh(chain);
+      expect(again.status, again.stderr).toBe(0);
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(sh(rm).status).toBe(0);
+      expect(install()).toEqual(before);
+      expect(recoveryFiles()).toEqual([]);
+    }, TEST_LIMIT_MS);
+
+    it("the text says in words that the last line runs only if every line above it worked", () => {
+      expect(run([NAME, "--yes", "--passphrase-file", passFile()]).code).toBe(0);
+      const text = read("recovery-during");
+      expect(text).toContain("3. Put it back. These lines are ONE command (each ends in &&): a line runs");
+      expect(text).toContain("only if every line above it worked, so the marker is cleared (the last");
+      expect(text).toContain("never run the last");
+      expect(text).not.toContain("Run every line, in this order");
+    });
 
     it("(c) UNTOUCHED (refused while staging, no marker): unchanged — the database file is not even rewritten", async () => {
       const before = install();
@@ -735,7 +810,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(install()).toEqual(before); // the staging folder is gone too
       expect({ mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino }).toEqual(dbBefore);
       expect(recoveryFiles()).toEqual([]);
-    }, 120_000);
+    }, TEST_LIMIT_MS);
 
     it("the text describes the three states, and on PostgreSQL says the psql lines are for 'started' only", () => {
       pgInstall();
@@ -938,6 +1013,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(powershellStep(backupCode)).toHaveLength(1);
     expect(powershellStep(code)[0]).toBe(powershellStep(backupCode)[0]);
     // It is the ONLY way restore.bat hands anything to a program on stdin, and it runs with backup.bat's "ask once" mode.
+    // Ruling R27: ONE call, so one PowerShell process and one passphrase prompt for both programs.
+    expect(code.filter((l) => l.includes("call :run_with_passphrase"))).toEqual(["call :run_with_passphrase"]);
     const at = code.indexOf(":run_with_passphrase");
     expect(code.slice(at, at + 4)).toEqual([":run_with_passphrase", powershellStep(backupCode)[0], 'set "BV_RC=!errorlevel!"', "goto :eof"]);
     expect(code).toContain('set "BV_MODE=verify"');
@@ -958,19 +1035,52 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   });
 
   it("the steps are in the spec's order, and the two program calls match restore.sh's (no --user, no --no-deps; the restore container is named)", () => {
+    // Ruling R27: the check and the restore are the first and second call of ONE PowerShell step, with
+    // :prepare_phase (confirm, stop, snapshot, recovery file) run by that step in between, in a child cmd.exe.
     const order = [
       'if not exist "backups\\restore-*-RECOVERY.txt" goto :no_recovery_pending',
       'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"',
+      'set "BV_DOCKER_ARGS_2=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
+      'set "BV_BETWEEN=%~f0"',
+      'set "BV_RESTORE_PHASE=prepare"',
+      "call :run_with_passphrase",
+      "goto :programs_returned",
+      ":prepare_phase",
       'set /p "BV_CONFIRM=Type RESTORE to continue: "',
       'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!" goto :stamp_taken', // a taken time stamp is refused before the stop
       "%COMPOSE% stop blackvault 1>&2",
       'call scripts\\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1',
       "call :write_recovery",
-      'set "BV_DOCKER_ARGS=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
+      '>>"!BV_HANDOFF!" echo ready=1',
+      "exit /b 0",
+      ":programs_returned",
       ":rollback",
     ].map((l) => code.indexOf(l));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The child is entered only through BV_RESTORE_PHASE, checked before anything else runs.
+    expect(code.filter((l) => l !== "")[1]).toBe("if defined BV_RESTORE_PHASE goto :prepare_phase");
+    // The PowerShell step: the second call only after the first and the step in between both exited 0;
+    // the check's standard output goes to standard error, so standard output holds the restore's line only.
+    const ps = powershellStep(code)[0];
+    expect(ps).toContain("for ($i = 0; $i -lt $calls.Count; $i++) { if ($i -eq 1) { $between = New-Object Diagnostics.ProcessStartInfo; $between.FileName = $env:ComSpec;");
+    expect(ps).toContain("$b.WaitForExit(); if ($b.ExitCode -ne 0) { exit 1 } };");
+    expect(ps).toContain("if ($p.ExitCode -ne 0) { exit $p.ExitCode } }; exit 0 }");
+    expect(ps).toContain("$toErr = ($calls.Count -gt 1) -and ($i -eq 0); if ($toErr) { $psi.RedirectStandardOutput = $true }");
+    // How far it got comes back in the handoff file: no file = the check failed; no `ready` = the step in between stopped.
+    const back = code.indexOf(":programs_returned");
+    expect(code.slice(back + 5, back + 13)).toEqual([
+      'if exist "!BV_HANDOFF!" for /f "usebackq tokens=1,* delims==" %%A in ("!BV_HANDOFF!") do set "BV_H_%%A=%%B"',
+      'del /f /q "!BV_HANDOFF!" >nul 2>&1',
+      "if defined BV_H_ready goto :restore_ran",
+      "if defined BV_H_phase exit /b 1",
+      ">&2 echo ERROR: the backup !BV_FILE_NAME! did not pass the check (the reason is on the line above). Nothing was changed; BlackVault was not stopped.",
+      "exit /b 1",
+      ":restore_ran",
+      'set "BV_DB_SNAPSHOT=!BV_H_db!"',
+    ]);
+    // Nothing secret is written there: the three handoff lines are the phase, two snapshot paths and `ready`.
+    expect(code.filter((l) => l.includes('"!BV_HANDOFF!" echo'))).toEqual(['>"!BV_HANDOFF!" echo phase=prepare', '>>"!BV_HANDOFF!" echo db=!BV_DB_SNAPSHOT!', '>>"!BV_HANDOFF!" echo uploads=!BV_UPLOADS_SNAPSHOT!', '>>"!BV_HANDOFF!" echo ready=1']);
     expect(code).toContain('set "BV_CONTAINER=blackvault-restore-!BV_STAMP!"');
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
     expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-backup.mjs --verify "$NAME")');
@@ -978,19 +1088,29 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(sh).toContain('CONTAINER="blackvault-restore-$STAMP"');
   });
 
-  it("R24: the database is put back only when the marker exists (or the uploads folder is not there to look into); the uploads go first; the marker is cleared last", () => {
-    // The gate, in the order it is evaluated: complete < started; a missing uploads folder counts as started.
+  it("R24: the database is put back only when the marker exists; an uploads folder that is not there to look into rolls NOTHING back; the uploads go first; the marker is cleared last", () => {
+    // The gate, in the order it is evaluated: complete < started < unknown (a missing uploads folder; Task 7 re-review item 3).
     const at = code.indexOf('set "BV_STATE=untouched"');
-    expect(code.slice(at, at + 7)).toEqual([
+    expect(code.slice(at, at + 8)).toEqual([
       'set "BV_STATE=untouched"',
       'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\images\\" set "BV_STATE=complete"',
       'if exist "!BV_HOST_UPLOADS!\\.pre-restore-!BV_STAMP!\\documents\\" set "BV_STATE=complete"',
       'if exist "!BV_MARKER!\\" set "BV_STATE=started"',
-      'if not exist "!BV_HOST_UPLOADS!\\" set "BV_STATE=started"',
+      'if not exist "!BV_HOST_UPLOADS!\\" set "BV_STATE=unknown"',
+      'if "!BV_STATE!"=="unknown" goto :state_unknown',
       'if not "!BV_STATE!"=="complete" goto :rollback',
       ">&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.",
     ]);
     expect(code).toContain('set "BV_MARKER=!BV_HOST_UPLOADS!\\.restore-!BV_STAMP!.db-started"');
+    // unknown: one line that says so, then straight to the "not started, here is the recovery file" ending - no rollback command, no `up -d`.
+    const unknown = code.indexOf(":state_unknown");
+    expect(code.slice(unknown, unknown + 6).filter((l) => l !== "")).toEqual([
+      ":state_unknown",
+      ">&2 echo.",
+      ">&2 echo The restore failed (exit !BV_RC!; the reason is above), and how far it got could not be found out: the uploads folder !BV_HOST_UPLOADS! is not there to look into. Nothing is rolled back blindly.",
+      ":rollback_failed",
+      ">&2 echo ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started. What to do is in !CD!\\!BV_RECOVERY!:",
+    ]);
     const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
     const psql = "%COMPOSE% exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
     const expected = [
@@ -1019,24 +1139,42 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     const text = write.filter((l) => l.startsWith('>>"!BV_RECOVERY!" echo')).map((l) => l.slice('>>"!BV_RECOVERY!" echo'.length).replace(/^[. ]/, ""));
     expect(text).toContain("  docker stop !BV_CONTAINER!");
     expect(text).toContain("  docker ps -a --filter name=!BV_CONTAINER!");
-    expect(text).toContain("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!");
-    expect(text).toContain("  !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP!");
+    // Task 7 re-review, new breakage 1: step 3 is ONE command line joined with && (written ^&^& for echo),
+    // so clear-marker runs only if every part before it worked - and the text says so in words.
+    const up = "!BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!";
+    const clear = "!BV_RB! clear-marker /app/uploads !BV_STAMP!";
+    const pg = "!BV_PSQL! -d postgres -c";
+    expect(text).toContain(`  ${up} ^&^& !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP! ^&^& ${clear}`);
+    expect(text).toContain(
+      `  ${up} ^&^& docker compose up -d --wait db ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& ${pg} "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& ${clear}`,
+    );
+    expect(text).toContain(`  ${up}`); // PostgreSQL, untouched or complete: the uploads line by itself
+    // clear-marker is never a line of its own, and never follows anything but "&& ".
+    for (const l of text.filter((x) => x.includes("clear-marker"))) expect(l.endsWith(` ^&^& ${clear}`)).toBe(true);
+    expect(text.filter((x) => x.includes("clear-marker"))).toHaveLength(2);
+    expect(text.filter((x) => x.includes("only if every part before it worked, so the marker is cleared"))).toHaveLength(2);
+    expect(text.filter((x) => x.includes("never run its last part by"))).toHaveLength(2);
+    expect(text.join("\n")).not.toContain("Run every line, in this order");
     // R28: the three states, looked up first; the sentence that was false after a finished restore is gone.
     expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeGreaterThan(0);
     expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeLessThan(text.indexOf("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!"));
     for (const word of ["   complete   ", "   started    ", "   untouched  "]) expect(text.some((l) => l.startsWith(word))).toBe(true);
-    expect(text).toContain("   PostgreSQL: the next four lines ONLY if step 2 printed: started");
+    expect(text).toContain("   PostgreSQL: the next line ONLY if step 2 printed: started");
     expect(text.join("\n")).not.toContain("the database was never touched: skip to step 4");
     // …and its wording is restore.sh's, line for line, for the state block.
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
     for (const l of text.filter((x) => /^ {3}(complete|started|untouched) |^ {14}\S/.test(x))) expect(sh, l).toContain(`echo "${l}"`);
-    expect(text).toContain('  !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!"');
-    expect(text).toContain("  !BV_RB! clear-marker /app/uploads !BV_STAMP!");
+    expect(text.some((l) => l.includes(' -f - ^< "!BV_DB_SNAPSHOT!" ^&^& '))).toBe(true); // the dump path is quoted, the < escaped for echo
     expect(text.join("\n")).toContain("A batch file cannot catch Ctrl-C or a closed");
     // Paths in the commands are quoted (a checkout path with spaces).
     expect(write).toContain('set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"');
     // No exclamation mark in the text itself: with delayed expansion on it would be eaten.
     for (const l of text) expect(l.replace(/!BV_[A-Z_]+!|!CD!/g, "")).not.toContain("!");
+    // Every & in the text is escaped for echo (an unescaped one would end the echo and run the rest), and none sits inside a quoted string.
+    for (const l of text) {
+      expect(l.replace(/\^&/g, "")).not.toContain("&");
+      for (const quoted of l.match(/"[^"]*"/g) ?? []) expect(quoted).not.toContain("&");
+    }
     // Deleted in exactly two places (success / completed, and after a good rollback); never between :rollback and :rolled_back.
     const dels = code.map((l, i) => (l === 'del /f /q "!BV_RECOVERY!" >nul 2>&1' ? i : -1)).filter((i) => i >= 0);
     expect(dels).toHaveLength(3); // + the one that clears a stale file before writing
@@ -1045,18 +1183,18 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => l === 'type "!BV_RECOVERY!" 1>&2')).toHaveLength(2); // before the restore, and after a failed rollback
   });
 
-  it("every for /f character check on a user value is guarded against a leading ';', and it never pauses", () => {
+  it("every for /f character check on a user value is guarded against a ';' anywhere in it, and it never pauses", () => {
     const at = code.findIndex((l) => l.startsWith('for /f "delims=') && l.includes('("!BV_FILE_NAME!")'));
     expect(at).toBeGreaterThan(0);
     expect(code[at].endsWith("do goto :file_bad_name")).toBe(true);
-    expect(code[at - 1]).toBe('if "!BV_FILE_NAME:~0,1!"==";" goto :file_bad_name');
+    expect(code[at - 1]).toBe('if not "!BV_FILE_NAME:;=!"=="!BV_FILE_NAME!" goto :file_bad_name');
     expect(code.filter((l) => /^for \/f "delims=[^"]+" %%X in \("!BV_/.test(l))).toHaveLength(1);
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS11) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS13) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 11; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 13; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# --------------------------------------------------------------------- report"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];

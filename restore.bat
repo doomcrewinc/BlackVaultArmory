@@ -47,13 +47,27 @@
 :: restore.sh uses. PostgreSQL is put back with psql in the db container:
 :: the dump is loaded into a NEW database, and only then swapped in.
 ::
-:: THE PASSPHRASE NEVER TOUCHES cmd.exe, exactly as in backup.bat: one
-:: PowerShell process reads --passphrase-file (or asks, without echo), starts
-:: docker with its standard input a pipe, and writes the passphrase there.
-:: The backup is opened twice (the check, then the restore), so WITHOUT
-:: --passphrase-file you are asked for the passphrase twice: cmd.exe must not
-:: hold it in between. With no --passphrase-file and no console this script
-:: stops at once.
+:: THE PASSPHRASE NEVER TOUCHES cmd.exe, exactly as in backup.bat, and it is
+:: asked for ONCE (ruling R27). The backup is opened twice (the check, then
+:: the restore) and cmd.exe must not hold the passphrase in between. So ONE
+:: PowerShell process (:run_with_passphrase) reads --passphrase-file, or
+:: asks without echo, and then does three things itself, stopping at the
+:: first that fails:
+::   a. starts docker for the check (step 1), the passphrase on its standard
+::      input, its standard output sent to standard error;
+::   b. runs steps 2 and 3 by starting THIS SCRIPT again in a child cmd.exe
+::      (BV_RESTORE_PHASE is set: see :prepare_phase). The child inherits
+::      PowerShell's environment, which never holds the passphrase;
+::   c. starts docker for the restore (step 4), the passphrase on its
+::      standard input.
+:: The passphrase exists only in that PowerShell process's memory and in the
+:: two pipes: in no environment, on no command line, in no file.
+:: What the child found out (where the snapshot is) comes back in a small
+:: file in %TEMP% (BV_HANDOFF): two paths, no secret. The same file says how
+:: far things got: no file = the check did not pass; a file without its
+:: `ready` line = step 2 or 3 stopped, and said why; `ready` = the restore
+:: program was started, and the exit code is the restore program's.
+:: With no --passphrase-file and no console this script stops at once.
 ::
 :: --yes: without a console there is nobody to type RESTORE, so --yes is
 :: required; without it the script stops before anything is checked.
@@ -65,6 +79,10 @@
 ::
 :: It never pauses. EXIT CODE: 0 restored, 1 failed (rolled back, or nothing
 :: was changed). A failure ends with one ERROR line that says which.
+
+:: Started again by :run_with_passphrase for steps 2 and 3 (see THE
+:: PASSPHRASE NEVER TOUCHES cmd.exe above).
+if defined BV_RESTORE_PHASE goto :prepare_phase
 
 :: Arguments are read BEFORE changing folder: a relative path is relative to
 :: where the user ran this from.
@@ -215,7 +233,9 @@ if /i not "!BV_FILE_DIR!"=="!BV_HOST_FULL!" goto :file_outside
 :file_name_check
 if not defined BV_FILE_NAME goto :file_bad_name
 if "!BV_FILE_NAME:~0,1!"=="-" goto :file_bad_name
-if "!BV_FILE_NAME:~0,1!"==";" goto :file_bad_name
+:: for /f drops a value whose first character after its leading delimiters
+:: is ";" (its eol character), so a ";" anywhere is refused first.
+if not "!BV_FILE_NAME:;=!"=="!BV_FILE_NAME!" goto :file_bad_name
 for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" %%X in ("!BV_FILE_NAME!") do goto :file_bad_name
 goto :file_mapped
 :file_outside
@@ -228,14 +248,62 @@ exit /b 1
 
 call :provider_from_env
 
-:: -- 4. Check the backup: nothing is changed yet --------------------
+:: This run's time stamp. It names the recovery file, the restore container,
+:: and the restore program's marker and .pre-restore folder. It is read here,
+:: before the check, because the restore program's command line (below)
+:: holds it and both programs are started by one PowerShell process.
+set "BV_STAMP="
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')" 2^>nul`) do set "BV_STAMP=%%T"
+if defined BV_STAMP goto :stamp_ok
+>&2 echo ERROR: could not read the time. Nothing was changed; BlackVault was not stopped.
+exit /b 1
+:stamp_ok
+set "BV_RECOVERY=backups\restore-!BV_STAMP!-RECOVERY.txt"
+:: The one-off restore container gets a name, so that it can be stopped by name.
+set "BV_CONTAINER=blackvault-restore-!BV_STAMP!"
+:: docker-compose.yml mounts <DATA_DIR>\uploads at /app/uploads. The restore
+:: program's marker and its .pre-restore folder are looked for here.
+set "BV_HOST_UPLOADS=!BV_HOST_DATA!\uploads"
+set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
+
+:: -- 4. Check the backup; then steps 5 to 7; then restore ------------
+:: One call, one passphrase prompt (ruling R27). :run_with_passphrase runs
+:: the check; if it passes, :prepare_phase (steps 5 to 7: confirm, stop,
+:: snapshot, recovery file) in a child cmd.exe; if that exits 0, the restore.
 >&2 echo Checking the backup !BV_FILE_NAME! (nothing is changed yet)...
 set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"
-call :run_with_passphrase 1>&2
-if "!BV_RC!"=="0" goto :verified
->&2 echo ERROR: the backup !BV_FILE_NAME! did not pass the check (the reason is on the line above). Nothing was changed; BlackVault was not stopped.
+set "BV_DOCKER_ARGS_2=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"
+set "BV_BETWEEN=%~f0"
+set "BV_HANDOFF=%TEMP%\blackvault-restore-handoff-%RANDOM%%RANDOM%.txt"
+del /f /q "!BV_HANDOFF!" >nul 2>&1
+set "BV_RESTORE_PHASE=prepare"
+call :run_with_passphrase
+set "BV_RESTORE_PHASE="
+goto :programs_returned
+
+:: ====================================================================
+:: :prepare_phase - steps 5 to 7, run in a CHILD cmd.exe that the PowerShell
+:: step starts between the check and the restore. Everything set above
+:: (BV_*, COMPOSE, DB_PROVIDER) is inherited through the environment; the
+:: passphrase is not in it. Exit 0 = go on and restore. Any other exit =
+:: stop: this phase has printed why, and has started BlackVault again if it
+:: had stopped it. The first line it writes to BV_HANDOFF says it was
+:: reached (the check passed); the last ones hand back the snapshot paths.
+:: ====================================================================
+:prepare_phase
+setlocal EnableDelayedExpansion
+set "BV_RESTORE_PHASE="
+if not defined BV_HANDOFF goto :prepare_misuse
+if not defined BV_STAMP goto :prepare_misuse
+cd /d "%~dp0"
+>"!BV_HANDOFF!" echo phase=prepare
+if exist "!BV_HANDOFF!" goto :prepare_started
+>&2 echo ERROR: could not write !BV_HANDOFF!. Nothing was changed; BlackVault was not stopped.
 exit /b 1
-:verified
+:prepare_misuse
+>&2 echo ERROR: BV_RESTORE_PHASE is set in this console; it is for this script's own use. Run 'set BV_RESTORE_PHASE=' and start the restore again. Nothing was done.
+exit /b 1
+:prepare_started
 
 :: -- 5. Confirm ------------------------------------------------------
 if defined BV_YES goto :confirmed
@@ -254,19 +322,6 @@ if "!BV_CONFIRM!"=="RESTORE" goto :confirmed
 exit /b 1
 :confirmed
 
-set "BV_STAMP="
-for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')" 2^>nul`) do set "BV_STAMP=%%T"
-if defined BV_STAMP goto :stamp_ok
->&2 echo ERROR: could not read the time. Nothing was changed; BlackVault was not stopped.
-exit /b 1
-:stamp_ok
-set "BV_RECOVERY=backups\restore-!BV_STAMP!-RECOVERY.txt"
-:: The one-off restore container gets a name, so that it can be stopped by name.
-set "BV_CONTAINER=blackvault-restore-!BV_STAMP!"
-:: docker-compose.yml mounts <DATA_DIR>\uploads at /app/uploads. The restore
-:: program's marker and its .pre-restore folder are looked for here.
-set "BV_HOST_UPLOADS=!BV_HOST_DATA!\uploads"
-set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
 :: This run's two names must be free. If one exists (a second run in the
 :: same second, a clock set back), the restore program would refuse - and a
 :: leftover .pre-restore folder would then read as "the restore finished".
@@ -313,15 +368,7 @@ call :start_app_or_warn
 >&2 echo ERROR: there is no database to snapshot yet, so a failed restore could not be undone. Start BlackVault once (docker compose up -d), wait until it is up, then run the restore again. Nothing was changed.
 exit /b 1
 :have_snapshot
-set "BV_DB_SNAPSHOT_NAME="
-for %%F in ("!BV_DB_SNAPSHOT!") do set "BV_DB_SNAPSHOT_NAME=%%~nxF"
-:: With no uploads snapshot recorded the last argument of the uploads rollback is empty.
-set "BV_UPLOADS_ARG="
-set "BV_UPLOADS_SHOWN=(no uploads snapshot was recorded)"
-if not defined BV_UPLOADS_SNAPSHOT goto :uploads_arg_done
-for %%F in ("!BV_UPLOADS_SNAPSHOT!") do set "BV_UPLOADS_ARG=/bv-backups/%%~nxF"
-set "BV_UPLOADS_SHOWN=!BV_UPLOADS_SNAPSHOT!"
-:uploads_arg_done
+call :snapshot_names
 
 :: -- 7. The recovery file, then the restore --------------------------
 call :write_recovery
@@ -339,18 +386,48 @@ type "!BV_RECOVERY!" 1>&2
 >&2 echo.
 
 >&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...
-set "BV_DOCKER_ARGS=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"
-call :run_with_passphrase
+:: Hand the snapshot paths back, and say "ready": from here on the restore
+:: program counts as started.
+>>"!BV_HANDOFF!" echo db=!BV_DB_SNAPSHOT!
+>>"!BV_HANDOFF!" echo uploads=!BV_UPLOADS_SNAPSHOT!
+>>"!BV_HANDOFF!" echo ready=1
+exit /b 0
+
+:: ====================================================================
+:: Back in the script the user started. BV_RC is the PowerShell step's exit
+:: code; BV_HANDOFF says how far it got.
+:: ====================================================================
+:programs_returned
+set "BV_H_phase="
+set "BV_H_db="
+set "BV_H_uploads="
+set "BV_H_ready="
+if exist "!BV_HANDOFF!" for /f "usebackq tokens=1,* delims==" %%A in ("!BV_HANDOFF!") do set "BV_H_%%A=%%B"
+del /f /q "!BV_HANDOFF!" >nul 2>&1
+if defined BV_H_ready goto :restore_ran
+:: Steps 5 to 7 stopped: :prepare_phase has said why.
+if defined BV_H_phase exit /b 1
+>&2 echo ERROR: the backup !BV_FILE_NAME! did not pass the check (the reason is on the line above). Nothing was changed; BlackVault was not stopped.
+exit /b 1
+:restore_ran
+set "BV_DB_SNAPSHOT=!BV_H_db!"
+set "BV_UPLOADS_SNAPSHOT=!BV_H_uploads!"
+call :snapshot_names
 if "!BV_RC!"=="0" goto :restore_done
 
 :: Ruling R24. What the restore program left behind:
-::   started    its marker exists: the database step was reached. Also the
-::              answer when the uploads folder is not there to look into.
+::   started    its marker exists: the database step was reached.
 ::   complete   no marker, but .pre-restore-<time> holds a previous folder:
 ::              the program removes its marker only after everything is in
 ::              place, so the restore FINISHED and only its exit status was
 ::              lost.
 ::   untouched  neither: the database step was never reached.
+::   unknown    the uploads folder is not there to look into (it is mounted
+::              from somewhere other than <DATA_DIR>\uploads). Nothing is
+::              rolled back blindly - on PostgreSQL that could put the old
+::              records back under a restore that had in fact finished.
+::              BlackVault is not started and the recovery file, whose step
+::              2 asks inside a container, says what to do (as restore.sh).
 :: scripts/snapshot-restore.sh applies the same rule again by itself, inside
 :: the container (ruling R28): its uploads mode changes nothing after a
 :: finished restore, and its sqlite mode nothing unless the marker exists.
@@ -358,7 +435,8 @@ set "BV_STATE=untouched"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\documents\" set "BV_STATE=complete"
 if exist "!BV_MARKER!\" set "BV_STATE=started"
-if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=started"
+if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=unknown"
+if "!BV_STATE!"=="unknown" goto :state_unknown
 if not "!BV_STATE!"=="complete" goto :rollback
 >&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.
 
@@ -411,7 +489,13 @@ goto :rollback_checked
 set "BV_ROLLED_BACK="
 :rollback_checked
 if defined BV_ROLLED_BACK goto :rolled_back
+goto :rollback_failed
 
+:state_unknown
+>&2 echo.
+>&2 echo The restore failed (exit !BV_RC!; the reason is above), and how far it got could not be found out: the uploads folder !BV_HOST_UPLOADS! is not there to look into. Nothing is rolled back blindly.
+
+:rollback_failed
 >&2 echo ERROR: the restore failed AND the automatic rollback failed (see above). The install may be half restored. BlackVault was NOT started. What to do is in !CD!\!BV_RECOVERY!:
 type "!BV_RECOVERY!" 1>&2
 exit /b 1
@@ -445,10 +529,27 @@ exit /b 1
 if errorlevel 1 >&2 echo WARNING: BlackVault did not start again; start it by hand: docker compose up -d
 goto :eof
 
+:: :snapshot_names - from BV_DB_SNAPSHOT and BV_UPLOADS_SNAPSHOT (paths under
+:: backups\), the names the rollback commands use inside the container. With
+:: no uploads snapshot recorded the last argument of the uploads rollback is
+:: empty.
+:snapshot_names
+set "BV_DB_SNAPSHOT_NAME="
+for %%F in ("!BV_DB_SNAPSHOT!") do set "BV_DB_SNAPSHOT_NAME=%%~nxF"
+set "BV_UPLOADS_ARG="
+set "BV_UPLOADS_SHOWN=(no uploads snapshot was recorded)"
+if not defined BV_UPLOADS_SNAPSHOT goto :eof
+for %%F in ("!BV_UPLOADS_SNAPSHOT!") do set "BV_UPLOADS_ARG=/bv-backups/%%~nxF"
+set "BV_UPLOADS_SHOWN=!BV_UPLOADS_SNAPSHOT!"
+goto :eof
+
 :: :write_recovery - ruling R25: writes !BV_RECOVERY!, the file that says
 :: where the snapshot is and exactly what to run to put it back. The same
 :: steps as restore.sh's recovery_text. No exclamation mark may appear in
-:: the text (delayed expansion is on).
+:: the text (delayed expansion is on). Step 3 is ONE command line joined with
+:: ^&^& (restore.sh prints the same chain over several lines): clear-marker
+:: removes the only thing that says "the database step was reached", so it
+:: must never run after a part that failed.
 :write_recovery
 del /f /q "!BV_RECOVERY!" >nul 2>&1
 set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"
@@ -485,35 +586,46 @@ set "BV_PSQL=docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault"
 >>"!BV_RECOVERY!" echo    untouched  The restore never reached the database. Step 3 only removes its
 >>"!BV_RECOVERY!" echo               work folder and checks the photos and documents.
 >>"!BV_RECOVERY!" echo.
->>"!BV_RECOVERY!" echo 3. Put it back. Run every line, in this order; each one looks at the state
->>"!BV_RECOVERY!" echo    itself and changes only what that state needs.
->>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!
 if /i "!DB_PROVIDER!"=="sqlite" goto :write_recovery_sqlite
->>"!BV_RECOVERY!" echo    PostgreSQL: the next four lines ONLY if step 2 printed: started
->>"!BV_RECOVERY!" echo    (in any other state they would replace a database the restore did not
->>"!BV_RECOVERY!" echo    leave half done):
->>"!BV_RECOVERY!" echo   docker compose up -d --wait db
->>"!BV_RECOVERY!" echo   !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault"
->>"!BV_RECOVERY!" echo   !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!"
->>"!BV_RECOVERY!" echo   !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault"
+>>"!BV_RECOVERY!" echo 3. Put it back. Step 2 says which of the two to run.
+>>"!BV_RECOVERY!" echo    PostgreSQL: the next line ONLY if step 2 printed: started
+>>"!BV_RECOVERY!" echo    (in any other state it would replace a database the restore did not
+>>"!BV_RECOVERY!" echo    leave half done). It is ONE command line, joined with ^&^&: each part runs
+>>"!BV_RECOVERY!" echo    only if every part before it worked, so the marker is cleared (the last
+>>"!BV_RECOVERY!" echo    part) only when everything is back. If it stops with an ERROR, fix what
+>>"!BV_RECOVERY!" echo    it says and run the whole line again; never run its last part by itself.
+>>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& docker compose up -d --wait db ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
+>>"!BV_RECOVERY!" echo    If step 2 printed untouched or complete, this line and nothing else (it
+>>"!BV_RECOVERY!" echo    removes the work folder of the restore and checks the photos and documents):
+>>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!
 goto :write_recovery_tail
 :write_recovery_sqlite
->>"!BV_RECOVERY!" echo   !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP!
+>>"!BV_RECOVERY!" echo 3. Put it back. The next line is ONE command line, joined with ^&^&: each
+>>"!BV_RECOVERY!" echo    part runs only if every part before it worked, so the marker is cleared
+>>"!BV_RECOVERY!" echo    (the last part) only when everything is back. If it stops with an ERROR,
+>>"!BV_RECOVERY!" echo    fix what it says and run the whole line again; never run its last part by
+>>"!BV_RECOVERY!" echo    itself. Each part looks at the state itself and changes only what that
+>>"!BV_RECOVERY!" echo    state needs.
+>>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& !BV_RB! sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db /app/uploads !BV_STAMP! ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
 :write_recovery_tail
->>"!BV_RECOVERY!" echo   !BV_RB! clear-marker /app/uploads !BV_STAMP!
 >>"!BV_RECOVERY!" echo.
 >>"!BV_RECOVERY!" echo 4. Start BlackVault, check it, then delete this file:
 >>"!BV_RECOVERY!" echo   docker compose up -d
 >>"!BV_RECOVERY!" echo   del "!BV_RECOVERY!"
 goto :eof
 
-:: :run_with_passphrase - starts `docker %BV_DOCKER_ARGS%` with the
-:: passphrase on its standard input and leaves its exit code in BV_RC. The
-:: PowerShell line is backup.bat's, character for character (see THE
-:: PASSPHRASE NEVER TOUCHES cmd.exe there for the details that matter):
-:: change both together. BV_MODE is always `verify` here, so it asks once.
+:: :run_with_passphrase - reads the passphrase ONCE, then: starts
+:: `docker %BV_DOCKER_ARGS%` (the check) with it on standard input, the
+:: check's standard output sent to standard error; if that exits 0, runs
+:: `cmd /d /s /c ""%BV_BETWEEN%""` (this script again: :prepare_phase); if that
+:: exits 0, starts `docker %BV_DOCKER_ARGS_2%` (the restore) with the
+:: passphrase on standard input. BV_RC is the exit code of the docker call
+:: that failed, 1 if :prepare_phase stopped, 0 if all three worked. The
+:: PowerShell line is backup.bat's, character for character (see step 6
+:: there for the details that matter): change both together. BV_MODE is
+:: always `verify` here, so it asks once, not twice.
 :run_with_passphrase
-powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { if ($env:BV_PASSFILE) { $bytes = [IO.File]::ReadAllBytes($env:BV_PASSFILE) } else { if ([Console]::IsInputRedirected) { [Console]::Error.WriteLine('ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done.'); exit 1 }; $m = [Runtime.InteropServices.Marshal]; $p1 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Backup passphrase' -AsSecureString))); if ($p1.Length -eq 0) { [Console]::Error.WriteLine('ERROR: the passphrase is empty. Nothing was done.'); exit 1 }; if ($env:BV_MODE -ne 'verify') { $p2 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Repeat the passphrase' -AsSecureString))); if ($p1 -cne $p2) { [Console]::Error.WriteLine('ERROR: the two passphrases do not match. Nothing was done.'); exit 1 } }; $bytes = [Text.Encoding]::UTF8.GetBytes($p1) }; $psi = New-Object Diagnostics.ProcessStartInfo; $psi.FileName = 'docker'; $psi.Arguments = $env:BV_DOCKER_ARGS; $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $p = [Diagnostics.Process]::Start($psi); $pipe = $p.StandardInput.BaseStream; $pipe.Write($bytes, 0, $bytes.Length); $pipe.Flush(); $pipe.Close(); $limit = 0; if ($env:BV_LIMIT) { $limit = [int]$env:BV_LIMIT }; if ($limit -gt 0) { if (-not $p.WaitForExit($limit * 1000)) { try { $p.Kill() } catch { }; [Console]::Error.WriteLine('ERROR: the backup did not finish within ' + $limit + ' seconds (BLACKVAULT_BACKUP_TIMEOUT). It may still be running inside the container.'); exit 1 } } else { $p.WaitForExit() }; exit $p.ExitCode } catch { [Console]::Error.WriteLine('ERROR: could not run the backup: ' + $_.Exception.Message); exit 1 }"
+powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { if ($env:BV_PASSFILE) { $bytes = [IO.File]::ReadAllBytes($env:BV_PASSFILE) } else { if ([Console]::IsInputRedirected) { [Console]::Error.WriteLine('ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done.'); exit 1 }; $m = [Runtime.InteropServices.Marshal]; $p1 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Backup passphrase' -AsSecureString))); if ($p1.Length -eq 0) { [Console]::Error.WriteLine('ERROR: the passphrase is empty. Nothing was done.'); exit 1 }; if ($env:BV_MODE -ne 'verify') { $p2 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Repeat the passphrase' -AsSecureString))); if ($p1 -cne $p2) { [Console]::Error.WriteLine('ERROR: the two passphrases do not match. Nothing was done.'); exit 1 } }; $bytes = [Text.Encoding]::UTF8.GetBytes($p1) }; $docker = @(Get-Command docker -CommandType Application)[0].Path; $calls = @($env:BV_DOCKER_ARGS); if ($env:BV_DOCKER_ARGS_2) { $calls += $env:BV_DOCKER_ARGS_2 }; $limit = 0; if ($env:BV_LIMIT) { $limit = [int]$env:BV_LIMIT }; for ($i = 0; $i -lt $calls.Count; $i++) { if ($i -eq 1) { $between = New-Object Diagnostics.ProcessStartInfo; $between.FileName = $env:ComSpec; $q = [string][char]34; $between.Arguments = '/d /s /c ' + $q + $q + $env:BV_BETWEEN + $q + $q; $between.UseShellExecute = $false; $b = [Diagnostics.Process]::Start($between); $b.WaitForExit(); if ($b.ExitCode -ne 0) { exit 1 } }; $psi = New-Object Diagnostics.ProcessStartInfo; $psi.FileName = $docker; $psi.Arguments = $calls[$i]; $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $toErr = ($calls.Count -gt 1) -and ($i -eq 0); if ($toErr) { $psi.RedirectStandardOutput = $true }; $p = [Diagnostics.Process]::Start($psi); $pipe = $p.StandardInput.BaseStream; $pipe.Write($bytes, 0, $bytes.Length); $pipe.Flush(); $pipe.Close(); if ($toErr) { $err = [Console]::OpenStandardError(); $p.StandardOutput.BaseStream.CopyTo($err); $err.Flush() }; if ($limit -gt 0) { if (-not $p.WaitForExit($limit * 1000)) { try { $p.Kill() } catch { }; [Console]::Error.WriteLine('ERROR: the backup did not finish within ' + $limit + ' seconds (BLACKVAULT_BACKUP_TIMEOUT). It may still be running inside the container.'); exit 1 } } else { $p.WaitForExit() }; if ($p.ExitCode -ne 0) { exit $p.ExitCode } }; exit 0 } catch { [Console]::Error.WriteLine('ERROR: could not run docker: ' + $_.Exception.Message); exit 1 }"
 set "BV_RC=!errorlevel!"
 goto :eof
 

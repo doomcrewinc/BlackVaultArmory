@@ -603,9 +603,24 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
     expect(body).toContain("$pipe = $p.StandardInput.BaseStream");
     expect(body).not.toMatch(/StandardInput\.(Write|Close|Dispose)/);
     expect(body).toContain("exit $p.ExitCode");
-    // The passphrase is never handed to docker as an argument or an environment variable.
-    expect(body).toContain("$psi.Arguments = $env:BV_DOCKER_ARGS");
+    // The passphrase is never handed to docker as an argument or an environment variable:
+    // the only argument strings are BV_DOCKER_ARGS and (restore.bat only) BV_DOCKER_ARGS_2.
+    expect(body).toContain("$calls = @($env:BV_DOCKER_ARGS); if ($env:BV_DOCKER_ARGS_2) { $calls += $env:BV_DOCKER_ARGS_2 }");
+    expect(body.match(/\$psi\.Arguments = /g)).toEqual(["$psi.Arguments = "]);
+    expect(body).toContain("$psi.Arguments = $calls[$i]");
     expect(body).not.toMatch(/EnvironmentVariables|\$env:\w+\s*=/);
+  });
+
+  // Windows CI, first run (fa9f32f): Process.Start('docker') uses CreateProcess's search order, which
+  // looks in the Windows system folders BEFORE PATH, so the step started a different docker.exe from
+  // the one cmd.exe runs for every other docker call in the script.
+  it("looks docker up along PATH, as cmd.exe does, and makes exactly one call (the second-call variables are cleared)", () => {
+    const ps = code.filter((l) => l.startsWith('powershell -NoProfile -Command "'));
+    expect(ps[0]).toContain("$docker = @(Get-Command docker -CommandType Application)[0].Path");
+    expect(ps[0]).toContain("$psi.FileName = $docker");
+    expect(ps[0]).not.toContain("FileName = 'docker'");
+    const at = code.indexOf(ps[0]);
+    expect(code.slice(at - 2, at)).toEqual(['set "BV_DOCKER_ARGS_2="', 'set "BV_BETWEEN="']);
   });
 
   it("builds the same two docker commands as backup.sh, and maps exit codes the same way", () => {
@@ -628,9 +643,10 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
     ]);
   });
 
-  // Fix round 1: `for /f` skips a line starting with its eol character (";" by default), so each
-  // character check on a user-supplied value must be preceded by a refusal of a leading ";".
-  it("fix round 1: every for /f character check on a user value is guarded against a leading ';'", () => {
+  // Fix round 1: `for /f` skips a line starting with its eol character (";" by default). Windows CI
+  // (fa9f32f) showed the test is made AFTER the leading delimiters are dropped: "a;b.bvb" was skipped
+  // too. So each character check on a user-supplied value is preceded by a refusal of ";" ANYWHERE.
+  it("fix round 1: every for /f character check on a user value is guarded against a ';' anywhere in it", () => {
     const checks: Array<[string, string]> = [
       ["BV_KEEP", ":bad_keep"],
       ["BV_LIMIT", ":bad_limit"],
@@ -640,7 +656,7 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
       const at = code.findIndex((l) => l.startsWith('for /f "delims=') && l.includes(`("!${name}!")`));
       expect(at, name).toBeGreaterThan(0);
       expect(code[at].endsWith(`do goto ${label}`)).toBe(true);
-      expect(code[at - 1]).toBe(`if "!${name}:~0,1!"==";" goto ${label}`);
+      expect(code[at - 1]).toBe(`if not "!${name}:;=!"=="!${name}!" goto ${label}`);
     }
     // No other for /f in the script checks a value the user supplied.
     const charChecks = code.filter((l) => /^for \/f "delims=[^"]+" %%X in \("!BV_/.test(l));

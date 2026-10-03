@@ -16,7 +16,7 @@
 :: THE PASSPHRASE NEVER TOUCHES cmd.exe. A `set VAR=` variable is part of
 :: cmd's environment, and every program cmd starts (docker included) inherits
 :: a copy of it. So this script never holds the passphrase in a variable, and
-:: never puts it on a command line. One PowerShell process (:run_backup)
+:: never puts it on a command line. One PowerShell process (step 6)
 ::   - reads the --passphrase-file bytes, or asks for the passphrase with
 ::     Read-Host -AsSecureString (no echo; twice when making a backup, once
 ::     for --verify),
@@ -108,11 +108,12 @@ setlocal EnableDelayedExpansion
 
 :: -- 1. --keep ---------------------------------------------------
 if "!BV_MODE!"=="verify" goto :check_keep_verify
-:: for /f skips a line that starts with its eol character, ";" by default,
-:: so a value starting with ";" would pass the character checks below
-:: unexamined. It is refused first, here and at the two other checks.
+:: for /f drops a value whose first character AFTER its leading delimiters
+:: is the eol character, ";" by default: ";3" and "1;2" alike would pass the
+:: character checks below unexamined. So a ";" ANYWHERE in the value is
+:: refused first, here and at the two other checks.
 if not defined BV_KEEP set "BV_KEEP=7"
-if "!BV_KEEP:~0,1!"==";" goto :bad_keep
+if not "!BV_KEEP:;=!"=="!BV_KEEP!" goto :bad_keep
 for /f "delims=0123456789" %%X in ("!BV_KEEP!") do goto :bad_keep
 if not "!BV_KEEP:~6!"=="" goto :bad_keep
 :keep_strip
@@ -174,7 +175,7 @@ set "BV_LIMIT="
 if defined BLACKVAULT_BACKUP_TIMEOUT set "BV_LIMIT=!BLACKVAULT_BACKUP_TIMEOUT!"
 set "BLACKVAULT_BACKUP_DIR="
 if not defined BV_LIMIT goto :limit_ok
-if "!BV_LIMIT:~0,1!"==";" goto :bad_limit
+if not "!BV_LIMIT:;=!"=="!BV_LIMIT!" goto :bad_limit
 for /f "delims=0123456789" %%X in ("!BV_LIMIT!") do goto :bad_limit
 if "!BV_LIMIT:~8!"=="" goto :limit_ok
 :bad_limit
@@ -202,7 +203,7 @@ if /i not "!BV_VERIFY_DIR!"=="!BV_HOST_FULL!" goto :verify_outside
 :verify_name_check
 if not defined BV_VERIFY_NAME goto :verify_bad_name
 if "!BV_VERIFY_NAME:~0,1!"=="-" goto :verify_bad_name
-if "!BV_VERIFY_NAME:~0,1!"==";" goto :verify_bad_name
+if not "!BV_VERIFY_NAME:;=!"=="!BV_VERIFY_NAME!" goto :verify_bad_name
 for /f "delims=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" %%X in ("!BV_VERIFY_NAME!") do goto :verify_bad_name
 set "BV_ENGINE_ARGS=--verify !BV_VERIFY_NAME!"
 goto :verify_mapped
@@ -224,7 +225,15 @@ if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault nod
 
 :: -- 6. Run it, the passphrase on docker's standard input ----------
 :: One PowerShell process does all of it; see THE PASSPHRASE NEVER TOUCHES
-:: cmd.exe at the top. Details that matter:
+:: cmd.exe at the top. The line is shared with restore.bat, character for
+:: character: restore.bat also sets BV_DOCKER_ARGS_2 and BV_BETWEEN to make a
+:: second docker call with the same passphrase (ruling R27). They are
+:: cleared here, so this script makes exactly one call. Details that matter:
+::   * docker is looked up with Get-Command, which walks PATH in order, as
+::     cmd.exe does for every other docker call in this script. Handing the
+::     bare name to Process.Start would use CreateProcess's search order
+::     instead - the Windows system folders BEFORE PATH - and could start a
+::     different docker.exe from the one the version check above talked to.
 ::   * -cne, not -ne: PowerShell's -ne ignores case.
 ::   * the pipe's BaseStream is written and closed directly. Closing the
 ::     StreamWriter around it would append a UTF-8 byte-order mark when the
@@ -232,7 +241,9 @@ if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault nod
 ::   * no -NonInteractive: Read-Host refuses to prompt under it.
 ::   * no double quote, exclamation mark, percent sign or caret inside the
 ::     command: cmd would interpret them.
-powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { if ($env:BV_PASSFILE) { $bytes = [IO.File]::ReadAllBytes($env:BV_PASSFILE) } else { if ([Console]::IsInputRedirected) { [Console]::Error.WriteLine('ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done.'); exit 1 }; $m = [Runtime.InteropServices.Marshal]; $p1 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Backup passphrase' -AsSecureString))); if ($p1.Length -eq 0) { [Console]::Error.WriteLine('ERROR: the passphrase is empty. Nothing was done.'); exit 1 }; if ($env:BV_MODE -ne 'verify') { $p2 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Repeat the passphrase' -AsSecureString))); if ($p1 -cne $p2) { [Console]::Error.WriteLine('ERROR: the two passphrases do not match. Nothing was done.'); exit 1 } }; $bytes = [Text.Encoding]::UTF8.GetBytes($p1) }; $psi = New-Object Diagnostics.ProcessStartInfo; $psi.FileName = 'docker'; $psi.Arguments = $env:BV_DOCKER_ARGS; $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $p = [Diagnostics.Process]::Start($psi); $pipe = $p.StandardInput.BaseStream; $pipe.Write($bytes, 0, $bytes.Length); $pipe.Flush(); $pipe.Close(); $limit = 0; if ($env:BV_LIMIT) { $limit = [int]$env:BV_LIMIT }; if ($limit -gt 0) { if (-not $p.WaitForExit($limit * 1000)) { try { $p.Kill() } catch { }; [Console]::Error.WriteLine('ERROR: the backup did not finish within ' + $limit + ' seconds (BLACKVAULT_BACKUP_TIMEOUT). It may still be running inside the container.'); exit 1 } } else { $p.WaitForExit() }; exit $p.ExitCode } catch { [Console]::Error.WriteLine('ERROR: could not run the backup: ' + $_.Exception.Message); exit 1 }"
+set "BV_DOCKER_ARGS_2="
+set "BV_BETWEEN="
+powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { if ($env:BV_PASSFILE) { $bytes = [IO.File]::ReadAllBytes($env:BV_PASSFILE) } else { if ([Console]::IsInputRedirected) { [Console]::Error.WriteLine('ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done.'); exit 1 }; $m = [Runtime.InteropServices.Marshal]; $p1 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Backup passphrase' -AsSecureString))); if ($p1.Length -eq 0) { [Console]::Error.WriteLine('ERROR: the passphrase is empty. Nothing was done.'); exit 1 }; if ($env:BV_MODE -ne 'verify') { $p2 = $m::PtrToStringUni($m::SecureStringToGlobalAllocUnicode((Read-Host 'Repeat the passphrase' -AsSecureString))); if ($p1 -cne $p2) { [Console]::Error.WriteLine('ERROR: the two passphrases do not match. Nothing was done.'); exit 1 } }; $bytes = [Text.Encoding]::UTF8.GetBytes($p1) }; $docker = @(Get-Command docker -CommandType Application)[0].Path; $calls = @($env:BV_DOCKER_ARGS); if ($env:BV_DOCKER_ARGS_2) { $calls += $env:BV_DOCKER_ARGS_2 }; $limit = 0; if ($env:BV_LIMIT) { $limit = [int]$env:BV_LIMIT }; for ($i = 0; $i -lt $calls.Count; $i++) { if ($i -eq 1) { $between = New-Object Diagnostics.ProcessStartInfo; $between.FileName = $env:ComSpec; $q = [string][char]34; $between.Arguments = '/d /s /c ' + $q + $q + $env:BV_BETWEEN + $q + $q; $between.UseShellExecute = $false; $b = [Diagnostics.Process]::Start($between); $b.WaitForExit(); if ($b.ExitCode -ne 0) { exit 1 } }; $psi = New-Object Diagnostics.ProcessStartInfo; $psi.FileName = $docker; $psi.Arguments = $calls[$i]; $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $toErr = ($calls.Count -gt 1) -and ($i -eq 0); if ($toErr) { $psi.RedirectStandardOutput = $true }; $p = [Diagnostics.Process]::Start($psi); $pipe = $p.StandardInput.BaseStream; $pipe.Write($bytes, 0, $bytes.Length); $pipe.Flush(); $pipe.Close(); if ($toErr) { $err = [Console]::OpenStandardError(); $p.StandardOutput.BaseStream.CopyTo($err); $err.Flush() }; if ($limit -gt 0) { if (-not $p.WaitForExit($limit * 1000)) { try { $p.Kill() } catch { }; [Console]::Error.WriteLine('ERROR: the backup did not finish within ' + $limit + ' seconds (BLACKVAULT_BACKUP_TIMEOUT). It may still be running inside the container.'); exit 1 } } else { $p.WaitForExit() }; if ($p.ExitCode -ne 0) { exit $p.ExitCode } }; exit 0 } catch { [Console]::Error.WriteLine('ERROR: could not run docker: ' + $_.Exception.Message); exit 1 }"
 set "BV_RC=!errorlevel!"
 if "!BV_RC!"=="0" exit /b 0
 :: For 1 and 2 the backup program (or the PowerShell step) printed why.
