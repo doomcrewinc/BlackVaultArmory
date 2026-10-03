@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
-import { containsInsensitive } from "../db/text-search";
+import { containsInsensitive, matchesLiteralInsensitive, needsLiteralCheck } from "../db/text-search";
 import { redactStoredChanges } from "./redact";
 import type { AuditAction } from "./actions";
 
@@ -300,11 +300,30 @@ export async function listAuditEvents(
   filters: AuditFilters,
   limit = 50,
 ): Promise<{ events: AuditEventDto[]; nextCursor: string | null }> {
-  const rows = (await prisma.auditEvent.findMany({
-    where: buildWhere(filters),
-    orderBy: [{ at: "desc" }, { id: "desc" }],
-    take: limit + 1,
-  })) as RawEvent[];
+  const wanted = limit + 1;
+  // SQLite cannot make `contains` literal, so a `q` holding `%` or `_`
+  // over-matches in SQL; scan page by page and keep only true matches until
+  // `wanted` rows are collected. Otherwise one query is enough.
+  const exactQ = filters.q !== undefined && needsLiteralCheck(filters.q) ? filters.q : undefined;
+  const rows: RawEvent[] = [];
+  let cursor = filters.cursor;
+  for (;;) {
+    const batch = (await prisma.auditEvent.findMany({
+      where: buildWhere({ ...filters, cursor }),
+      orderBy: [{ at: "desc" }, { id: "desc" }],
+      take: wanted,
+    })) as RawEvent[];
+    if (exactQ === undefined) {
+      rows.push(...batch);
+      break;
+    }
+    for (const row of batch) {
+      if (matchesLiteralInsensitive(row.entityLabel, exactQ)) rows.push(row);
+    }
+    const last = batch[batch.length - 1];
+    if (rows.length >= wanted || batch.length < wanted || !last) break;
+    cursor = encodeCursor(last.at, last.id);
+  }
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;

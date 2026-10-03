@@ -12,13 +12,22 @@ import { mkdirSync, rmSync } from "node:fs";
  * needs and this one doesn't: `auditEvent.create`/`findMany` are plain
  * passthroughs (AuditEvent is excluded from the capture extension), so no
  * actor resolution or `next/headers` mock is required.
+ *
+ * With AUDIT_REAL_DB_PG_URL set (a scratch PostgreSQL database), the same
+ * suite runs against PostgreSQL instead.
  */
 const ctx = vi.hoisted(() => {
+  const pg = process.env.AUDIT_REAL_DB_PG_URL;
   const base = (process.env.TMPDIR || "/tmp").replace(/\/+$/, "");
   const dir = `${base}/bv-audit-query-real-db-${process.pid}-${Date.now()}`;
-  process.env.DB_PROVIDER = "sqlite";
-  process.env.DATABASE_URL = `file:${dir}/t.db?connection_limit=1`;
-  return { dir, file: `${dir}/t.db` };
+  if (pg) {
+    process.env.DB_PROVIDER = "postgresql";
+    process.env.DATABASE_URL = pg;
+  } else {
+    process.env.DB_PROVIDER = "sqlite";
+    process.env.DATABASE_URL = `file:${dir}/t.db?connection_limit=1`;
+  }
+  return { pg, dir, file: `${dir}/t.db` };
 });
 
 import { prisma } from "../prisma";
@@ -26,12 +35,12 @@ import { listAuditEvents } from "./query";
 
 const SAME_AT = new Date("2026-03-05T12:00:00.000Z");
 
-describe("listAuditEvents cursor paging against real SQLite (connection_limit=1)", () => {
+describe(`listAuditEvents against real ${ctx.pg ? "PostgreSQL" : "SQLite (connection_limit=1)"}`, () => {
   beforeAll(async () => {
-    mkdirSync(ctx.dir, { recursive: true });
-    execFileSync("npx", ["prisma", "migrate", "deploy", "--schema", "prisma/sqlite/schema.prisma"], {
+    if (!ctx.pg) mkdirSync(ctx.dir, { recursive: true });
+    execFileSync("npx", ["prisma", "migrate", "deploy", "--schema", ctx.pg ? "prisma/postgres/schema.prisma" : "prisma/sqlite/schema.prisma"], {
       cwd: process.cwd(),
-      env: { ...process.env, DATABASE_URL: `file:${ctx.file}` },
+      env: { ...process.env, DATABASE_URL: ctx.pg ?? `file:${ctx.file}` },
       stdio: "pipe",
       timeout: 90_000,
     });
@@ -86,5 +95,49 @@ describe("listAuditEvents cursor paging against real SQLite (connection_limit=1)
     const { events, nextCursor } = await listAuditEvents({}, 50);
     expect(nextCursor).toBeNull();
     expect(events.map((e) => e.id)).toEqual(["later", "tie-4", "tie-3", "tie-2", "tie-1", "tie-0", "earlier"]);
+  });
+  describe("q is a literal substring, never a LIKE pattern", () => {
+    const LABELS = ["100% sure", "plain", "a_b", "axb", "back\\slash", "bare"];
+
+    beforeAll(async () => {
+      for (const [i, label] of LABELS.entries()) {
+        await prisma.auditEvent.create({
+          data: {
+            id: `wild-${i}`,
+            at: new Date(Date.UTC(2026, 0, 1, 0, i)),
+            actorName: "system",
+            action: "CREATE",
+            entityType: "Wild",
+            entityId: `wild-${i}`,
+            entityLabel: label,
+          },
+        });
+      }
+    });
+
+    const labelsFor = async (q: string) =>
+      (await listAuditEvents({ type: "Wild", q }, 50)).events.map((e) => e.entityLabel).sort();
+
+    it("% matches only a label containing a percent sign", async () => {
+      expect(await labelsFor("%")).toEqual(["100% sure"]);
+    });
+
+    it("_ matches only a label containing an underscore", async () => {
+      expect(await labelsFor("_")).toEqual(["a_b"]);
+    });
+
+    it("a backslash matches only a label containing a backslash", async () => {
+      expect(await labelsFor("\\")).toEqual(["back\\slash"]);
+    });
+
+    it("finds a match that sits behind several non-matching rows even with limit 1", async () => {
+      const { events, nextCursor } = await listAuditEvents({ type: "Wild", q: "_" }, 1);
+      expect(events.map((e) => e.entityLabel)).toEqual(["a_b"]);
+      expect(nextCursor).toBeNull();
+    });
+
+    it("case-insensitive matching still works", async () => {
+      expect(await labelsFor("PLAIN")).toEqual(["plain"]);
+    });
   });
 });

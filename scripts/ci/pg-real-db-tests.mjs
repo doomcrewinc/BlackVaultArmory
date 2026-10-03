@@ -17,6 +17,7 @@ const FILES = [
   "src/lib/encryption/extension.real-db.test.ts",
   "src/lib/encryption/startup.real-db.test.ts",
   "src/lib/audit/extension.real-db.test.ts",
+  "src/lib/audit/query.real-db.test.ts",
   "scripts/rotate-encryption-key.test.ts",
 ];
 
