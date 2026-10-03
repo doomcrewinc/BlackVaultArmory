@@ -61,6 +61,8 @@ export async function collectBackupRecords(): Promise<BackupRecords> {
     async (tx) => {
       const delegates = tx as unknown as Record<string, ReadDelegate>;
       const records: BackupRecords = {};
+      // Awaited one table at a time on purpose: the transaction is one
+      // connection, and a concurrent query would deadlock SQLite's single one.
       for (const { delegate, key } of BACKUP_MODELS) {
         records[key] = await delegates[delegate].findMany();
         await backupRecordHooks.afterRead?.(key);

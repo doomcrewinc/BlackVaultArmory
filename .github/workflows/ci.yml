@@ -147,7 +147,8 @@ jobs:
         image: postgres:17-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          # A throwaway server that exists only for this job: no credential.
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: blackvault_test
         ports:
           - 5432:5432
@@ -225,9 +226,9 @@ jobs:
       - name: Real-database PostgreSQL test (backup records)
         if: matrix.pg_real_db
         env:
-          ENCRYPTION_REAL_DB_PG_URL: postgresql://postgres:postgres@localhost:5432/blackvault_test
+          ENCRYPTION_REAL_DB_PG_URL: postgresql://postgres@localhost:5432/blackvault_test
           TZ_OVERRIDE: ${{ matrix.tz_override }}
-        run: npx vitest run src/lib/backup/records.real-db.test.ts
+        run: npm test -- src/lib/backup/records.real-db.test.ts
 
   # ---------------------------------------------------------------------------
   migration-drift:
