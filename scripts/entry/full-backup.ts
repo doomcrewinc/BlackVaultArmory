@@ -98,16 +98,34 @@ interface Args {
 
 const USAGE = "Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file> | [--dir <folder>] --lock-status; the passphrase is read from standard input.";
 
+/** The options that take a value, and where each value goes. */
+const VALUE_FLAGS: Record<string, (args: Args, value: string) => void> = {
+  "--dir": (args, value) => {
+    args.dir = value;
+  },
+  "--verify": (args, value) => {
+    args.verify = value;
+  },
+  "--keep": (args, value) => {
+    args.keep = parseKeep(value); // throws (without echoing the value) unless a whole number >= 1
+  },
+};
+
+/** Refuses the modes that cannot be combined. */
+function checkCombination(args: Args): void {
+  if (args.verify !== null && args.keep !== null) throw new UsageError(`--keep cannot be used with --verify. ${USAGE}`);
+  if (args.lockStatus && (args.verify !== null || args.keep !== null)) throw new UsageError(`--lock-status cannot be used with --verify or --keep. ${USAGE}`);
+}
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { dir: DEFAULT_FULL_BACKUP_DIR, verify: null, keep: null, lockStatus: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (flag === "--dir" || flag === "--verify" || flag === "--keep") {
+    const setValue = Object.hasOwn(VALUE_FLAGS, flag) ? VALUE_FLAGS[flag] : undefined;
+    if (setValue) {
       const value = argv[++i];
       if (!value) throw new UsageError(`${flag} needs a value.`);
-      if (flag === "--dir") args.dir = value;
-      else if (flag === "--verify") args.verify = value;
-      else args.keep = parseKeep(value); // throws (without echoing the value) unless a whole number >= 1
+      setValue(args, value);
     } else if (flag === "--lock-status") {
       args.lockStatus = true;
     } else {
@@ -116,8 +134,7 @@ function parseArgs(argv: string[]): Args {
       throw new UsageError(`unknown argument. ${USAGE}`);
     }
   }
-  if (args.verify !== null && args.keep !== null) throw new UsageError(`--keep cannot be used with --verify. ${USAGE}`);
-  if (args.lockStatus && (args.verify !== null || args.keep !== null)) throw new UsageError(`--lock-status cannot be used with --verify or --keep. ${USAGE}`);
+  checkCombination(args);
   return args;
 }
 
