@@ -70,7 +70,7 @@ export async function collectBackupRecords(): Promise<BackupRecords> {
     {
       maxWait: READ_TX_MAX_WAIT_MS,
       timeout: READ_TX_TIMEOUT_MS,
-      ...(postgres ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}),
+      ...(postgres ? {} : {}),
     },
   );
 }
