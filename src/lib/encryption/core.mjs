@@ -272,21 +272,26 @@ const BVB_TAG = 16;
 const BVB_MAX_HEADER = 4096;
 const BVB_MAX_COUNTER = 0xffffffff;
 
-// Byte FIFO over a list of Buffers, so 64 KiB writes are not re-concatenated per write.
+// Byte FIFO over a list of Buffers, so small writes are not re-concatenated per write.
+// Consumed entries are skipped with a head index (Array#shift is O(entries) once the
+// array is large, which made 1-byte writes quadratic); the array is compacted when the
+// consumed prefix is both large and at least half the array, so compaction is amortised O(1).
 class ByteQueue {
-  constructor() { this.bufs = []; this.length = 0; }
+  constructor() { this.bufs = []; this.head = 0; this.length = 0; }
   push(b) { if (b.length) { this.bufs.push(b); this.length += b.length; } }
   take(n) {
     const out = Buffer.allocUnsafe(n);
     let off = 0;
     while (off < n) {
-      const b = this.bufs[0];
+      const b = this.bufs[this.head];
       const k = Math.min(b.length, n - off);
       b.copy(out, off, 0, k);
       off += k;
-      if (k === b.length) this.bufs.shift(); else this.bufs[0] = b.subarray(k);
+      if (k === b.length) { this.bufs[this.head] = undefined; this.head += 1; } else this.bufs[this.head] = b.subarray(k);
     }
     this.length -= n;
+    if (this.head === this.bufs.length) { this.bufs = []; this.head = 0; }
+    else if (this.head > 1024 && this.head * 2 > this.bufs.length) { this.bufs = this.bufs.slice(this.head); this.head = 0; }
     return out;
   }
 }
@@ -364,8 +369,12 @@ function parseBvbHeader(headerBytes) {
       || Object.keys(h).length !== 6 || Object.keys(k).length !== 5) {
     throw new SealError("UNSUPPORTED", "Unsupported or malformed full backup.");
   }
-  const salt = unb64u(k.salt);
-  const prefix = unb64u(h.noncePrefix);
+  // Strict base64url: Buffer.from(…, "base64url") silently skips junk characters, so require
+  // the alphabet only and an exact round-trip (rejects padding, spaces, non-zero spare bits).
+  const strictB64u = (v) => (typeof v === "string" && /^[A-Za-z0-9_-]+$/.test(v) && b64u(unb64u(v)) === v
+    ? unb64u(v) : Buffer.alloc(0));
+  const salt = strictB64u(k.salt);
+  const prefix = strictB64u(h.noncePrefix);
   // Canonical-form check: the raw bytes are the AAD, and this also rejects duplicate keys.
   if (salt.length !== 16 || prefix.length !== 8 || canonicalJson(h) !== headerBytes.toString("utf8")) {
     throw new SealError("UNSUPPORTED", "Unsupported or malformed full backup.");
@@ -437,7 +446,17 @@ export function createBackupOpener(passphrase) {
         if (q.length < BVB_TAG) throw truncated();
         const sealed = q.take(q.length);
         const plain = tryOpen(sealed, true);
-        if (!plain) throw tryOpen(sealed, false) ? truncated() : damaged();
+        if (!plain) {
+          if (tryOpen(sealed, false)) throw truncated();
+          // M-1: once a chunk has verified the passphrase is proven right, so do not say
+          // "wrong passphrase". A cut inside the last chunk, damage to it, and trailing bytes
+          // after it are indistinguishable here; keep the DAMAGED code, say so in the message.
+          if (counter > 0) {
+            throw new SealError("WRONG_PASSPHRASE_OR_DAMAGED",
+              "Backup file is damaged or incomplete (its last part is cut off, altered, or followed by extra bytes).");
+          }
+          throw damaged();
+        }
         this.push(plain);
         cb();
       } catch (e) { cb(e); }

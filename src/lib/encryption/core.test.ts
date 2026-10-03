@@ -460,3 +460,93 @@ describe("streaming full backups (BVB1)", () => {
     expect((await open(sealed, p.normalize("NFD"))).equals(input)).toBe(true);
   }, 30000);
 });
+
+describe("streaming full backups (BVB1) — fix round 1", () => {
+  const PASS = "correct horse battery";
+  const CHUNK = 1048576;
+  const SEALED_CHUNK = CHUNK + 16;
+  const gen = (n: number) => {
+    const b = Buffer.alloc(n);
+    for (let i = 0; i < n; i++) b[i] = (i * 13 + 5) & 0xff;
+    return b;
+  };
+  const pump = (t: import("node:stream").Transform, input: Buffer, piece = 65537) =>
+    new Promise<Buffer>((resolve, reject) => {
+      const out: Buffer[] = [];
+      t.on("data", (d: Buffer) => out.push(d));
+      t.on("error", reject);
+      t.on("end", () => resolve(Buffer.concat(out)));
+      for (let i = 0; i < input.length; i += piece) t.write(input.subarray(i, i + piece));
+      t.end();
+    });
+  const seal = (input: Buffer, piece?: number) => pump(core.createBackupSealer(PASS), input, piece);
+  const open = (sealed: Buffer, piece?: number) => pump(core.createBackupOpener(PASS), sealed, piece);
+  const headLen = (sealed: Buffer) => 4 + sealed.readUInt32BE(0);
+  const rebuild = (sealed: Buffer, mutate: (h: Record<string, unknown> & { kdf: Record<string, unknown> }) => void) => {
+    const hl = headLen(sealed);
+    const h = JSON.parse(sealed.subarray(4, hl).toString("utf8"));
+    mutate(h);
+    // Keep canonical key order so only the value under test is wrong.
+    const canon = (v: unknown): string => Array.isArray(v) ? `[${v.map(canon).join(",")}]`
+      : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`
+      : JSON.stringify(v);
+    const json = Buffer.from(canon(h));
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(json.length);
+    return Buffer.concat([len, json, sealed.subarray(hl)]);
+  };
+
+  it("I-1: 512 KiB written one byte at a time seals and opens in under 5 s", async () => {
+    const input = gen(512 * 1024);
+    const t0 = Date.now();
+    const sealed = await seal(input, 1);
+    const plain = await open(sealed, 1);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(plain.equals(input)).toBe(true);
+  }, 120000);
+
+  it("M-1: a cut inside a chunk after a verified chunk says damaged or incomplete, not wrong passphrase", async () => {
+    const sealed = await seal(gen(3.5 * CHUNK));
+    const cut = sealed.subarray(0, headLen(sealed) + 2 * SEALED_CHUNK + 1000);
+    const err = await open(cut).then(() => null, (e: unknown) => e as { name: string; code: string; message: string });
+    expect(err).toMatchObject({ name: "SealError" });
+    expect(["TRUNCATED", "WRONG_PASSPHRASE_OR_DAMAGED"]).toContain(err!.code);
+    expect(err!.message).toMatch(/damaged or incomplete/i);
+    expect(err!.message).not.toMatch(/passphrase/i);
+  }, 30000);
+
+  it("M-2: salt / noncePrefix that are not exact base64url of 16 / 8 bytes are UNSUPPORTED before scrypt", async () => {
+    const sealed = await seal(gen(10));
+    for (const mutate of [
+      (h: { kdf: Record<string, unknown> }) => { h.kdf.salt = `${h.kdf.salt}!!`; },
+      (h: { kdf: Record<string, unknown> }) => { h.kdf.salt = `${h.kdf.salt}==`; },
+      (h: { kdf: Record<string, unknown> }) => { h.kdf.salt = `${(h.kdf.salt as string).slice(0, 10)} ${(h.kdf.salt as string).slice(10)}`; },
+      (h: { kdf: Record<string, unknown> }) => { h.kdf.salt = Buffer.alloc(16, 9).toString("base64"); },
+      (h: { kdf: Record<string, unknown> }) => { h.kdf.salt = Buffer.alloc(17).toString("base64url"); },
+      (h: Record<string, unknown>) => { h.noncePrefix = `${h.noncePrefix}.`; },
+      (h: Record<string, unknown>) => { h.noncePrefix = Buffer.alloc(9).toString("base64url"); },
+      (h: Record<string, unknown>) => { h.noncePrefix = 12345678; },
+    ]) {
+      const t = Date.now();
+      await expect(open(rebuild(sealed, mutate as never))).rejects.toMatchObject({ name: "SealError", code: "UNSUPPORTED" });
+      expect(Date.now() - t).toBeLessThan(200);
+    }
+    // Non-canonical last base64url character (spare bits set; a 16-byte salt's canonical last
+    // char has index % 16 === 0, so "| 1" always changes it) decodes to the same bytes: rejected too.
+    await expect(open(rebuild(sealed, (h) => {
+      const s = h.kdf.salt as string;
+      const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      h.kdf.salt = s.slice(0, -1) + alpha[alpha.indexOf(s.slice(-1)) | 1];
+    }))).rejects.toMatchObject({ name: "SealError", code: "UNSUPPORTED" });
+  }, 30000);
+
+  it("rejects trailing bytes after a short final chunk (small and multi-chunk, both buffer paths)", async () => {
+    const small = await seal(gen(5000));
+    await expect(open(Buffer.concat([small, Buffer.alloc(16, 0xaa)])))
+      .rejects.toMatchObject({ name: "SealError", code: "WRONG_PASSPHRASE_OR_DAMAGED" });
+    const big = await seal(gen(2 * CHUNK + 777));
+    // More than a whole sealed chunk of junk: forces the transform-loop path, not just flush.
+    await expect(open(Buffer.concat([big, gen(SEALED_CHUNK + 5)])))
+      .rejects.toMatchObject({ name: "SealError", code: "WRONG_PASSPHRASE_OR_DAMAGED" });
+  }, 30000);
+});
