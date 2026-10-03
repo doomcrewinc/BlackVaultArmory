@@ -69,7 +69,7 @@ import { buildManifest } from "./manifest";
 import { collectBackupRecords, buildBackupPayload, backupCounts } from "./records";
 import { TarWriter } from "./tar";
 import { runFullBackup } from "./full-backup";
-import { FullBackupVerifyError } from "./full-verify";
+import { FullBackupVerifyError, verifyFullBackup } from "./full-verify";
 import { FullRestoreError, runFullRestore } from "./full-restore";
 
 const ROOT = path.resolve(__dirname, "../../..");
@@ -387,6 +387,58 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
     await upload(rootB, ".restore-20260101-000000/images/x.jpg", EXTRA);
     const again = await within(60_000, runFullBackup({ passphrase: PASS, dir: backups, now: new Date("2027-01-01T00:00:00Z"), env: { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv }));
     expect(again.files).toBe(3);
+  });
+
+  /**
+   * Ruling R26 — the invariant: for ANY uploads tree, a backup that verifies
+   * restores. The backup leaves out (and reports) every name the restore
+   * would refuse. The case / Unicode pairs can only exist on a filesystem
+   * that keeps them apart (Linux, CI); the control-character name exists
+   * everywhere.
+   */
+  it("R26: a tree with a control-character name and colliding names → the backup skips and reports them, verifies, and restores", async () => {
+    const source = await makeSource(); // key A; rootA holds a.jpg, big.jpg, c.pdf
+    const probe = path.join(work, "case-probe");
+    mkdirSync(probe);
+    writeFileSync(path.join(probe, "x"), "1");
+    const caseSensitive = !existsSync(path.join(probe, "X"));
+    const BELL = "images/firearms/be\u0007ll.jpg";
+    await upload(rootA, BELL, EXTRA);
+    await upload(rootA, "documents/line\nbreak.pdf", EXTRA);
+    const expectedSkipped = [
+      { path: "files/images/firearms/be?ll.jpg", kind: "unreadable", reason: "unsupported file name (its name contains a control character)" },
+      { path: "files/documents/line?break.pdf", kind: "unreadable", reason: "unsupported file name (its name contains a control character)" },
+    ];
+    const kept: Record<string, string> = { ...source.files };
+    if (caseSensitive) {
+      await upload(rootA, "images/firearms/A.jpg", DOC_C); // sorts before a.jpg: A.jpg is kept, a.jpg skipped
+      await upload(rootA, "images/Zdir/x.jpg", DOC_C);
+      await upload(rootA, "images/zdir", EXTRA); // a FILE that collides with the folder Zdir/: the folder (first) is kept
+      kept["images/firearms/A.jpg"] = sha(DOC_C);
+      kept["images/Zdir/x.jpg"] = sha(DOC_C);
+      delete kept["images/firearms/a.jpg"];
+      expectedSkipped.splice(
+        0,
+        0,
+        { path: "files/images/firearms/a.jpg", kind: "unreadable", reason: 'unsupported file name (it would be the same file or folder as "files/images/firearms/A.jpg" on a system that ignores case or accents)' },
+      );
+      expectedSkipped.splice(2, 0, { path: "files/images/zdir", kind: "unreadable", reason: 'unsupported file name (it would be the same file or folder as "files/images/Zdir/x.jpg" on a system that ignores case or accents)' });
+    }
+
+    const made = await within(60_000, runFullBackup({ passphrase: PASS, dir: backups, now: new Date("2027-02-02T00:00:00Z"), env: { ...process.env, IMAGE_UPLOAD_DIR: rootA } as NodeJS.ProcessEnv }));
+    expect(made.skipped).toEqual(expect.arrayContaining(expectedSkipped));
+    expect(made.skipped).toHaveLength(expectedSkipped.length);
+    expect(made.files).toBe(Object.keys(kept).length);
+    // It verified (the engine verifies before publishing; once more, independently).
+    await expect(verifyFullBackup(made.path, PASS)).resolves.toMatchObject({ files: made.files });
+
+    await makeTarget();
+    const result = await restore(made.path);
+    expect(result.files).toBe(made.files);
+    const live = tree(rootB);
+    const liveFiles = Object.keys(live).filter((p) => (p.startsWith("images/") || p.startsWith("documents/")) && live[p] !== "dir");
+    expect(liveFiles.sort()).toEqual(Object.keys(kept).sort());
+    for (const rel of liveFiles) expect(sha(await readDecryptedFile(path.join(rootB, rel))), rel).toBe(kept[rel]);
   });
 
   describe("refused before any change", () => {

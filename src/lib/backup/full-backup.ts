@@ -11,6 +11,7 @@ import { getFieldKeys } from "@/lib/encryption/keys";
 import { snapshotStamp } from "@/lib/encryption/pre-encryption-snapshot";
 import { FileAtRestError, readDecryptedFile, uploadsRoot } from "@/lib/files/storage";
 import { APP_VERSION } from "@/lib/version";
+import { EntryNameSet, printableName } from "./entry-names";
 import { acquireFullBackupLock, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
 import { verifyFullBackup } from "./full-verify";
 import { buildManifest, type ManifestFileEntry, type ManifestSkippedEntry } from "./manifest";
@@ -127,7 +128,8 @@ export interface FullBackupResult {
    * Files that are NOT in the archive (also in `manifest.skipped`, as
    * `{ path, reason }`). `vanished`: deleted while the backup ran — expected
    * on a live install. `unreadable`: the file exists but could not be read or
-   * decrypted — the caller must warn about every one of these.
+   * decrypted, or has a name a restore would refuse (reason "unsupported file
+   * name …", ruling R26) — the caller must warn about every one of these.
    */
   skipped: FullBackupSkipped[];
   /**
@@ -449,6 +451,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
 
     const files: ManifestFileEntry[] = [];
     const skipped: FullBackupSkipped[] = [];
+    const names = new EntryNameSet();
     const { sink, failure: sinkFailure } = fileSink(handle);
     const piped = pipeline(sealer, sink);
     piped.catch(() => undefined); // awaited below; never an unhandled rejection in between
@@ -466,12 +469,22 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
         // "this file vanished / cannot be read" has to be known by now, and
         // its size settled. A skipped file therefore never has a tar entry.
         let plaintext: Buffer | null = null;
-        try {
-          plaintext = await readDecryptedFile(upload.abs);
-        } catch (e) {
-          const skip = classifyReadFailure(e);
-          if (!skip) throw e;
-          skipped.push({ path: upload.archivePath, ...skip });
+        // Ruling R26: a name the restore would refuse (a control character,
+        // or a second name that differs from an earlier one only by case or
+        // Unicode normalisation) is left out and reported, so that every
+        // backup that verifies also restores. ./entry-names.ts says which of
+        // two colliding files is kept: the first in this (sorted) order.
+        const refusal = names.add(upload.archivePath);
+        if (refusal) {
+          skipped.push({ path: printableName(upload.archivePath), kind: "unreadable", reason: `unsupported file name (${refusal})` });
+        } else {
+          try {
+            plaintext = await readDecryptedFile(upload.abs);
+          } catch (e) {
+            const skip = classifyReadFailure(e);
+            if (!skip) throw e;
+            skipped.push({ path: upload.archivePath, ...skip });
+          }
         }
         if (plaintext) {
           const sha256 = createHash("sha256").update(plaintext).digest("hex");

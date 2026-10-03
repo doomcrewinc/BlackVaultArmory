@@ -106,6 +106,23 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(fs.readFileSync(path.join(backups, file)).includes(Buffer.from("cli image bytes"))).toBe(false);
   });
 
+  it("R26: a file whose name a restore would refuse is left out with a WARNING (shown without the control character) and counted; exit 0, and the backup verifies", async () => {
+    const odd = path.join(tmp, "uploads-odd-names");
+    fs.mkdirSync(path.join(odd, "images"), { recursive: true });
+    await writeEncryptedFile(path.join(odd, "images", "good.jpg"), IMG);
+    await writeEncryptedFile(path.join(odd, "images", "be\u0007ll.jpg"), IMG);
+    const r = spawnSync(process.execPath, [bundle, "--dir", backups], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: odd }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+    expect(r.status).toBe(0);
+    const m = OK_LINE.exec(r.stdout);
+    expect(m, r.stdout).not.toBeNull();
+    expect(m!.slice(2)).toEqual(["1", String(IMG.length), m![4], "1", "1"]);
+    expect(r.stderr.split("\n").filter(Boolean)).toEqual([
+      "WARNING: skipped files/images/be?ll.jpg: unsupported file name (its name contains a control character)",
+      "WARNING: 1 file could not be read and is NOT in this backup.",
+    ]);
+    expect(cli(["--dir", backups, "--verify", m![1]]).status).toBe(0);
+  });
+
   it("R9: an unreadable file is skipped with a WARNING line per file and a final count on stderr; exit 0, and the backup verifies", async () => {
     const dirty = path.join(tmp, "uploads-dirty");
     fs.mkdirSync(path.join(dirty, "images"), { recursive: true });

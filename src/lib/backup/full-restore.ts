@@ -9,6 +9,7 @@ import { createBackupOpener } from "@/lib/encryption/core.mjs";
 import { getFieldKeys } from "@/lib/encryption/keys";
 import { snapshotStamp } from "@/lib/encryption/pre-encryption-snapshot";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
+import { EntryNameSet, printableName } from "./entry-names";
 import { checkDbAgainstCounts, checkEntriesAgainstManifest } from "./full-verify";
 import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
 import { restoreBackupRecords } from "./restore-core";
@@ -62,15 +63,13 @@ export const PRE_RESTORE_PREFIX = ".pre-restore-";
 
 /** Same two folders, same archive roots, as the backup engine's walk (./full-backup.ts). */
 const UPLOAD_FOLDERS = [
-  { dir: "images", archive: "files/images/" },
-  { dir: "documents", archive: "files/documents/" },
+  { dir: "images" },
+  { dir: "documents" },
 ] as const;
 
 const DB_ENTRY = "db.json";
 const MANIFEST_ENTRY = "manifest.json";
 const STAMP = /^\d{8}-\d{6}(-\d{1,10})?$/;
-/** C0/C1 controls and DEL: never in a restored file name. */
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 /** One entry is held whole in memory, then encrypted (a second buffer). */
 const MAX_ENTRY_BYTES = Math.min(bufferConstants.MAX_LENGTH - 64, 2 ** 31 - 1);
 const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
@@ -125,68 +124,17 @@ const messageOf = (e: unknown): string => (e instanceof Error ? e.message : Stri
 
 /**
  * Where a `files/...` entry goes under the staging folder, as path segments
- * — or a refusal. `readTar` has already applied `validateEntryPath` (relative,
- * `/` only, no `.`/`..`/empty segment, no NUL, no backslash). On top of it:
- * - only `files/images/...` and `files/documents/...`;
- * - no control character;
- * - no segment the backup engine itself never writes and the app treats
- *   specially: hidden names (`.pre-restore-*`, `.restore-*`,
- *   `.pre-encryption-*` are folders the app skips), `*.tmp` (the startup sweep
- *   deletes interrupted writes) and `*.rot` (key-rotation staging, which
- *   startup would rename over a real file).
+ * — or a refusal. The rule is ./entry-names.ts's, shared with the backup
+ * walk and with `verifyFullBackup` (ruling R26): a backup never holds a name
+ * this refuses, and one that does fails its verify first.
  */
-function stagedSegments(entryPath: string): string[] {
-  const folder = UPLOAD_FOLDERS.find((f) => entryPath.startsWith(f.archive));
-  if (!folder) throw new FullRestoreError(`The backup holds an entry that does not belong in it: "${printable(entryPath)}". Nothing was changed.`, false);
-  if (CONTROL_CHARS.test(entryPath)) {
-    throw new FullRestoreError(`The backup holds a file whose name contains a control character: "${printable(entryPath)}". Nothing was changed.`, false);
-  }
-  const segments = entryPath.slice("files/".length).split("/");
-  for (const segment of segments) {
-    if (segment.startsWith(".")) {
-      throw new FullRestoreError(`The backup holds a hidden file or folder, which a backup never contains: "${entryPath}". Nothing was changed.`, false);
-    }
-  }
-  const name = segments[segments.length - 1];
-  if (name.endsWith(".tmp") || name.endsWith(".rot")) {
-    throw new FullRestoreError(`The backup holds a work file (*.tmp / *.rot), which a backup never contains: "${entryPath}". Nothing was changed.`, false);
-  }
-  return segments;
+function stagedSegments(names: EntryNameSet, entryPath: string): string[] {
+  const refusal = names.add(entryPath);
+  if (refusal) throw new FullRestoreError(`The backup holds a file that cannot be restored: "${printableName(entryPath)}" (${refusal}). Nothing was changed.`, false);
+  return entryPath.slice("files/".length).split("/");
 }
 
-const printable = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
-
-/**
- * Refuses two entries that would be ONE file on a filesystem that ignores
- * case or Unicode normalisation (macOS, Windows, some NAS shares) — the
- * second would silently replace the first — and an entry that is a file in
- * one path and a folder in another (`a` and `a/b`).
- */
-class CollisionGuard {
-  private readonly files = new Map<string, string>();
-  private readonly folders = new Map<string, string>();
-
-  add(entryPath: string): void {
-    const key = entryPath.normalize("NFC").toLowerCase();
-    const clash = this.files.get(key) ?? this.folders.get(key);
-    if (clash !== undefined) this.refuse(entryPath, clash);
-    const parts = key.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      const prefix = parts.slice(0, i).join("/");
-      const asFile = this.files.get(prefix);
-      if (asFile !== undefined) this.refuse(entryPath, asFile);
-      if (!this.folders.has(prefix)) this.folders.set(prefix, entryPath);
-    }
-    this.files.set(key, entryPath);
-  }
-
-  private refuse(a: string, b: string): never {
-    throw new FullRestoreError(
-      `The backup holds two entries that would be the same file or folder on this system: "${a}" and "${b}". Nothing was changed.`,
-      false,
-    );
-  }
-}
+const printable = printableName;
 
 async function readWhole(body: Readable, size: number, what: string): Promise<Buffer> {
   if (size > MAX_ENTRY_BYTES) throw new FullRestoreError(`${what} is too large to restore (${size} bytes). Nothing was changed.`, false);
@@ -278,7 +226,7 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
     pipeline(input, opener, () => undefined);
 
     const staged = new Map<string, { size: number; sha256: string }>();
-    const collisions = new CollisionGuard();
+    const names = new EntryNameSet();
     let dbBytes: Buffer | null = null;
     let manifest: Manifest | null = null;
 
@@ -296,8 +244,7 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
         dbBytes = await readWhole(body, size, DB_ENTRY);
         return;
       }
-      const segments = stagedSegments(entryPath);
-      collisions.add(entryPath);
+      const segments = stagedSegments(names, entryPath);
       const plaintext = await readWhole(body, size, entryPath);
       const target = path.join(staging, ...segments);
       await fsp.mkdir(path.dirname(target), { recursive: true });

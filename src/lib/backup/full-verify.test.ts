@@ -152,6 +152,24 @@ describe("verifyFullBackup", () => {
     await expect(verifyFullBackup(await seal(entries), PASS)).rejects.toThrow(/unexpected entry.*notes\.txt/i);
   });
 
+  // Ruling R26: the restore refuses these names, so an archive holding one must not verify —
+  // even when its manifest lists the file with the right size and checksum.
+  it.each([
+    ["a control character in a name", [["files/images/a\u0007b.jpg", A]]],
+    ["two names differing only in case", [["files/images/A.jpg", A], ["files/images/a.jpg", A]]],
+    ["two names differing only in Unicode normalisation", [["files/images/caf\u00e9.jpg", A], ["files/images/cafe\u0301.jpg", A]]],
+    ["a file where another entry needs a folder", [["files/images/a", A], ["files/images/a/b.jpg", A]]],
+    ["a hidden folder", [["files/images/.pre-restore-20260101-000000/x.jpg", A]]],
+    ["a rotation work file", [["files/documents/x.pdf.rot", A]]],
+  ] as Array<[string, Array<[string, Buffer]>]>)("R26: an archive holding %s is rejected, although its manifest matches", async (_name, files) => {
+    const m = manifest({ files: files.map(([p, b]) => ({ path: p, size: b.length, sha256: sha(b) })) });
+    const file = await seal([["db.json", json(DB)], ...files, ["manifest.json", json(m)]]);
+    const failure = await verifyFullBackup(file, PASS).then(() => null, (e: unknown) => e);
+    expect(failure).toBeInstanceOf(FullBackupVerifyError);
+    expect((failure as Error).message).toMatch(/cannot be restored: it (is|would be|.*contains)|cannot be restored: its name/);
+    expect((failure as Error).message).not.toMatch(/[\u0000-\u001f]/); // the name is printed safely
+  });
+
   it("an archive with no manifest.json is rejected", async () => {
     await expect(verifyFullBackup(await seal(good().slice(0, 3)), PASS)).rejects.toThrow(/manifest\.json/);
   });

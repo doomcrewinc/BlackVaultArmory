@@ -3,6 +3,7 @@ import { createReadStream, promises as fsp } from "node:fs";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream";
 import { createBackupOpener } from "@/lib/encryption/core.mjs";
+import { EntryNameSet, printableName } from "./entry-names";
 import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
 import { readTar } from "./tar";
 
@@ -14,7 +15,8 @@ import { readTar } from "./tar";
  * someone holding the passphrase and that the stream is complete and in
  * order. This module proves the archive is internally CONSISTENT — that what
  * a restore would unpack is exactly what the manifest promises:
- * - only `db.json`, `manifest.json` and `files/...` entries exist;
+ * - only `db.json`, `manifest.json` and `files/...` entries exist, and every
+ *   file name is one a restore accepts (./entry-names.ts, ruling R26);
  * - `manifest.json` is present, within MAX_MANIFEST_BYTES, valid, and the
  *   LAST entry (the engine writes it last so it can hash files while
  *   streaming them — controller ruling, see ./manifest.ts);
@@ -146,6 +148,7 @@ export async function verifyFullBackup(file: string, passphrase: string, opts: V
   pipeline(input, opener, () => undefined);
 
   const seen = new Map<string, { size: number; sha256: string }>();
+  const names = new EntryNameSet();
   let dbBytes: Buffer | null = null;
   let manifest: Manifest | null = null;
   let bytesDone = 0;
@@ -162,7 +165,10 @@ export async function verifyFullBackup(file: string, passphrase: string, opts: V
       dbBytes = await readWhole(body);
       return;
     }
-    if (!entryPath.startsWith(FILES_PREFIX)) fail(`unexpected entry "${entryPath}" in the archive.`);
+    if (!entryPath.startsWith(FILES_PREFIX)) fail(`unexpected entry "${printableName(entryPath)}" in the archive.`);
+    // Ruling R26: the restore refuses these names, so an archive holding one must not verify.
+    const refusal = names.add(entryPath);
+    if (refusal) fail(`"${printableName(entryPath)}" cannot be restored: ${refusal}.`);
     const hashed = await hashBody(body);
     seen.set(entryPath, hashed);
     bytesDone += hashed.size;
