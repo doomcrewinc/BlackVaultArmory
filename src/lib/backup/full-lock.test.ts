@@ -220,7 +220,7 @@ describe("acquireFullBackupLock", () => {
     });
   });
 
-  describe("reclaim is race-safe", () => {
+  describe("reclaim with no leftover guard is exclusive", () => {
     it("25 contenders reclaiming the same stale lock: exactly one wins, the rest get 'already running'", async () => {
       for (let round = 0; round < 8; round++) {
         plant({ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "stale" }, FULL_BACKUP_LOCK_STALE_MS * 2);
@@ -266,7 +266,10 @@ describe("acquireFullBackupLock", () => {
       utimesSync(guardPath(), then, then);
     }
 
-    it("FORCED interleaving: both contenders see the stale guard; A clears it and takes a fresh guard; B then acts on its old observation — B must not remove A's guard, and exactly one wins", async () => {
+    // Covers the TWO-contender race only. With three contenders, or with B's claim landing
+    // between A's guard check and A's rename, two can win or none can (full-lock.ts module
+    // comment, "WHAT THIS DOES NOT GUARANTEE"); those orderings are accepted and not tested.
+    it("FORCED interleaving, two contenders: both see the stale guard; A clears it and takes a fresh guard; B then acts on its old observation — B puts A's guard back, and A alone wins", async () => {
       plantStaleLockAndGuard();
       const gate = () => {
         let open!: () => void;
@@ -317,7 +320,10 @@ describe("acquireFullBackupLock", () => {
       expect(readdirSync(dir)).toEqual([]); // no lock, no guard, no claimed-guard leftovers
     });
 
-    it("25 contenders on a stale lock PLUS a stale guard: never two winners, and the lock is taken within two rounds", async () => {
+    // What this run observes, not a proof: in-process contenders do not reach the orderings
+    // that give two winners. A no-winner round that leaves an orphan guard would fail the
+    // "within two rounds" assertion; that has not been seen, and is a documented limit, not a bug to chase here.
+    it("25 contenders on a stale lock PLUS a stale guard: at most one winner per round observed, and the lock is taken within two rounds", async () => {
       for (let round = 0; round < 8; round++) {
         plantStaleLockAndGuard();
         let winners: FullBackupLock[] = [];

@@ -34,24 +34,55 @@ import path from "node:path";
  *   caught it). The price is that a lock cut short by a crash blocks backups
  *   for up to 5 minutes.
  *
- * Reclaiming a stale lock is serialised by a second exclusive file,
- * `.full-backup.lock.reclaim`, holding its owner's token: only its holder
- * may replace the stale lock. The holder re-judges the lock after taking the
- * guard, confirms the guard is still its own immediately before replacing,
+ * Reclaiming a stale lock goes through a second exclusive file,
+ * `.full-backup.lock.reclaim`, holding its owner's token: a contender
+ * replaces the stale lock only while it holds that guard. It re-judges the
+ * lock after taking the guard, reads the guard back just before replacing,
  * and replaces with one atomic rename — the lock path is never empty in
  * between, so a plain create (`wx`) cannot slip in.
  *
+ * With no leftover guard in the folder this is exclusive: the guard is
+ * created with `wx` and nothing ever moves a fresh guard, so of any number
+ * of contenders on a stale lock exactly one replaces it.
+ *
  * A guard left by a reclaimer that died is itself stale after 5 minutes. It
- * is never removed by path: two contenders that both saw the old guard would
+ * is not removed by path: two contenders that both saw the old guard would
  * then delete each other's NEW guard and both reclaim. Instead a contender
  * CLAIMS it with an atomic rename to a name of its own and then looks at
- * what it got. If that is the old guard, it is deleted and the contender
- * starts over. If it is someone's fresh guard (taken after this contender
- * looked), it is put back and the contender backs off. Never two winners;
- * in that last interleaving the round can end with no winner (the guard's
- * owner finds it missing and backs off too) and the next attempt succeeds.
+ * what it got. The old guard is deleted and the contender starts over. A
+ * fresh guard (someone took it after this contender looked) is linked back
+ * and the contender backs off. That closes the two-contender race.
  *
- * Known limits: a pid recycled by an unrelated process on the same host keeps
+ * WHAT THIS DOES NOT GUARANTEE (accepted, ruling R14 — do not "fix" without
+ * reading this). The claim renames whatever is at the guard path BEFORE it
+ * can look at it, and the owner's guard check and its lock rename are two
+ * separate calls. So, only when a dead reclaimer's guard is present:
+ * - Two winners, with three contenders. B saw the old guard and has not
+ *   claimed yet. A clears the old guard, takes a fresh one and passes its
+ *   guard check. B's claim now renames A's fresh guard away, leaving the
+ *   guard path empty. C creates its own guard, finds the lock still stale,
+ *   passes its check and replaces the lock. A, already past its check,
+ *   replaces it too. Both A and C believe they hold the lock.
+ * - No winner, and an orphan guard. B's claim takes A's fresh guard before
+ *   A's guard check. A finds no guard, backs off, and does not remove a guard
+ *   it cannot see. B then links A's guard back and backs off. Now a FRESH
+ *   guard that nobody owns sits next to the stale lock: every attempt
+ *   reports "already running" although nothing runs, until that guard is
+ *   older than the stale threshold (5 minutes). Then it is claimed as an old
+ *   guard and the next attempt takes the lock.
+ * Both need another contender's calls to land between two adjacent calls of
+ * the guard's owner; they were reached only by pausing contenders on purpose.
+ *
+ * Why that is acceptable: this lock is advisory. It exists so two backups do
+ * not load the machine at once and so the second caller gets a clear
+ * "already running". It is not what keeps an archive correct. Each run
+ * writes its own `.partial` (created with `wx`, so two runs never share one)
+ * and renames it to `.bvb` only after it has verified it; a run whose
+ * `.partial` was removed by another run's cleanup fails at verify or at the
+ * rename and publishes nothing (see `removeOrphanedPartials` in
+ * ./full-backup.ts).
+ *
+ * Other known limits: a pid recycled by an unrelated process on the same host keeps
  * a stale lock alive until that process exits; the heartbeat rule compares
  * the file's mtime with this machine's clock, so on a network share a clock
  * difference of minutes between the file server and this host shifts the
@@ -218,7 +249,13 @@ async function guardIsOurs(guardPath: string, token: string): Promise<boolean> {
  * it — and then checked: between this contender's look and its rename, the
  * old guard may already have been cleared and replaced by a live reclaimer's
  * fresh one. A fresh guard is put back (link: never over a guard someone
- * else created meanwhile) and left alone.
+ * else created meanwhile).
+ *
+ * The rename happens before the check, so for a moment a live reclaimer's
+ * guard is NOT at its path. That moment is the source of both limits in the
+ * module comment: a third contender can create a guard of its own in it, and
+ * the owner can find its guard missing, give up, and leave the linked-back
+ * guard without an owner.
  */
 async function claimStaleGuard(guardPath: string, token: string, staleMs: number): Promise<boolean> {
   const claimed = `${guardPath}.${token}.claimed`;
@@ -315,12 +352,13 @@ export async function acquireFullBackupLock(dir: string, opts: FullBackupLockOpt
     const tmpPath = `${lockPath}.${token}.tmp`;
     try {
       await opts.hooks?.afterGuardTaken?.();
-      // Judged again now that no one else can be reclaiming.
+      // Judged again while holding the guard.
       const again = await judge(lockPath, hostname, staleMs);
       if (again.state === "live") throw alreadyRunning(again.body);
       if (again.state === "gone") continue; // nothing to replace; a plain create decides
       if (!(await createExclusive(tmpPath, text))) throw new Error(`full-backup lock: ${tmpPath} already exists`);
-      // The guard must still be ours at the moment we replace the lock.
+      // Read the guard back just before replacing the lock. This and the rename below are two
+      // separate calls: a contender that displaces the guard in between is not noticed (module comment).
       if (!(await guardIsOurs(guardPath, token))) throw alreadyRunning(again.body);
       await fsp.rename(tmpPath, lockPath); // atomic: the stale lock becomes ours
       return hold();

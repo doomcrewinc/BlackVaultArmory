@@ -238,7 +238,18 @@ async function assertBackupDirWritable(dir: string): Promise<void> {
   }
 }
 
-/** Leftovers of a run that was killed: with the lock held, no `.partial` here belongs to a live backup. */
+/**
+ * Removes leftovers of a run that was killed. Called with the lock held, so
+ * normally no `.partial` here belongs to a live backup.
+ *
+ * The lock is advisory (./full-lock.ts, "WHAT THIS DOES NOT GUARANTEE"): in
+ * rare cases two runs hold it at once, and then this CAN remove the other
+ * run's in-progress `.partial`. That run keeps writing to its open handle,
+ * then fails loudly — `verifyFullBackup` cannot stat the path (or, if the
+ * removal lands after its verify, the rename fails) — and publishes nothing.
+ * It never turns into an unverified `.bvb`: only a path that has just
+ * verified is ever renamed.
+ */
 async function removeOrphanedPartials(dir: string): Promise<void> {
   for (const name of await fsp.readdir(dir)) {
     if (name.startsWith(FULL_BACKUP_PREFIX) && name.endsWith(FULL_BACKUP_SUFFIX + PARTIAL_SUFFIX)) {
