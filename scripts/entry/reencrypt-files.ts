@@ -24,7 +24,7 @@
  * STDOUT       Exactly one line whenever the uploads folder was gone through
  *              (also when the run then stopped on an error); nothing when
  *              the old key was refused or the run could not start:
- *                BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n>
+ *                BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n> stopped=<0|1>
  *              reencrypted      were under the old key, now under the current one
  *              already_current  already under the current key: skipped
  *              unknown_key      under some other key, or with a damaged
@@ -32,6 +32,14 @@
  *              not_encrypted    not an encrypted file: left untouched
  *              failed           under the old key but NOT re-encrypted
  *                               (left untouched)
+ *              stopped          1 when the run stopped before it had gone
+ *                               through every file (an I/O error, or a
+ *                               replaced file that could not be read back):
+ *                               the counts then cover only the files reached,
+ *                               and running it again continues. 0 when every
+ *                               file was looked at — with FAILED that means
+ *                               the `failed` files will fail again until they
+ *                               are restored or moved out.
  * STDERR       Human-readable. `WARNING: …` for every unknown_key file and
  *              one closing WARNING with their count; `reencrypt-files: …`
  *              for everything else. The exit code is not changed by a WARNING.
@@ -79,7 +87,7 @@ async function main(): Promise<number> {
   if (result.outcome === "failed") {
     say(
       `${c.failed} ${c.failed === 1 ? "file" : "files"} under the old key could not be re-encrypted and ${c.failed === 1 ? "was" : "were"} left as ${c.failed === 1 ? "it was" : "they were"} (named above); ` +
-        `${c.reencrypted} ${c.reencrypted === 1 ? "file was" : "files were"} re-encrypted. BlackVault refuses to start while a file under another key is in the uploads folder: restore those files from a backup or move them out.`,
+        `${c.reencrypted} ${c.reencrypted === 1 ? "file was" : "files were"} re-encrypted. Running this again will not convert ${c.failed === 1 ? "it" : "them"}. BlackVault refuses to start while a file under another key is in the uploads folder: restore ${c.failed === 1 ? "that file" : "those files"} from a backup or move ${c.failed === 1 ? "it" : "them"} out.`,
     );
     return EXIT_FAILED;
   }

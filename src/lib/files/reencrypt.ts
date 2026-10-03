@@ -37,10 +37,18 @@ import { listUploads } from "./upload-walk";
  *   counted as `failed`; the run goes on with the next file, so that one bad
  *   file cannot keep every file after it from being recovered.
  * - A file that cannot be read or written (a full disk, permissions) stops
- *   the run: ReencryptError, with the counts so far.
- * Either way every file is whole — its original bytes, or the complete new
- * ones: writeAtomic writes a temp file and renames it over the original.
+ *   the run: ReencryptError, with the counts so far (`stopped` is 1).
+ * In both cases every file is whole — its original bytes, or the complete
+ * new ones: writeAtomic writes a temp file and renames it over the original.
  * Running the tool again continues with the files still under the old key.
+ * - ONE path is different. After a file has been replaced it is read back
+ *   and decrypted with the current key. If THAT fails, the original is
+ *   already gone (the rename has happened), so nothing here can put it
+ *   back: the run stops and says that this one file was replaced but could
+ *   not be confirmed, and to check it. It is counted as `reencrypted` — on
+ *   disk it is the new file — never as "left as it was". The bytes written
+ *   had been checked in memory (they decrypt to the original) before the
+ *   write, so this means the disk or the filesystem returned something else.
  *
  * It never deletes a file, and it knows nothing about key FILES: the caller
  * hands it the old key's text.
@@ -61,6 +69,12 @@ export interface ReencryptCounts {
   notEncrypted: number;
   /** Under the old key, but could not be re-encrypted: left untouched. */
   failed: number;
+  /**
+   * 1 when the run stopped before it had gone through every file (an I/O
+   * error, or a re-encrypted file that could not be confirmed): the other
+   * counts then cover only the files reached. 0 when every file was looked at.
+   */
+  stopped: number;
 }
 
 /**
@@ -122,11 +136,11 @@ const STATUS: Record<ReencryptOutcome, string> = { ok: "OK", nothing: "NOTHING",
 
 /**
  * The one line the CLI prints on standard output:
- *   BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n>
+ *   BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n> stopped=<0|1>
  */
 export function summaryLine(r: Pick<ReencryptResult, "outcome" | "counts">): string {
   const c = r.counts;
-  return `BLACKVAULT_REENCRYPT_${STATUS[r.outcome]} reencrypted=${c.reencrypted} already_current=${c.alreadyCurrent} unknown_key=${c.unknownKey} not_encrypted=${c.notEncrypted} failed=${c.failed}`;
+  return `BLACKVAULT_REENCRYPT_${STATUS[r.outcome]} reencrypted=${c.reencrypted} already_current=${c.alreadyCurrent} unknown_key=${c.unknownKey} not_encrypted=${c.notEncrypted} failed=${c.failed} stopped=${c.stopped}`;
 }
 
 export interface ReencryptOptions {
@@ -155,10 +169,12 @@ export async function reencryptFiles(opts: ReencryptOptions): Promise<ReencryptR
     );
   }
   const root = opts.root ?? uploadsRoot();
-  const counts: ReencryptCounts = { reencrypted: 0, alreadyCurrent: 0, unknownKey: 0, notEncrypted: 0, failed: 0 };
+  const counts: ReencryptCounts = { reencrypted: 0, alreadyCurrent: 0, unknownKey: 0, notEncrypted: 0, failed: 0, stopped: 0 };
   const failures: string[] = [];
+  // The run stops at a file that was NOT changed (it could not be read, re-encrypted or written).
   const stop = (rel: string, what: string, e: unknown): ReencryptError => {
     counts.failed++;
+    counts.stopped = 1;
     return new ReencryptError(
       `Could not ${what} ${rel} (${codeOf(e)}); it was left as it was. ${counts.reencrypted} ${counts.reencrypted === 1 ? "file was" : "files were"} re-encrypted before that. ` +
         "Every file is whole, under the old key or the current one. Free disk space or fix the uploads folder's permissions, then run this again: it continues with the files still under the old key.",
@@ -215,13 +231,23 @@ export async function reencryptFiles(opts: ReencryptOptions): Promise<ReencryptR
     } catch (e) {
       throw stop(rel, "write", e);
     }
-    // Confirm what is on disk now reads under the current key.
-    try {
-      if (!decryptFile(current, name, await fsp.readFile(entry.abs)).equals(plaintext)) throw new Error("the file read back differs");
-    } catch (e) {
-      throw stop(rel, "read back", e);
-    }
+    // The file on disk is now the re-encrypted one: the rename has happened.
     counts.reencrypted++;
+    // Confirm it reads under the current key. If it does not, the original is
+    // already gone, so this is NOT "left as it was": say exactly what happened.
+    try {
+      if (!decryptFile(current, name, await fsp.readFile(entry.abs)).equals(plaintext)) throw new Error("the file read back differs from what was written");
+    } catch (e) {
+      counts.stopped = 1;
+      throw new ReencryptError(
+        `${rel} was replaced with its re-encrypted copy, but it could not be confirmed: reading it back failed (${codeOf(e)}). ` +
+          "Check this file once BlackVault runs; if it does not open, put it back from your copy of the uploads folder or from a backup. " +
+          `The run stopped here, after ${counts.reencrypted} ${counts.reencrypted === 1 ? "file" : "files"} (this one included). ` +
+          "Every OTHER file is whole, under the old key or the current one; run this again to continue with the files still under the old key.",
+        counts,
+        e,
+      );
+    }
     if (counts.reencrypted % REENCRYPT_PROGRESS_EVERY === 0) log(`reencrypt-files: re-encrypted ${counts.reencrypted} files so far`);
   }
 

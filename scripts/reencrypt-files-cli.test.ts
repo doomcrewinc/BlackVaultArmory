@@ -90,7 +90,7 @@ describe("dist/scripts/reencrypt-files.mjs (the bundle, under plain node)", () =
   it("exit 0: the old key on stdin (as the key file's bytes, with its line ending) re-encrypts the old-key files; one stdout line; the key is never printed", () => {
     const r = cli(`${OLD_HEX}\n`);
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_OK reencrypted=2 already_current=1 unknown_key=1 not_encrypted=1 failed=0\n");
+    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_OK reencrypted=2 already_current=1 unknown_key=1 not_encrypted=1 failed=0 stopped=0\n");
     expect(idOf("images/a.jpg")).toBe(CURRENT.id);
     expect(plainOf("images/a.jpg", CURRENT)).toBe("image a");
     expect(plainOf("documents/d.pdf", CURRENT)).toBe("document d");
@@ -107,7 +107,7 @@ describe("dist/scripts/reencrypt-files.mjs (the bundle, under plain node)", () =
     const before = all();
     const r = cli(`${OLD_HEX}\n`);
     expect(r.status).toBe(3);
-    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=3 unknown_key=1 not_encrypted=1 failed=0\n");
+    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=3 unknown_key=1 not_encrypted=1 failed=0 stopped=0\n");
     expect(r.stderr).toMatch(/^reencrypt-files: nothing to do: no uploaded file is encrypted with the old key \(key id [0-9a-f]{8}\)\. 3 already under the current key, 1 under another key, 1 not encrypted\. Nothing was changed\.$/m);
     expect(all()).toEqual(before);
   });
@@ -127,7 +127,7 @@ describe("dist/scripts/reencrypt-files.mjs (the bundle, under plain node)", () =
     ["two keys", `${OLD_HEX}\n${OLD_HEX}\n`],
   ])("exit 3 before anything is touched: an invalid old key (%s); nothing on stdout; the text is not echoed", (_name, text) => {
     const before = all();
-    // An unreadable uploads folder would fail the run with exit 1 if it were looked at.
+    // The uploads folder named here does not exist: if it were looked at, stdout would carry a NOTHING line.
     const r = cli(text, { env: { IMAGE_UPLOAD_DIR: path.join(tmp, "not-looked-at") } });
     expect(r.status).toBe(3);
     expect(r.stdout).toBe("");
@@ -163,8 +163,9 @@ describe("dist/scripts/reencrypt-files.mjs (the bundle, under plain node)", () =
     fs.writeFileSync(bad, bytes);
     const r = cli(`${OLD_HEX}\n`);
     expect(r.status).toBe(1);
-    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_FAILED reencrypted=1 already_current=1 unknown_key=1 not_encrypted=1 failed=1\n");
+    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_FAILED reencrypted=1 already_current=1 unknown_key=1 not_encrypted=1 failed=1 stopped=0\n");
     expect(r.stderr).toMatch(/^reencrypt-files: documents\/d\.pdf is under the old key but could not be decrypted with it/m);
+    expect(r.stderr).toMatch(/^reencrypt-files: 1 file under the old key could not be re-encrypted and was left as it was \(named above\); 1 file was re-encrypted\. Running this again will not convert it\. /m);
     expect(fs.readFileSync(bad).equals(bytes)).toBe(true);
     expect(idOf("images/a.jpg")).toBe(CURRENT.id);
   });
@@ -180,11 +181,11 @@ describe("dist/scripts/reencrypt-files.mjs (the bundle, under plain node)", () =
     }
     expect(r.status).toBe(1);
     // images/ is gone through first: a.jpg was re-encrypted before documents/d.pdf could not be written.
-    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_FAILED reencrypted=1 already_current=1 unknown_key=1 not_encrypted=1 failed=1\n");
+    expect(r.stdout).toBe("BLACKVAULT_REENCRYPT_FAILED reencrypted=1 already_current=1 unknown_key=1 not_encrypted=1 failed=1 stopped=1\n");
     expect(r.stderr).toMatch(/^reencrypt-files: Could not write documents\/d\.pdf \(EACCES\); it was left as it was\. 1 file was re-encrypted before that\. .* run this again/m);
     expect(plainOf("documents/d.pdf", OLD)).toBe("document d");
     const again = cli(`${OLD_HEX}\n`);
     expect(again.status, again.stderr).toBe(0);
-    expect(again.stdout).toBe("BLACKVAULT_REENCRYPT_OK reencrypted=1 already_current=2 unknown_key=1 not_encrypted=1 failed=0\n");
+    expect(again.stdout).toBe("BLACKVAULT_REENCRYPT_OK reencrypted=1 already_current=2 unknown_key=1 not_encrypted=1 failed=0 stopped=0\n");
   });
 });
