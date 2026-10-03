@@ -2626,8 +2626,8 @@ Show-EvidenceIfFailed $r
 
 $OldKey = "5a17c0de" * 8
 $ReencryptCall = "compose run --rm -T blackvault node dist/scripts/reencrypt-files.mjs"
-$ReencryptOkLine = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0"
-$ReencryptNothingLine = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0"
+$ReencryptOkLine = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0 stopped=0"
+$ReencryptNothingLine = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0 stopped=0"
 $ReencryptWhenRunning = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall || compose start blackvault"
 $ReencryptWhenStopped = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall"
 
@@ -2723,7 +2723,8 @@ $kf = New-PassFile $d "$OldKey`n" "old.key"
 $r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_EXIT" = "1"; "BV_STUB_REENCRYPT_STDERR" = "reencrypt-files: Could not write documents/d.pdf (ENOSPC); it was left as it was." }
 Assert ($r.ExitCode -eq 1) "exit 1 stays 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "Could not write documents/d\.pdf \(ENOSPC\)") "the program's message is shown"
-Assert ($r.Output.Contains("ERROR: the re-encryption failed (the reason is above). Every file is whole, under the old key or the current one; run reencrypt-files.bat again to continue. BlackVault was started again.")) "says it failed, that running it again continues, and that BlackVault was started again"
+Assert ($r.Output.Contains("ERROR: the re-encryption did not complete. The lines above say why, and whether running reencrypt-files.bat again will continue or the files named there must be restored or moved out first. BlackVault was started again.")) "says it did not complete, points at the program's own lines for what to do, and says BlackVault was started again"
+Assert ($r.Output -notmatch "again to continue") "does not promise that running it again continues (a file that cannot be converted would fail again)"
 Assert ($r.Output -notmatch "ended unexpectedly") "nothing added for exit 1"
 Show-EvidenceIfFailed $r
 $r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_EXIT" = "137" }
@@ -2774,7 +2775,7 @@ Assert (@(Get-ChildItem -Force $elsewhere).Count -eq 1) "nothing was written bes
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario RF7
-Write-Scenario "reencrypt-files.bat - stop fails: exit 1 and the program is never started; the restart fails after a good run: exit 0 with a WARNING that BlackVault did NOT start"
+Write-Scenario "reencrypt-files.bat - stop fails: exit 1 and the program is never started; the restart fails after a good run, or after a run that changed nothing: exit 1, saying only starting BlackVault failed (ruling R31)"
 $d = New-ReencryptSandbox "reencrypt-stop-start-fail"
 $kf = New-PassFile $d "$OldKey`n" "old.key"
 $r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "stop" }
@@ -2784,9 +2785,15 @@ Assert ((Get-ReencryptCalls $r) -eq "compose ps --status running -q blackvault |
 Assert (-not (Test-Path (Join-Path $d "__stdin.bin"))) "the old key was handed to nothing"
 Show-EvidenceIfFailed $r
 $r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "start"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
-Assert ($r.ExitCode -eq 0) "the restart fails: the exit code stays the program's, 0 (got $($r.ExitCode))"
-Assert ($r.Output.Contains("WARNING: BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "warns that BlackVault did NOT start, with the command"
-Assert (-not $r.Output.Contains("BlackVault was started again.")) "and does not claim it was started"
+Assert ($r.ExitCode -eq 1) "the restart fails after a good run: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains($ReencryptOkLine)) "the program's own line still says OK"
+Assert ($r.Output.Contains("ERROR: the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "says the re-encryption itself completed and only the start failed, with the command"
+Assert (-not $r.Output.Contains("BlackVault was started again.") -and -not $r.Output.Contains("Done.")) "and does not claim it was started, or that all is done"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "the start was attempted once (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "start"; "BV_STUB_REENCRYPT_EXIT" = "3"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptNothingLine }
+Assert ($r.ExitCode -eq 1) "the restart fails after a run that changed nothing: exits 1, not 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: nothing was changed, and only starting BlackVault again failed. BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "says nothing was changed and only the start failed, with the command"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario RF8

@@ -28,13 +28,18 @@ const isWindows = process.platform === "win32";
 // A key that appears nowhere else: any trace of it in an argv or an environment is a leak.
 const KEY = "5a17c0de".repeat(8);
 const KEY_FILE_BYTES = Buffer.from(`﻿${KEY}\r\n`, "utf8"); // a key file as Windows tools write one: handed over byte for byte
-const OK_LINE = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0";
-const NOTHING_LINE = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0";
+const OK_LINE = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0 stopped=0";
+const NOTHING_LINE = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0 stopped=0";
 const PROGRAM = "compose run --rm -T blackvault node dist/scripts/reencrypt-files.mjs";
 const VERSION = "compose version --short";
 const PS = "compose ps --status running -q blackvault";
 const STOP = "compose stop blackvault";
 const START = "compose start blackvault";
+const NOT_STARTED = "BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d";
+// The wrapper cannot see the program's standard output (it goes straight to the user), so its last line after
+// exit 1 does not guess between "stopped early: run it again" and "some files cannot be converted": it points at
+// the program's own lines, which say which it is.
+const FAILED_SH = "ERROR: the re-encryption did not complete. The lines above say why, and whether running ./reencrypt-files.sh again will continue or the files named there must be restored or moved out first.";
 
 let tmp: string;
 let app: string;
@@ -213,11 +218,30 @@ describe.skipIf(isWindows)("reencrypt-files.sh", () => {
       expect(fs.existsSync(path.join(rec, "stdin"))).toBe(false);
     });
 
-    it("the restart fails after a good run: the exit code stays the program's (0), with a WARNING that says BlackVault did NOT start and how to start it", () => {
+    // Ruling R31: as in rotate-key.sh, a BlackVault that was running and did not come back is a failure of the run.
+    it("the restart fails after a good run: exit 1, and the last line says the re-encryption itself completed and only starting BlackVault failed, with the command", () => {
       const r = run(["--from-key-file", keyFile()], { env: { BV_STUB_RUNNING: "1", BV_STUB_STDOUT: OK_LINE, BV_STUB_FAIL_ON: "start" } });
-      expect(r.code).toBe(0);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe(`${OK_LINE}\n`); // the program's own line still says OK
       expect(callLines()).toEqual([VERSION, PS, STOP, PROGRAM, START]);
-      expect(lastLine(r.stderr)).toMatch(/WARNING: BlackVault did NOT start again: check the logs \(docker compose logs blackvault\) and start it by hand: docker compose up -d$/);
+      expect(lastLine(r.stderr)).toBe(
+        "ERROR: the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. " + NOT_STARTED,
+      );
+      expect(r.stderr).not.toContain("BlackVault was started again.");
+      expect(r.stderr).not.toContain("Done.");
+    });
+
+    it("the restart fails after a run that changed nothing (exit 3 from the program): exit 1 too, saying nothing was changed and only the start failed", () => {
+      const r = run(["--from-key-file", keyFile()], { env: { BV_STUB_RUNNING: "1", BV_STUB_EXIT: "3", BV_STUB_STDOUT: NOTHING_LINE, BV_STUB_FAIL_ON: "start" } });
+      expect(r.code).toBe(1);
+      expect(lastLine(r.stderr)).toBe("ERROR: nothing was changed, and only starting BlackVault again failed. " + NOT_STARTED);
+    });
+
+    it("the restart fails after a failed run: exit 1, and the last line says BlackVault did NOT start", () => {
+      const r = run(["--from-key-file", keyFile()], { env: { BV_STUB_RUNNING: "1", BV_STUB_EXIT: "1", BV_STUB_FAIL_ON: "start" } });
+      expect(r.code).toBe(1);
+      expect(lastLine(r.stderr).endsWith(NOT_STARTED)).toBe(true);
+      expect(r.stderr).not.toContain("BlackVault was started again.");
     });
 
     it("BLACKVAULT_* keys exported in the shell do not reach docker compose; Docker Compose older than 2.20 stops before anything is touched", () => {
@@ -252,13 +276,12 @@ describe.skipIf(isWindows)("reencrypt-files.sh", () => {
       expect(callLines()).toEqual([VERSION, PS, STOP, PROGRAM]);
     });
 
-    it("1 (failed): exit 1, says every file is whole and that running it again continues, and whether BlackVault was started", () => {
+    it("1 (failed): exit 1; the last line points at the program's own advice (it does NOT promise that running it again continues) and says whether BlackVault was started", () => {
       const r = run(["--from-key-file", keyFile()], { env: { BV_STUB_RUNNING: "1", BV_STUB_EXIT: "1", BV_STUB_STDERR: "reencrypt-files: Could not write documents/d.pdf (ENOSPC); it was left as it was." } });
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("reencrypt-files: Could not write documents/d.pdf (ENOSPC); it was left as it was.\n");
-      expect(lastLine(r.stderr)).toBe(
-        "ERROR: the re-encryption failed (the reason is above). Every file is whole, under the old key or the current one; run ./reencrypt-files.sh again to continue. BlackVault was started again.",
-      );
+      expect(lastLine(r.stderr)).toBe(`${FAILED_SH} BlackVault was started again.`);
+      expect(lastLine(r.stderr)).not.toMatch(/again to continue/);
       const stopped = run(["--from-key-file", keyFile()], { env: { BV_STUB_EXIT: "1" } });
       expect(stopped.code).toBe(1);
       expect(lastLine(stopped.stderr)).toMatch(/BlackVault was not running before, so it was NOT started\. Start it with: docker compose up -d$/);
@@ -417,16 +440,45 @@ describe("reencrypt-files.bat (static checks; executed only by the Windows CI jo
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(code.filter((l) => l === "%COMPOSE% start blackvault 1>&2")).toHaveLength(1);
-    const exits = (label: string) => {
+    const NOT_STARTED_BAT = "BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d";
+    const start = code.indexOf("%COMPOSE% start blackvault 1>&2");
+    expect(code.slice(start, start + 5)).toEqual([
+      "%COMPOSE% start blackvault 1>&2",
+      "if not errorlevel 1 goto :start_done",
+      'set "BV_START_FAILED=1"',
+      `set "BV_STARTED=${NOT_STARTED_BAT}"`,
+      ":start_done",
+    ]);
+    expect(code.indexOf('set "BV_START_FAILED="')).toBeLessThan(start); // cleared first: an inherited value must not count
+    const ending = (label: string, n: number) => {
       const at = code.indexOf(label);
-      return code.slice(at, at + 3);
+      return code.slice(at, at + n);
     };
-    expect(exits(":ended_ok")[2]).toBe("exit /b 0");
-    expect(exits(":ended_nothing")[2]).toBe("exit /b 3");
-    expect(exits(":ended_failed")[2]).toBe("exit /b 1");
+    // Ruling R31: a BlackVault that was running and did not come back makes the run exit 1, whatever the program said.
+    expect(ending(":ended_ok", 4)).toEqual([
+      ":ended_ok",
+      "if defined BV_START_FAILED goto :ended_ok_not_started",
+      ">&2 echo Done. Keep the old key file until BlackVault has started and your photos and documents open. !BV_STARTED!",
+      "exit /b 0",
+    ]);
+    expect(ending(":ended_ok_not_started", 3)).toEqual([
+      ":ended_ok_not_started",
+      ">&2 echo ERROR: the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. !BV_STARTED!",
+      "exit /b 1",
+    ]);
+    expect(ending(":ended_nothing", 4)).toEqual([":ended_nothing", "if defined BV_START_FAILED goto :ended_nothing_not_started", ">&2 echo Nothing was changed. !BV_STARTED!", "exit /b 3"]);
+    expect(ending(":ended_nothing_not_started", 3)).toEqual([
+      ":ended_nothing_not_started",
+      ">&2 echo ERROR: nothing was changed, and only starting BlackVault again failed. !BV_STARTED!",
+      "exit /b 1",
+    ]);
+    expect(ending(":ended_failed", 3)).toEqual([
+      ":ended_failed",
+      ">&2 echo ERROR: the re-encryption did not complete. The lines above say why, and whether running reencrypt-files.bat again will continue or the files named there must be restored or moved out first. !BV_STARTED!",
+      "exit /b 1",
+    ]);
     // Every ending prints the sentence that says whether BlackVault was started.
-    for (const label of [":ended_ok", ":ended_nothing", ":ended_failed"]) expect(exits(label)[1]).toContain("!BV_STARTED!");
-    expect(code.filter((l) => l.includes("!BV_STARTED!"))).toHaveLength(4);
+    expect(code.filter((l) => l.includes("!BV_STARTED!"))).toHaveLength(6);
     // The wording is the .sh's.
     const sh = fs.readFileSync(path.join(ROOT, "reencrypt-files.sh"), "utf8");
     for (const sentence of [
@@ -434,6 +486,11 @@ describe("reencrypt-files.bat (static checks; executed only by the Windows CI jo
       "BlackVault was not running before, so it was NOT started. Start it with: ",
       "Done. Keep the old key file until BlackVault has started and your photos and documents open.",
       "Every file is whole, under the old key or the current one; run ",
+      "the re-encryption itself completed, and only starting BlackVault again failed.",
+      "nothing was changed, and only starting BlackVault again failed.",
+      "the re-encryption did not complete. The lines above say why, and whether running ",
+      " again will continue or the files named there must be restored or moved out first.",
+      "BlackVault did NOT start again: check the logs (",
     ]) {
       expect(sh).toContain(sentence);
       expect(text).toContain(sentence);

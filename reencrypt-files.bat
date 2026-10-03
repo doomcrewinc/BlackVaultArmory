@@ -31,8 +31,11 @@
 ::      are not encrypted, are left as they are.
 ::   4. Starts BlackVault again - only if it was running in step 2 - and says
 ::      whether it did.
-:: It deletes no file. If it stops part-way, every file is whole, under the
-:: old key or the current one: run it again and it continues with the rest.
+:: It deletes no file, and it takes NO snapshot: the files are rewritten in
+:: place. Copy the uploads folder first if you want a way back. If it stops
+:: part-way, every file is whole, under the old key or the current one: run
+:: it again and it continues with the rest. After an interruption BlackVault
+:: stays stopped.
 ::
 :: THE OLD KEY NEVER TOUCHES cmd.exe. It is handed over exactly as backup.bat
 :: hands over a passphrase file: one PowerShell process reads the file's
@@ -52,7 +55,8 @@
 ::
 :: OUTPUT: one line on standard output, from the program, whenever it went
 :: through the uploads folder:
-::   BLACKVAULT_REENCRYPT_[OK or NOTHING or FAILED] reencrypted=n already_current=n unknown_key=n not_encrypted=n failed=n
+::   BLACKVAULT_REENCRYPT_[OK or NOTHING or FAILED] reencrypted=n already_current=n unknown_key=n not_encrypted=n failed=n stopped=0 or 1
+:: (stopped=1: it stopped before it had gone through every file; run it again.)
 :: Everything else goes to standard error. The last line says whether
 :: BlackVault was started. It never pauses.
 ::
@@ -61,7 +65,8 @@
 ::   3  nothing was changed: no file is under the old key (this is also what a
 ::      second run answers), or the old key file is missing, empty, not a key,
 ::      or is this install's current key
-::   1  failed
+::   1  failed - or the program finished (0 or 3) but BlackVault, which was
+::      running before, could not be started again; the last line says which
 
 :: Arguments are read BEFORE changing folder: a relative --from-key-file path
 :: is relative to where the user ran this from. `shift /1`, never a bare
@@ -155,11 +160,17 @@ powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { if ($env:
 set "BV_RC=!errorlevel!"
 
 :: -- 5. Start the app again if it was running, and say so ----------
+:: BV_START_FAILED: it was running before and could not be started again.
+:: The run then ends with exit 1 whatever the program answered, as in
+:: rotate-key.bat.
+set "BV_START_FAILED="
 set "BV_STARTED=BlackVault was not running before, so it was NOT started. Start it with: docker compose up -d"
 if not defined BV_RUNNING goto :start_done
 set "BV_STARTED=BlackVault was started again."
 %COMPOSE% start blackvault 1>&2
-if errorlevel 1 set "BV_STARTED=WARNING: BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d"
+if not errorlevel 1 goto :start_done
+set "BV_START_FAILED=1"
+set "BV_STARTED=BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d"
 :start_done
 if "!BV_RC!"=="0" goto :ended_ok
 if "!BV_RC!"=="3" goto :ended_nothing
@@ -167,14 +178,27 @@ if "!BV_RC!"=="1" goto :ended_failed
 >&2 echo ERROR: the re-encryption command ended unexpectedly (exit !BV_RC!); see the output above. Every file is whole, under the old key or the current one; run reencrypt-files.bat again to continue. !BV_STARTED!
 exit /b 1
 :ended_ok
+if defined BV_START_FAILED goto :ended_ok_not_started
 >&2 echo Done. Keep the old key file until BlackVault has started and your photos and documents open. !BV_STARTED!
 exit /b 0
+:ended_ok_not_started
+>&2 echo ERROR: the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. !BV_STARTED!
+exit /b 1
 :: The program printed why (one reencrypt-files: line).
 :ended_nothing
+if defined BV_START_FAILED goto :ended_nothing_not_started
 >&2 echo Nothing was changed. !BV_STARTED!
 exit /b 3
+:ended_nothing_not_started
+>&2 echo ERROR: nothing was changed, and only starting BlackVault again failed. !BV_STARTED!
+exit /b 1
+:: Two different failures end in exit 1, and the program's own lines say
+:: which: it stopped part-way (run it again: it continues), or some files
+:: under the old key cannot be converted (running it again will not help).
+:: This script does not see the program's standard output, so it does not
+:: guess: it points at those lines.
 :ended_failed
->&2 echo ERROR: the re-encryption failed (the reason is above). Every file is whole, under the old key or the current one; run reencrypt-files.bat again to continue. !BV_STARTED!
+>&2 echo ERROR: the re-encryption did not complete. The lines above say why, and whether running reencrypt-files.bat again will continue or the files named there must be restored or moved out first. !BV_STARTED!
 exit /b 1
 
 :: ============================================================

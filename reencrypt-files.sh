@@ -32,9 +32,11 @@
 #      as they are; each one under another key gets a WARNING line.
 #   4. Starts BlackVault again — only if it was running in step 2 — and says
 #      whether it did.
-# It deletes no file. If it stops part-way (a full disk, a closed terminal),
-# every file is whole, under the old key or the current one: run it again
-# and it continues with the rest.
+# It deletes no file, and it takes NO snapshot: the files are rewritten in
+# place. Copy the uploads folder first if you want a way back. If it stops
+# part-way (a full disk, a closed terminal), every file is whole, under the
+# old key or the current one: run it again and it continues with the rest.
+# After an interruption BlackVault stays stopped.
 #
 # THE OLD KEY IS A SECRET. The file is handed to the program on its standard
 # input (redirected by this shell). Its content is never put on a command
@@ -50,7 +52,8 @@
 #
 # OUTPUT. One line on standard output, from the program, whenever it went
 # through the uploads folder:
-#   BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n>
+#   BLACKVAULT_REENCRYPT_<OK|NOTHING|FAILED> reencrypted=<n> already_current=<n> unknown_key=<n> not_encrypted=<n> failed=<n> stopped=<0|1>
+# (stopped=1: it stopped before it had gone through every file; run it again.)
 # Everything else goes to standard error. The last line says whether
 # BlackVault was started.
 #
@@ -59,7 +62,8 @@
 #   3  nothing was changed: no file is under the old key (this is also what a
 #      second run answers), or the old key file is missing, empty, not a key,
 #      or is this install's current key
-#   1  failed
+#   1  failed — or the program finished (0 or 3) but BlackVault, which was
+#      running before, could not be started again; the last line says which
 set -o pipefail
 # No `set -e` on purpose (as in backup.sh): every failure is handled where it happens.
 
@@ -109,15 +113,19 @@ bv_compose_setup
 # ── 3. Stop the app ───────────────────────────────────────────
 RUNNING=$($COMPOSE ps --status running -q blackvault 2>/dev/null) || RUNNING=""
 
-# Sets STARTED to one sentence: whether BlackVault runs again.
+# Sets STARTED to one sentence: whether BlackVault runs again. START_FAILED
+# is 1 when it was running before and could not be started again: the run
+# then ends with exit 1 whatever the program answered, as in rotate-key.sh.
 STARTED=""
+START_FAILED=""
 start_if_was_running() {
   if [ -z "$RUNNING" ]; then
     STARTED="BlackVault was not running before, so it was NOT started. Start it with: $COMPOSE up -d"
   elif $COMPOSE start blackvault >&2; then
     STARTED="BlackVault was started again."
   else
-    STARTED="WARNING: BlackVault did NOT start again: check the logs ($COMPOSE logs blackvault) and start it by hand: $COMPOSE up -d"
+    START_FAILED=1
+    STARTED="BlackVault did NOT start again: check the logs ($COMPOSE logs blackvault) and start it by hand: $COMPOSE up -d"
   fi
 }
 
@@ -149,16 +157,29 @@ trap - INT TERM HUP
 start_if_was_running
 case "$RC" in
   0)
+    if [ -n "$START_FAILED" ]; then
+      printf 'ERROR: %s\n' "the re-encryption itself completed, and only starting BlackVault again failed. Keep the old key file until BlackVault has started and your photos and documents open. $STARTED" >&2
+      exit 1
+    fi
     echo "Done. Keep the old key file until BlackVault has started and your photos and documents open. $STARTED" >&2
     exit 0
     ;;
   3)
     # The program printed why (one `reencrypt-files: ...` line).
+    if [ -n "$START_FAILED" ]; then
+      printf 'ERROR: %s\n' "nothing was changed, and only starting BlackVault again failed. $STARTED" >&2
+      exit 1
+    fi
     echo "Nothing was changed. $STARTED" >&2
     exit 3
     ;;
   1)
-    printf 'ERROR: %s\n' "the re-encryption failed (the reason is above). Every file is whole, under the old key or the current one; run ./reencrypt-files.sh again to continue. $STARTED" >&2
+    # Two different failures end in exit 1, and the program's own lines say
+    # which: it stopped part-way (run it again: it continues), or some files
+    # under the old key cannot be converted (running it again will not help).
+    # This script does not see the program's standard output, so it does not
+    # guess: it points at those lines.
+    printf 'ERROR: %s\n' "the re-encryption did not complete. The lines above say why, and whether running ./reencrypt-files.sh again will continue or the files named there must be restored or moved out first. $STARTED" >&2
     exit 1
     ;;
   *)

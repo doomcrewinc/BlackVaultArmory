@@ -1176,12 +1176,21 @@ To recover, pick one:
   4. It starts BlackVault again **only if it was running** when you ran the tool. The last line
      says whether it was started; if not, start it with `docker compose up -d`.
 
+  **It takes no snapshot.** The files are rewritten in place, and the tool keeps no copy of the
+  uploads folder. If you want a way back, copy `<DATA_DIR>/uploads` somewhere else first (on Linux
+  with `sudo`: the files belong to uid 1001).
+
+  **It only looks under `uploads/images` and `uploads/documents`**, where BlackVault itself puts
+  files. A file under the old key that was placed anywhere else in the uploads folder is not
+  converted, and BlackVault will still refuse to start on it: move it out.
+
   The old key file is only read: the tool never deletes, moves or changes a key file, and it
   deletes no uploaded file. The key is handed to the program on its standard input, never on a
   command line or in an environment variable.
 
   If it stops part-way (a full disk, a closed terminal), every file is whole, under the old key
   or the current one. Run it again: it continues with the files still under the old key.
+  **After an interrupted run BlackVault stays stopped**, even if it was running before.
 
   Exit codes:
 
@@ -1189,7 +1198,7 @@ To recover, pick one:
   |---|---|
   | 0 | At least one file was under the old key, and all of them were re-encrypted. |
   | 3 | Nothing was changed: no file is under the old key (a second run answers this too), or the old key file is missing, empty, not a key, or is this install's current key. |
-  | 1 | Failed. The reason is printed above the last line. |
+  | 1 | Failed; the lines above the last one say why, and whether running it again will continue. Also: the tool finished, but BlackVault was running before and could not be started again (the last line says so). |
 
   **Keep the old key file until BlackVault has started and your photos and documents open.**
 
