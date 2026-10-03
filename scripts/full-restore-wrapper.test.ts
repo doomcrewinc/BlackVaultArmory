@@ -1091,7 +1091,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.code, r.stderr).toBe(0);
       expect(steps().slice(0, 4)).toEqual([VERIFY, PS, LOCK_STATUS, "compose stop blackvault"]);
       expect(steps().filter((c) => c === LOCK_STATUS)).toHaveLength(1);
-      expect(fs.readFileSync(path.join(rec, "stdin-lock-status")).length).toBe(0);
+      expect(fs.readFileSync(path.join(rec, "stdin-lock-status"))).toHaveLength(0);
       expect(r.stdout).toBe(`${OK_LINE}\n`);
       expect(r.stderr).not.toContain("BLACKVAULT_FULL_BACKUP_LOCK");
       expect(r.stderr).not.toContain("WARNING: could not check");
