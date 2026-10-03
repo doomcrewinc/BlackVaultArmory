@@ -30,8 +30,7 @@ const TSCONFIG = path.join(REPO_ROOT, "tsconfig.json");
 /**
  * Bundles every `*.ts` file directly inside `entryDir` into `<outDir>/<name>.mjs`.
  * Returns the list of output file paths written (empty when entryDir has no
- * entries, or does not exist at all — both are success, not an error: a
- * fresh checkout before Task 4 lands has no scripts/entry/ yet).
+ * entries, or does not exist at all — both are success, not an error).
  *
  * @param {{ entryDir?: string; outDir?: string }} [opts]
  * @returns {Promise<string[]>}
@@ -40,8 +39,7 @@ export async function buildScripts({ entryDir = DEFAULT_ENTRY_DIR, outDir = DEFA
   // Created unconditionally, even with no entryDir at all: the Dockerfile's
   // builder stage always runs this, and the runner stage always
   // `COPY --from=builder /app/dist/scripts ./dist/scripts` — that COPY needs
-  // a real (possibly empty) directory to exist before Task 4 adds the first
-  // scripts/entry/*.ts.
+  // a real directory to exist, even an empty one.
   fs.mkdirSync(outDir, { recursive: true });
 
   let names;

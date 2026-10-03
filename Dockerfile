@@ -38,8 +38,8 @@ ENV DB_PROVIDER=sqlite
 ENV BUILD_DATABASE_URL="file:/tmp/prisma-build.db"
 RUN npm run build
 
-# Bundles the TypeScript CLI engines (scripts/entry/*.ts — full-backup,
-# full-restore, reencrypt-files as they land) into dist/scripts/*.mjs with
+# Bundles the TypeScript CLI engines (scripts/entry/*.ts: full-backup,
+# full-restore, reencrypt-files) into dist/scripts/*.mjs with
 # esbuild. @prisma/client and .prisma/* stay external (scripts/build-scripts.mjs),
 # so they resolve against the RUNNER stage's own node_modules/@prisma and
 # node_modules/.prisma below, not whatever the builder stage generated here.

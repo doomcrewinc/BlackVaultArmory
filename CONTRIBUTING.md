@@ -261,7 +261,9 @@ new program is a new file there and nothing else; for the same reason a test mus
 that folder (the CLI tests are `scripts/*-cli.test.ts`). `@prisma/client` and `.prisma/*` are left
 external and resolve against the image's own `node_modules`. The Dockerfile runs the build and
 copies `dist/scripts` into the image; `dist/` is not committed. The CLI tests build the bundle
-themselves, into a temp folder, and run it under plain `node`.
+themselves, into a scratch folder `dist/bv-test-out-*` inside the repository (ignored with the rest
+of `dist/`, and removed when the test ends; it has to be there so that the bundle finds
+`@prisma/client` in the repository's `node_modules`), and run it under plain `node`.
 
 **The wrappers.** `backup.sh`, `restore.sh` and `reencrypt-files.sh` share
 `scripts/backup-common.sh`; each has a `.bat` twin that must change with it.
@@ -300,7 +302,7 @@ cannot run alone. The second needs only Docker and an image name, changes nothin
 and runs on Docker Desktop and OrbStack too:
 
 ```bash
-docker compose build && ./scripts/ci/full-backup-entrypoint-linux.sh "$(docker compose config --images | head -n 1)"
+docker compose build && ./scripts/ci/full-backup-entrypoint-linux.sh "$(docker compose config --images blackvault | head -n 1)"
 ```
 
 `full-backup-linux.sh` reports a failed check and carries on, so one run lists everything that

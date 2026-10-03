@@ -1372,8 +1372,8 @@ above it. Look at `WARNING:` lines even when the command succeeded.
 
 | Option | What it does |
 |---|---|
-| `--passphrase-file <path>` | Reads the passphrase from a file instead of asking. The file's content is the passphrase, byte for byte, minus one line ending at the very end. The passphrase is never put on a command line or into an environment variable. |
-| `--keep <n>` | After the new backup has been written **and verified**, deletes the oldest full backups beyond the newest `<n>`. Default 7. If the backup fails, nothing is deleted. Only files named exactly `blackvault-full-<date>-<time>.bvb` count: a copy you renamed is never deleted. The deleting happens inside the container, because on Linux the files belong to uid 1001. |
+| `--passphrase-file <path>` | Reads the passphrase from a file instead of asking. The file's content is the passphrase, minus one line ending at the very end (and a UTF-8 byte order mark at the very start, if the editor wrote one). The file must be saved as UTF-8 text: see [the passphrase file](#a-nightly-backup-with-cron) below. The passphrase is never put on a command line or into an environment variable. |
+| `--keep <n>` | After the new backup has been written **and verified**, deletes the oldest full backups beyond the newest `<n>`. Default 7. If the backup fails, nothing is deleted. If the new backup is **incomplete** (`unreadable` above 0), nothing is deleted either: an older backup may be the only one that still holds the file. It prints `WARNING: old backups were kept because this backup is incomplete`, and the folder grows until the file is repaired or removed. Only files named exactly `blackvault-full-<date>-<time>.bvb` count: a copy you renamed is never deleted. The deleting happens inside the container, because on Linux the files belong to uid 1001. |
 | `--verify <file>` | Checks one backup: decrypts the whole archive and compares every file with its checksum. Writes nothing. `<file>` is a file name in the backup folder, or a path to a file in that folder. Asks for the passphrase once. |
 
 | Exit code | Meaning |
@@ -1404,6 +1404,15 @@ The passphrase file:
   and run backups you start yourself without a file at all.
 - **Keep a second copy of the passphrase somewhere else** (a password manager). If the file is
   lost with the machine, the backups you copied off-site cannot be opened.
+- **Save it as UTF-8 text**, the passphrase on one line. A backup made from the file then opens
+  with the same passphrase typed at the prompt. A file in another encoding (UTF-16, for example)
+  is refused with `the passphrase is not UTF-8 text`, before anything is done.
+- **Windows:** do not create it with `>` or `Out-File` in Windows PowerShell 5.1; they write
+  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell:
+
+  ```powershell
+  [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", (Read-Host "Passphrase"))
+  ```
 
 Check the log, or the exit code, now and then: a cron job that has been failing for a month is
 not a backup.
@@ -1511,7 +1520,7 @@ the snapshot in `backups/` (on Linux with `sudo`).
 | Exit code | Meaning |
 |---|---|
 | 0 | Restored. |
-| 1 | Failed. The last lines say which of three it was: nothing was changed; or the install was put back and BlackVault was started again; or the rollback failed, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
+| 1 | Failed. The last lines say which of four it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
 
 ---
 
@@ -1531,7 +1540,8 @@ the snapshot in `backups/` (on Linux with `sudo`).
   bad file does not block every backup of everything else. Such a backup is incomplete.
 - **Files with names a restore would refuse are left out the same way:** hidden files and
   folders, `*.tmp` and `*.rot`, names with control characters, and one of two names that differ
-  only in upper/lower case or Unicode form (`A.jpg` and `a.jpg`). The names BlackVault gives its
+  only in upper/lower case or Unicode form (`A.jpg` and `a.jpg`), and paths too long for the
+  archive (a file name over 100 bytes, or the folders in front of it over 155). The names BlackVault gives its
   own uploads are not like that; this is about files placed in the uploads folder by hand. Only `uploads/images` and
   `uploads/documents` are backed up.
 - **"Already running" can outlast a crash.** The lock is a file in the backup folder that a
