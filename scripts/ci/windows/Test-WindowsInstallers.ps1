@@ -169,7 +169,12 @@ function Invoke-Bat {
     [switch]$NoPad,
     [int]$TimeoutSeconds = 180,
     # Task 6 (backup.bat): arguments for the script, already quoted for cmd.exe.
-    [string]$BatArgs = ""
+    [string]$BatArgs = "",
+    # How the script is NAMED on the command line (default: its full path), and
+    # the folder cmd.exe starts in (default: -Dir). Together they start a script
+    # by a quoted RELATIVE name from another folder (scenario RS15).
+    [string]$InvokeAs = "",
+    [string]$WorkDir = ""
   )
   $answerFile = Join-Path $Dir "__answers.txt"
   # @() because an `if` that yields an empty array yields $null, and
@@ -215,8 +220,9 @@ function Invoke-Bat {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
     # /s: strip exactly the outer pair of quotes, keep the inner ones.
-    $psi.Arguments = "/d /s /c `"`"$Dir\$Script`" $BatArgs < `"$answerFile`" 2>&1`""
-    $psi.WorkingDirectory = $Dir
+    $batName = if ($InvokeAs) { $InvokeAs } else { "$Dir\$Script" }
+    $psi.Arguments = "/d /s /c `"`"$batName`" $BatArgs < `"$answerFile`" 2>&1`""
+    $psi.WorkingDirectory = if ($WorkDir) { $WorkDir } else { $Dir }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -2257,7 +2263,7 @@ function New-RestoreSandbox([string]$Name, [switch]$Postgres) {
   return $dir
 }
 
-function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 180) {
+function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 180, [string]$InvokeAs = "", [string]$WorkDir = "") {
   $vars = @{
     "BV_STUB_STDIN_FILE" = (Join-Path $Dir "__stdin-verify.bin"); "BV_STUB_RESTORE_STDIN_FILE" = (Join-Path $Dir "__stdin-restore.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt")
     "BV_STUB_BACKUP_EXIT" = $null; "BV_STUB_BACKUP_STDOUT" = $null; "BV_STUB_BACKUP_STDERR" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null
@@ -2268,7 +2274,7 @@ function Invoke-Restore([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{
   }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   Remove-Item -Force $vars["BV_STUB_STDIN_FILE"], $vars["BV_STUB_RESTORE_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"], (Join-Path $Dir "__recovery-during.txt") -ErrorAction SilentlyContinue
-  return Invoke-Bat -Dir $Dir -Script "restore.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds
+  return Invoke-Bat -Dir $Dir -Script "restore.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds -InvokeAs $InvokeAs -WorkDir $WorkDir
 }
 
 # The stub log's lines without the Compose version probes.
@@ -2580,6 +2586,27 @@ Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0 -and (Get-StepI
 Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last"
 Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
 Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS15
+# cmd.exe works out %~f0 again from the CURRENT folder when the script was
+# started by a quoted, relative name. restore.bat read %~f0 AFTER its
+# `cd /d "%~dp0"`, so started as "bv\restore.bat" from the folder above, the
+# path it handed to the PowerShell step for steps 5-7 was ...\bv\bv\restore.bat:
+# the check passed, the child could not be started, and the user was told the
+# backup "did not pass the check". The path is now read before the folder changes.
+Write-Scenario "restore.bat - started by a quoted RELATIVE name from the parent folder: steps 5-7 still run (the script's own path is read before the folder changes)"
+$d = New-RestoreSandbox "restore-relative-quoted"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine } 180 "restore-relative-quoted\restore.bat" $Sandboxes
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "did not pass the check") "does not claim the backup failed its check"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0 -and (Get-StepIndex $steps $RestoreCallPattern) -gt (Get-StepIndex $steps '^compose stop blackvault$')) "check, stop, restore - in that order"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last"
+Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
+Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
 Show-EvidenceIfFailed $r
 
 # ══════════════════════════════════════════════════════════════════════════

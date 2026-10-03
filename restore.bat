@@ -140,6 +140,12 @@ if defined BV_FILE_GIVEN goto :file_given
 >&2 echo ERROR: no backup file was given. Usage: restore.bat file [--passphrase-file path] [--yes]
 exit /b 1
 :file_given
+:: This script's own full path, read BEFORE the folder changes. When the
+:: script was started by a quoted relative name (bv\restore.bat, in quotes,
+:: from the folder above), cmd.exe works out the full path of argument 0 again
+:: from the CURRENT folder each time it is read: read after the `cd /d` below
+:: it would name bv\bv\restore.bat, and steps 5 to 7 could not be started.
+set "BV_SELF=%~f0"
 :: Run from the folder this script lives in (.env and docker-compose.yml).
 cd /d "%~dp0"
 setlocal EnableDelayedExpansion
@@ -276,7 +282,7 @@ set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
 >&2 echo Checking the backup !BV_FILE_NAME! (nothing is changed yet)...
 set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"
 set "BV_DOCKER_ARGS_2=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"
-set "BV_BETWEEN=%~f0"
+set "BV_BETWEEN=!BV_SELF!"
 set "BV_HANDOFF=%TEMP%\blackvault-restore-handoff-%RANDOM%%RANDOM%.txt"
 del /f /q "!BV_HANDOFF!" >nul 2>&1
 set "BV_RESTORE_PHASE=prepare"

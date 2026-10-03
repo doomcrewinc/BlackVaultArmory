@@ -1041,7 +1041,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       'if not exist "backups\\restore-*-RECOVERY.txt" goto :no_recovery_pending',
       'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"',
       'set "BV_DOCKER_ARGS_2=compose run --rm -T --name !BV_CONTAINER! blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
-      'set "BV_BETWEEN=%~f0"',
+      'set "BV_BETWEEN=!BV_SELF!"',
       'set "BV_RESTORE_PHASE=prepare"',
       "call :run_with_passphrase",
       "goto :programs_returned",
@@ -1058,8 +1058,18 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     ].map((l) => code.indexOf(l));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    // %~f0 must still be this script when BV_BETWEEN is set: arguments are shifted with `shift /1` only.
+    // BV_SELF must be this script: arguments are shifted with `shift /1` only, and %~f0 is read BEFORE the
+    // first `cd /d` (after it, cmd.exe re-resolves a quoted relative %0 against the new folder) and nowhere else.
     expect(code.filter((l) => /^\s*shift\b/i.test(l))).toEqual(Array(4).fill("shift /1"));
+    const firstCd = code.indexOf('cd /d "%~dp0"');
+    expect(code[firstCd - 1]).toBe('set "BV_SELF=%~f0"');
+    expect(code.filter((l) => l.includes("%~f0"))).toEqual(['set "BV_SELF=%~f0"']);
+    expect(code.indexOf('set "BV_BETWEEN=!BV_SELF!"')).toBeGreaterThan(firstCd);
+    // backup.bat and reencrypt-files.bat read the script's path once, for their own `cd /d`, and never after it.
+    for (const file of ["backup.bat", "reencrypt-files.bat"]) {
+      const other = fs.readFileSync(path.join(ROOT, file), "utf8").split("\r\n").filter((l) => !l.startsWith("::"));
+      expect(other.filter((l) => /%~[a-z]*0/i.test(l)), file).toEqual(['cd /d "%~dp0"']);
+    }
     // The child is entered only through BV_RESTORE_PHASE, checked before anything else runs.
     expect(code.filter((l) => l !== "")[1]).toBe("if defined BV_RESTORE_PHASE goto :prepare_phase");
     // The PowerShell step: the second call only after the first and the step in between both exited 0;
@@ -1194,9 +1204,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
   });
 
-  it("the Windows harness runs it (RS1–RS14) and prints the script's output and the docker calls whenever a check fails", () => {
+  it("the Windows harness runs it (RS1–RS15) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
-    for (let i = 1; i <= 14; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    for (let i = 1; i <= 15; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
     const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
