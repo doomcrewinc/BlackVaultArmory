@@ -71,6 +71,17 @@
 //                            lines that call prints.
 //   BV_STUB_BACKUP_EXIT      its exit code; unset => 0.
 //   BV_STUB_BACKUP_SLEEP_MS  it sleeps this long before exiting.
+//   BV_STUB_RESTORE_STDIN_FILE / BV_STUB_RESTORE_STDOUT / BV_STUB_RESTORE_STDERR /
+//   BV_STUB_RESTORE_EXIT     full restore (Task 7): the same four knobs for the
+//                            restore program's call (any `compose run ...
+//                            dist/scripts/full-restore.mjs`). restore.bat's
+//                            CHECK step is the backup program with --verify,
+//                            so it is driven by the BV_STUB_BACKUP_* knobs.
+//   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
+//                            (any call naming /bv-snapshot-restore.sh);
+//                            unset/"0" => 0. The stub does NOT run the script:
+//                            what it does to real files is proven on Linux
+//                            (src/lib/backup/full-restore.real-db.test.ts).
 //
 // Task 4: `compose up` also appends a line "ENV BLACKVAULT_UPLOADS_SNAPSHOT=
 // [<value>]" to BV_STUB_LOG, reporting what update.bat passed through its own
@@ -131,7 +142,11 @@ internal static class DockerStub
         // Full backups (Task 6): the backup program, through exec or run.
         // Handled before everything else so BV_STUB_FAIL_ON / BV_STUB_RUN_EXIT
         // (the rotation's knobs) never apply to it.
-        if (Array.IndexOf(args, "dist/scripts/full-backup.mjs") >= 0)
+        // Full restore (Task 7): the restore program takes the same path,
+        // with its own knobs (BV_STUB_RESTORE_*).
+        bool isRestoreProgram = Array.IndexOf(args, "dist/scripts/full-restore.mjs") >= 0;
+        string programKnobs = isRestoreProgram ? "BV_STUB_RESTORE_" : "BV_STUB_BACKUP_";
+        if (Array.IndexOf(args, "dist/scripts/full-backup.mjs") >= 0 || isRestoreProgram)
         {
             byte[] input;
             using (Stream stdin = Console.OpenStandardInput())
@@ -140,7 +155,7 @@ internal static class DockerStub
                 stdin.CopyTo(buffer);
                 input = buffer.ToArray();
             }
-            string stdinFile = Environment.GetEnvironmentVariable("BV_STUB_STDIN_FILE");
+            string stdinFile = Environment.GetEnvironmentVariable(isRestoreProgram ? "BV_STUB_RESTORE_STDIN_FILE" : "BV_STUB_STDIN_FILE");
             if (!string.IsNullOrEmpty(stdinFile))
             {
                 File.WriteAllBytes(stdinFile, input);
@@ -161,19 +176,34 @@ internal static class DockerStub
             {
                 System.Threading.Thread.Sleep(ms);
             }
-            string backupOut = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_STDOUT");
+            string backupOut = Environment.GetEnvironmentVariable(programKnobs + "STDOUT");
             if (!string.IsNullOrEmpty(backupOut))
             {
                 Console.WriteLine(backupOut);
             }
-            string backupErr = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_STDERR");
+            string backupErr = Environment.GetEnvironmentVariable(programKnobs + "STDERR");
             if (!string.IsNullOrEmpty(backupErr))
             {
                 Console.Error.WriteLine(backupErr);
             }
-            string backupExit = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_EXIT");
+            string backupExit = Environment.GetEnvironmentVariable(programKnobs + "EXIT");
             int backupCode;
             return (!string.IsNullOrEmpty(backupExit) && int.TryParse(backupExit, out backupCode)) ? backupCode : 0;
+        }
+
+        // Full restore (Task 7): the rollback container. Handled before the
+        // generic `run` branch so the rotation's knobs never apply to it.
+        if (Array.IndexOf(args, "/bv-snapshot-restore.sh") >= 0)
+        {
+            string rollbackExit = Environment.GetEnvironmentVariable("BV_STUB_ROLLBACK_EXIT");
+            int rollbackCode;
+            if (!string.IsNullOrEmpty(rollbackExit) && int.TryParse(rollbackExit, out rollbackCode) && rollbackCode != 0)
+            {
+                Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_ROLLBACK_EXIT)");
+                return rollbackCode;
+            }
+            Console.WriteLine("[stub] docker " + joined);
+            return 0;
         }
 
         if (string.Equals(sub, "ps", StringComparison.OrdinalIgnoreCase))

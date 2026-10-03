@@ -544,3 +544,108 @@ describe.skipIf(isWindows)("restore.sh", () => {
     });
   });
 });
+
+/**
+ * restore.bat cannot be RUN here (no cmd.exe); the Windows CI job runs it
+ * (scripts/ci/windows/Test-WindowsInstallers.ps1, scenarios RS1–RS8). These
+ * are the properties that can be read off the file on any platform. The
+ * first of them is the one that matters most: batch cannot include another
+ * file, so what restore.bat shares with backup.bat is a COPY, and it must be
+ * the same copy — a fix to backup.bat's docker launch has to land in both.
+ */
+describe("restore.bat (static checks; executed only by the Windows CI job)", () => {
+  const raw = fs.readFileSync(path.join(ROOT, "restore.bat"));
+  const text = raw.toString("utf8");
+  const code = text.split("\r\n").filter((l) => !l.startsWith("::"));
+  const backup = fs.readFileSync(path.join(ROOT, "backup.bat"), "utf8");
+  const backupCode = backup.split("\r\n").filter((l) => !l.startsWith("::"));
+  const powershellStep = (lines: string[]) => lines.filter((l) => l.startsWith('powershell -NoProfile -Command "'));
+  const sharedTail = (t: string) => t.slice(t.indexOf(":: :env_value KEY - the value of KEY"));
+
+  it("is pure ASCII with CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
+    expect(raw.every((b) => b < 0x80)).toBe(true);
+    expect(text.replace(/\r\n/g, "")).not.toMatch(/[\r\n]/);
+  });
+
+  it("starts docker through backup.bat's PowerShell step, character for character, and :env_value / :require_compose are backup.bat's too", () => {
+    expect(powershellStep(code)).toHaveLength(1);
+    expect(powershellStep(backupCode)).toHaveLength(1);
+    expect(powershellStep(code)[0]).toBe(powershellStep(backupCode)[0]);
+    // It is the ONLY way restore.bat hands anything to a program on stdin, and it runs with backup.bat's "ask once" mode.
+    const at = code.indexOf(":run_with_passphrase");
+    expect(code.slice(at, at + 4)).toEqual([":run_with_passphrase", powershellStep(backupCode)[0], 'set "BV_RC=!errorlevel!"', "goto :eof"]);
+    expect(code).toContain('set "BV_MODE=verify"');
+    expect(code.filter((l) => /^set "BV_MODE=/.test(l))).toEqual(['set "BV_MODE=verify"']);
+    expect(code).toContain('set "BV_LIMIT="');
+    expect(sharedTail(text).length).toBeGreaterThan(1500);
+    expect(sharedTail(text)).toBe(sharedTail(backup));
+  });
+
+  it("never reads the passphrase into a cmd variable: `set /p` only reads the typed RESTORE and the snapshot marker", () => {
+    expect(code.filter((l) => /set\s+\/p/i.test(l))).toEqual([
+      'set /p "BV_CONFIRM=Type RESTORE to continue: "',
+      'if exist "backups\\.uploads-snapshot-marker" set /p BV_UPLOADS_SNAPSHOT=<"backups\\.uploads-snapshot-marker"',
+    ]);
+    const uses = code.filter((l) => l.includes("BV_PASSFILE") && !l.trimStart().startsWith(">&2 echo") && !l.startsWith("powershell "));
+    for (const l of uses) expect(l).toMatch(/^(set "BV_PASSFILE=(%~f2)?"|if (not )?(defined BV_PASSFILE|exist "!BV_PASSFILE!\\?") goto :\w+|for %%F in \("!BV_PASSFILE!"\) do if %%~zF EQU 0 goto :passfile_empty)$/);
+    expect(uses.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("the steps are in the spec's order, and the two program calls match restore.sh's (no --user, no --no-deps)", () => {
+    const order = [
+      'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs --verify !BV_FILE_NAME!"',
+      'set /p "BV_CONFIRM=Type RESTORE to continue: "',
+      "%COMPOSE% stop blackvault 1>&2",
+      'call scripts\\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1',
+      'set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp !BV_STAMP! !BV_FILE_NAME!"',
+      ":rollback",
+    ].map((l) => code.indexOf(l));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
+    expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-backup.mjs --verify "$NAME")');
+    expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-restore.mjs --stamp "$STAMP" "$NAME")');
+  });
+
+  it("the rollback uses the same commands as restore.sh: snapshot-restore.sh as root with backups read-only, and psql into a new database before the swap", () => {
+    const container = '%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\\backups:/bv-backups:ro" -v "!CD!\\scripts\\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh';
+    const psql = "%COMPOSE% exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault";
+    const expected = [
+      `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" 1>&2`,
+      `${psql} -d blackvault_rollback --single-transaction -f - < "!BV_DB_SNAPSHOT!" >nul`,
+      `${psql} -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" 1>&2`,
+      `${container} sqlite /bv-backups/!BV_DB_SNAPSHOT_NAME! /app/data/vault.db 1>&2`,
+      `${container} uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! 1>&2`,
+    ].map((l) => code.indexOf(l));
+    expect(expected.every((i) => i > code.indexOf(":rollback"))).toBe(true);
+    expect([...expected].sort((a, b) => a - b)).toEqual(expected);
+    // After a failed rollback the app is not started: the only `up -d` calls are before :rollback, and after :rolled_back.
+    const ups = code.map((l, i) => (l === "%COMPOSE% up -d 1>&2" ? i : -1)).filter((i) => i >= 0);
+    expect(ups.filter((i) => i > code.indexOf(":rollback") && i < code.indexOf(":rolled_back"))).toEqual([]);
+    expect(ups.some((i) => i > code.indexOf(":rolled_back"))).toBe(true);
+    // The script the container runs must reach Windows checkouts with LF endings.
+    expect(fs.readFileSync(path.join(ROOT, ".gitattributes"), "utf8")).toContain("scripts/snapshot-restore.sh text eol=lf");
+  });
+
+  it("every for /f character check on a user value is guarded against a leading ';', and it never pauses", () => {
+    const at = code.findIndex((l) => l.startsWith('for /f "delims=') && l.includes('("!BV_FILE_NAME!")'));
+    expect(at).toBeGreaterThan(0);
+    expect(code[at].endsWith("do goto :file_bad_name")).toBe(true);
+    expect(code[at - 1]).toBe('if "!BV_FILE_NAME:~0,1!"==";" goto :file_bad_name');
+    expect(code.filter((l) => /^for \/f "delims=[^"]+" %%X in \("!BV_/.test(l))).toHaveLength(1);
+    expect(code.filter((l) => /^\s*pause\b/i.test(l))).toEqual([]);
+  });
+
+  it("the Windows harness runs it (RS1–RS8) and prints the script's output and the docker calls whenever a check fails", () => {
+    const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
+    for (let i = 1; i <= 8; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
+    const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# --------------------------------------------------------------------- report"));
+    const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
+    const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
+    expect(runs.length).toBeGreaterThanOrEqual(14);
+    expect(evidence.length).toBe(runs.length);
+    const stub = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/docker-stub.cs"), "utf8");
+    expect(stub).toContain('"dist/scripts/full-restore.mjs"');
+    expect(stub).toContain('"/bv-snapshot-restore.sh"');
+  });
+});

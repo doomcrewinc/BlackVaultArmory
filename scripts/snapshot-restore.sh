@@ -58,6 +58,16 @@ is_root() {
   [ "$(id -u)" = "0" ]
 }
 
+# As root, gives $1 to the app user. Never fatal: a network share or a Docker
+# Desktop (Windows, macOS) mount refuses or ignores chown, and there the app
+# user can use the file anyway.
+own() {
+  if is_root; then
+    chown "$APP_UID:$APP_GID" "$1" 2>/dev/null ||
+      echo "WARNING: could not set the owner of $1 to uid $APP_UID (a network share or a Docker Desktop mount refuses this)."
+  fi
+}
+
 MODE=${1:-}
 case "$MODE" in
   sqlite)
@@ -72,7 +82,7 @@ case "$MODE" in
       cp -p "$LIVE" "$TMP" || fail "could not write beside $LIVE (permissions? free disk space?)."
     else
       (umask 077 && : > "$TMP") || fail "could not write beside $LIVE."
-      if is_root; then chown "$APP_UID:$APP_GID" "$TMP" || fail "could not give $TMP to uid $APP_UID."; fi
+      own "$TMP"
     fi
     cat "$SNAP" > "$TMP" || { rm -f "$TMP"; fail "could not copy $SNAP (free disk space?). The database was not touched."; }
     cmp -s "$SNAP" "$TMP" || { rm -f "$TMP"; fail "the copy of $SNAP does not match it. The database was not touched."; }
@@ -103,7 +113,7 @@ case "$MODE" in
       dir=$(dirname "$dest")
       if [ ! -d "$dir" ]; then
         (umask 077 && mkdir -p "$dir")
-        if is_root; then chown "$APP_UID:$APP_GID" "$dir"; fi
+        own "$dir"
       fi
       if [ -e "$dest" ] || [ -L "$dest" ]; then rm -rf "$dest"; fi
       tmp="$dest.rollback.partial"
@@ -111,7 +121,7 @@ case "$MODE" in
       : > "$tmp"
       chmod 600 "$tmp"
       cat "$f" > "$tmp"
-      if is_root; then chown "$APP_UID:$APP_GID" "$tmp"; fi
+      own "$tmp"
       mv -f "$tmp" "$dest"
       echo "copied back from the snapshot: ${rel#/}"
     done
