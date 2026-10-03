@@ -22,7 +22,8 @@
   - AAD: `canonicalHeader ‖ uint32be(counter) ‖ finalFlag(1 byte)`.
   - Each chunk ends with a 16-byte tag.
   - Reject reorder, drop, duplicate, a missing final chunk, and trailing bytes.
-- **Plaintext:** a ustar tar holding, in order, `manifest.json`, `db.json`, `files/images/...`, `files/documents/...`. It skips `.pre-encryption-*`, `*.tmp`, `*.rot`, hidden entries and symlinks.
+- **Plaintext:** a ustar tar holding, in order, `db.json`, `files/images/...`, `files/documents/...`, `manifest.json`. It skips `.pre-encryption-*`, `*.tmp`, `*.rot`, hidden entries and symlinks.
+  - *Corrected 2026-10-03:* this line said the order starts with `manifest.json`. `manifest.json` is the LAST entry (Task 2 ruling; see the spec's "Changes during implementation"). Task text below that still says "manifest first" predates the ruling.
 - **Backup storage:**
   - File name: `blackvault-full-<YYYYmmdd-HHMMSS>.bvb`, mode 600.
   - Folder: `/app/backups`, mounted from `${BLACKVAULT_BACKUP_DIR:-./data/backups}`. The entrypoint, as root, makes it 1001:1001 mode 0700.

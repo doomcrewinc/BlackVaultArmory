@@ -237,6 +237,86 @@ for uid 1001; the copy runs as 1001 with `su-exec`. It must, because the host us
 the uploads (mode 600, uid 1001). The image ships busybox, not bash: keep the script POSIX `sh`.
 Exit 3 means "nothing to copy". `scripts/db-snapshot.bat` (Windows) still copies on the host.
 
+## Full backups
+
+A full backup is one `BVB1` file (spec 3c, `docs/superpowers/specs/2026-10-02-full-backups-design.md`;
+its "Changes during implementation" section is the list of what differs from the design). The
+sealing (`createBackupSealer` / `createBackupOpener`) is in `src/lib/encryption/core.mjs`, like
+all other crypto. Everything else is in `src/lib/backup/`: `tar.ts` and `manifest.ts` (the
+plaintext stream), `full-backup.ts`, `full-verify.ts`, `full-restore.ts`, `full-lock.ts`,
+`full-prune.ts` (`--keep`), `entry-names.ts` (which file names an archive may hold — one rule
+for backup, verify and restore) and `full-job.ts` (the Settings button's in-process job).
+`src/lib/files/reencrypt.ts` is the re-encryption engine.
+
+**The script bundles.** The three programs the wrappers run in the container are TypeScript
+entry files, `scripts/entry/full-backup.ts`, `full-restore.ts` and `reencrypt-files.ts`. They
+import from `src/` with `@/`, so they cannot run as they are:
+
+```bash
+npm run build:scripts     # scripts/entry/<name>.ts → dist/scripts/<name>.mjs (esbuild)
+```
+
+`scripts/build-scripts.mjs` bundles **every** `*.ts` file directly inside `scripts/entry/`, so a
+new program is a new file there and nothing else; for the same reason a test must never live in
+that folder (the CLI tests are `scripts/*-cli.test.ts`). `@prisma/client` and `.prisma/*` are left
+external and resolve against the image's own `node_modules`. The Dockerfile runs the build and
+copies `dist/scripts` into the image; `dist/` is not committed. The CLI tests build the bundle
+themselves, into a temp folder, and run it under plain `node`.
+
+**The wrappers.** `backup.sh`, `restore.sh` and `reencrypt-files.sh` share
+`scripts/backup-common.sh`; each has a `.bat` twin that must change with it.
+`scripts/snapshot-restore.sh` (the rollback's file work) runs inside the container as root: keep
+it POSIX `sh`. The passphrase and the old key reach the programs on standard input only.
+`scripts/full-backup-wrapper.test.ts`, `full-restore-wrapper.test.ts` and
+`reencrypt-files-wrapper.test.ts` pin that statically (every line that names the passphrase
+variable), because a process listing cannot be relied on to catch a short-lived helper.
+
+**The slow memory test.** `scripts/full-backup-cli.test.ts` has one test behind
+`it.runIf(!!process.env.RUN_SLOW_TESTS)`: a child process running only the backup engine over
+2 GiB of uploads must peak under 300 MB of resident memory. The cap is asserted on Linux only
+(512 MB elsewhere: macOS counts freed pages). CI's `verify` job runs it on every push:
+
+```bash
+RUN_SLOW_TESTS=1 npx vitest run scripts/full-backup-cli.test.ts
+```
+
+If it fails, find what now buffers; do not raise the cap.
+
+**The Linux Docker job.** The `encryption-key-linux` job runs three scripts in order, against the
+image it builds, on real containers:
+
+```bash
+./scripts/ci/encryption-key-linux.sh                          # install A; key handling (3a, 3b)
+./scripts/ci/full-backup-entrypoint-linux.sh app-blackvault   # a backup folder that refuses chown
+./scripts/ci/full-backup-linux.sh                             # backup, restore, rollback, re-encrypt
+```
+
+The first and the third need a real Linux Docker host and **passwordless sudo**, and they are
+not gentle: they create the users `bvtest` (uid 1234) and `bvother`, install under
+`/home/bvtest/`, use port 3000 and the container names `blackvault` and `blackvault-db`, and
+bind-mount a folder onto itself. Run them from the repository root in a throwaway VM, never on
+a machine that runs BlackVault. The third takes over the install the first one leaves, so it
+cannot run alone. The second needs only Docker and an image name, changes nothing on the host,
+and runs on Docker Desktop and OrbStack too:
+
+```bash
+docker compose build && ./scripts/ci/full-backup-entrypoint-linux.sh "$(docker compose config --images | head -n 1)"
+```
+
+`full-backup-linux.sh` reports a failed check and carries on, so one run lists everything that
+is wrong; it exits 1 at the end. Its header lists what it proves. Two things in it are worth
+knowing before changing the restore: the failing restore is made by turning `uploads/documents`
+into a mount point (the folder swap then fails with `EBUSY` *after* the database step has
+committed), and "the database is unchanged" is a per-table checksum of every table except
+`AuditEvent` and `Session`, which the running app writes by itself.
+
+**Windows scenarios.** `scripts/ci/windows/Test-WindowsInstallers.ps1` names its full-backup
+scenarios by wrapper: `BK<n>` for `backup.bat`, `RS<n>` for `restore.bat`, `RF<n>` for
+`reencrypt-files.bat`. Docker is a stub there (`docker-stub.cs`, compiled to `docker.exe`), so
+they prove the batch logic and that the passphrase bytes arrive on docker's standard input, not
+that a backup works. Every scenario passes `--passphrase-file` (and `--yes`): the typed prompts
+have no scenario. Add the next number; do not renumber.
+
 ## Docker Compose
 
 There is **one** production compose file, `docker-compose.yml`, and plain `docker compose` (no
