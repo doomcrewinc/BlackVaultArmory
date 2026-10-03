@@ -42,9 +42,11 @@
 :: HOW IT RUNS
 ::   app running   docker compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs ...
 ::   app stopped   docker compose run --rm -T blackvault node dist/scripts/full-backup.mjs ...
-:: The first form names the group too (1001:1001): with -u 1001 alone Docker
-:: takes the group from the image's /etc/passwd (nogroup, 65533), and the
-:: backup file came out 1001:65533 instead of the app's own 1001:1001.
+:: The first form names the group too (1001:1001), so the backup file is
+:: owned 1001:1001 like every other file the app writes whatever the image's
+:: /etc/passwd says: with -u 1001 alone Docker takes the group from there. In
+:: the current image that is nodejs (1001); in an image built without that
+:: group it is nogroup (65533).
 :: The one-off container has no --user and no --no-deps on purpose (same as
 :: rotate-key.bat): the image's entrypoint must start as root to copy the
 :: encryption key into /run/secrets before it drops to the app user, and on

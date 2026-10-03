@@ -33,8 +33,10 @@ const hasTimeout = has("timeout");
 const PASS = " wrapper tëst 'pass' \"phrase\" $HOME `id` \\n * ";
 const OK_LINE = "BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261002-180405.bvb files=2 bytes=10 archive_bytes=99 skipped=0 unreadable=0";
 // `-u 1001:1001`, not `-u 1001`: with the uid alone Docker takes the group from the image's
-// /etc/passwd, where nextjs's primary group is nogroup (65533), and the backup file came out
-// 1001:65533 instead of the app's own 1001:1001 (found by scripts/ci/full-backup-linux.sh).
+// /etc/passwd. In the current image that is nodejs (1001); in an image built without that group
+// it is nogroup (65533), and the backup file is then 1001:65533 instead of the app's own
+// 1001:1001. Naming both keeps the wrapper independent of the image's passwd entry
+// (scripts/ci/full-backup-linux.sh checks the owner of the file).
 const BACKUP_EXEC = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs";
 const BACKUP_RUN = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs";
 
