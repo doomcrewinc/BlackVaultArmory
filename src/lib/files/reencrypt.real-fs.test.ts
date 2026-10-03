@@ -169,7 +169,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("reencryptFiles (real filesystem)", () => {
+// Every re-encrypted file is fsynced (file and folder). On a busy machine that has taken more than the default 5 s.
+describe("reencryptFiles (real filesystem)", { timeout: 60_000 }, () => {
   it("a mixed folder: only the old-key files change; they decrypt to the same plaintext under the CURRENT key; everything else is byte- and mtime-identical", async () => {
     seedMixed();
     const before = snapshot();
