@@ -148,6 +148,12 @@ export interface FullBackupLock {
   readonly path: string;
   /** Stops the heartbeat and removes the lock if it is still ours. Safe to call more than once; never throws. */
   release(): Promise<void>;
+  /**
+   * What the holder must tell the user at the end of its run (ruling R34):
+   * today, that the heartbeat could not refresh the lock, so another backup
+   * or restore may not see this one as running. Empty on a normal run.
+   */
+  warnings(): string[];
 }
 
 interface LockBody {
@@ -323,15 +329,48 @@ export async function acquireFullBackupLock(dir: string, opts: FullBackupLockOpt
       return current?.token === token && current.pid === process.pid;
     };
     // The heartbeat. unref'd: a held lock never keeps the process alive.
+    //
+    // Ruling R34. `utimes` with explicit times needs ownership of the file on
+    // some filesystems, and since a refused chmod is tolerated the lock can
+    // sit on one where the app does not own what it creates (a FAT disk, a
+    // share mounted for another uid). A swallowed failure there would let
+    // the lock look stale after 5 minutes — and a cron backup start in the
+    // middle of a long restore. So when `utimes` fails the heartbeat WRITES
+    // to the file instead: the holder created it, so it can write it, and a
+    // write refreshes the mtime. Only the first byte is rewritten, with the
+    // `{` every lock body starts with, so the content never changes — not
+    // even if another contender reclaimed the lock a moment ago. If that
+    // fails too, one warning is kept for the holder to show at the end.
+    const heartbeatWarnings: string[] = [];
     const timer = setInterval(() => {
       void (async () => {
         try {
           // Never refresh a lock someone else reclaimed after a long stall of ours.
           if (!(await isOurs())) return;
+        } catch {
+          return; // Gone or unreadable: nothing to refresh.
+        }
+        try {
           const now = new Date();
           await fsp.utimes(lockPath, now, now);
-        } catch {
-          // Gone or unreadable: nothing to refresh.
+          return;
+        } catch (utimesError) {
+          if (codeOf(utimesError) === "ENOENT") return;
+          try {
+            const handle = await fsp.open(lockPath, "r+");
+            try {
+              await handle.write("{", 0, "utf8");
+            } finally {
+              await handle.close();
+            }
+          } catch (writeError) {
+            if (codeOf(writeError) === "ENOENT" || heartbeatWarnings.length > 0) return;
+            heartbeatWarnings.push(
+              `The lock ${lockPath} could not be refreshed while this ran (${codeOf(utimesError) ?? "error"}, then ${codeOf(writeError) ?? "error"}): ` +
+                `the folder's filesystem lets the app neither set the file's time nor rewrite it. After ${Math.round(staleMs / 60_000)} minutes ` +
+                "another backup or restore may not see this one as running and could start beside it. Do not start one while a long backup or restore runs on this folder.",
+            );
+          }
         }
       })();
     }, heartbeatMs);
@@ -340,6 +379,7 @@ export async function acquireFullBackupLock(dir: string, opts: FullBackupLockOpt
     let released = false;
     return {
       path: lockPath,
+      warnings: () => [...heartbeatWarnings],
       async release() {
         if (released) return;
         released = true;

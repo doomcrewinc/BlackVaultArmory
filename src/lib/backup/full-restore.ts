@@ -240,7 +240,10 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
   const lock = await acquireFullBackupLock(path.resolve(opts.dir ?? path.dirname(file)));
 
   try {
-    return await restoreLocked({ opts, stamp, file, fileName, root, staging, preRestoreName, preRestore, marker });
+    const result = await restoreLocked({ opts, stamp, file, fileName, root, staging, preRestoreName, preRestore, marker });
+    // Ruling R34: the heartbeat could not keep the lock fresh on this folder.
+    result.warnings.push(...lock.warnings());
+    return result;
   } finally {
     await lock.release();
   }

@@ -105,6 +105,70 @@ describe("acquireFullBackupLock", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  // Ruling R34. Where the app does not own the lock file (a FAT disk or a share
+  // mounted for another uid), utimes with explicit times can be refused. The
+  // heartbeat must still keep the lock fresh, or it looks stale after 5 minutes.
+  describe("heartbeat when utimes is refused (R34)", () => {
+    const refuseUtimes = () =>
+      vi.spyOn(fsp, "utimes").mockImplementation((async () => {
+        throw Object.assign(new Error("EPERM: operation not permitted, utime"), { code: "EPERM", syscall: "utime" });
+      }) as typeof fsp.utimes);
+    const backdate = () => {
+      const then = new Date(Date.now() - 60 * 60_000);
+      utimesSync(lockPath(), then, then);
+    };
+    const ageMs = () => Date.now() - statSync(lockPath()).mtimeMs;
+
+    it("falls back to rewriting the lock file in place: its mtime advances, its content is unchanged, and there is no warning", async () => {
+      const utimes = refuseUtimes();
+      const lock = await acquire(dir, { heartbeatMs: 25 });
+      const before = readFileSync(lockPath(), "utf8");
+      backdate();
+      expect(ageMs()).toBeGreaterThan(30 * 60_000);
+      await sleep(300);
+      expect(utimes).toHaveBeenCalled();
+      expect(ageMs()).toBeLessThan(10_000);
+      expect(readFileSync(lockPath(), "utf8")).toBe(before);
+      expect(lock.warnings()).toEqual([]);
+    });
+
+    it("when the rewrite is refused too, ONE warning says another backup or restore may not see this one as running", async () => {
+      refuseUtimes();
+      const lock = await acquire(dir, { heartbeatMs: 25 });
+      const realOpen = fsp.open.bind(fsp);
+      vi.spyOn(fsp, "open").mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+        if (String(args[0]) === lockPath() && args[1] === "r+") throw Object.assign(new Error("EACCES: permission denied, open"), { code: "EACCES", syscall: "open" });
+        return realOpen(...args);
+      }) as typeof fsp.open);
+      backdate();
+      await sleep(300);
+      expect(ageMs()).toBeGreaterThan(30 * 60_000);
+      const warnings = lock.warnings();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(lockPath());
+      expect(warnings[0]).toMatch(/EPERM/);
+      expect(warnings[0]).toMatch(/another backup or restore may not see this one as running/);
+    });
+
+    it("a normal filesystem is unaffected: utimes refreshes the lock, the file is never opened for rewriting, no warning", async () => {
+      const open = vi.spyOn(fsp, "open");
+      const lock = await acquire(dir, { heartbeatMs: 25 });
+      backdate();
+      await sleep(300);
+      expect(ageMs()).toBeLessThan(10_000);
+      expect(open.mock.calls.filter((c) => c[1] === "r+")).toEqual([]);
+      expect(lock.warnings()).toEqual([]);
+    });
+
+    it("a lock that is gone (released by hand) is not a warning", async () => {
+      refuseUtimes();
+      const lock = await acquire(dir, { heartbeatMs: 25 });
+      rmSync(lockPath());
+      await sleep(150);
+      expect(lock.warnings()).toEqual([]);
+    });
+  });
+
   it("a second acquire while the first is held fails with FullBackupAlreadyRunningError, and works again after release", async () => {
     const first = await acquire(dir);
     const second = acquireFullBackupLock(dir);

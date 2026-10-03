@@ -130,6 +130,7 @@ export interface FullBackupResult {
    * Things that did not stop the backup but that the user must see: the
    * folder fsync failed after the backup was verified and renamed into place,
    * or the backup folder's filesystem refused to set the file's mode to 600.
+   * Also the lock's own warnings (./full-lock.ts, ruling R34).
    * The backup succeeded. Empty on a normal run.
    */
   warnings: string[];
@@ -511,6 +512,9 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
           `(${codeOf(e) ?? (e instanceof Error ? e.message : String(e))}). If the machine loses power right now the new file may not survive; check that it is still there afterwards.`,
       );
     }
+
+    // Ruling R34: the heartbeat could not keep the lock fresh on this folder.
+    warnings.push(...lock.warnings());
 
     await recordEventBestEffort(null, {
       action: "BACKUP_CREATED",

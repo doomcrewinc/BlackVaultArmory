@@ -60,13 +60,17 @@ const verifyHook = vi.hoisted(() => ({
 }));
 // The lock, wrapped so one test can let two runs in at once — which the real,
 // advisory lock can do in rare orderings (full-lock.ts, "WHAT THIS DOES NOT GUARANTEE").
-const lockHook = vi.hoisted(() => ({ bypass: false }));
+const lockHook = vi.hoisted(() => ({ bypass: false, warnings: null as string[] | null }));
 vi.mock("./full-lock", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./full-lock")>();
   return {
     ...actual,
-    acquireFullBackupLock: async (...args: Parameters<typeof actual.acquireFullBackupLock>) =>
-      lockHook.bypass ? { path: "(bypassed)", release: async () => undefined } : actual.acquireFullBackupLock(...args),
+    acquireFullBackupLock: async (...args: Parameters<typeof actual.acquireFullBackupLock>) => {
+      if (lockHook.bypass) return { path: "(bypassed)", release: async () => undefined, warnings: () => [] };
+      const lock = await actual.acquireFullBackupLock(...args);
+      // One test stands in for a heartbeat that could not refresh the lock (ruling R34).
+      return lockHook.warnings ? { ...lock, warnings: () => [...lock.warnings(), ...(lockHook.warnings ?? [])] } : lock;
+    },
   };
 });
 vi.mock("./full-verify", async (importOriginal) => {
@@ -547,6 +551,19 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     vi.restoreAllMocks();
     const ok = await run();
     expect(backupFolder()).toEqual([ok.file]);
+  });
+
+  it("R34: a warning from the lock's heartbeat is surfaced in the result, and the backup still succeeds and is audited", async () => {
+    await seedUploads();
+    lockHook.warnings = ["The lock X could not be refreshed while this ran (EPERM, then EACCES)"];
+    try {
+      const result = await run();
+      expect(result.warnings).toEqual(["The lock X could not be refreshed while this ran (EPERM, then EACCES)"]);
+      expect(backupFolder()).toEqual([NAME]);
+      expect(await events()).toHaveLength(1);
+    } finally {
+      lockHook.warnings = null;
+    }
   });
 
   it("a normal run has no warnings", async () => {
