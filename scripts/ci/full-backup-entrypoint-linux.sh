@@ -36,7 +36,7 @@ set -uo pipefail
 IMAGE=${1:?usage: full-backup-entrypoint-linux.sh IMAGE}
 FAILED=0
 cleanup() {
-  for c in bvbk-t6-ep-writable bvbk-t6-ep-readonly bvbk-t6-ep-normal; do
+  for c in bvbk-t6-ep-writable bvbk-t6-ep-readonly bvbk-t6-ep-normal bvbk-t6-ep-id; do
     timeout 60 docker rm -f "$c" >/dev/null 2>&1 || true
   done
 }
@@ -79,6 +79,12 @@ run_case() {
   echo "$OUT" | sed 's/^/       | /'
 }
 TEST_KEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+
+# `exec -u nextjs` (the admin commands in the README) takes the user's primary
+# group from the image's /etc/passwd: it must be the group the app runs with.
+echo "==> the image's app user"
+ID_OUT=$(timeout 60 docker run --rm --name bvbk-t6-ep-id --entrypoint id "$IMAGE" nextjs 2>&1)
+check "nextjs is uid 1001 with primary group nodejs, gid 1001 (id nextjs: $ID_OUT)" "$(has "$ID_OUT" "uid=1001(nextjs) gid=1001(nodejs)"; echo $?)"
 
 echo "==> chown refused, folder writable by uid 1001"
 run_case bvbk-t6-ep-writable 1777 --cap-drop CHOWN --cap-drop FOWNER -e T9_BACKUP=1
