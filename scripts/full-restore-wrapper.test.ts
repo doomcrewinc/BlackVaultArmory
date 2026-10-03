@@ -1845,8 +1845,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
     expect(sh).toContain("the uploads folder holds a marker left by an earlier restore: $OLD_MARKERS. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  $OLD_COMMANDS  Then run the restore again. Nothing was done.");
     // One marker: its stamp is cut out of the name, and its command is added to ONE line joined with &&, the stamp quoted.
-    expect(".restore-".length).toBe(9);
-    expect(".db-started".length).toBe(11);
+    expect(".restore-").toHaveLength(9);
+    expect(".db-started").toHaveLength(11);
     const sub = code.slice(at(":old_marker_named"), at(":write_marker_left"));
     expect(sub).toEqual([
       ":old_marker_named",

@@ -112,10 +112,12 @@ check_stamp() {
 
 # restore_state UPLOADS STAMP: prints started, complete or untouched (see the top of this file).
 restore_state() {
-  if [ -e "$1/.restore-$2.db-started" ] || [ -L "$1/.restore-$2.db-started" ]; then
+  state_marker="$1/.restore-$2.db-started"
+  state_pre="$1/.pre-restore-$2"
+  if [ -e "$state_marker" ] || [ -L "$state_marker" ]; then
     echo started
-  elif { [ -d "$1/.pre-restore-$2/images" ] && [ ! -L "$1/.pre-restore-$2/images" ]; } ||
-    { [ -d "$1/.pre-restore-$2/documents" ] && [ ! -L "$1/.pre-restore-$2/documents" ]; }; then
+  elif { [ -d "$state_pre/images" ] && [ ! -L "$state_pre/images" ]; } ||
+    { [ -d "$state_pre/documents" ] && [ ! -L "$state_pre/documents" ]; }; then
     echo complete
   else
     echo untouched

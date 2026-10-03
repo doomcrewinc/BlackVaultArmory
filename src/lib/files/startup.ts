@@ -565,7 +565,7 @@ export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "
   const stamps = names
     .map(markerStamp)
     .filter((s): s is string => s !== null)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    .sort(byCodeUnit);
   if (stamps.length === 0) return;
   const one = stamps.length === 1;
   const markers = stamps.map((s) => restoreMarkerLocation(path.join(root, dbStepMarkerName(s)), env)).join(", ");
@@ -575,14 +575,21 @@ export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "
     ? `If ${recovery.join(" or ")} exists (in the folder that holds docker-compose.yml), follow it: it ends by removing ` +
       "the marker. If no such file is there, the marker alone cannot say whether the install is whole: "
     : "No recovery file belongs to a marker with that name, so the marker alone cannot say whether the install is whole: ";
+  const which = one ? "A restore did not finish cleanly: its marker" : `${stamps.length} restores did not finish cleanly: their markers`;
   throw new FileStartupError(
-    `${one ? "A restore did not finish cleanly: its marker" : `${stamps.length} restores did not finish cleanly: their markers`} ${markers} ` +
-      `${one ? "is" : "are"} still in the uploads folder. The database and the uploaded files may be half restored, so ` +
+    `${which} ${markers} ${one ? "is" : "are"} still in the uploads folder. The database and the uploaded files may be half restored, so ` +
       `BlackVault will not start. ${whatToDo}delete the marker folder (on Linux it belongs to uid 1001: use sudo) only if ` +
       "the restore script had reported the restore as complete or as put back, and then start BlackVault again; otherwise " +
       "do not start on this install: restore a full backup with restore.sh or restore.bat, which says how to remove the " +
       'marker first. See the README, "Restoring a full backup".',
   );
+}
+
+/** Orders strings by UTF-16 code unit (never by locale), like `<` on strings. */
+function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 }
 
 /**
