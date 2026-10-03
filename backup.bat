@@ -38,8 +38,11 @@
 :: that folder. Decrypts and checks the whole archive; writes nothing.
 ::
 :: HOW IT RUNS
-::   app running   docker compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs ...
+::   app running   docker compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs ...
 ::   app stopped   docker compose run --rm -T blackvault node dist/scripts/full-backup.mjs ...
+:: The first form names the group too (1001:1001): with -u 1001 alone Docker
+:: takes the group from the image's /etc/passwd (nogroup, 65533), and the
+:: backup file came out 1001:65533 instead of the app's own 1001:1001.
 :: The one-off container has no --user and no --no-deps on purpose (same as
 :: rotate-key.bat): the image's entrypoint must start as root to copy the
 :: encryption key into /run/secrets before it drops to the app user, and on
@@ -224,7 +227,7 @@ exit /b 1
 set "BV_RUNNING="
 for /f "usebackq delims=" %%I in (`%COMPOSE% ps --status running -q blackvault 2^>nul`) do set "BV_RUNNING=1"
 set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"
-if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"
+if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"
 
 :: -- 6. Run it, the passphrase on docker's standard input ----------
 :: One PowerShell process does all of it; see THE PASSPHRASE NEVER TOUCHES

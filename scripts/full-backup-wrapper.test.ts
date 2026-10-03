@@ -32,7 +32,10 @@ const hasTimeout = has("timeout");
 // Shell metacharacters, quotes, non-ASCII and leading/trailing spaces: none of it may be interpreted or trimmed.
 const PASS = " wrapper tëst 'pass' \"phrase\" $HOME `id` \\n * ";
 const OK_LINE = "BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261002-180405.bvb files=2 bytes=10 archive_bytes=99 skipped=0 unreadable=0";
-const BACKUP_EXEC = "compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs";
+// `-u 1001:1001`, not `-u 1001`: with the uid alone Docker takes the group from the image's
+// /etc/passwd, where nextjs's primary group is nogroup (65533), and the backup file came out
+// 1001:65533 instead of the app's own 1001:1001 (found by scripts/ci/full-backup-linux.sh).
+const BACKUP_EXEC = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs";
 const BACKUP_RUN = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs";
 
 let tmp: string;
@@ -274,7 +277,7 @@ describe.skipIf(isWindows)("backup.sh", () => {
   });
 
   describe("running or stopped", () => {
-    it("app running → `docker compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs --keep 7` (the default keep is the wrapper's)", () => {
+    it("app running → `docker compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --keep 7` (the default keep is the wrapper's)", () => {
       const r = run(["--passphrase-file", passFile()], { env: { BV_STUB_RUNNING: "1" } });
       expect(r.code, r.stderr).toBe(0);
       expect(callLines()).toEqual(["compose version --short", "compose ps --status running -q blackvault", `${BACKUP_EXEC} --keep 7`]);
@@ -644,12 +647,12 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
 
   it("builds the same two docker commands as backup.sh, and maps exit codes the same way", () => {
     expect(code).toContain('set "BV_DOCKER_ARGS=compose run --rm -T blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
-    expect(code).toContain('if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
+    expect(code).toContain('if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs !BV_ENGINE_ARGS!"');
     expect(code).toContain('set "BV_ENGINE_ARGS=--keep !BV_KEEP!"');
     expect(code).toContain('set "BV_ENGINE_ARGS=--verify !BV_VERIFY_NAME!"');
     expect(code.join("\n")).not.toMatch(/--no-deps|--user/);
     const sh = fs.readFileSync(path.join(ROOT, "backup.sh"), "utf8");
-    expect(sh).toContain('CMD=($COMPOSE exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs "${ENGINE_ARGS[@]}")');
+    expect(sh).toContain('CMD=($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs "${ENGINE_ARGS[@]}")');
     expect(sh).toContain('CMD=($COMPOSE run --rm -T blackvault node dist/scripts/full-backup.mjs "${ENGINE_ARGS[@]}")');
     const tail = code.slice(code.indexOf('set "BV_RC=!errorlevel!"'));
     expect(tail.slice(0, 6)).toEqual([

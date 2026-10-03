@@ -1961,7 +1961,7 @@ Show-EvidenceIfFailed $r
 
 $BackupPass = " bat tëst 'pass' `"phrase`" %PATH% ^ & | * "
 $BackupOkLine = "BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261002-180405.bvb files=2 bytes=10 archive_bytes=99 skipped=0 unreadable=0"
-$BackupExec = "compose exec -T -u 1001 blackvault node dist/scripts/full-backup.mjs"
+$BackupExec = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs"
 $BackupRun = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs"
 
 function New-BackupSandbox([string]$Name, [string[]]$EnvLines = @("PORT=3000", "BLACKVAULT_DB_PROVIDER=sqlite")) {
@@ -1991,7 +1991,7 @@ function Get-BackupCalls([pscustomobject]$Result) {
 }
 
 # ---------------------------------------------------------------- scenario BK1
-Write-Scenario "backup.bat - --passphrase-file, app running: exec -T -u 1001 with --keep 7; the file's bytes arrive on stdin unchanged; the passphrase is in no argv and no environment"
+Write-Scenario "backup.bat - --passphrase-file, app running: exec -T -u 1001:1001 with --keep 7; the file's bytes arrive on stdin unchanged; the passphrase is in no argv and no environment"
 $d = New-BackupSandbox "backup-running"
 $passBytesText = "$BackupPass`r`n`n"
 $pf = New-PassFile $d $passBytesText
