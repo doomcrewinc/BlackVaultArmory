@@ -309,7 +309,8 @@ function bvbAad(headerBytes, counter, final) {
   return Buffer.concat([headerBytes, t]);
 }
 
-function requirePassphrase(passphrase) {
+/** The passphrase floor: NFC-normalised, at least 12 code points. Throws SealError PASSPHRASE_TOO_SHORT. Exported so callers validate with the same rule the sealer enforces. */
+export function requirePassphrase(passphrase) {
   if (Array.from(String(passphrase).normalize("NFC")).length < MIN_PASSPHRASE) {
     throw new SealError("PASSPHRASE_TOO_SHORT", `Passphrase must be at least ${MIN_PASSPHRASE} characters.`);
   }

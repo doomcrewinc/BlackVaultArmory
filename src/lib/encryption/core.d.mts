@@ -48,6 +48,7 @@ export function encryptFile(keys: FieldKeys, basename: string, plaintext: Buffer
 export function decryptFile(keys: FieldKeys, basename: string, stored: Buffer): Buffer;
 
 /** BVB1 streaming sealer: emits the length-prefixed header, then sealed 1 MiB chunks. Throws SealError PASSPHRASE_TOO_SHORT. */
+export function requirePassphrase(passphrase: unknown): void;
 export function createBackupSealer(passphrase: string): Transform;
 /** BVB1 streaming opener: validates the header before deriving, then emits each chunk's plaintext
  *  only after that chunk's tag verifies. Output is NOT known to be complete or untruncated until
