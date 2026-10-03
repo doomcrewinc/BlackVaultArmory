@@ -505,8 +505,10 @@ describe.skipIf(isWindows)("backup.sh", () => {
  * code now lives in scripts/backup-common.sh, shared with restore.sh, so the
  * check covers all three files.
  */
-describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the typed passphrase is only ever handled by shell builtins)", () => {
-  const FILES = ["backup.sh", "restore.sh", "scripts/backup-common.sh"];
+describe("backup.sh, restore.sh, reencrypt-files.sh and scripts/backup-common.sh (static checks: the typed passphrase is only ever handled by shell builtins)", () => {
+  // Task 8: reencrypt-files.sh sources the same shared file (its secret is the old key FILE, pinned in
+  // scripts/reencrypt-files-wrapper.test.ts); it must never name one of the passphrase variables at all.
+  const FILES = ["backup.sh", "restore.sh", "reencrypt-files.sh", "scripts/backup-common.sh"];
   const codeOf = (file: string) =>
     fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
   const code = FILES.flatMap(codeOf);
@@ -535,12 +537,13 @@ describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the
     expect(codeOf("scripts/backup-common.sh").filter((l) => l === SEND || l === SEND_WAITED)).toEqual([SEND, SEND_WAITED]);
     // restore.sh and backup.sh only ever clear it (backup.sh also compares the two typed answers).
     expect(codeOf("restore.sh").filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l)).every((l) => l === 'PASSPHRASE=""')).toBe(true);
+    expect(codeOf("reencrypt-files.sh").filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l))).toEqual([]);
   });
 
   it("nothing is exported, no allexport, no xtrace", () => {
     expect(code.filter((l) => /\b(export|typeset|declare)\b/.test(l))).toEqual([]);
     expect(code.filter((l) => /\bset\s+[-+][a-zA-Z]*[ax]/.test(l) || /\bset\s+-o\s+(allexport|xtrace)/.test(l))).toEqual([]);
-    for (const file of ["backup.sh", "restore.sh"]) {
+    for (const file of ["backup.sh", "restore.sh", "reencrypt-files.sh"]) {
       expect(fs.readFileSync(path.join(ROOT, file), "utf8").split("\n")[0]).toBe("#!/bin/bash"); // printf and [ are builtins in bash
     }
   });
@@ -552,7 +555,7 @@ describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the
   it("the shared code is shared, not copied: neither script defines what scripts/backup-common.sh defines", () => {
     const shared = codeOf("scripts/backup-common.sh").filter((l) => /^[a-z_]+\(\) \{$/.test(l));
     expect(shared.length).toBeGreaterThanOrEqual(8);
-    for (const file of ["backup.sh", "restore.sh"]) {
+    for (const file of ["backup.sh", "restore.sh", "reencrypt-files.sh"]) {
       const own = codeOf(file);
       for (const definition of shared) expect(own, `${file} redefines ${definition}`).not.toContain(definition);
       expect(own).toContain(". ./scripts/backup-common.sh");

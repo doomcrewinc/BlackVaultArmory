@@ -87,6 +87,14 @@
 //                            backups\restore-*-RECOVERY.txt it finds (in the
 //                            current folder) there: what is on disk WHILE the
 //                            restore runs.
+//   BV_STUB_REENCRYPT_STDIN_FILE / BV_STUB_REENCRYPT_STDOUT / BV_STUB_REENCRYPT_STDERR /
+//   BV_STUB_REENCRYPT_EXIT   reencrypt-files (Task 8): the same four knobs for
+//                            the re-encryption program's call (any `compose run
+//                            ... dist/scripts/reencrypt-files.mjs`). The stdin
+//                            file is the only place the OLD KEY may arrive;
+//                            BV_STUB_ENV_FILE records that call's environment
+//                            too. `compose stop` / `compose start` are failed
+//                            with BV_STUB_FAIL_ON, as for rotate-key.bat.
 //   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
 //                            (any call naming /bv-snapshot-restore.sh);
 //                            unset/"0" => 0. The stub does NOT run the script:
@@ -154,9 +162,12 @@ internal static class DockerStub
         // (the rotation's knobs) never apply to it.
         // Full restore (Task 7): the restore program takes the same path,
         // with its own knobs (BV_STUB_RESTORE_*).
+        // reencrypt-files (Task 8): the re-encryption program, the same path
+        // again with its own knobs (BV_STUB_REENCRYPT_*).
         bool isRestoreProgram = Array.IndexOf(args, "dist/scripts/full-restore.mjs") >= 0;
-        string programKnobs = isRestoreProgram ? "BV_STUB_RESTORE_" : "BV_STUB_BACKUP_";
-        if (Array.IndexOf(args, "dist/scripts/full-backup.mjs") >= 0 || isRestoreProgram)
+        bool isReencryptProgram = Array.IndexOf(args, "dist/scripts/reencrypt-files.mjs") >= 0;
+        string programKnobs = isReencryptProgram ? "BV_STUB_REENCRYPT_" : (isRestoreProgram ? "BV_STUB_RESTORE_" : "BV_STUB_BACKUP_");
+        if (Array.IndexOf(args, "dist/scripts/full-backup.mjs") >= 0 || isRestoreProgram || isReencryptProgram)
         {
             byte[] input;
             using (Stream stdin = Console.OpenStandardInput())
@@ -165,7 +176,7 @@ internal static class DockerStub
                 stdin.CopyTo(buffer);
                 input = buffer.ToArray();
             }
-            string stdinFile = Environment.GetEnvironmentVariable(isRestoreProgram ? "BV_STUB_RESTORE_STDIN_FILE" : "BV_STUB_STDIN_FILE");
+            string stdinFile = Environment.GetEnvironmentVariable(isReencryptProgram ? "BV_STUB_REENCRYPT_STDIN_FILE" : (isRestoreProgram ? "BV_STUB_RESTORE_STDIN_FILE" : "BV_STUB_STDIN_FILE"));
             if (!string.IsNullOrEmpty(stdinFile))
             {
                 File.WriteAllBytes(stdinFile, input);

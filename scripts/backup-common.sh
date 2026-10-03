@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 #
-# Shared by backup.sh and restore.sh (full-backups spec §2 and §3). Source
-# it; do not run it. It must be sourced AFTER scripts/compose-provider.sh
+# Shared by backup.sh, restore.sh and reencrypt-files.sh (full-backups spec
+# §2 and §3). Source it; do not run it. It must be sourced AFTER scripts/compose-provider.sh
 # (it uses env_value and compose_version_ok) and from the folder that holds
 # docker-compose.yml. backup.bat and restore.bat mirror it.
 #
@@ -16,14 +16,29 @@ die() {
   exit 1
 }
 
+# bv_check_secret_file WHAT CODE: PASSFILE (not empty) and ORIG_PWD are set by
+# the caller. Makes PASSFILE absolute and checks that it is a readable file
+# that is not empty; otherwise one ERROR line naming it as WHAT, and exit
+# CODE. The file is only tested here, never read. reencrypt-files.sh uses it
+# for the old key file (which it hands over exactly as a passphrase file is).
+bv_check_secret_file() {
+  case "$PASSFILE" in /*) ;; *) PASSFILE="$ORIG_PWD/$PASSFILE" ;; esac
+  if [ ! -f "$PASSFILE" ] || [ ! -r "$PASSFILE" ]; then
+    printf 'ERROR: %s\n' "cannot read the $1 $PASSFILE." >&2
+    exit "$2"
+  fi
+  if [ ! -s "$PASSFILE" ]; then
+    printf 'ERROR: %s\n' "the $1 $PASSFILE is empty." >&2
+    exit "$2"
+  fi
+}
+
 # bv_check_passphrase_source: PASSFILE (may be empty) and ORIG_PWD are set by
 # the caller. Makes PASSFILE absolute and checks it; with no file and no
 # terminal (cron) stops at once instead of waiting on a prompt.
 bv_check_passphrase_source() {
   if [ -n "$PASSFILE" ]; then
-    case "$PASSFILE" in /*) ;; *) PASSFILE="$ORIG_PWD/$PASSFILE" ;; esac
-    { [ -f "$PASSFILE" ] && [ -r "$PASSFILE" ]; } || die "cannot read the passphrase file $PASSFILE."
-    [ -s "$PASSFILE" ] || die "the passphrase file $PASSFILE is empty."
+    bv_check_secret_file "passphrase file" 1
   elif [ ! -t 0 ]; then
     # Review Focus 5 (cron): nothing to prompt on. Stop now; never wait.
     die "no passphrase: standard input is not a terminal, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done."

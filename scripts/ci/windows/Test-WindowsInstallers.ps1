@@ -2582,6 +2582,202 @@ Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db
 Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
 Show-EvidenceIfFailed $r
 
+# ══════════════════════════════════════════════════════════════════════════
+# reencrypt-files.bat (Task 8)
+# ══════════════════════════════════════════════════════════════════════════
+# REAL here: reencrypt-files.bat. STUBBED: docker - `compose ps`, `compose
+# stop`, `compose start`, and the re-encryption program (any `compose run ...
+# dist/scripts/reencrypt-files.mjs`, knobs BV_STUB_REENCRYPT_*). So these
+# scenarios prove the ORDER of the docker calls, that the old key file's bytes
+# reach the program on standard input and are in no argv and no environment,
+# whether BlackVault is started again, and the exit codes. What the program
+# does to files is proven on Linux (src/lib/files/reencrypt.real-fs.test.ts,
+# scripts/reencrypt-files-cli.test.ts).
+#
+# The old key file is handed over by the SAME PowerShell line as a passphrase
+# file in backup.bat (BK1-BK11 above).
+
+$OldKey = "5a17c0de" * 8
+$ReencryptCall = "compose run --rm -T blackvault node dist/scripts/reencrypt-files.mjs"
+$ReencryptOkLine = "BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=1 not_encrypted=1 failed=0"
+$ReencryptNothingLine = "BLACKVAULT_REENCRYPT_NOTHING reencrypted=0 already_current=6 unknown_key=1 not_encrypted=1 failed=0"
+$ReencryptWhenRunning = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall || compose start blackvault"
+$ReencryptWhenStopped = "compose ps --status running -q blackvault || compose stop blackvault || $ReencryptCall"
+
+function New-ReencryptSandbox([string]$Name) {
+  $dir = Join-Path $Sandboxes $Name
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  foreach ($f in @("reencrypt-files.bat", "docker-compose.yml")) { Copy-Item (Join-Path $RepoRoot $f) $dir }
+  [IO.File]::WriteAllText((Join-Path $dir ".env"), "PORT=3000`r`nBLACKVAULT_DB_PROVIDER=sqlite`r`n", [Text.Encoding]::ASCII)
+  return $dir
+}
+
+function Invoke-Reencrypt([string]$Dir, [string]$BatArgs, [hashtable]$EnvVars = @{}, [int]$TimeoutSeconds = 120) {
+  $vars = @{
+    "BV_STUB_REENCRYPT_STDIN_FILE" = (Join-Path $Dir "__stdin.bin"); "BV_STUB_ENV_FILE" = (Join-Path $Dir "__env.txt")
+    "BV_STUB_REENCRYPT_EXIT" = $null; "BV_STUB_REENCRYPT_STDOUT" = $null; "BV_STUB_REENCRYPT_STDERR" = $null
+    "BV_STUB_APP_RUNNING" = $null; "BV_STUB_BACKUP_SLEEP_MS" = $null; "BV_LIMIT" = $null; "BV_PASSFILE" = $null
+    "BLACKVAULT_BACKUP_TIMEOUT" = $null; "BLACKVAULT_BACKUP_DIR" = $null
+  }
+  foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
+  Remove-Item -Force $vars["BV_STUB_REENCRYPT_STDIN_FILE"], $vars["BV_STUB_ENV_FILE"] -ErrorAction SilentlyContinue
+  return Invoke-Bat -Dir $Dir -Script "reencrypt-files.bat" -BatArgs $BatArgs -EnvVars $vars -NoPad -TimeoutSeconds $TimeoutSeconds
+}
+
+# The docker calls of one run, without the Compose version probe, joined with " || ".
+function Get-ReencryptCalls([pscustomobject]$Result) {
+  return (@(Get-RestoreSteps $Result) -join " || ")
+}
+
+# ---------------------------------------------------------------- scenario RF1
+Write-Scenario "reencrypt-files.bat - BlackVault running: ps, stop, the program in a one-off container, start; the old key file's bytes arrive on stdin unchanged and are in no argv and no environment; the key file is untouched"
+$d = New-ReencryptSandbox "reencrypt-running"
+$keyText = "$OldKey`r`n"
+$kf = New-PassFile $d $keyText "old.key"
+$keyBefore = Get-FileBase64 $kf
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = Get-ReencryptCalls $r
+Assert ($calls -eq $ReencryptWhenRunning) "the docker calls, in order: $ReencryptWhenRunning (got: $calls)"
+Assert ($r.StubLog -notmatch "--user|--no-deps|compose exec") "a one-off container with no --user and no --no-deps; never exec"
+$stdinFile = Join-Path $d "__stdin.bin"
+$expected = (New-Object Text.UTF8Encoding($false)).GetBytes($keyText)
+Assert (Test-Path $stdinFile) "the program's standard input was recorded (it was started)"
+$gotLength = if (Test-Path $stdinFile) { (Get-Item $stdinFile).Length } else { -1 }
+Assert ((Get-FileBase64 $stdinFile) -eq [Convert]::ToBase64String($expected)) "stdin is the old key file byte for byte ($gotLength bytes, expected $($expected.Length)): nothing stripped, no byte-order mark added"
+Assert (-not $r.StubLog.Contains("5a17c0de")) "the old key is in no docker argv"
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "" }
+Assert ($envDump.Contains("BV_DOCKER_ARGS=")) "the environment of the program's call was recorded"
+Assert (-not $envDump.Contains("5a17c0de")) "the old key is not in the environment docker inherited"
+Assert (-not $r.Output.Contains("5a17c0de")) "the old key is never printed"
+Assert ($r.Output.Contains($ReencryptOkLine)) "the program's line is passed through"
+Assert ($r.Output.Contains("Done. Keep the old key file until BlackVault has started and your photos and documents open. BlackVault was started again.")) "says it is done and that BlackVault was started again"
+Assert ((Test-Path $kf) -and ((Get-FileBase64 $kf) -eq $keyBefore)) "the old key file is still there, byte for byte"
+Assert (@(Get-ChildItem -Force $d | Where-Object { $_.Name -notmatch '^(__.*|\.env|docker-compose\.yml|reencrypt-files\.bat|old\.key)$' }).Count -eq 0) "nothing was written into the install folder"
+Assert ($r.Output -notmatch "is not recognized as an internal or external command") "no stray command fragment was executed"
+Assert ($r.Output -notmatch "The syntax of the command is incorrect") "no syntax error"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF2
+Write-Scenario "reencrypt-files.bat - BlackVault NOT running: stopped anyway, the program runs, and it is NOT started - said plainly"
+$d = New-ReencryptSandbox "reencrypt-stopped"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$calls = Get-ReencryptCalls $r
+Assert ($calls -eq $ReencryptWhenStopped) "the docker calls, in order, with no start: $ReencryptWhenStopped (got: $calls)"
+Assert ($r.Output.Contains("BlackVault was not running before, so it was NOT started. Start it with: docker compose up -d")) "says it was not started, and how to start it"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$OldKey`n") "the old key arrived on stdin"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF3
+Write-Scenario "reencrypt-files.bat - the program's exit 3 (no file under the old key; also the second run) is passed through; BlackVault is started again if it was running"
+$d = New-ReencryptSandbox "reencrypt-exit3"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_EXIT" = "3"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptNothingLine; "BV_STUB_REENCRYPT_STDERR" = "reencrypt-files: nothing to do: no uploaded file is encrypted with the old key (key id 02d449a3)." }
+Assert ($r.ExitCode -eq 3) "exits 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains($ReencryptNothingLine)) "the program's line is passed through"
+Assert ($r.Output -match "nothing to do: no uploaded file is encrypted with the old key") "the program's reason is shown"
+Assert ($r.Output.Contains("Nothing was changed. BlackVault was started again.")) "says nothing was changed and that BlackVault was started again"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "started again: $ReencryptWhenRunning (got: $(Get-ReencryptCalls $r))"
+Assert ($r.Output -notmatch "ERROR:") "no ERROR line: nothing failed"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_EXIT" = "3" }
+Assert ($r.ExitCode -eq 3) "not running before: exits 3 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("Nothing was changed. BlackVault was not running before, so it was NOT started.")) "and says it was NOT started"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenStopped) "no start (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF4
+Write-Scenario "reencrypt-files.bat - exit codes: the program's 1 stays 1; anything else becomes 1 with one ERROR line; both say whether BlackVault was started"
+$d = New-ReencryptSandbox "reencrypt-exit-codes"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_EXIT" = "1"; "BV_STUB_REENCRYPT_STDERR" = "reencrypt-files: Could not write documents/d.pdf (ENOSPC); it was left as it was." }
+Assert ($r.ExitCode -eq 1) "exit 1 stays 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Could not write documents/d\.pdf \(ENOSPC\)") "the program's message is shown"
+Assert ($r.Output.Contains("ERROR: the re-encryption failed (the reason is above). Every file is whole, under the old key or the current one; run reencrypt-files.bat again to continue. BlackVault was started again.")) "says it failed, that running it again continues, and that BlackVault was started again"
+Assert ($r.Output -notmatch "ended unexpectedly") "nothing added for exit 1"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_REENCRYPT_EXIT" = "137" }
+Assert ($r.ExitCode -eq 1) "exit 137 becomes 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: the re-encryption command ended unexpectedly \(exit 137\)") "says the command ended unexpectedly"
+Assert ($r.Output.Contains("BlackVault was not running before, so it was NOT started.")) "and that BlackVault was NOT started"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF5
+Write-Scenario "reencrypt-files.bat - a missing or empty old key file, or a folder: exit 3 before docker is touched; no --from-key-file or an unknown argument: exit 1, never echoed"
+$d = New-ReencryptSandbox "reencrypt-bad-args"
+$r = Invoke-Reencrypt $d "--from-key-file `"$(Join-Path $d 'nope.key')`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: cannot read the old key file" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "a missing old key file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$empty = New-PassFile $d "" "empty.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$empty`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: the old key file .* is empty" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "an empty old key file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$d`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 3 -and $r.Output -match "ERROR: cannot read the old key file" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "a folder instead of a file: exit 3, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d ""
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: no old key file was given" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "no --from-key-file: exit 1, docker never invoked (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file"
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --from-key-file needs a path" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--from-key-file without a value: exit 1 (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key $OldKey"
+Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: unknown argument") "an unknown argument is refused (exit $($r.ExitCode))"
+Assert (-not $r.Output.Contains("5a17c0de")) "and is not echoed back (it could be a key)"
+Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF6
+# See BK11: a bare `shift` in the argument parser would move the key file's
+# path into %0, and `cd /d "%~dp0"` would then go to the key file's folder.
+Write-Scenario "reencrypt-files.bat - the old key file lives in ANOTHER folder: the script still works from its own folder"
+$elsewhere = Join-Path $Sandboxes "reencrypt-key-elsewhere-secrets"
+New-Item -ItemType Directory -Force -Path $elsewhere | Out-Null
+$d = New-ReencryptSandbox "reencrypt-key-elsewhere"
+$kf = New-PassFile $elsewhere "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-ReencryptCalls $r) -eq $ReencryptWhenRunning) "the docker calls, in order (got: $(Get-ReencryptCalls $r))"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$OldKey`n") "the old key arrived on stdin"
+Assert (@(Get-ChildItem -Force $elsewhere).Count -eq 1) "nothing was written beside the key file"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF7
+Write-Scenario "reencrypt-files.bat - stop fails: exit 1 and the program is never started; the restart fails after a good run: exit 0 with a WARNING that BlackVault did NOT start"
+$d = New-ReencryptSandbox "reencrypt-stop-start-fail"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "stop" }
+Assert ($r.ExitCode -eq 1) "stop fails: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: could not stop BlackVault. Nothing was changed; BlackVault was left as it was.")) "says so"
+Assert ((Get-ReencryptCalls $r) -eq "compose ps --status running -q blackvault || compose stop blackvault") "the program was never started, nothing was started (got: $(Get-ReencryptCalls $r))"
+Assert (-not (Test-Path (Join-Path $d "__stdin.bin"))) "the old key was handed to nothing"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_FAIL_ON" = "start"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+Assert ($r.ExitCode -eq 0) "the restart fails: the exit code stays the program's, 0 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("WARNING: BlackVault did NOT start again: check the logs (docker compose logs blackvault) and start it by hand: docker compose up -d")) "warns that BlackVault did NOT start, with the command"
+Assert (-not $r.Output.Contains("BlackVault was started again.")) "and does not claim it was started"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario RF8
+Write-Scenario "reencrypt-files.bat - Docker Compose too old: exit 1 before anything is stopped; BLACKVAULT_* and BV_LIMIT set in the console do not reach or limit the run"
+$d = New-ReencryptSandbox "reencrypt-compose-env"
+$kf = New-PassFile $d "$OldKey`n" "old.key"
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_COMPOSE_VERSION" = "2.19.0"; "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BlackVault needs Docker Compose v2\.20 or newer") "explains the v2.20 requirement"
+Assert ((Get-ReencryptCalls $r) -eq "") "nothing was stopped or run (got: $(Get-ReencryptCalls $r))"
+Show-EvidenceIfFailed $r
+$r = Invoke-Reencrypt $d "--from-key-file `"$kf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_DATABASE_URL" = "file:./dev.db"; "BLACKVAULT_UPLOADS_SNAPSHOT" = "backups\uploads-x"; "BV_LIMIT" = "1"; "BV_STUB_BACKUP_SLEEP_MS" = "4000"; "BV_STUB_REENCRYPT_STDOUT" = $ReencryptOkLine }
+$envDump = if (Test-Path (Join-Path $d "__env.txt")) { [IO.File]::ReadAllText((Join-Path $d "__env.txt")) } else { "MISSING" }
+Assert ($r.ExitCode -eq 0) "exits 0: a BV_LIMIT of 1 second in the console did not cut a 4 second run short (got $($r.ExitCode))"
+Assert ($envDump -ne "MISSING" -and $envDump -notmatch "BLACKVAULT_DATABASE_URL=|BLACKVAULT_UPLOADS_SNAPSHOT=") "docker compose would read those keys from .env only"
+Assert ($r.Output -notmatch "did not finish within") "no time-limit message"
+Show-EvidenceIfFailed $r
+
 # --------------------------------------------------------------------- report
 Write-Host "`n================ summary ================"
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
@@ -2589,5 +2785,5 @@ if ($script:Failures.Count -gt 0) {
   foreach ($f in $script:Failures) { Write-Host "  FAILED: $f" -ForegroundColor Red }
   exit 1
 }
-Write-Host "install.bat, update.bat, rotate-key.bat, backup.bat, restore.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
+Write-Host "install.bat, update.bat, rotate-key.bat, backup.bat, restore.bat, reencrypt-files.bat and scripts\db-snapshot.bat verified on Windows (Docker stubbed)." -ForegroundColor Green
 exit 0

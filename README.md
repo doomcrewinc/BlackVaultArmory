@@ -1133,7 +1133,7 @@ first such file and its key id (`… is encrypted with key <id>, not the current
 Restarting, or running the rotation again, does not help: the database is already bound to the
 current key, and the rotation only accepts files under the current or the new key.
 
-To recover:
+To recover, pick one:
 
 - **Move the files aside.** Move every file the log names out of `<DATA_DIR>/uploads` (on
   Linux with `sudo`: they belong to uid 1001) and start again; repeat until it starts. Keep
@@ -1149,8 +1149,51 @@ To recover:
   5. Restore your backup (**Settings → Backup**). If you want a new key, rotate afterwards
      (see **Rotation**).
 
-Re-encrypting files from another key into the current one is not supported yet (planned: spec
-3c). Without the key that encrypted them, those files cannot be opened.
+- **Re-encrypt them, if you still have the key that encrypted them** — for example
+  `secrets/blackvault_encryption_key.old-<timestamp>` after a rotation, or the key file of the
+  machine the folder came from. Run, from the BlackVault folder:
+
+  ```bash
+  ./reencrypt-files.sh --from-key-file <path to the old key file>
+  ```
+
+  **Windows:**
+
+  ```bat
+  reencrypt-files.bat --from-key-file <path to the old key file>
+  ```
+
+  What it does:
+
+  1. It stops BlackVault.
+  2. In a one-off container, every file under `uploads/images` and `uploads/documents` that is
+     encrypted with the old key is decrypted with it, encrypted with the current key, and
+     replaced in one step. Files already under the current key are skipped, so running it twice
+     is safe. Files that are not encrypted are left as they are.
+  3. Files under any **other** key are left as they are too, each with a `WARNING:` line.
+     BlackVault still refuses to start while one of those is in the folder: move it out, or run
+     the tool again with the key that encrypted it.
+  4. It starts BlackVault again **only if it was running** when you ran the tool. The last line
+     says whether it was started; if not, start it with `docker compose up -d`.
+
+  The old key file is only read: the tool never deletes, moves or changes a key file, and it
+  deletes no uploaded file. The key is handed to the program on its standard input, never on a
+  command line or in an environment variable.
+
+  If it stops part-way (a full disk, a closed terminal), every file is whole, under the old key
+  or the current one. Run it again: it continues with the files still under the old key.
+
+  Exit codes:
+
+  | Code | Meaning |
+  |---|---|
+  | 0 | At least one file was under the old key, and all of them were re-encrypted. |
+  | 3 | Nothing was changed: no file is under the old key (a second run answers this too), or the old key file is missing, empty, not a key, or is this install's current key. |
+  | 1 | Failed. The reason is printed above the last line. |
+
+  **Keep the old key file until BlackVault has started and your photos and documents open.**
+
+Without the key that encrypted them, those files cannot be recovered.
 
 ### Known limitations of file encryption
 

@@ -1197,7 +1197,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   it("the Windows harness runs it (RS1–RS14) and prints the script's output and the docker calls whenever a check fails", () => {
     const harness = fs.readFileSync(path.join(ROOT, "scripts/ci/windows/Test-WindowsInstallers.ps1"), "utf8");
     for (let i = 1; i <= 14; i++) expect(harness).toContain(`scenario RS${i}\r\n`);
-    const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# --------------------------------------------------------------------- report"));
+    const section = harness.slice(harness.indexOf("# restore.bat (full restore, Task 7)"), harness.indexOf("# reencrypt-files.bat (Task 8)"));
     const runs = section.match(/^\s*\$r = Invoke-Restore /gm) ?? [];
     const evidence = section.match(/^\s*Show-EvidenceIfFailed \$r/gm) ?? [];
     expect(runs.length).toBeGreaterThanOrEqual(17);
