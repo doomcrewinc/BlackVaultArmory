@@ -1198,7 +1198,7 @@ To recover, pick one:
   |---|---|
   | 0 | At least one file was under the old key, and all of them were re-encrypted. |
   | 3 | Nothing was changed: no file is under the old key (a second run answers this too), or the old key file is missing, empty, not a key, or is this install's current key. |
-  | 1 | Failed; the lines above the last one say why, and whether running it again will continue. Also: the tool finished, but BlackVault was running before and could not be started again (the last line says so). |
+  | 1 | Failed; the lines above the last one say why, and whether running it again will continue. Also: the tool finished — whether it re-encrypted files or found nothing to do — but BlackVault was running before and could not be started again (the last line says so). |
 
   **Keep the old key file until BlackVault has started and your photos and documents open.**
 
@@ -1429,6 +1429,12 @@ not a backup.
   backup but cannot set its mode to 600. The backup is still made, verified and usable; a
   `WARNING:` says that who else can read the file is decided by the mount options. Mounting
   the disk for the app's user (`uid=1001,gid=1001,fmask=0177,dmask=0077`) avoids the warning.
+  **On such a folder anyone who can read the disk or the share can copy the backup file.** Its
+  header (the salt and the key-derivation settings) is not secret, so the copy can be attacked
+  by guessing passphrases at leisure: the passphrase is the only protection. Choose a long one.
+  If BlackVault can neither set the lock file's time nor rewrite it there, a `WARNING:` says
+  that another backup or restore may not see this one as running: do not start a second one
+  while a long backup or restore runs on that folder.
 
 ---
 
@@ -1441,7 +1447,8 @@ only.)
 **It replaces everything a backup holds:** every inventory record and every uploaded photo and
 document. Accounts, settings and the audit log are not in a backup and are kept as they are.
 
-1. Put the `.bvb` file into the backup folder (`<DATA_DIR>/backups`). On Linux:
+1. Put the `.bvb` file into the backup folder: `<DATA_DIR>/backups`, or the folder
+   `BLACKVAULT_BACKUP_DIR` names if you set it. On Linux, with the default folder:
 
    ```bash
    sudo install -o 1001 -g 1001 -m 600 /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
@@ -1491,9 +1498,10 @@ the script says what to do.
 **The recovery file.** Just before step 4 the script prints, and writes to
 `backups/restore-<time>-RECOVERY.txt`, where the snapshot is and the exact commands that put it
 back by hand. It is deleted when the restore has succeeded or the automatic rollback has worked.
-If you find one, the script did not end by itself (the terminal was closed, the machine
-restarted): BlackVault is stopped and the install may be half restored. Read the file and follow
-it. **While one exists, a new restore refuses to start.**
+If you find one, either the script did not end by itself (it was interrupted, the terminal was
+closed, the machine restarted) or the automatic rollback failed, which the script says before it
+exits. Either way BlackVault is stopped and the install may be half restored. Read the file and
+follow it. **While one exists, a new restore refuses to start.**
 
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
@@ -1503,7 +1511,7 @@ the snapshot in `backups/` (on Linux with `sudo`).
 | Exit code | Meaning |
 |---|---|
 | 0 | Restored. |
-| 1 | Failed. The last line says whether anything was changed: either nothing was, or it was put back. |
+| 1 | Failed. The last lines say which of three it was: nothing was changed; or the install was put back and BlackVault was started again; or the rollback failed, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
 
 ---
 
