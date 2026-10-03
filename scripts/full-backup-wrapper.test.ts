@@ -170,7 +170,7 @@ beforeEach(() => {
   bin = path.join(tmp, "bin");
   rec = path.join(tmp, "rec");
   for (const d of [bin, rec, path.join(app, "scripts")]) fs.mkdirSync(d, { recursive: true });
-  for (const f of ["backup.sh", "scripts/compose-provider.sh", "docker-compose.yml"]) fs.copyFileSync(path.join(ROOT, f), path.join(app, f));
+  for (const f of ["backup.sh", "scripts/compose-provider.sh", "scripts/backup-common.sh", "docker-compose.yml"]) fs.copyFileSync(path.join(ROOT, f), path.join(app, f));
   fs.writeFileSync(path.join(app, ".env"), "PORT=3000\nBLACKVAULT_DB_PROVIDER=sqlite\n");
   writeStub();
 });
@@ -500,12 +500,16 @@ describe.skipIf(isWindows)("backup.sh", () => {
 /**
  * Fix round 1. The docker stub's `ps` record cannot see a helper that has
  * already exited, so "only shell builtins ever touch the typed passphrase"
- * is pinned here instead: every line of backup.sh that names one of the
- * three variables holding it must be one of a short list of shapes.
+ * is pinned here instead: every line that names one of the three variables
+ * holding it must be one of a short list of shapes. Task 7: the passphrase
+ * code now lives in scripts/backup-common.sh, shared with restore.sh, so the
+ * check covers all three files.
  */
-describe("backup.sh (static checks: the typed passphrase is only ever handled by shell builtins)", () => {
-  const sh = fs.readFileSync(path.join(ROOT, "backup.sh"), "utf8");
-  const code = sh.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+describe("backup.sh, restore.sh and scripts/backup-common.sh (static checks: the typed passphrase is only ever handled by shell builtins)", () => {
+  const FILES = ["backup.sh", "restore.sh", "scripts/backup-common.sh"];
+  const codeOf = (file: string) =>
+    fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  const code = FILES.flatMap(codeOf);
   const ALLOWED = [
     /^(PASSPHRASE|FIRST)=""$/, // cleared
     /^PASSPHRASE=\$answer$/, // assigned
@@ -521,19 +525,34 @@ describe("backup.sh (static checks: the typed passphrase is only ever handled by
     const lines = code.filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l));
     const unexpected = lines.filter((l) => !ALLOWED.some((re) => re.test(l)));
     expect(unexpected).toEqual([]);
-    expect(lines.length).toBeGreaterThanOrEqual(10);
-    // Exactly one place sends it anywhere.
+    expect(lines.length).toBeGreaterThanOrEqual(15);
+    // Exactly one place sends it anywhere, and it is the shared one.
     expect(lines.filter((l) => l.includes("|") && !l.includes("||"))).toEqual([`printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`]);
+    expect(codeOf("scripts/backup-common.sh")).toContain(`printf '%s' "$PASSPHRASE" | "\${CMD[@]}"`);
+    // restore.sh and backup.sh only ever clear it (backup.sh also compares the two typed answers).
+    expect(codeOf("restore.sh").filter((l) => /\b(PASSPHRASE|FIRST|answer)\b/.test(l)).every((l) => l === 'PASSPHRASE=""')).toBe(true);
   });
 
   it("nothing is exported, no allexport, no xtrace", () => {
     expect(code.filter((l) => /\b(export|typeset|declare)\b/.test(l))).toEqual([]);
     expect(code.filter((l) => /\bset\s+[-+][a-zA-Z]*[ax]/.test(l) || /\bset\s+-o\s+(allexport|xtrace)/.test(l))).toEqual([]);
-    expect(sh.split("\n")[0]).toBe("#!/bin/bash"); // printf and [ are builtins in bash
+    for (const file of ["backup.sh", "restore.sh"]) {
+      expect(fs.readFileSync(path.join(ROOT, file), "utf8").split("\n")[0]).toBe("#!/bin/bash"); // printf and [ are builtins in bash
+    }
   });
 
   it("does not assign the names docker compose interpolates (DATA_DIR, PORT, COMPOSE_*)", () => {
-    expect(code.filter((l) => /^(DATA_DIR|PORT|COMPOSE_PROFILES|COMPOSE_FILE|COMPOSE_PROJECT_NAME)=/.test(l))).toEqual([]);
+    expect(code.filter((l) => /^(local )?(DATA_DIR|PORT|COMPOSE_PROFILES|COMPOSE_FILE|COMPOSE_PROJECT_NAME)=/.test(l))).toEqual([]);
+  });
+
+  it("the shared code is shared, not copied: neither script defines what scripts/backup-common.sh defines", () => {
+    const shared = codeOf("scripts/backup-common.sh").filter((l) => /^[a-z_]+\(\) \{$/.test(l));
+    expect(shared.length).toBeGreaterThanOrEqual(8);
+    for (const file of ["backup.sh", "restore.sh"]) {
+      const own = codeOf(file);
+      for (const definition of shared) expect(own, `${file} redefines ${definition}`).not.toContain(definition);
+      expect(own).toContain(". ./scripts/backup-common.sh");
+    }
   });
 });
 

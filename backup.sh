@@ -64,10 +64,20 @@ set -o pipefail
 
 USAGE="Usage: ./backup.sh [--passphrase-file <path>] [--keep <n>]  |  ./backup.sh --verify <file> [--passphrase-file <path>]"
 
-die() {
-  printf 'ERROR: %s\n' "$*" >&2
-  exit 1
-}
+# ── 0. The install ────────────────────────────────────────────
+# Paths given on the command line are relative to where the user ran this
+# script from, not to the folder it lives in. .env and docker-compose.yml
+# live next to this script: everything else runs from there.
+# scripts/backup-common.sh holds what this script shares with restore.sh.
+ORIG_PWD=$PWD
+cd "$(dirname "$0")" || { printf 'ERROR: %s\n' "cannot change to the folder backup.sh is in." >&2; exit 1; }
+for f in scripts/compose-provider.sh scripts/backup-common.sh; do
+  [ -f "./$f" ] || { printf 'ERROR: %s\n' "$f is missing; run backup.sh from a complete BlackVault folder." >&2; exit 1; }
+done
+# shellcheck source=scripts/compose-provider.sh
+. ./scripts/compose-provider.sh
+# shellcheck source=scripts/backup-common.sh
+. ./scripts/backup-common.sh
 
 # ── 1. Arguments ──────────────────────────────────────────────
 # An unknown argument is never echoed back: it could be a passphrase typed
@@ -116,115 +126,25 @@ else
   { [ "$KEEP" -ge 1 ] && [ "$KEEP" -le 100000 ]; } || die "--keep needs a whole number from 1 to 100000."
 fi
 
-# Paths given on the command line are relative to where the user ran this
-# script from, not to the folder it lives in.
-ORIG_PWD=$PWD
-if [ -n "$PASSFILE" ]; then
-  case "$PASSFILE" in /*) ;; *) PASSFILE="$ORIG_PWD/$PASSFILE" ;; esac
-  { [ -f "$PASSFILE" ] && [ -r "$PASSFILE" ]; } || die "cannot read the passphrase file $PASSFILE."
-  [ -s "$PASSFILE" ] || die "the passphrase file $PASSFILE is empty."
-elif [ ! -t 0 ]; then
-  # Review Focus 5 (cron): nothing to prompt on. Stop now; never wait.
-  die "no passphrase: standard input is not a terminal, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done."
-fi
+# ── 2. The passphrase source, then Docker Compose and the backup folder ──
+bv_check_passphrase_source
 
-# ── 2. The install ────────────────────────────────────────────
-# .env and docker-compose.yml live next to this script: always run from here.
-cd "$(dirname "$0")" || die "cannot change to the folder backup.sh is in."
-[ -f ./scripts/compose-provider.sh ] || die "scripts/compose-provider.sh is missing; run backup.sh from a complete BlackVault folder."
-# shellcheck source=scripts/compose-provider.sh
-. ./scripts/compose-provider.sh
-
-COMPOSE_VERSION=$(docker compose version --short 2>/dev/null) || COMPOSE_VERSION=""
-compose_version_ok "$COMPOSE_VERSION" ||
-  die "BlackVault needs Docker Compose v$COMPOSE_MIN_VERSION or newer, run as 'docker compose' (found: ${COMPOSE_VERSION:-none}). Nothing was done."
-COMPOSE="docker compose"
-
-# docker compose must read the BLACKVAULT_* keys from .env only, never from
-# this shell (a shell variable would override .env), and the one-off
-# container must not inherit an uploads-snapshot marker (see rotate-key.sh).
-unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_BACKUP_DIR BLACKVAULT_UPLOADS_SNAPSHOT
-
-# The backup folder on the HOST: the same expression docker-compose.yml
-# mounts at /app/backups. A relative path is relative to this folder.
-HOST_BACKUP_DIR=$(env_value BLACKVAULT_BACKUP_DIR)
-if [ -z "$HOST_BACKUP_DIR" ]; then
-  # NOT named DATA_DIR: if the user's shell exports DATA_DIR, assigning it
-  # here would change the value docker compose interpolates into every mount.
-  ENV_DATA_DIR=$(env_value DATA_DIR)
-  HOST_BACKUP_DIR="${ENV_DATA_DIR:-./data}/backups"
-fi
-
-# Physical absolute path of a folder. The backup folder is mode 0700 and
-# owned by the app user (uid 1001), so on Linux the host user usually cannot
-# enter it: then its PARENT is resolved and the last component appended.
-canonical_dir() {
-  local dir=$1 parent base
-  if (cd "$dir" 2>/dev/null); then
-    (cd "$dir" && pwd -P)
-    return
-  fi
-  while [ "${dir%/}" != "$dir" ] && [ -n "${dir%/}" ]; do dir=${dir%/}; done
-  parent=$(dirname "$dir")
-  base=$(basename "$dir")
-  case "$base" in . | .. | /) return 1 ;; esac
-  parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
-  [ "$parent" = "/" ] && parent=""
-  printf '%s/%s\n' "$parent" "$base"
-}
+bv_compose_setup
 
 # ── 3. --verify <file>: a name in the backup folder, or a path into it ──
 ENGINE_ARGS=()
 if [ "$MODE" = "verify" ]; then
-  case "$VERIFY" in
-    */*)
-      case "$VERIFY" in /*) VERIFY_PATH=$VERIFY ;; *) VERIFY_PATH="$ORIG_PWD/$VERIFY" ;; esac
-      VERIFY_NAME=$(basename "$VERIFY_PATH")
-      VERIFY_DIR=$(canonical_dir "$(dirname "$VERIFY_PATH")") || VERIFY_DIR=""
-      BACKUP_DIR_REAL=$(canonical_dir "$HOST_BACKUP_DIR") || BACKUP_DIR_REAL=""
-      { [ -n "$VERIFY_DIR" ] && [ "$VERIFY_DIR" = "$BACKUP_DIR_REAL" ]; } ||
-        die "--verify: $VERIFY is not in the backup folder ($HOST_BACKUP_DIR). Give a file name, or the path of a file in that folder."
-      ;;
-    *)
-      VERIFY_NAME=$VERIFY
-      ;;
-  esac
-  case "$VERIFY_NAME" in
-    "" | . | .. | -* | *\\*) die "--verify: that is not a backup file name. Give a file name, or the path of a file in the backup folder ($HOST_BACKUP_DIR)." ;;
-  esac
+  bv_backup_file_name --verify "$VERIFY"
+  VERIFY_NAME=$BACKUP_FILE_NAME
   ENGINE_ARGS=(--verify "$VERIFY_NAME")
 else
   ENGINE_ARGS=(--keep "$KEEP")
 fi
 
 # ── 4. The passphrase (prompt only; a file is redirected in step 6) ──
-# Echo is switched off ONCE, before the first prompt is printed, and stays
-# off until the last answer is in: `read -s` alone turns it back on between
-# the two questions, and anything typed (or pasted) in that gap would show.
-PASSPHRASE=""
-TTY_STATE=""
-restore_tty() {
-  [ -n "$TTY_STATE" ] && stty "$TTY_STATE" 2>/dev/null
-  TTY_STATE=""
-  return 0
-}
-ask_passphrase() {
-  local answer
-  printf '%s' "$1" >&2
-  if ! IFS= read -r -s answer; then
-    printf '\n' >&2
-    die "no passphrase was entered. Nothing was done."
-  fi
-  printf '\n' >&2
-  [ -n "$answer" ] || die "the passphrase is empty. Nothing was done."
-  PASSPHRASE=$answer
-}
 if [ -z "$PASSFILE" ]; then
-  trap restore_tty EXIT
-  trap 'exit 1' INT TERM HUP
   [ "$MODE" = "verify" ] || echo "Choose the passphrase for this backup. Without it the backup cannot be opened." >&2
-  TTY_STATE=$(stty -g 2>/dev/null) || TTY_STATE=""
-  stty -echo 2>/dev/null
+  bv_echo_off
   if [ "$MODE" = "verify" ]; then
     ask_passphrase "Backup passphrase: "
   else
@@ -266,15 +186,9 @@ if [ -n "$LIMIT" ]; then
 fi
 
 # ── 6. Run it, the passphrase on standard input ───────────────
-if [ -n "$PASSFILE" ]; then
-  "${CMD[@]}" < "$PASSFILE"
-  RC=$?
-else
-  [ "$MODE" = "verify" ] || echo "Making the backup. A large uploads folder can take a while..." >&2
-  printf '%s' "$PASSPHRASE" | "${CMD[@]}"
-  RC=${PIPESTATUS[1]}
-  PASSPHRASE=""
-fi
+{ [ -n "$PASSFILE" ] || [ "$MODE" = "verify" ]; } || echo "Making the backup. A large uploads folder can take a while..." >&2
+bv_run_with_passphrase
+PASSPHRASE=""
 
 case "$RC" in
   0) exit 0 ;;
