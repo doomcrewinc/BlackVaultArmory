@@ -300,3 +300,158 @@ describe("file encryption", () => {
     expect(keys.file.toString("hex")).toBe(KNOWN_FILE_SUBKEY_HEX);
   });
 });
+
+describe("streaming full backups (BVB1)", () => {
+  const PASS = "correct horse battery";
+  const CHUNK = 1048576;
+  const SEALED_CHUNK = CHUNK + 16;
+
+  // Deterministic generated data; never a repo file.
+  const gen = (n: number) => {
+    const b = Buffer.alloc(n);
+    for (let i = 0; i < n; i++) b[i] = (i * 31 + (i >>> 8) * 7) & 0xff;
+    return b;
+  };
+  // Feed in odd-sized pieces so buffering across chunk boundaries is exercised.
+  const pump = (t: import("node:stream").Transform, input: Buffer, piece = 65537) =>
+    new Promise<Buffer>((resolve, reject) => {
+      const out: Buffer[] = [];
+      t.on("data", (d: Buffer) => out.push(d));
+      t.on("error", reject);
+      t.on("end", () => resolve(Buffer.concat(out)));
+      for (let i = 0; i < input.length; i += piece) t.write(input.subarray(i, i + piece));
+      t.end();
+    });
+  const seal = (input: Buffer, p = PASS) => pump(core.createBackupSealer(p), input);
+  const open = (sealed: Buffer, p = PASS) => pump(core.createBackupOpener(p), sealed);
+  const split = (sealed: Buffer) => {
+    const hlen = sealed.readUInt32BE(0);
+    const head = sealed.subarray(0, 4 + hlen);
+    const body = sealed.subarray(4 + hlen);
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < body.length; i += SEALED_CHUNK) chunks.push(body.subarray(i, i + SEALED_CHUNK));
+    return { head, header: JSON.parse(head.subarray(4).toString("utf8")), chunks };
+  };
+  const rejects = (p: Promise<unknown>, code: string) => expect(p).rejects.toMatchObject({ name: "SealError", code });
+
+  it("exports the format name", () => {
+    expect(core.BVB_FORMAT).toBe("blackvault-full-backup");
+  });
+
+  it("writes the exact BVB1 header", async () => {
+    const { head, header } = split(await seal(Buffer.alloc(0)));
+    expect(header).toMatchObject({
+      format: "blackvault-full-backup", version: 1, cipher: "aes-256-gcm-stream", chunkSize: 1048576,
+      kdf: { name: "scrypt", N: 65536, r: 8, p: 1 },
+    });
+    expect(Object.keys(header).sort()).toEqual(["chunkSize", "cipher", "format", "kdf", "noncePrefix", "version"]);
+    expect(Buffer.from(header.kdf.salt, "base64url")).toHaveLength(16);
+    expect(Buffer.from(header.noncePrefix, "base64url")).toHaveLength(8);
+    expect(head.readUInt32BE(0)).toBe(head.length - 4);
+  });
+
+  it.each([
+    ["0 B", 0, [16]],
+    ["1 B", 1, [17]],
+    ["1 MiB - 1", CHUNK - 1, [CHUNK - 1 + 16]],
+    ["1 MiB", CHUNK, [SEALED_CHUNK, 16]],
+    ["1 MiB + 1", CHUNK + 1, [SEALED_CHUNK, 17]],
+    ["3.5 MiB", 3.5 * CHUNK, [SEALED_CHUNK, SEALED_CHUNK, SEALED_CHUNK, CHUNK / 2 + 16]],
+  ])("round-trips %s with the expected chunk layout", async (_l, n, sizes) => {
+    const input = gen(n);
+    const sealed = await seal(input);
+    expect(split(sealed).chunks.map((c) => c.length)).toEqual(sizes);
+    if (n >= 64) expect(sealed.includes(input.subarray(0, 64))).toBe(false);
+    expect((await open(sealed)).equals(input)).toBe(true);
+  }, 30000);
+
+  it("a stream ending exactly on 1 MiB carries the final flag on an empty last chunk", async () => {
+    const sealed = await seal(gen(CHUNK));
+    const { head, chunks } = split(sealed);
+    expect(chunks.map((c) => c.length)).toEqual([SEALED_CHUNK, 16]);
+    // Without the empty final chunk the full chunk is not final: TRUNCATED.
+    await rejects(open(Buffer.concat([head, chunks[0]])), "TRUNCATED");
+  }, 30000);
+
+  describe("tampering with a 3.5 MiB backup", () => {
+    let sealed: Buffer;
+    let head: Buffer;
+    let c: Buffer[];
+    it("setup", async () => {
+      sealed = await seal(gen(3.5 * CHUNK));
+      ({ head, chunks: c } = split(sealed));
+      expect(c).toHaveLength(4);
+    }, 30000);
+    it("rejects swapped chunks", () => rejects(open(Buffer.concat([head, c[1], c[0], c[2], c[3]])), "WRONG_PASSPHRASE_OR_DAMAGED"));
+    it("rejects a dropped middle chunk", () => rejects(open(Buffer.concat([head, c[0], c[2], c[3]])), "WRONG_PASSPHRASE_OR_DAMAGED"));
+    it("rejects a duplicated chunk", () => rejects(open(Buffer.concat([head, c[0], c[1], c[1], c[2], c[3]])), "WRONG_PASSPHRASE_OR_DAMAGED"));
+    it("rejects a body cut off after a non-final chunk (TRUNCATED)", () => rejects(open(Buffer.concat([head, c[0], c[1]])), "TRUNCATED"));
+    it("rejects a header with no body (TRUNCATED)", () => rejects(open(head), "TRUNCATED"));
+    it("rejects bytes after the final chunk", () => rejects(open(Buffer.concat([sealed, Buffer.from([0])])), "WRONG_PASSPHRASE_OR_DAMAGED"));
+    it("rejects a flipped ciphertext bit", () => {
+      const bad = Buffer.from(sealed);
+      bad[head.length + 100] ^= 1;
+      return rejects(open(bad), "WRONG_PASSPHRASE_OR_DAMAGED");
+    });
+    it("rejects a header byte changed", () => {
+      const bad = Buffer.from(sealed);
+      const i = bad.indexOf('"salt":"', 4) + 8;
+      bad[i] = bad[i] === 0x41 ? 0x42 : 0x41;
+      return rejects(open(bad), "WRONG_PASSPHRASE_OR_DAMAGED");
+    });
+    it("rejects a wrong passphrase", () => rejects(open(sealed, "wrong passphrase!!"), "WRONG_PASSPHRASE_OR_DAMAGED"));
+    it("emits no plaintext from a chunk whose tag fails", async () => {
+      const bad = Buffer.from(sealed);
+      bad[head.length + SEALED_CHUNK + 5] ^= 1; // damage chunk 1
+      const t = core.createBackupOpener(PASS);
+      const out: Buffer[] = [];
+      t.on("data", (d: Buffer) => out.push(d));
+      const done = new Promise((resolve) => t.on("error", resolve));
+      t.end(bad);
+      await done;
+      expect(Buffer.concat(out).length).toBe(CHUNK); // only chunk 0
+    }, 30000);
+  });
+
+  it("rejects an extra trailing byte after an exactly-1-MiB backup", async () => {
+    const sealed = await seal(gen(CHUNK));
+    await rejects(open(Buffer.concat([sealed, Buffer.from([1])])), "WRONG_PASSPHRASE_OR_DAMAGED");
+  }, 30000);
+
+  it("rejects hostile KDF parameters with UNSUPPORTED before deriving", async () => {
+    const sealed = await seal(gen(10));
+    const { header, chunks } = split(sealed);
+    for (const kdf of [{ N: 2 ** 30 }, { r: 64 }, { p: 16 }, { name: "argon2" }]) {
+      const json = Buffer.from(JSON.stringify({ ...header, kdf: { ...header.kdf, ...kdf } }));
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(json.length);
+      const t = Date.now();
+      await rejects(open(Buffer.concat([len, json, ...chunks])), "UNSUPPORTED");
+      expect(Date.now() - t).toBeLessThan(200);
+    }
+  }, 30000);
+
+  it("rejects an unknown format, chunk size, or oversized header length with UNSUPPORTED", async () => {
+    const { header, chunks } = split(await seal(gen(10)));
+    for (const h of [{ ...header, version: 2 }, { ...header, chunkSize: 4096 }, { ...header, cipher: "aes-256-gcm" }]) {
+      const json = Buffer.from(JSON.stringify(h));
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(json.length);
+      await rejects(open(Buffer.concat([len, json, ...chunks])), "UNSUPPORTED");
+    }
+    await rejects(open(Buffer.from([0xff, 0xff, 0xff, 0xff, 0x7b])), "UNSUPPORTED");
+    await rejects(open(Buffer.from("not a backup at all")), "UNSUPPORTED");
+  }, 30000);
+
+  it("refuses a passphrase under 12 code points when sealing", () => {
+    expect(() => core.createBackupSealer("short")).toThrow(expect.objectContaining({ code: "PASSPHRASE_TOO_SHORT" }));
+    expect(() => core.createBackupSealer("🔫".repeat(11))).toThrow(expect.objectContaining({ code: "PASSPHRASE_TOO_SHORT" }));
+  });
+
+  it("an NFD passphrase opens a backup sealed with the NFC form", async () => {
+    const p = "pässwörd-ünïcode";
+    const input = gen(5000);
+    const sealed = await seal(input, p.normalize("NFC"));
+    expect((await open(sealed, p.normalize("NFD"))).equals(input)).toBe(true);
+  }, 30000);
+});
