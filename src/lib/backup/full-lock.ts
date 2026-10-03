@@ -15,11 +15,14 @@ import path from "node:path";
  * refreshes its mtime every 30 s (the heartbeat) for as long as it holds it.
  *
  * Is an existing lock live? (ruling R10)
- * - Same hostname: the pid decides. A dead pid is reclaimed at once. A lock
- *   carrying THIS process's pid is live only if this process really holds it
- *   (`held`): a container that crashed mid-backup restarts with the same
- *   hostname and the same pid, so "the pid is alive" alone would make its
- *   leftover lock permanent.
+ * - Same hostname: live only while its pid is alive AND its heartbeat is
+ *   fresh (ruling R12). A dead pid is reclaimed at once. A live pid alone is
+ *   not enough: the Settings-button backup runs inside the server process, so
+ *   after a crash and an in-place restart (same hostname) the lock names a
+ *   pid that is alive again — as the new server, not as a backup. Nothing
+ *   beats that lock's heart, so it goes stale after 5 minutes. A lock
+ *   carrying THIS process's pid must also really be held by this process
+ *   (`held`).
  * - Different hostname: a pid means nothing across containers (the app and a
  *   `docker compose run` CLI are both pid 1 in their own namespaces), so only
  *   the heartbeat decides: live unless the mtime is older than 5 minutes.
@@ -32,10 +35,21 @@ import path from "node:path";
  *   for up to 5 minutes.
  *
  * Reclaiming a stale lock is serialised by a second exclusive file,
- * `.full-backup.lock.reclaim`: only its holder may replace the stale lock,
- * it re-judges the lock after taking the guard, and it replaces it with one
- * atomic rename — the lock path is never empty in between, so a plain
- * create (`wx`) cannot slip in. Of any number of contenders exactly one wins.
+ * `.full-backup.lock.reclaim`, holding its owner's token: only its holder
+ * may replace the stale lock. The holder re-judges the lock after taking the
+ * guard, confirms the guard is still its own immediately before replacing,
+ * and replaces with one atomic rename — the lock path is never empty in
+ * between, so a plain create (`wx`) cannot slip in.
+ *
+ * A guard left by a reclaimer that died is itself stale after 5 minutes. It
+ * is never removed by path: two contenders that both saw the old guard would
+ * then delete each other's NEW guard and both reclaim. Instead a contender
+ * CLAIMS it with an atomic rename to a name of its own and then looks at
+ * what it got. If that is the old guard, it is deleted and the contender
+ * starts over. If it is someone's fresh guard (taken after this contender
+ * looked), it is put back and the contender backs off. Never two winners;
+ * in that last interleaving the round can end with no winner (the guard's
+ * owner finds it missing and backs off too) and the next attempt succeeds.
  *
  * Known limits: a pid recycled by an unrelated process on the same host keeps
  * a stale lock alive until that process exits; the heartbeat rule compares
@@ -82,6 +96,13 @@ export interface FullBackupLockOptions {
   staleMs?: number;
   /** This machine's name, written into the lock and compared with an existing one. Default `os.hostname()`. */
   hostname?: string;
+  /** Tests only: pause points that let a test force an interleaving between contenders. */
+  hooks?: {
+    /** After a stale reclaim guard was seen, before it is claimed. */
+    beforeStaleGuardClaim?: () => Promise<void>;
+    /** Once this contender holds the reclaim guard, before it re-judges the lock. */
+    afterGuardTaken?: () => Promise<void>;
+  };
 }
 
 export interface FullBackupLock {
@@ -144,10 +165,12 @@ async function judge(lockPath: string, hostname: string, staleMs: number): Promi
   }
   const body = parseLock(text);
   let live: boolean;
+  const heartbeatFresh = Date.now() - mtimeMs <= staleMs;
   if (body && body.hostname === hostname) {
-    live = body.pid === process.pid ? held.get(lockPath) === body.token : pidIsAlive(body.pid);
+    const pidLive = body.pid === process.pid ? held.get(lockPath) === body.token : pidIsAlive(body.pid);
+    live = pidLive && heartbeatFresh;
   } else {
-    live = Date.now() - mtimeMs <= staleMs;
+    live = heartbeatFresh;
   }
   return { state: live ? "live" : "stale", body };
 }
@@ -180,6 +203,39 @@ async function createExclusive(file: string, text: string): Promise<boolean> {
   }
   await handle.close();
   return true;
+}
+
+async function guardIsOurs(guardPath: string, token: string): Promise<boolean> {
+  return fsp.readFile(guardPath, "utf8").then((text) => text === token, () => false);
+}
+
+/**
+ * Takes a stale reclaim guard out of the way. True when the old guard is
+ * gone and the caller may start over; false when the caller must back off.
+ *
+ * The guard is claimed by renaming it to a name only this contender uses —
+ * atomic, so of several contenders that saw the same old guard only one gets
+ * it — and then checked: between this contender's look and its rename, the
+ * old guard may already have been cleared and replaced by a live reclaimer's
+ * fresh one. A fresh guard is put back (link: never over a guard someone
+ * else created meanwhile) and left alone.
+ */
+async function claimStaleGuard(guardPath: string, token: string, staleMs: number): Promise<boolean> {
+  const claimed = `${guardPath}.${token}.claimed`;
+  try {
+    await fsp.rename(guardPath, claimed);
+  } catch (e) {
+    if (codeOf(e) === "ENOENT") return true; // someone else cleared it: start over
+    throw e;
+  }
+  try {
+    const age = Date.now() - (await fsp.stat(claimed)).mtimeMs;
+    if (age > staleMs) return true; // the old guard: dropped below
+    await fsp.link(claimed, guardPath).catch(() => undefined); // a live reclaimer's guard: give it back
+    return false;
+  } finally {
+    await fsp.rm(claimed, { force: true }).catch(() => undefined);
+  }
 }
 
 /**
@@ -245,28 +301,32 @@ export async function acquireFullBackupLock(dir: string, opts: FullBackupLockOpt
     if (verdict.state === "live") throw alreadyRunning(verdict.body);
 
     // Stale. Only the holder of the reclaim guard may replace it.
-    if (!(await createExclusive(guardPath, ""))) {
+    if (!(await createExclusive(guardPath, token))) {
       const guardAge = await fsp.stat(guardPath).then((s) => Date.now() - s.mtimeMs, () => null);
       // No guard any more (the other reclaimer just finished): look again.
       if (guardAge === null) continue;
       // Someone is reclaiming right now: they, or whoever they find, hold the lock.
       if (guardAge <= staleMs) throw alreadyRunning(verdict.body);
-      // A reclaimer died holding the guard, long ago.
-      await fsp.rm(guardPath, { force: true });
-      continue;
+      // A reclaimer died holding the guard, long ago — as far as we saw.
+      await opts.hooks?.beforeStaleGuardClaim?.();
+      if (await claimStaleGuard(guardPath, token, staleMs)) continue;
+      throw alreadyRunning(verdict.body);
     }
     const tmpPath = `${lockPath}.${token}.tmp`;
     try {
+      await opts.hooks?.afterGuardTaken?.();
       // Judged again now that no one else can be reclaiming.
       const again = await judge(lockPath, hostname, staleMs);
       if (again.state === "live") throw alreadyRunning(again.body);
       if (again.state === "gone") continue; // nothing to replace; a plain create decides
       if (!(await createExclusive(tmpPath, text))) throw new Error(`full-backup lock: ${tmpPath} already exists`);
+      // The guard must still be ours at the moment we replace the lock.
+      if (!(await guardIsOurs(guardPath, token))) throw alreadyRunning(again.body);
       await fsp.rename(tmpPath, lockPath); // atomic: the stale lock becomes ours
       return hold();
     } finally {
       await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
-      await fsp.rm(guardPath, { force: true }).catch(() => undefined);
+      if (await guardIsOurs(guardPath, token)) await fsp.rm(guardPath, { force: true }).catch(() => undefined);
     }
   }
 

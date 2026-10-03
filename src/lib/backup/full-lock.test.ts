@@ -82,10 +82,26 @@ describe("acquireFullBackupLock", () => {
   });
 
   describe("same hostname: liveness is the pid", () => {
-    it("another LIVE process is respected — even when its heartbeat is old", async () => {
-      plant({ pid: process.ppid, startedAt: new Date().toISOString(), hostname: HOST, token: "other" }, FULL_BACKUP_LOCK_STALE_MS * 2);
+    it("another LIVE process with a fresh heartbeat is respected", async () => {
+      plant({ pid: process.ppid, startedAt: new Date().toISOString(), hostname: HOST, token: "other" }, FULL_BACKUP_LOCK_STALE_MS - 30_000);
       await expect(acquireFullBackupLock(dir)).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
       expect(body().token).toBe("other");
+    });
+
+    it("R12, the restart case: a LIVE pid whose heartbeat is old is reclaimed (the container restarted in place; that pid now belongs to the new server, not to a backup)", async () => {
+      plant({ pid: process.ppid, startedAt: "2026-01-01T00:00:00.000Z", hostname: HOST, token: "crashed-run" }, FULL_BACKUP_LOCK_STALE_MS + 30_000);
+      await acquire(dir);
+      expect(body()).toMatchObject({ pid: process.pid, hostname: HOST });
+      expect(body().token).not.toBe("crashed-run");
+    });
+
+    it("R12: this process's OWN held lock is live only while its heartbeat is fresh too", async () => {
+      await acquire(dir, { heartbeatMs: 60_000 });
+      await expect(acquireFullBackupLock(dir)).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
+      const old = new Date(Date.now() - FULL_BACKUP_LOCK_STALE_MS - 30_000);
+      utimesSync(lockPath(), old, old);
+      const second = await acquire(dir);
+      expect(second.path).toBe(lockPath());
     });
 
     it("a DEAD pid is reclaimed at once, however fresh the heartbeat", async () => {
@@ -238,6 +254,115 @@ describe("acquireFullBackupLock", () => {
       await acquire(dir);
       expect(body().pid).toBe(process.pid);
       expect(existsSync(guard)).toBe(false);
+    });
+  });
+
+  describe("a stale reclaim guard (a reclaimer died holding it)", () => {
+    const guardPath = () => `${lockPath()}.reclaim`;
+    function plantStaleLockAndGuard(): void {
+      plant({ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "stale" }, FULL_BACKUP_LOCK_STALE_MS * 2);
+      writeFileSync(guardPath(), "dead-reclaimer");
+      const then = new Date(Date.now() - FULL_BACKUP_LOCK_STALE_MS * 2);
+      utimesSync(guardPath(), then, then);
+    }
+
+    it("FORCED interleaving: both contenders see the stale guard; A clears it and takes a fresh guard; B then acts on its old observation — B must not remove A's guard, and exactly one wins", async () => {
+      plantStaleLockAndGuard();
+      const gate = () => {
+        let open!: () => void;
+        const wait = new Promise<void>((r) => (open = r));
+        return { wait, open };
+      };
+      // Each contender pauses (1) after seeing the stale guard, before acting on it, and (2) once it holds a guard of its own.
+      const seen = { A: gate(), B: gate() };
+      const go = { A: gate(), B: gate() };
+      const holding = { A: gate(), B: gate() };
+      const finish = { A: gate(), B: gate() };
+      const contender = (name: "A" | "B") =>
+        acquireFullBackupLock(dir, {
+          hooks: {
+            beforeStaleGuardClaim: async () => {
+              seen[name].open();
+              await go[name].wait;
+            },
+            afterGuardTaken: async () => {
+              holding[name].open();
+              await finish[name].wait;
+            },
+          },
+        });
+
+      const a = contender("A");
+      const b = contender("B");
+      a.catch(() => undefined);
+      b.catch(() => undefined);
+      await Promise.all([seen.A.wait, seen.B.wait]); // both have statted the OLD guard
+
+      go.A.open();
+      await holding.A.wait; // A cleared the stale guard and now holds a fresh one
+
+      go.B.open(); // B acts on what it saw before A's guard existed
+      await Promise.race([holding.B.wait, b.catch(() => undefined)]); // B either (wrongly) takes a guard, or backs off
+
+      finish.A.open();
+      finish.B.open();
+      const results = await Promise.allSettled([a, b]);
+      const won = results.filter((r): r is PromiseFulfilledResult<FullBackupLock> => r.status === "fulfilled");
+      open.push(...won.map((w) => w.value));
+      expect(won).toHaveLength(1);
+      expect(results[0].status).toBe("fulfilled"); // A, whose guard it was
+      expect((results[1] as PromiseRejectedResult).reason).toBeInstanceOf(FullBackupAlreadyRunningError);
+      expect(body().pid).toBe(process.pid);
+      await won[0].value.release();
+      expect(readdirSync(dir)).toEqual([]); // no lock, no guard, no claimed-guard leftovers
+    });
+
+    it("25 contenders on a stale lock PLUS a stale guard: never two winners, and the lock is taken within two rounds", async () => {
+      for (let round = 0; round < 8; round++) {
+        plantStaleLockAndGuard();
+        let winners: FullBackupLock[] = [];
+        for (let pass = 0; pass < 2 && winners.length === 0; pass++) {
+          const results = await Promise.allSettled(Array.from({ length: 25 }, () => acquireFullBackupLock(dir)));
+          winners = results.filter((r): r is PromiseFulfilledResult<FullBackupLock> => r.status === "fulfilled").map((r) => r.value);
+          expect(winners.length, `round ${round} pass ${pass}`).toBeLessThanOrEqual(1);
+          expect(
+            results.filter((r) => r.status === "rejected").every((r) => (r as PromiseRejectedResult).reason instanceof FullBackupAlreadyRunningError),
+          ).toBe(true);
+        }
+        expect(winners, `round ${round}`).toHaveLength(1);
+        await winners[0].release();
+        expect(readdirSync(dir), `round ${round}`).toEqual([]);
+      }
+    });
+
+    it("the guard holds its owner's token while a reclaim is in progress", async () => {
+      plant({ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "stale" }, FULL_BACKUP_LOCK_STALE_MS * 2);
+      let guardText = "";
+      const lock = await acquire(dir, {
+        hooks: {
+          afterGuardTaken: async () => {
+            guardText = readFileSync(guardPath(), "utf8");
+          },
+        },
+      });
+      expect(guardText).toMatch(/^[0-9a-f]{16}$/);
+      expect(body().token).toBe(guardText);
+      expect(existsSync(guardPath())).toBe(false);
+      await lock.release();
+    });
+
+    it("a holder whose guard was taken away before it could finish backs off instead of replacing the lock", async () => {
+      plant({ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "stale" }, FULL_BACKUP_LOCK_STALE_MS * 2);
+      const attempt = acquireFullBackupLock(dir, {
+        hooks: {
+          afterGuardTaken: async () => {
+            writeFileSync(guardPath(), "someone-else"); // as if another contender now holds the guard
+          },
+        },
+      });
+      await expect(attempt).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
+      expect(body().token).toBe("stale"); // not replaced
+      expect(readFileSync(guardPath(), "utf8")).toBe("someone-else"); // and their guard is left alone
     });
   });
 
