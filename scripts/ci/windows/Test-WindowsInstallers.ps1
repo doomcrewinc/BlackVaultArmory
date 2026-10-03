@@ -2070,8 +2070,9 @@ $d = New-BackupSandbox "backup-bad-args"
 $pf = New-PassFile $d "$BackupPass`n"
 # "1;2": Windows CI (fa9f32f) showed for /f drops a value whose first
 # character AFTER its leading delimiters is ";", not only one that starts
-# with it - the same hole as "a;b.bvb" in BK9.
-foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000", "1;2")) {
+# with it - the same hole as "a;b.bvb" in BK9. It is passed in quotes:
+# unquoted, cmd.exe itself splits the argument at the semicolon.
+foreach ($bad in @("0", "000", "-1", "1.5", "seven", "1000000", "`"1;2`"")) {
   $r = Invoke-Backup $d "--keep $bad --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
   Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: --keep needs a whole number" -and [string]::IsNullOrWhiteSpace($r.StubLog)) "--keep $bad refused, docker never invoked (exit $($r.ExitCode))"
   Show-EvidenceIfFailed $r
@@ -2186,6 +2187,24 @@ Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOU
 Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BLACKVAULT_BACKUP_TIMEOUT" = "6h" }
 Assert ($r.ExitCode -eq 1 -and $r.Output -match "ERROR: BLACKVAULT_BACKUP_TIMEOUT must be a number of seconds" -and @(Get-BackupCalls $r).Count -eq 0) "a non-numeric limit is refused before the program starts (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario BK11
+# Windows CI (269a53f): the argument parser used a bare `shift`, which moves
+# the arguments into %0 too, so `cd /d "%~dp0"` went to the folder of the
+# LAST argument - the passphrase file. Every scenario above keeps that file
+# in the install folder, which hid it.
+Write-Scenario "backup.bat - the passphrase file lives in ANOTHER folder: the script still works from its own folder (.env is read there)"
+$elsewhere = Join-Path $Sandboxes "backup-pass-elsewhere-secrets"
+$nas2 = Join-Path $Sandboxes "backup-pass-elsewhere-nas"
+New-Item -ItemType Directory -Force -Path $elsewhere, $nas2 | Out-Null
+$d = New-BackupSandbox "backup-pass-elsewhere" @("BLACKVAULT_BACKUP_DIR=$nas2")
+$pf = New-PassFile $elsewhere "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $nas2 $name)`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "BLACKVAULT_BACKUP_DIR was read from the .env beside the script (exit $($r.ExitCode); got: $($calls -join ' || '))"
+$got = if (Test-Path (Join-Path $d "__stdin.bin")) { [IO.File]::ReadAllText((Join-Path $d "__stdin.bin"), (New-Object Text.UTF8Encoding($false))) } else { "" }
+Assert ($got -eq "$BackupPass`n") "the passphrase arrived on stdin"
 Show-EvidenceIfFailed $r
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2543,6 +2562,24 @@ Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "ERROR: BV_RESTORE_PHASE is set in this console") "says why"
 Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never called"
 Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
+Show-EvidenceIfFailed $r
+
+# --------------------------------------------------------------- scenario RS14
+# Windows CI (269a53f): see BK11. In restore.bat the bare `shift` also made
+# %~f0 the passphrase file, which is what the PowerShell step starts for
+# steps 5-7 - so cmd.exe "ran" a .txt file and the restore never went on.
+Write-Scenario "restore.bat - the passphrase file lives in ANOTHER folder: the whole restore still runs from the script's own folder"
+$elsewhere = Join-Path $Sandboxes "restore-pass-elsewhere-secrets"
+New-Item -ItemType Directory -Force -Path $elsewhere | Out-Null
+$d = New-RestoreSandbox "restore-pass-elsewhere"
+$pf = New-PassFile $elsewhere "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$steps = @(Get-RestoreSteps $r)
+Assert ((Get-StepIndex $steps '^compose stop blackvault$') -gt 0 -and (Get-StepIndex $steps $RestoreCallPattern) -gt (Get-StepIndex $steps '^compose stop blackvault$')) "check, stop, restore - in that order"
+Assert (($steps | Select-Object -Last 1) -eq "compose up -d") "BlackVault is started last"
+Assert (@(Get-Backups $d | Where-Object { $_ -match '^blackvault-\d{8}-\d{6}\.db$' }).Count -eq 1) "the snapshot went into the backups folder of the install"
+Assert ($r.Output.Contains("Restore complete.")) "says the restore is complete"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------------- report
