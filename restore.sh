@@ -199,7 +199,8 @@ RECOVERY_FILE="backups/restore-$STAMP-RECOVERY.txt"
 # The one-off restore container gets a name, so that it can be stopped by name.
 CONTAINER="blackvault-restore-$STAMP"
 # docker-compose.yml mounts <DATA_DIR>/uploads at /app/uploads. The restore
-# program's marker and its .pre-restore folder are looked for here, on the host.
+# program's marker and its .pre-restore folder are here, seen from the host
+# (restore_state says when the host is asked, and when a container is).
 HOST_UPLOADS_DIR="$HOST_DATA_DIR/uploads"
 MARKER_HOST="$HOST_UPLOADS_DIR/.restore-$STAMP.db-started"
 
@@ -246,38 +247,62 @@ rollback_uploads() {
   "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}" >&2
 }
 
-# Ruling R24. What the restore program left behind, seen from the host:
+# Ruling R24. What the restore program left behind:
 #   started    its marker exists: the database step was reached, so the
 #              database may hold the backup's records.
-#   complete   no marker, but .pre-restore-<time> exists: the program removes
-#              its marker only after everything is in place, so the restore
-#              FINISHED and only its exit status was lost.
+#   complete   no marker, but .pre-restore-<time> holds a previous folder: the
+#              program removes its marker only after everything is in place,
+#              so the restore FINISHED and only its exit status was lost.
 #   untouched  neither: the database step was never reached.
-#   unknown    the uploads folder cannot be looked into from here AND the
-#              question could not be put to a container either. Nothing is
-#              rolled back blindly: BlackVault is not started and the
-#              recovery file says what to do.
-# scripts/snapshot-restore.sh applies the same rule again by itself, inside
-# the container (ruling R28): its `uploads` mode changes nothing after a
-# finished restore, whatever this function answered.
+#   unknown    neither a container nor the host could say. Nothing is rolled
+#              back blindly: BlackVault is not started and the recovery file
+#              says what to do.
+# The answer comes from INSIDE a container, as root: scripts/snapshot-restore.sh
+# `state` is the rule itself, and it sees what the restore program wrote. The
+# host cannot be relied on: on Linux the program creates .pre-restore-<time>
+# with mode 0700 as uid 1001, so the user running this script can see that it
+# exists but not what is in it. The host is looked at only when the container
+# could not be asked, and it answers only what it can actually see: a
+# .pre-restore-<time> that exists but cannot be entered is `unknown`, never
+# `untouched`.
+# scripts/snapshot-restore.sh applies the same rule again by itself (ruling
+# R28): its `uploads` mode changes nothing after a finished restore, whatever
+# this function answered.
+container_restore_state() {
+  local seen
+  seen=$("${SNAPSHOT_RESTORE[@]}" state /app/uploads "$STAMP" 2> /dev/null | tr -d '[:space:]') || seen=""
+  case "$seen" in
+    started | complete | untouched) echo "$seen" ;;
+    *) echo unknown ;;
+  esac
+}
+
+host_can_enter() {
+  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
+}
+
+host_restore_state() {
+  local pre="$HOST_UPLOADS_DIR/.pre-restore-$STAMP"
+  if ! host_can_enter "$HOST_UPLOADS_DIR"; then
+    echo unknown
+  elif [ -e "$MARKER_HOST" ]; then
+    echo started
+  elif [ ! -e "$pre" ] && [ ! -L "$pre" ]; then
+    echo untouched
+  elif ! host_can_enter "$pre"; then
+    echo unknown
+  elif { [ -d "$pre/images" ] && [ ! -L "$pre/images" ]; } || { [ -d "$pre/documents" ] && [ ! -L "$pre/documents" ]; }; then
+    echo complete
+  else
+    echo untouched
+  fi
+}
+
 restore_state() {
   local seen
-  if [ -e "$MARKER_HOST" ]; then
-    echo started
-  elif [ -d "$HOST_UPLOADS_DIR" ] && [ -r "$HOST_UPLOADS_DIR" ] && [ -x "$HOST_UPLOADS_DIR" ]; then
-    if [ -d "$HOST_UPLOADS_DIR/.pre-restore-$STAMP/images" ] || [ -d "$HOST_UPLOADS_DIR/.pre-restore-$STAMP/documents" ]; then
-      echo complete
-    else
-      echo untouched
-    fi
-  else
-    # The host user cannot enter the folder (it belongs to the app user): ask inside a container.
-    seen=$("${SNAPSHOT_RESTORE[@]}" state /app/uploads "$STAMP" 2> /dev/null | tr -d '[:space:]') || seen=""
-    case "$seen" in
-      started | complete | untouched) echo "$seen" ;;
-      *) echo unknown ;;
-    esac
-  fi
+  seen=$(container_restore_state)
+  [ "$seen" != "unknown" ] || seen=$(host_restore_state)
+  echo "$seen"
 }
 
 # Ruling R25. Where the snapshot is and exactly what to run, for when this
@@ -357,12 +382,29 @@ recovery_text() {
 # This run's two names must be free. If one exists (a second run in the same
 # second, a clock set back), the restore program would refuse — and a
 # leftover .pre-restore folder would then read as "the restore finished".
-for f in "$HOST_UPLOADS_DIR/.pre-restore-$STAMP" "$MARKER_HOST"; do
-  if [ -e "$f" ]; then
-    PASSPHRASE=""
-    die "$f already exists (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped."
-  fi
-done
+# Looked at from the host when the host can enter the uploads folder (a name
+# is visible there even when the folder behind it is not); otherwise the
+# container is asked, as restore_state does.
+if host_can_enter "$HOST_UPLOADS_DIR" || [ ! -e "$HOST_UPLOADS_DIR" ]; then
+  for f in "$HOST_UPLOADS_DIR/.pre-restore-$STAMP" "$MARKER_HOST"; do
+    if [ -e "$f" ]; then
+      PASSPHRASE=""
+      die "$f already exists (left by an earlier restore with the same time stamp). Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped."
+    fi
+  done
+else
+  case "$(container_restore_state)" in
+    untouched) ;;
+    started | complete)
+      PASSPHRASE=""
+      die "an earlier restore with the same time stamp ($STAMP) left its .pre-restore folder or its marker in the uploads folder. Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped."
+      ;;
+    *)
+      PASSPHRASE=""
+      die "could not check the uploads folder $HOST_UPLOADS_DIR for what an earlier restore may have left: it cannot be entered from here, and asking inside a container failed. Nothing was changed; BlackVault was not stopped."
+      ;;
+  esac
+fi
 
 # ── 4. Stop the app, snapshot the database and the uploads ────
 # Interrupted before the restore itself has started: nothing was changed.
@@ -499,7 +541,7 @@ fi
 echo "" >&2
 ROLLED_BACK=1
 if [ "$STATE" = "unknown" ]; then
-  echo "The restore failed (exit $RC; the reason is above), and how far it got could not be found out: the uploads folder $HOST_UPLOADS_DIR cannot be looked into from here, and asking inside a container failed. Nothing is rolled back blindly." >&2
+  echo "The restore failed (exit $RC; the reason is above), and how far it got could not be found out: asking inside a container failed, and the uploads folder $HOST_UPLOADS_DIR (or its .pre-restore-$STAMP) cannot be looked into from here. Nothing is rolled back blindly." >&2
   ROLLED_BACK=0
 elif [ "$STATE" = "started" ]; then
   echo "The restore failed (exit $RC; the reason is above) after it had reached the database. Putting the uploads and the database back from the snapshot..." >&2

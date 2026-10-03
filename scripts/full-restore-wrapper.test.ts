@@ -82,7 +82,11 @@ case "$*" in
       chmod 755 "$dd/uploads" 2>/dev/null
       [ "$a" = "/bv-snapshot-restore.sh" ] && seen=1
     done
-    sh scripts/snapshot-restore.sh "\${args[@]}"; exit $? ;;
+    # "root in the container" can enter a folder the host user cannot (BV_STUB_HIDE_PRE); the host still cannot afterwards.
+    [ "\${BV_STUB_HIDE_PRE:-}" = 1 ] && chmod 700 "$dd"/uploads/.pre-restore-* 2>/dev/null
+    sh scripts/snapshot-restore.sh "\${args[@]}"; rc=$?
+    [ "\${BV_STUB_HIDE_PRE:-}" = 1 ] && chmod 000 "$dd"/uploads/.pre-restore-* 2>/dev/null
+    exit $rc ;;
   *"dist/scripts/full-backup.mjs --verify"*)
     cat > "${rec}/stdin-verify"
     [ "\${BV_STUB_VERIFY_EXIT:-0}" = 0 ] && echo "BLACKVAULT_FULL_BACKUP_VERIFIED file=${NAME} files=2 bytes=10 archive_bytes=99"
@@ -93,6 +97,8 @@ case "$*" in
     # Once the "container" has ended, the host user can no longer look into the uploads folder.
     [ "\${BV_STUB_HIDE_UPLOADS:-}" = 1 ] && trap 'chmod 000 "$dd/uploads"' EXIT
     stamp=""; prev=""; for a in "$@"; do [ "$prev" = "--stamp" ] && stamp=$a; prev=$a; done
+    # BV_STUB_HIDE_PRE=1: as on native Linux, the program's .pre-restore-<time> (mode 0700, uid 1001) cannot be entered by the host user.
+    [ "\${BV_STUB_HIDE_PRE:-}" = 1 ] && trap 'chmod 000 "$dd/uploads/.pre-restore-$stamp" 2>/dev/null' EXIT
     # What is on disk WHILE the restore runs: the recovery file (ruling R25).
     cat backups/restore-*-RECOVERY.txt > "${rec}/recovery-during" 2>/dev/null
     marker() { mkdir -p "$dd/uploads/.restore-$stamp.db-started" && : > "$dd/uploads/.restore-$stamp.db-started/started"; }
@@ -404,6 +410,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.stdout).toBe("");
       const stamp = stampOf();
       expect(afterRestore()).toEqual([
+        `${ROLLBACK()} state /app/uploads ${stamp}`, // how far it got is asked inside a container first (I1)
         `${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`,
         `${ROLLBACK()} sqlite /bv-backups/${dbSnapName()} /app/data/vault.db /app/uploads ${stamp}`,
         `${ROLLBACK()} clear-marker /app/uploads ${stamp}`,
@@ -425,7 +432,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const dbBefore = { sha: sha(fs.readFileSync(dbPath)), mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino };
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse" } });
       expect(r.code).toBe(1);
-      expect(afterRestore()).toEqual([`${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
+      expect(afterRestore()).toEqual([`${ROLLBACK()} state /app/uploads ${stampOf()}`, `${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
       expect(read("calls")).not.toMatch(/bv-snapshot-restore\.sh (sqlite|clear-marker)|psql/);
       expect({ sha: sha(fs.readFileSync(dbPath)), mtime: fs.statSync(dbPath).mtimeMs, ino: fs.statSync(dbPath).ino }).toEqual(dbBefore); // not even rewritten
       expect(install()).toEqual(before);
@@ -439,7 +446,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const before = install();
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "dbfail" } });
       expect(r.code).toBe(1);
-      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["uploads", "sqlite", "clear-marker", "compose up -d"]);
+      expect(afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c)).toEqual(["state", "uploads", "sqlite", "clear-marker", "compose up -d"]);
       expect(install()).toEqual(before);
     });
 
@@ -448,7 +455,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const before = install();
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "refuse" } });
       expect(r.code).toBe(1);
-      expect(afterRestore()).toEqual([`${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
+      expect(afterRestore()).toEqual([`${ROLLBACK()} state /app/uploads ${stampOf()}`, `${ROLLBACK()} uploads /app/uploads ${stampOf()} /bv-backups/${upSnapName()}`, "compose up -d"]);
       expect(read("calls")).not.toMatch(/psql|DROP DATABASE|clear-marker/);
       expect(install()).toEqual(before);
     });
@@ -461,6 +468,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const stamp = stampOf();
       expect(steps().slice(0, steps().findIndex((c) => RESTORE.test(c)))).toEqual(expect.arrayContaining(["compose up -d --wait db", "compose exec -T db pg_dump -U blackvault -d blackvault"]));
       expect(afterRestore()).toEqual([
+        `${ROLLBACK()} state /app/uploads ${stamp}`,
         `${ROLLBACK()} uploads /app/uploads ${stamp} /bv-backups/${upSnapName()}`,
         "compose up -d --wait db",
         `${PSQL} -d postgres -c DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE) -c CREATE DATABASE blackvault_rollback OWNER blackvault`,
@@ -508,10 +516,76 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(recoveryFiles()).toHaveLength(1);
     });
 
+    describe("I1: on native Linux the host user cannot enter .pre-restore-<time> (0700, uid 1001): the container is asked FIRST", () => {
+      const modes = () => afterRestore().map((c) => c.split("/bv-snapshot-restore.sh ")[1]?.split(" ")[0] ?? c);
+      const unhide = () => {
+        for (const n of fs.readdirSync(path.join(app, "data/uploads"))) if (n.startsWith(".pre-restore-")) fs.chmodSync(path.join(app, "data/uploads", n), 0o755);
+      };
+
+      it("the container answers complete: exit 0 with the WARNING, nothing rolled back, the RECOVERY file removed, BlackVault started", () => {
+        const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete", BV_STUB_HIDE_PRE: "1" } });
+        unhide();
+        expect(r.code, r.stderr).toBe(0);
+        expect(afterRestore()).toEqual([`${ROLLBACK()} state /app/uploads ${stampOf()}`, "compose up -d"]);
+        expect(r.stderr).toMatch(/WARNING: the restore program ended with exit 137, but it had FINISHED: .* Nothing is rolled back\./);
+        expect(r.stderr).not.toContain("the restore failed");
+        expect(lines(r.stderr)).toContain("Restore complete.");
+        expect(recoveryFiles()).toEqual([]);
+        // The restored state is still there: nothing was moved back.
+        expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
+        expect(fs.readFileSync(path.join(app, "data/db/vault.db"), "utf8")).toBe("THE RESTORED RECORDS");
+        expect(fs.existsSync(path.join(app, `data/uploads/.pre-restore-${stampOf()}/images/firearms/photo1.jpg`))).toBe(true);
+      });
+
+      it("the container answers started: the full rollback (uploads, database, marker), then start; byte-identical to before", () => {
+        const before = install();
+        const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "crash", BV_STUB_HIDE_PRE: "1" } });
+        expect(r.code).toBe(1);
+        expect(modes()).toEqual(["state", "uploads", "sqlite", "clear-marker", "compose up -d"]);
+        expect(install()).toEqual(before);
+        expect(recoveryFiles()).toEqual([]);
+      });
+
+      it("the container cannot answer and the host cannot look into .pre-restore-<time>: unknown — nothing rolled back, BlackVault not started, the RECOVERY file kept and shown", () => {
+        const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete", BV_STUB_HIDE_PRE: "1", BV_STUB_ROLLBACK_FAIL: "state" } });
+        unhide();
+        expect(r.code).toBe(1);
+        expect(modes()).toEqual(["state"]);
+        expect(r.stderr).toContain("how far it got could not be found out");
+        expect(r.stderr).toContain("Nothing is rolled back blindly.");
+        expect(r.stderr).toContain("BlackVault was NOT started.");
+        expect(r.stderr).not.toContain("Nothing is changed");
+        expect(steps()).not.toContain("compose up -d");
+        expect(recoveryFiles()).toHaveLength(1);
+        expect(fs.readFileSync(path.join(app, "data/db/vault.db"), "utf8")).toBe("THE RESTORED RECORDS");
+      });
+
+      it("the container cannot answer but the host CAN look: the host's answer is used (complete → exit 0; untouched → uploads checked; started → rollback attempted)", () => {
+        const done = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete", BV_STUB_ROLLBACK_FAIL: "state" } });
+        expect(done.code, done.stderr).toBe(0);
+        expect(modes()).toEqual(["state", "compose up -d"]);
+        expect(recoveryFiles()).toEqual([]);
+
+        for (const [stub, expected] of [
+          ["refuse", ["state", "uploads", "compose up -d"]],
+          ["crash", ["state", "uploads", "sqlite", "clear-marker", "compose up -d"]],
+        ] as Array<[string, string[]]>) {
+          fs.rmSync(path.join(rec, "calls"));
+          fs.rmSync(path.join(app, "backups"), { recursive: true });
+          fs.rmSync(path.join(app, "data"), { recursive: true });
+          seedInstall();
+          const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: stub, BV_STUB_ROLLBACK_FAIL: "state" } });
+          expect(r.code).toBe(1);
+          expect(modes(), stub).toEqual(expected);
+          expect(recoveryFiles()).toEqual([]);
+        }
+      });
+    });
+
     it("the program had FINISHED but its exit status was lost (no marker, .pre-restore-<time> in place): nothing is rolled back; BlackVault is started; exit 0 with a WARNING", () => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_RESTORE: "complete" } });
       expect(r.code, r.stderr).toBe(0);
-      expect(afterRestore()).toEqual(["compose up -d"]);
+      expect(afterRestore()).toEqual([`${ROLLBACK()} state /app/uploads ${stampOf()}`, "compose up -d"]);
       expect(r.stderr).toMatch(/WARNING: the restore program ended with exit 137, but it had FINISHED: .* Nothing is rolled back\. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing\./);
       expect(fs.readFileSync(path.join(app, "data/uploads/images/from-backup.jpg"), "utf8")).toBe("restored");
       expect(recoveryFiles()).toEqual([]);
@@ -706,6 +780,32 @@ describe.skipIf(isWindows)("restore.sh", () => {
       );
       fs.rmdirSync(path.join(app, "data/uploads", leftover));
       expect(install()).toEqual(before);
+    });
+
+    // I1: the same blind spot before the run. The host cannot enter the uploads folder, so the container is asked.
+    it.each([
+      [".pre-restore-20270101-000000/images", "complete"],
+      [".restore-20270101-000000.db-started", "started"],
+    ])("the uploads folder cannot be entered from the host and %s is there: the container is asked, and the restore is refused before BlackVault is stopped", (leftover) => {
+      fs.mkdirSync(path.join(app, "data/uploads", leftover), { recursive: true });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o000);
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000" } });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(steps()).toEqual([VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
+      expect(lines(r.stderr).at(-1)).toBe(
+        "ERROR: an earlier restore with the same time stamp (20270101-000000) left its .pre-restore folder or its marker in the uploads folder. Wait a second and run the restore again. Nothing was changed; BlackVault was not stopped.",
+      );
+    });
+
+    it("the uploads folder cannot be entered from the host and the container cannot be asked: refused before BlackVault is stopped", () => {
+      fs.chmodSync(path.join(app, "data/uploads"), 0o000);
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { BV_STUB_DATE: "20270101-000000", BV_STUB_ROLLBACK_FAIL: "state" } });
+      fs.chmodSync(path.join(app, "data/uploads"), 0o755);
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([VERIFY, `${ROLLBACK()} state /app/uploads 20270101-000000`]);
+      expect(lines(r.stderr).at(-1)).toMatch(/^ERROR: could not check the uploads folder .* Nothing was changed; BlackVault was not stopped\.$/);
     });
   });
 
