@@ -301,6 +301,38 @@ export const MAX_LITERAL_SCAN_ROWS = 5000;
 const LITERAL_SCAN_BATCH = 500;
 
 /**
+ * Reads batches in the list order from `filters.cursor`, keeping the rows whose
+ * label contains `term` literally, until `wanted` are found, the log ends, or
+ * `MAX_LITERAL_SCAN_ROWS` rows were read. `boundary` is the cursor of the last
+ * row read when the cap ended the scan, else null.
+ */
+async function scanForLiteralMatches(
+  filters: AuditFilters,
+  term: string,
+  wanted: number,
+): Promise<{ matches: RawEvent[]; boundary: string | null }> {
+  const matches: RawEvent[] = [];
+  const batchSize = Math.max(wanted, LITERAL_SCAN_BATCH);
+  let cursor = filters.cursor;
+  let scanned = 0;
+  while (matches.length < wanted && scanned < MAX_LITERAL_SCAN_ROWS) {
+    const take = Math.min(batchSize, MAX_LITERAL_SCAN_ROWS - scanned);
+    // Each batch starts where the previous one ended, so the reads are sequential by nature.
+    const batch = (await prisma.auditEvent.findMany({
+      where: buildWhere({ ...filters, cursor }),
+      orderBy: [{ at: "desc" }, { id: "desc" }],
+      take,
+    })) as RawEvent[];
+    matches.push(...batch.filter((row) => matchesLiteralInsensitive(row.entityLabel, term)));
+    const last = batch.at(-1);
+    if (!last || batch.length < take) return { matches, boundary: null }; // the log is exhausted
+    scanned += batch.length;
+    cursor = encodeCursor(last.at, last.id);
+  }
+  return { matches, boundary: matches.length < wanted ? cursor ?? null : null };
+}
+
+/**
  * Newest first (`at desc, id desc` — `id` breaks ties among events sharing
  * the same `at`, which is what keeps the cursor free of duplicates/gaps when
  * several events share a timestamp). Fetches `limit + 1` rows to know
@@ -334,30 +366,7 @@ export async function listAuditEvents(
     return { events: page.map(toDto), nextCursor: hasMore && last ? encodeCursor(last.at, last.id) : null };
   }
 
-  const matches: RawEvent[] = [];
-  const batchSize = Math.max(wanted, LITERAL_SCAN_BATCH);
-  let cursor = filters.cursor;
-  let scanned = 0;
-  let boundary: string | null = null; // where the scan stopped early, if it did
-  while (matches.length < wanted) {
-    const take = Math.min(batchSize, MAX_LITERAL_SCAN_ROWS - scanned);
-    const batch = (await prisma.auditEvent.findMany({
-      where: buildWhere({ ...filters, cursor }),
-      orderBy: [{ at: "desc" }, { id: "desc" }],
-      take,
-    })) as RawEvent[];
-    for (const row of batch) {
-      if (matchesLiteralInsensitive(row.entityLabel, exactQ)) matches.push(row);
-    }
-    const last = batch.at(-1);
-    if (!last || batch.length < take) break; // the log is exhausted
-    scanned += batch.length;
-    cursor = encodeCursor(last.at, last.id);
-    if (scanned >= MAX_LITERAL_SCAN_ROWS) {
-      boundary = cursor;
-      break;
-    }
-  }
+  const { matches, boundary } = await scanForLiteralMatches(filters, exactQ, wanted);
 
   if (matches.length > limit) {
     const page = matches.slice(0, limit);

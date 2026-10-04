@@ -22,7 +22,10 @@ async function* pages(filters: AuditFilters): AsyncGenerator<AuditEventDto[]> {
   let cursor: string | undefined;
   for (;;) {
     const page = await listAuditEvents({ ...filters, cursor }, BATCH_SIZE);
-    yield page.events;
+    // A page can be empty while `nextCursor` is set (a search that found
+    // nothing in the stretch of the log it read): carry on past it. Only the
+    // first is yielded regardless, so the header is written for an empty export.
+    if (page.events.length > 0 || cursor === undefined) yield page.events;
     if (!page.nextCursor) return;
     cursor = page.nextCursor;
   }
@@ -61,13 +64,9 @@ export async function GET(request: NextRequest) {
     {
       async pull(controller) {
         try {
-          let next = preamble ? first : await iterator.next();
+          const next = preamble ? first : await iterator.next();
           const head = preamble ? CSV_PREAMBLE : "";
           preamble = false;
-          // A page can be empty while `nextCursor` is set (a search that found
-          // nothing in the stretch of the log it read): keep going, writing
-          // nothing for it, until a page has rows or the log ends.
-          while (!next.done && next.value.length === 0) next = await iterator.next();
           if (next.done) {
             if (head) controller.enqueue(encoder.encode(head));
             controller.close();
