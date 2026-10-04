@@ -44,6 +44,34 @@ describe("processPicture", () => {
     expect(out.preview).toBeUndefined();
   });
 
+  it("removes XMP and IPTC blocks that are really present in the input", async () => {
+    const withXmp = await blank(40, 20)
+      .jpeg()
+      .withXmp('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf/></x:xmpmeta>')
+      .toBuffer();
+    // sharp cannot write IPTC, so an APP13 "Photoshop 3.0" segment holding one
+    // 8BIM IPTC resource (id 0x0404) is spliced in after the SOI marker.
+    const iptcData = Buffer.concat([
+      Buffer.from("Photoshop 3.0\0"),
+      Buffer.from("8BIM"),
+      Buffer.from([0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06]),
+      Buffer.from("abcdef"),
+    ]);
+    const app13 = Buffer.concat([
+      Buffer.from([0xff, 0xed, 0x00, iptcData.length + 2]),
+      iptcData,
+    ]);
+    const input = Buffer.concat([withXmp.subarray(0, 2), app13, withXmp.subarray(2)]);
+    const inMeta = await sharp(input).metadata();
+    expect(inMeta.xmp).toBeDefined();
+    expect(inMeta.iptc).toBeDefined();
+
+    const out = await processPicture(input);
+    const meta = await sharp(out.bytes).metadata();
+    expect(meta.xmp).toBeUndefined();
+    expect(meta.iptc).toBeUndefined();
+  });
+
   it("stores a sideways photo (orientation 6) upright with no orientation tag", async () => {
     const input = await blank(40, 20).jpeg().withMetadata({ orientation: 6 }).toBuffer();
     expect((await sharp(input).metadata()).orientation).toBe(6);

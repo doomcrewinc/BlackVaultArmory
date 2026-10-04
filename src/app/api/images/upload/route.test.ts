@@ -17,6 +17,21 @@ vi.mock("@/lib/rate-limit", () => ({
   enforceRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
+const processMocks = vi.hoisted(() => ({ reject: false }));
+
+vi.mock("@/lib/images/process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/images/process")>();
+  return {
+    ...actual,
+    processPicture: (...args: Parameters<typeof actual.processPicture>) => {
+      if (processMocks.reject) {
+        throw new actual.PictureRejected("METADATA_REMAINS", "hidden data remains");
+      }
+      return actual.processPicture(...args);
+    },
+  };
+});
+
 const storageMocks = vi.hoisted(() => ({
   writeEncryptedFile: vi.fn(),
 }));
@@ -75,6 +90,7 @@ describe("POST /api/images/upload", () => {
   beforeEach(async () => {
     const { getCurrentUser } = await import("@/lib/server/auth");
     vi.clearAllMocks();
+    processMocks.reject = false;
     (getCurrentUser as unknown as Mock).mockResolvedValue({
       id: "user-1",
       username: "testuser",
@@ -116,6 +132,15 @@ describe("POST /api/images/upload", () => {
     expect(json.size).toBe(written.length);
     expect(json.mimeType).toBe("image/jpeg");
     expect(json.fileName).toMatch(/\.jpg$/);
+  });
+
+  it("answers 400 and writes nothing when metadata would remain in the stored picture", async () => {
+    processMocks.reject = true;
+    const response = await POST(await validPngUploadRequest("firearm", "gear-1"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("hidden data remains");
+    expect(storageMocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("rejects a HEIC file with the HEIC message and writes nothing", async () => {
