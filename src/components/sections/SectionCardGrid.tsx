@@ -13,26 +13,45 @@ import { fetchCategoryCounts } from "@/lib/category-counts";
  * The card grid shared by the Gear and Preparedness landing pages: one card
  * per section of the group, each with its item count.
  *
- * `counts` stays null until the request settles, and stays null if it fails,
- * so a card shows no number rather than a `0` that is not the real count. Once
- * loaded, a section with nothing in it shows an honest `0`.
+ * The counts have an explicit status. While `loading` and after a `failed`
+ * request (or a body without counts) a card shows no number, rather than a `0`
+ * that is not the real count; once `ready`, a section with nothing in it shows
+ * an honest `0`. The grid is `aria-busy` only while loading.
  */
+type CountsState =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "ready"; counts: Record<string, number> };
+
 export function SectionCardGrid({ group }: Readonly<{ group: SectionGroup }>) {
   const sections = sectionsForGroup(group);
-  const [counts, setCounts] = useState<Record<string, number> | null>(null);
+  const [state, setState] = useState<CountsState>({ status: "loading" });
 
   useEffect(() => {
     let cancelled = false;
-    fetchCategoryCounts().then((body) => {
-      if (!cancelled && body?.counts) setCounts(body.counts);
-    });
+    fetchCategoryCounts()
+      .then((body) => {
+        if (cancelled) return;
+        setState(
+          body?.counts
+            ? { status: "ready", counts: body.counts }
+            : { status: "failed" },
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setState({ status: "failed" });
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    <div
+      className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
+      data-counts-status={state.status}
+      aria-busy={state.status === "loading" ? true : undefined}
+    >
       {sections.map((section) => (
         <Link
           key={section.slug}
@@ -43,9 +62,9 @@ export function SectionCardGrid({ group }: Readonly<{ group: SectionGroup }>) {
             <p className="min-w-0 truncate font-medium text-vault-text">
               {section.label}
             </p>
-            {counts && (
+            {state.status === "ready" && (
               <span className="shrink-0 tabular-nums text-sm text-vault-text-muted">
-                {counts[section.slug] ?? 0}
+                {state.counts[section.slug] ?? 0}
               </span>
             )}
           </div>

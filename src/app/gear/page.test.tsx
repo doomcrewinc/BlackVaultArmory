@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { sectionHref, sectionsForGroup } from "@/lib/categories";
-import type { CategoryCounts } from "@/lib/category-counts";
 import GearPage from "./page";
 
 const fetchCategoryCounts = vi.hoisted(() => vi.fn());
@@ -18,38 +17,69 @@ function cardFor(label: string): HTMLElement {
   return screen.getByText(label).closest("a") as HTMLElement;
 }
 
-function countsFor(slugValues: Record<string, number>): CategoryCounts {
-  return { counts: slugValues, legacySmgCount: 0 };
+function gridOf(container: HTMLElement): HTMLElement {
+  return container.querySelector("[data-counts-status]") as HTMLElement;
+}
+
+async function flush() {
+  await act(async () => {});
 }
 
 describe("Gear page counts", () => {
-  const [first, second] = sectionsForGroup("gear");
+  const sections = sectionsForGroup("gear");
+  const [first, second] = sections;
 
-  it("shows no number while the counts are loading", () => {
+  function expectNoNumbers() {
+    for (const section of sections) {
+      expect(within(cardFor(section.label)).queryByText(/^\d+$/)).toBeNull();
+    }
+  }
+
+  it("is busy and shows no number while the counts are loading", async () => {
     fetchCategoryCounts.mockReturnValue(new Promise(() => {}));
-    render(<GearPage />);
+    const { container } = render(<GearPage />);
+    await flush();
 
+    expect(gridOf(container)).toHaveAttribute("data-counts-status", "loading");
+    expect(gridOf(container)).toHaveAttribute("aria-busy", "true");
     expect(cardFor(first.label)).toHaveAttribute("href", sectionHref(first));
-    expect(within(cardFor(first.label)).queryByText(/^\d+$/)).toBeNull();
-    expect(within(cardFor(second.label)).queryByText(/^\d+$/)).toBeNull();
+    expectNoNumbers();
   });
 
-  it("shows a real zero and a non-zero once loaded", async () => {
-    fetchCategoryCounts.mockResolvedValue(countsFor({ [first.slug]: 0, [second.slug]: 7 }));
-    render(<GearPage />);
+  it("shows a real zero and a non-zero once loaded, and is no longer busy", async () => {
+    fetchCategoryCounts.mockResolvedValue({
+      counts: { [first.slug]: 0, [second.slug]: 7 },
+      legacySmgCount: 0,
+    });
+    const { container } = render(<GearPage />);
+    await flush();
 
-    await waitFor(() => expect(within(cardFor(second.label)).getByText("7")).toBeInTheDocument());
+    expect(gridOf(container)).toHaveAttribute("data-counts-status", "ready");
+    expect(gridOf(container)).not.toHaveAttribute("aria-busy");
+    expect(within(cardFor(second.label)).getByText("7")).toBeInTheDocument();
     expect(within(cardFor(first.label)).getByText("0")).toBeInTheDocument();
   });
 
-  it("shows no numbers and still lists every section when the load fails", async () => {
-    fetchCategoryCounts.mockResolvedValue(null);
-    render(<GearPage />);
+  it.each([
+    ["the request fails", null],
+    ["the body has no counts", { legacySmgCount: 0 }],
+  ])("is not busy, shows no numbers and keeps every link when %s", async (_name, result) => {
+    fetchCategoryCounts.mockResolvedValue(result);
+    const { container } = render(<GearPage />);
+    await flush();
 
-    await waitFor(() => expect(fetchCategoryCounts).toHaveBeenCalled());
-    await Promise.resolve();
-    for (const section of sectionsForGroup("gear")) {
-      expect(within(cardFor(section.label)).queryByText(/^\d+$/)).toBeNull();
-    }
+    expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
+    expect(gridOf(container)).not.toHaveAttribute("aria-busy");
+    expectNoNumbers();
+    expect(cardFor(first.label)).toHaveAttribute("href", sectionHref(first));
+  });
+
+  it("is failed, not stuck loading, when the loader rejects", async () => {
+    fetchCategoryCounts.mockRejectedValue(new Error("boom"));
+    const { container } = render(<GearPage />);
+    await flush();
+
+    expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
+    expectNoNumbers();
   });
 });
