@@ -205,7 +205,7 @@ describe("every batch script reads .env through the one shared :env_value", () =
     for (const l of readers) expect(block.has(l), `${name} reads .env outside :env_value: ${l}`).toBe(true);
   });
 
-  it("update.bat reads DATA_DIR with :env_value BEFORE `git pull`, and skips the check when the line is refused", () => {
+  it("update.bat reads DATA_DIR with :env_value BEFORE `git pull`, and stops there when the line is refused", () => {
     const lines = linesOf(FILES.update).map(bare);
     const pull = lines.indexOf("git pull");
     const at = lines.indexOf("call :env_value DATA_DIR");
@@ -214,7 +214,17 @@ describe("every batch script reads .env through the one shared :env_value", () =
     expect(lines.slice(at, at + 3)).toEqual([
       "call :env_value DATA_DIR",
       'set "ACTIVE_DATA_DIR=!_EV!"',
-      "if defined _EV_BAD call :data_dir_unreadable",
+      "if defined _EV_BAD goto :data_dir_unreadable",
+    ]);
+    // The stop itself: an error, then exit 1, with no way back into the run.
+    const stop = lines.indexOf(":data_dir_unreadable");
+    expect(stop).toBeGreaterThan(pull);
+    expect(lines.slice(stop + 1, stop + 6)).toEqual([
+      "echo ERROR: .env holds a DATA_DIR line this script does not read: see the Note",
+      "echo        above. Correct it and run update.bat again.",
+      "echo        Nothing was pulled, rebuilt or restarted.",
+      "pause",
+      "exit /b 1",
     ]);
     // Nothing between there and the check re-assigns it.
     const check = lines.indexOf("if not defined ACTIVE_DATA_DIR goto :preflight_done");
@@ -232,13 +242,22 @@ describe("every batch script reads .env through the one shared :env_value", () =
     }
   });
 
-  it("refuses a $ in an unquoted or double-quoted value and a backslash in a double-quoted one", () => {
+  it("refuses a $ in an unquoted or double-quoted value, and inside double quotes only the backslashes Compose unescapes", () => {
     const block = envValueBlock(BAT["install.bat"]).map(bare);
     expect(block.filter((l) => l === 'if not "!_EV:$=!"=="!_EV!" goto :env_value_bad')).toHaveLength(2);
-    const dq = block.indexOf(":env_value_dquote");
-    const sq = block.indexOf(":env_value_squote");
-    expect(block.slice(dq, sq)).toContain('if not "!_EV:\\=!"=="!_EV!" goto :env_value_bad');
-    // Single-quoted values are literal in Compose: neither rule applies there.
-    expect(block.slice(sq, block.indexOf(":env_value_bad")).filter((l) => l.includes("$") || l.includes("\\"))).toEqual([]);
+    const dq = block.slice(block.indexOf(":env_value_dquote"), block.indexOf(":env_value_squote"));
+    // No blanket refusal of a backslash: a value without one is done, the
+    // others are checked pair by pair, with case (IF without /i).
+    expect(dq).not.toContain('if not "!_EV:\\=!"=="!_EV!" goto :env_value_bad');
+    expect(dq).toContain('if "!_EV:\\=!"=="!_EV!" goto :env_value_done');
+    expect(dq).toContain('for %%E in (a b f n r t v 0) do if "!_EVC!"=="\\%%E" goto :env_value_bad');
+    expect(dq).toContain('if "!_EVC!"=="\\\\" goto :env_value_bad');
+    expect(dq).toContain('if "!_EVC!"=="\\" goto :env_value_bad');
+    expect(dq.filter((l) => /^if \/i /.test(l))).toEqual([]);
+    // Single quotes: literal, except an apostrophe inside or a backslash before the closing quote.
+    const sq = block.slice(block.indexOf(":env_value_squote"), block.indexOf(":env_value_bad"));
+    expect(sq).toContain(`if not "!_EV:'=!"=="!_EV!" goto :env_value_bad`);
+    expect(sq).toContain('if "!_EV:~-1!"=="\\" goto :env_value_bad');
+    expect(sq.filter((l) => l.includes("$"))).toEqual([]);
   });
 });

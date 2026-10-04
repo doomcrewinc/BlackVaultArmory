@@ -288,16 +288,19 @@ exit /b 1
 ::   KEY="value"    KEY='value'           one pair of quotes removed
 ::   KEY=value # comment                  cut at the first space before a #
 :: with leading whitespace and CRLF allowed, lines starting with # ignored,
-:: and the LAST assignment winning. A Windows path is read unquoted or in
-:: single quotes, as Compose takes it literally in both.
-:: A line whose value Compose would change, or that batch cannot split, is
-:: REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how to write
-:: the line. The caller must not go on as if the key were unset. Refused:
+:: and the LAST assignment winning. A Windows path is best written unquoted.
+:: A line whose value Compose would change or reject, or that batch cannot
+:: split, is REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how
+:: to write the line. The caller must not go on as if the key were unset.
+:: Refused:
 ::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
-::   a \ in a double-quoted value (Compose unescapes \r, \n, \t ...);
-::   KEY: value; a quoted value followed by a comment or other text; a
-::   double quote anywhere except as the one pair around the whole value; a
-::   value opened by ' and not closed by one; a value that starts with =.
+::   in double quotes, a \ before a b f n r t v 0 or another \ (Compose
+::   unescapes those: "C:\new" holds a newline) or before the closing quote;
+::   any other \ there is text, so "C:\BlackVault\Data" is read;
+::   in single quotes, an apostrophe inside the value or a \ before the
+::   closing quote; KEY: value when no KEY= line follows it; a quoted value
+::   followed by a comment or other text; a double quote anywhere except as
+::   the one pair around the whole value; a value that starts with =.
 :: A ! in a value is dropped by delayed expansion and is not detected.
 :env_value
 set "_EV="
@@ -310,10 +313,18 @@ for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
 )
 :: for /f took every = after the key as one separator, so a value that
-:: starts with = has lost it; and a KEY: value line never reached the loop
-:: as KEY. Either, anywhere in the file, refuses the key.
-findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" >nul 2>&1
+:: starts with = has lost it: such a line, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
 if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A KEY: value line never reached the loop above as KEY. Compose uses the
+:: LAST assignment of a key, so such a line refuses the key only when no
+:: KEY= line comes after it (line numbers from findstr /n).
+set "_EVY=0"
+set "_EVA=0"
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" 2^>nul`) do set "_EVY=%%N"
+if "!_EVY!"=="0" goto :env_value_trim
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*=" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=" ".env" 2^>nul`) do set "_EVA=%%N"
+if !_EVY! GTR !_EVA! set "_EV_SET=1" & goto :env_value_bad
 :env_value_trim
 if not defined _EV goto :env_value_done
 if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
@@ -344,22 +355,41 @@ if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
 set "_EV=!_EVQ!"
 if not defined _EV goto :env_value_done
 if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
-if not "!_EV:\=!"=="!_EV!" goto :env_value_bad
-goto :env_value_done
+if "!_EV:\=!"=="!_EV!" goto :env_value_done
+:: Each \ and the character after it. IF compares with case, as Compose
+:: does: \r is a carriage return to Compose, \R is two characters.
+set "_EVI=0"
+:env_value_escape
+set "_EVC=!_EV:~%_EVI%,2!"
+if not defined _EVC goto :env_value_done
+set /a _EVI+=1
+if not "!_EVC:~0,1!"=="\" goto :env_value_escape
+if "!_EVC!"=="\" goto :env_value_bad
+if "!_EVC!"=="\\" goto :env_value_bad
+for %%E in (a b f n r t v 0) do if "!_EVC!"=="\%%E" goto :env_value_bad
+goto :env_value_escape
 :env_value_squote
 if "!_EV:~1,1!"=="" goto :env_value_bad
 if not "!_EV:~-1!"=="'" goto :env_value_bad
 set "_EV=!_EV:~1,-1!"
+if not defined _EV goto :env_value_done
+if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
+if "!_EV:~-1!"=="\" goto :env_value_bad
 goto :env_value_done
 :env_value_bad
 set "_EV="
 set "_EV_BAD=1"
-echo Note: the %~1 line in .env is written in a form this script does not read.
-echo       Write it as %~1=value or %~1='value', the final value spelled out: no $,
-echo       no double quotes, no comment after a quoted value. A Windows path
-echo       goes unquoted or in single quotes.
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       Docker Compose would change its value, or reject the line. Rewrite
+echo       that line, or delete it, as %~1=value with the final value spelled
+echo       out and no $ in it: best for a Windows path. In single quotes the
+echo       value must hold no apostrophe and not end in a backslash. In double
+echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
+echo       another backslash or the closing quote. Nothing may follow a
+echo       closing quote, and a %~1: value line must become %~1=value.
 :env_value_done
 set "_EVQ="
+set "_EVC="
 goto :eof
 
 :: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh
