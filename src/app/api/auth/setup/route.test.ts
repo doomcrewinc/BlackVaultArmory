@@ -108,6 +108,9 @@ describe("POST /api/auth/setup", () => {
       expect(lines).toHaveLength(1);
       expect(lines[0].startsWith("[auth] First admin created")).toBe(true);
       expect(lines[0]).not.toMatch(/ABCD|jeff|correct horse/i);
+      // The .bat twin takes whatever follows "setup token" (in any letter
+      // case) for the code, so this line must not hold those words.
+      expect(lines[0]).not.toMatch(/setup token/i);
       expect((await POST(req({ ...VALID, username: "other", setupCode: CODE }))).status).toBe(404);
       expect(log).toHaveBeenCalledOnce();
     } finally {

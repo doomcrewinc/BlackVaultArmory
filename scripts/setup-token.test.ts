@@ -32,7 +32,7 @@ const NO_TOKEN_LOG = [
 
 // The app logs this once, when the first admin account is created
 // (src/app/api/auth/setup/route.ts). From then on the token above it is spent.
-const ADMIN_CREATED = "blackvault  | [auth] First admin created: the setup token is no longer valid";
+const ADMIN_CREATED = "blackvault  | [auth] First admin created: first-time setup is closed";
 const tokenLine = (code: string) =>
   `blackvault  | [auth] Setup token: ${code} — create the first admin at https://vault.example.com/setup`;
 

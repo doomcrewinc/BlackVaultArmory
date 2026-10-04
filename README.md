@@ -560,6 +560,12 @@ and choose a username and password — you're the first admin. A fresh token is 
 time BlackVault starts while no admin exists yet, so only the most recent line in the log is
 valid. Once an admin exists, `/setup` returns 404 and no more tokens are printed.
 
+The log keeps its old lines for as long as the container lives, so a used token can still be
+found there. The scripts stop showing it once the log says `[auth] First admin created` after
+it. One case they cannot see: accounts that arrive through a full restore into a running
+install that never finished setup leave the old token line as the last one, and the scripts
+show it once more. It opens nothing, because `/setup` is closed as soon as any account exists.
+
 > 💡 Re-running `install.sh` / `install.bat` on an existing install won't show you the token —
 > it sees your `.env` already exists and changes nothing. Use the log command above instead.
 

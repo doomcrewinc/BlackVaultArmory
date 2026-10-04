@@ -7,7 +7,7 @@
 #   [auth] Setup token: XXXX-XXXX-XXXX-XXXX — create the first admin at <PUBLIC_URL>/setup
 # with a NEW token each time, so only the last such line in the log is valid.
 # When the first admin is created it prints, once:
-#   [auth] First admin created: the setup token is no longer valid
+#   [auth] First admin created: first-time setup is closed
 # and from then on it prints no token line at a start. An update that
 # changes nothing keeps the container and its log, so the spent token line is
 # still there: a token is shown only when no "First admin created" line
