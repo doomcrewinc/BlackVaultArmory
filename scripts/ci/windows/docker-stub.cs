@@ -42,6 +42,8 @@
 //                            "restarting" => "Restarting (1) 3 seconds ago",
 //                            "exited" => "Exited (1) 3 seconds ago",
 //                            "missing" => no line at all (no container),
+//                            "queryfail" => an error on stderr and exit 1
+//                            (Compose 2.20 rejects the --format template),
 //                            unset => "Up 4 seconds (healthy)".
 //   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
 //                            ...` prints on stdout (OLD / NEW / NEITHER).
@@ -352,6 +354,21 @@ internal static class DockerStub
             }
             // install.bat / update.bat read the health word in parentheses.
             string health = Environment.GetEnvironmentVariable("BV_STUB_HEALTH");
+            if (health == "queryfail")
+            {
+                Console.Error.WriteLine("format value \"{{.Status}}\" could not be parsed");
+                return 1;
+            }
+            // BV_STUB_PS_FAIL_FILE: a file holding how many more times this
+            // query fails before it answers.
+            string failFile = Environment.GetEnvironmentVariable("BV_STUB_PS_FAIL_FILE");
+            int failsLeft;
+            if (!string.IsNullOrEmpty(failFile) && File.Exists(failFile) && int.TryParse(File.ReadAllText(failFile).Trim(), out failsLeft) && failsLeft > 0)
+            {
+                File.WriteAllText(failFile, (failsLeft - 1).ToString());
+                Console.Error.WriteLine("format value \"{{.Status}}\" could not be parsed");
+                return 1;
+            }
             if (health == "missing") return 0;
             if (health == "restarting") { Console.WriteLine("Restarting (1) 3 seconds ago"); return 0; }
             if (health == "exited") { Console.WriteLine("Exited (1) 3 seconds ago"); return 0; }

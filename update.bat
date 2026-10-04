@@ -314,9 +314,9 @@ goto :upd_health_wait
 :upd_health_done
 set "STATUS=did not become healthy within two minutes, check the logs"
 if "!HEALTH!"=="unhealthy" set "STATUS=UNHEALTHY - the container's health check is failing, check the logs"
-if "!HEALTH!"=="restarting" set "STATUS=NOT RUNNING - the container keeps restarting: the app stops during startup, and says why in its log"
-if "!HEALTH!"=="exited" set "STATUS=NOT RUNNING - the container has exited: the app stopped during startup, and says why in its log"
-if "!HEALTH!"=="missing" set "STATUS=NOT RUNNING - no running BlackVault container was found"
+if "!HEALTH!"=="restarting" set "STATUS=NOT RUNNING - the container keeps restarting: the app stops during startup, and says why in its log: docker compose logs blackvault"
+if "!HEALTH!"=="exited" set "STATUS=NOT RUNNING - the container has exited: the app stopped during startup, and says why in its log: docker compose logs blackvault"
+if "!HEALTH!"=="missing" set "STATUS=NOT RUNNING - no running BlackVault container was found: docker compose logs blackvault"
 if "!HEALTH!"=="healthy" set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
@@ -735,15 +735,21 @@ goto :eof
 ::   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
 ::               starting it again
 ::   exited      "Exited (1) 4 seconds ago"
-::   missing     nothing is listed: there is no running container
-:: and leaves it undefined for anything else (still starting, no health
-:: reported). The parentheses are part of the match, so "(unhealthy)" is
+::   missing     the query worked and nothing is listed: no running container
+:: and leaves it undefined for anything else: still starting, no health
+:: reported, or the query itself failed. A failed query says nothing about
+:: the container and is never taken for "missing": Docker Compose 2.20, the
+:: oldest version supported, does not accept the --format template (2.21
+:: does). The line BV-PS-OK is printed only when the query worked.
+:: The parentheses are part of the match, so "(unhealthy)" is
 :: never taken for "(healthy)". Mirrors container_health in
 :: scripts/compose-provider.sh: change them together.
 :health_status
 set "HEALTH="
 set "_HS="
-for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul`) do set "_HS=%%S"
+set "_HQ="
+for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul ^&^& echo BV-PS-OK`) do if "%%S"=="BV-PS-OK" (set "_HQ=1") else set "_HS=%%S"
+if not defined _HQ goto :eof
 if not defined _HS set "HEALTH=missing"
 if not defined _HS goto :eof
 if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"

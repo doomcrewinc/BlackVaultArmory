@@ -75,7 +75,16 @@ case "$*" in
   *"rotate-encryption-key.mjs --probe"*) echo "\${BV_STUB_PROBE:-OLD}" ;;
   *"rotate-encryption-key.mjs"*) [ -n "$BV_STUB_ROTATE_STDERR" ] && echo "$BV_STUB_ROTATE_STDERR" >&2; exit "\${BV_STUB_ROTATE_EXIT:-0}" ;;
   "compose version --short") echo 2.30.1 ;;
-  "compose ps"*) echo "\${BV_STUB_PS_STATUS-Up 3 seconds (healthy)}" ;;
+  "compose ps"*)
+    # BV_STUB_PS_FAIL=always: the query itself fails every time (Compose 2.20 rejects the Go template).
+    # BV_STUB_PS_FAIL_FILE: a file holding how many more times it fails before it answers.
+    if [ "\${BV_STUB_PS_FAIL:-}" = always ]; then echo 'format value "{{.Status}}" could not be parsed' >&2; exit 1; fi
+    if [ -n "\${BV_STUB_PS_FAIL_FILE:-}" ] && [ -s "\$BV_STUB_PS_FAIL_FILE" ]; then
+      left=$(cat "\$BV_STUB_PS_FAIL_FILE")
+      if [ "\$left" -gt 0 ]; then echo $((left - 1)) > "\$BV_STUB_PS_FAIL_FILE"; echo 'format value "{{.Status}}" could not be parsed' >&2; exit 1; fi
+    fi
+    echo "\${BV_STUB_PS_STATUS-Up 3 seconds (healthy)}" ;;
+  "compose logs"*) [ -n "\${BV_STUB_LOGS_FILE:-}" ] && cat "\$BV_STUB_LOGS_FILE" ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
   "compose up -d")
     echo "AT-APP-START backups=[$(ls backups 2>/dev/null | tr '\\n' ' ')] key=$([ -f secrets/blackvault_encryption_key ] && echo yes || echo no) uploads_marker=[\${BLACKVAULT_UPLOADS_SNAPSHOT:-}]" >> "${calls}" ;;
@@ -340,6 +349,44 @@ describe("health wait: only the status word healthy is success", () => {
     expect(r.out).not.toMatch(/Status:\s+running/);
     expect(r.out).not.toContain("Update complete.");
     expect(r.out).not.toContain("did not become healthy");
+  });
+
+  // Docker Compose 2.20, the documented minimum, rejects `ps --format '{{.Status}}'`.
+  // A query that FAILS says nothing about the container: it is not "missing".
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: the status query fails every time: the full wait, the old warning, exit 0, and the setup token is still shown", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const logs = path.join(tmp, "logs.txt");
+    fs.writeFileSync(logs, "blackvault  | [auth] Setup token: ABCD-EFGH-JKMN-PQRS — create the first admin at https://vault.example.com/setup\n");
+    const r = run(dir, script, answers, { BV_STUB_PS_FAIL: "always", BV_STUB_LOGS_FILE: logs });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy within two minutes");
+    expect(r.out).not.toContain("no running BlackVault container");
+    expect(r.out).toContain("and enter the setup token: ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: the status query fails five times, then reports healthy: success, exit 0 (failed queries are not counted as sightings)", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const left = path.join(tmp, "ps-fail-left");
+    fs.writeFileSync(left, "5\n");
+    const r = run(dir, script, answers, { BV_STUB_PS_FAIL_FILE: left });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(6);
+    expect(r.out).not.toContain("NOT healthy");
+    expect(r.out).not.toContain("did not become healthy");
+    expect(r.out).toMatch(script === "install.sh" ? /BlackVault is running\./ : /Status:\s+running/);
   });
 
   it("a status with no health word at all (an image without a health check) is still the old outcome: the full wait, a warning, exit 0", () => {
@@ -607,6 +654,8 @@ describe("update.sh (no git checkout)", () => {
   it.each([
     ["an absolute path", (t: string) => `${t}/bv data`, (t: string) => `${t}/bv data`, false],
     ["~/x", () => "~/bv-data", (t: string) => `${t}/bv-data`, false],
+    ["~/x/ with a trailing slash", () => "~/bv-data/", (t: string) => `${t}/bv-data`, false],
+    ["~ alone", () => "~", (t: string) => t, false],
     ["$HOME/x", () => "$HOME/bv-data", (t: string) => `${t}/bv-data`, false],
     ["$HOME alone", () => "$HOME", (t: string) => t, false],
     ["~name/x, then a good path", (t: string) => `~rob/bv-data\n${t}/second`, (t: string) => `${t}/second`, true],

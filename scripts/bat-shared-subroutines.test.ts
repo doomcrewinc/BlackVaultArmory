@@ -244,7 +244,15 @@ describe("the health wait matches the status word with its parentheses", () => {
 
   it(":health_status tells a container that restarts, has exited or is missing from one that is still starting", () => {
     const lines = extract("install", "health_status").split(/\r?\n/).filter((l) => !l.startsWith("::"));
-    expect(lines).toContain('if not defined _HS set "HEALTH=missing"');
+    // A query that FAILED (no BV-PS-OK line) leaves HEALTH undefined: it is never "missing".
+    const query = lines.findIndex((l) => l.startsWith('for /f "usebackq delims=" %%S in (`%COMPOSE% ps '));
+    expect(lines.slice(query - 1, query + 4)).toEqual([
+      'set "_HQ="',
+      'for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul ^&^& echo BV-PS-OK`) do if "%%S"=="BV-PS-OK" (set "_HQ=1") else set "_HS=%%S"',
+      "if not defined _HQ goto :eof",
+      'if not defined _HS set "HEALTH=missing"',
+      "if not defined _HS goto :eof",
+    ]);
     expect(lines).toContain('if "!_HS:~0,10!"=="Restarting" set "HEALTH=restarting"');
     expect(lines).toContain('if "!_HS:~0,6!"=="Exited" set "HEALTH=exited"');
     expect("Restarting").toHaveLength(10);

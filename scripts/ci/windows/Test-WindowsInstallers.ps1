@@ -1004,7 +1004,7 @@ foreach ($state in @("restarting", "exited", "missing")) {
   Assert ($r.ExitCode -eq 1) "install.bat, ${state}: exits 1 (got $($r.ExitCode))"
   Assert ((Get-HealthPolls $r) -eq 3) "install.bat, ${state}: three polls, not sixty (got $(Get-HealthPolls $r))"
   Assert ($r.Output.Contains("WARNING: ") -and $r.Output.Contains($stateWords[$state])) "install.bat, ${state}: the warning says which"
-  Assert ($r.Output -match "Check the logs with:") "install.bat, ${state}: points at the logs"
+  Assert ($r.Output -match "Check the logs with:\s+docker compose logs blackvault") "install.bat, ${state}: points at the app's own log"
   Assert ($r.Output -notmatch "did not become healthy within two minutes") "install.bat, ${state}: not reported as a slow start"
   Assert ($r.Output -match "BlackVault was started, but is NOT healthy\.") "install.bat, ${state}: the summary heading says it is not healthy"
   Assert ($r.Output -notmatch "BlackVault is running\.") "install.bat, ${state}: does not say it is running"
@@ -1013,11 +1013,50 @@ foreach ($state in @("restarting", "exited", "missing")) {
   Assert ($r.ExitCode -eq 1) "update.bat, ${state}: exits 1 (got $($r.ExitCode))"
   Assert ((Get-HealthPolls $r) -eq 3) "update.bat, ${state}: three polls, not sixty (got $(Get-HealthPolls $r))"
   Assert ($r.Output -match "Status:\s+NOT RUNNING - " -and $r.Output.Contains($stateWords[$state])) "update.bat, ${state}: the status line says which"
+  Assert ($r.Output -match "NOT RUNNING - [^\r\n]*: docker compose logs blackvault") "update.bat, ${state}: the status line names the app's own log command"
   Assert ($r.Output -match "Update applied - app NOT healthy\.") "update.bat, ${state}: the heading says the app is not healthy"
   Assert ($r.Output -match "To check logs:") "update.bat, ${state}: points at the logs"
   Assert ($r.Output -notmatch "Update complete\.") "update.bat, ${state}: does not say Update complete"
   Show-EvidenceIfFailed $r
 }
+
+# ---------------------------------------------------------------- scenario H8
+# Docker Compose 2.20, the oldest version supported, rejects the --format
+# template of the status query. A query that FAILS says nothing about the
+# container: it is not "missing", it is not counted, and the wait goes on.
+Write-Scenario "install.bat / update.bat - the status query itself fails every time: the full wait, the 'did not become healthy' warning, exit code 0, and the setup token is still shown"
+$d = New-Sandbox "h8"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = "queryfail"; "BV_STUB_LOGS_FILE" = (New-StubLogs $d $TokenLog) }
+Assert ($r.ExitCode -eq 0) "install.bat: exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 60) "install.bat: polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "WARNING: BlackVault did not become healthy within two minutes") "install.bat: the old warning"
+Assert ($r.Output -notmatch "no running BlackVault container") "install.bat: a failed query is not taken for a missing container"
+Assert ($r.Output -match "and enter the setup token: WXYZ-2345-6789-ABCD") "install.bat: the setup token is still shown"
+Assert ($r.Output -match "docker compose logs blackvault") "install.bat: points at the app's own log"
+Show-EvidenceIfFailed $r
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = "queryfail" }
+Assert ($r.ExitCode -eq 0) "update.bat: exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 60) "update.bat: polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "Status:\s+did not become healthy within two minutes") "update.bat: the old status line"
+Assert ($r.Output -notmatch "NOT RUNNING") "update.bat: a failed query is not taken for a missing container"
+Show-EvidenceIfFailed $r
+
+Write-Scenario "install.bat / update.bat - the status query fails five times, then reports healthy: success, exit code 0 (failed queries are not counted as sightings)"
+$d = New-Sandbox "h8b"
+$left = Join-Path $d "__ps-fail-left.txt"
+Set-Content -Path $left -Value "5" -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_PS_FAIL_FILE" = $left }
+Assert ($r.ExitCode -eq 0) "install.bat: exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 6) "install.bat: five failed queries, then the one that answered (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "BlackVault is running\.") "install.bat: says it is running"
+Assert ($r.Output -notmatch "NOT healthy") "install.bat: no not-healthy heading"
+Show-EvidenceIfFailed $r
+Set-Content -Path $left -Value "5" -NoNewline -Encoding Ascii
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_PS_FAIL_FILE" = $left }
+Assert ($r.ExitCode -eq 0) "update.bat: exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 6) "update.bat: five failed queries, then the one that answered (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "Status:\s+running") "update.bat: the status line says running"
+Show-EvidenceIfFailed $r
 
 # ------------------------------------------------ spent setup-token scenarios
 # The app logs "[auth] First admin created" once, when the first admin is

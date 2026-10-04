@@ -246,12 +246,19 @@ check_postgres_env() {
 #   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
 #               starting it again (restart: unless-stopped)
 #   exited      "Exited (1) 4 seconds ago"
-#   missing     nothing is listed: there is no running container
+#   missing     the query worked and nothing is listed: no running container
+#   unknown     the query itself failed. That says nothing about the
+#               container, and is never taken for "missing": Docker Compose
+#               2.20, the oldest version supported, does not accept the
+#               --format template (2.21 does), and Docker may not answer
 # and nothing for any other text (a running container that reports no health).
 # Needs $COMPOSE. install.bat and update.bat mirror it in :health_status.
 container_health() {
   local status
-  status=$($COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null) || status=""
+  if ! status=$($COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null); then
+    echo "unknown"
+    return 0
+  fi
   case "$status" in
     *"(healthy)"*) echo "healthy" ;;
     *"(unhealthy)"*) echo "unhealthy" ;;
@@ -271,7 +278,7 @@ container_health() {
 # container has been seen restarting, exited or missing three times: the app
 # refuses to start (a restore marker, two keys, no public URL) by exiting, and
 # Docker then starts it over and over. "unhealthy" keeps polling: a slow first
-# start can recover.
+# start can recover. So does "unknown" (the query failed): it is not counted.
 wait_for_health() {
   local failed=0
   HEALTH=""
