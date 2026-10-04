@@ -241,7 +241,14 @@ describe("Full Armory preview — machine-gun registry", () => {
       expect(at).toBeGreaterThan(0);
       expect(headers[at - 1]).toMatch(/Class$/);
       const firstRow = within(table).getAllByRole("row")[1];
-      expect(within(firstRow).getAllByRole("cell")[at].textContent).toBe("Post-sample");
+      const cells = within(firstRow).getAllByRole("cell");
+      if (heading === "NFA Paperwork") {
+        // Screen-only column; on paper the label rides in the Class cell.
+        expect(table.querySelectorAll("th")[at]).toHaveClass("print:hidden");
+        expect(cells[at]).toHaveClass("print:hidden");
+        expect(cells[at - 1].querySelector(".hidden.print\\:inline")?.textContent).toContain("Post-sample");
+      }
+      expect(cells[at].textContent).toBe("Post-sample");
     }
     const inventoryRows = within(
       screen.getByText("Master Inventory").closest("section") as HTMLElement

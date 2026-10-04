@@ -369,7 +369,7 @@ export default function FullArmoryPreviewPage() {
                     <th className="py-2 pr-4 text-left">Item</th>
                     <th className="py-2 pr-4 text-left">Platform</th>
                     <th className="py-2 pr-4 text-left">Class</th>
-                    <th className="py-2 pr-4 text-left">Registry</th>
+                    <th className="print:hidden py-2 pr-4 text-left">Registry</th>
                     <th className="py-2 pr-4 text-left">Transfer Method</th>
                     <th className="py-2 pr-4 text-left">Control Number</th>
                     <th className="py-2 pr-4 text-left">Approval Date</th>
@@ -390,8 +390,16 @@ export default function FullArmoryPreviewPage() {
                           column exists to remove. Platform has its own cell above,
                           so nothing is lost — an accessory reads SUPPRESSOR there
                           and a dash here, because it has no class. */}
-                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || "—"}</td>
-                      <td className="py-2 pr-4">{mgRegistryLabel(item.mgRegistry) || "—"}</td>
+                      {/* On paper the registry is folded into the Class cell, so the
+                          printed table keeps the seven columns it was measured at;
+                          the separate Registry column is screen-only. */}
+                      <td className="py-2 pr-4">
+                        {nfaClassLabel(item.nfaClass) || "—"}
+                        {item.mgRegistry && (
+                          <span className="hidden print:inline"> — {mgRegistryLabel(item.mgRegistry)}</span>
+                        )}
+                      </td>
+                      <td className="print:hidden py-2 pr-4">{mgRegistryLabel(item.mgRegistry) || "—"}</td>
                       <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
                       <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
