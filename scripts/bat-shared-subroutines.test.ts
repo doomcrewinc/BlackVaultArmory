@@ -163,17 +163,26 @@ describe("update.bat and rotate-key.bat share the restore-marker lookup byte for
 });
 
 /**
- * An unhealthy container ends install.bat and update.bat with exit code 1; a
- * container still starting when the wait ran out, like a healthy one, with 0.
+ * A container that is unhealthy, keeps restarting, has exited or is not there
+ * ends install.bat and update.bat with exit code 1; one still starting when
+ * the wait ran out, like a healthy one, with 0.
  */
-describe("exit code 1 only for an unhealthy container", () => {
+describe("exit code 1 for a start that failed (unhealthy, restarting, exited, missing), 0 otherwise", () => {
   it.each([
     ["install", "call :show_setup_token PUBLIC_URL"],
     ["update", "call :show_setup_token ENV_PUBLIC_URL"],
   ] as const)("%s.bat", (fileName, lastStep) => {
     const lines = linesOf(FILES[fileName]).map(bare).filter((l) => !l.startsWith("::"));
     const at = lines.indexOf(lastStep);
-    expect(lines.slice(at, at + 4)).toEqual([lastStep, "pause", 'if "!HEALTH!"=="unhealthy" exit /b 1', "exit /b 0"]);
+    expect(lines.slice(at, at + 7)).toEqual([
+      lastStep,
+      "pause",
+      'if "!HEALTH!"=="unhealthy" exit /b 1',
+      'if "!HEALTH!"=="restarting" exit /b 1',
+      'if "!HEALTH!"=="exited" exit /b 1',
+      'if "!HEALTH!"=="missing" exit /b 1',
+      "exit /b 0",
+    ]);
   });
 });
 
@@ -225,12 +234,38 @@ describe("static proof: a for /f character check on a typed or .env value comes 
 describe("the health wait matches the status word with its parentheses", () => {
   it.each(["install", "update"] as const)("%s.bat", (fileName) => {
     const lines = linesOf(FILES[fileName]).map(bare).filter((l) => !l.startsWith("::"));
-    const mentions = lines.filter((l) => /healthy/i.test(l) && !/^\s*(echo|set "STATUS=)/.test(l) && !/^if (not )?"!HEALTH!"==/.test(l));
+    const mentions = lines.filter((l) => /healthy/i.test(l) && !/(^|\s)echo\s/.test(l) && !/^\s*set "STATUS=/.test(l) && !/^if (not )?"!HEALTH!"==/.test(l));
     expect(mentions).toEqual([
       'if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"',
       'if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"',
     ]);
     expect(lines.filter((l) => /findstr[^|]*healthy/i.test(l))).toEqual([]);
+  });
+
+  it(":health_status tells a container that restarts, has exited or is missing from one that is still starting", () => {
+    const lines = extract("install", "health_status").split(/\r?\n/).filter((l) => !l.startsWith("::"));
+    expect(lines).toContain('if not defined _HS set "HEALTH=missing"');
+    expect(lines).toContain('if "!_HS:~0,10!"=="Restarting" set "HEALTH=restarting"');
+    expect(lines).toContain('if "!_HS:~0,6!"=="Exited" set "HEALTH=exited"');
+    expect("Restarting").toHaveLength(10);
+    expect("Exited").toHaveLength(6);
+  });
+
+  it.each([
+    ["install", ":health_wait", ":health_timed_out"],
+    ["update", ":upd_health_wait", ":upd_health_done"],
+  ] as const)("%s.bat: three sightings of restarting, exited or missing end the wait", (fileName, loop, done) => {
+    const lines = linesOf(FILES[fileName]).map(bare).filter((l) => !l.startsWith("::"));
+    const at = lines.indexOf(loop);
+    expect(lines[at - 1]).toBe('set "_HF=0"');
+    expect(lines.slice(at + 1, at + 7)).toEqual([
+      "call :health_status",
+      `if "!HEALTH!"=="healthy" goto ${loop === ":health_wait" ? ":health_ok" : done}`,
+      'if "!HEALTH!"=="restarting" set /a _HF+=1',
+      'if "!HEALTH!"=="exited" set /a _HF+=1',
+      'if "!HEALTH!"=="missing" set /a _HF+=1',
+      `if !_HF! GEQ 3 goto ${done}`,
+    ]);
   });
 });
 
@@ -303,12 +338,58 @@ describe("all six batch scripts that read .env do it through the one shared :env
 
   it("the reader is the same in all six files, byte for byte, byte-order-mark lines included", () => {
     const install = envValueBlock(BAT["install.bat"]);
-    // The two lines that find a key behind a UTF-8 byte-order mark on line 1.
-    expect(install.filter((l) => l.includes(BOM))).toHaveLength(2);
+    // The four lines that see a key behind a UTF-8 byte-order mark on line 1 (and refuse it).
+    expect(install.filter((l) => l.includes(BOM))).toHaveLength(4);
     expect(Object.keys(BAT)).toHaveLength(6);
     for (const name of Object.keys(BAT) as (keyof typeof BAT)[]) {
       expect(envValueBlock(BAT[name]).join(""), `${name} :env_value differs`).toBe(install.join(""));
     }
+  });
+
+  it("a key on the first line of a .env that starts with a byte-order mark is refused, with its own note, before the searches that cannot see behind the mark", () => {
+    const block = envValueBlock(BAT["install.bat"]).map(bare);
+    const loopEnd = block.indexOf(")", block.indexOf(":env_value"));
+    expect(block.slice(loopEnd - 4, loopEnd)).toEqual([
+      `  if "%%K"=="${BOM}%~1" set "_EV_BOM=1"`,
+      `  if "%%K"=="${BOM}%~1:" set "_EV_BOM=1"`,
+      `  if "%%K"=="${BOM}export" if "%%L"=="%~1" set "_EV_BOM=1"`,
+      `  if "%%K"=="${BOM}export" if "%%L"=="%~1:" set "_EV_BOM=1"`,
+    ]);
+    const code = block.filter((l) => !l.startsWith("::"));
+    const jump = code.indexOf("if defined _EV_BOM goto :env_value_bom");
+    expect(jump).toBeGreaterThan(0);
+    expect(jump).toBeLessThan(code.findIndex((l) => l.startsWith("findstr ")));
+    const at = block.indexOf(":env_value_bom");
+    expect(block.slice(at + 1, at + 5)).toEqual(['set "_EV="', 'set "_EV_SET=1"', 'set "_EV_BAD=1"', "echo Note: the %~1 line in .env is written in a form this script does not read:"]);
+    expect(block[at + 8]).toBe("goto :env_value_done");
+    expect(block).toContain('set "_EV_BOM="');
+  });
+
+  it("install.bat checks the data folder by writing the line and reading it back with :env_value, and asks again (three times at most)", () => {
+    const lines = linesOf(FILES.install).map(bare).filter((l) => !l.startsWith("::"));
+    const sub = lines.indexOf(":check_data_dir");
+    expect(lines.slice(sub + 1, sub + 13)).toEqual([
+      'set "DATA_DIR_OK="',
+      'set "_CDD=%TEMP%\\blackvault-install-%RANDOM%%RANDOM%"',
+      'mkdir "!_CDD!" 2>nul',
+      'if not exist "!_CDD!\\" goto :eof',
+      '(echo DATA_DIR=!DATA_DIR!)>"!_CDD!\\.env"',
+      'pushd "!_CDD!"',
+      "call :env_value DATA_DIR >nul",
+      "popd",
+      'rd /s /q "!_CDD!" >nul 2>&1',
+      "if defined _EV_BAD goto :eof",
+      'if "!_EV!"=="!DATA_DIR!" set "DATA_DIR_OK=1"',
+      "goto :eof",
+    ]);
+    // The same echo form as the real .env, so the scratch line is the line that will be written.
+    expect(lines.filter((l) => l === "  echo DATA_DIR=!DATA_DIR!")).toHaveLength(2);
+    // Every path to :make_dirs passes the check: the kept legacy folder and the typed one.
+    expect(lines.filter((l) => l === "call :check_data_dir")).toHaveLength(2);
+    const again = lines.indexOf(":ask_data_dir_again");
+    const until = lines.indexOf("goto :ask_data_dir_again");
+    expect(lines.slice(again, until)).toContain("if !DD_TRIES! GEQ 3 goto :data_dir_refused");
+    expect(lines.slice(lines.indexOf(":ask_data_dir"), again).filter((l) => l.includes("goto :ask_port"))).toEqual(["if defined DATA_DIR_OK goto :ask_port"]);
   });
 
   it("rotate-key.bat decides whether .env holds a key with :env_value: a value, or a line it cannot read, both refuse", () => {

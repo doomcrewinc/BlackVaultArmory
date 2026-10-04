@@ -992,6 +992,33 @@ Assert ($r.Output -match "Update complete\.") "says Update complete"
 Assert ($r.Output -notmatch "NOT healthy") "no not-healthy heading"
 Show-EvidenceIfFailed $r
 
+# ---------------------------------------------------------------- scenario H7
+# The app refuses to start (a restore marker, two keys, no public URL) by
+# exiting, and Docker starts it over and over: the status is then neither
+# unhealthy nor starting. That is a failed start, seen after three polls.
+Write-Scenario "install.bat / update.bat - a container that keeps restarting, has exited or is not there is a failed start: the wait ends after three polls, the output says which, exit code 1"
+$stateWords = @{ "restarting" = "keeps restarting"; "exited" = "has exited"; "missing" = "no running BlackVault container was found" }
+foreach ($state in @("restarting", "exited", "missing")) {
+  $d = New-Sandbox "h7-$state"
+  $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = $state }
+  Assert ($r.ExitCode -eq 1) "install.bat, ${state}: exits 1 (got $($r.ExitCode))"
+  Assert ((Get-HealthPolls $r) -eq 3) "install.bat, ${state}: three polls, not sixty (got $(Get-HealthPolls $r))"
+  Assert ($r.Output.Contains("WARNING: ") -and $r.Output.Contains($stateWords[$state])) "install.bat, ${state}: the warning says which"
+  Assert ($r.Output -match "Check the logs with:") "install.bat, ${state}: points at the logs"
+  Assert ($r.Output -notmatch "did not become healthy within two minutes") "install.bat, ${state}: not reported as a slow start"
+  Assert ($r.Output -match "BlackVault was started, but is NOT healthy\.") "install.bat, ${state}: the summary heading says it is not healthy"
+  Assert ($r.Output -notmatch "BlackVault is running\.") "install.bat, ${state}: does not say it is running"
+  Show-EvidenceIfFailed $r
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = $state }
+  Assert ($r.ExitCode -eq 1) "update.bat, ${state}: exits 1 (got $($r.ExitCode))"
+  Assert ((Get-HealthPolls $r) -eq 3) "update.bat, ${state}: three polls, not sixty (got $(Get-HealthPolls $r))"
+  Assert ($r.Output -match "Status:\s+NOT RUNNING - " -and $r.Output.Contains($stateWords[$state])) "update.bat, ${state}: the status line says which"
+  Assert ($r.Output -match "Update applied - app NOT healthy\.") "update.bat, ${state}: the heading says the app is not healthy"
+  Assert ($r.Output -match "To check logs:") "update.bat, ${state}: points at the logs"
+  Assert ($r.Output -notmatch "Update complete\.") "update.bat, ${state}: does not say Update complete"
+  Show-EvidenceIfFailed $r
+}
+
 # ------------------------------------------------ spent setup-token scenarios
 # The app logs "[auth] First admin created" once, when the first admin is
 # created. An update that changes nothing keeps the container and its log, so
@@ -1137,8 +1164,8 @@ $EnvCases = @(
   @("\c and \( inside double quotes are text", "K=`"x\cy\(w`"`r`n", "[x\cy\(w][1][]"),
   @("KEY: value, then KEY=value (the last assignment wins)", "K: v`r`nA=1`r`nK=w`r`n", "[w][1][]"),
   @("export KEY: value, then export KEY=value", "export K: v`r`nexport K=w`r`n", "[w][1][]"),
-  @("a UTF-8 byte-order mark before the first line", "$([char]0xFEFF)K=v`r`n", "[v][1][]"),
-  @("a byte-order mark before an export line", "$([char]0xFEFF)export K=v`r`n", "[v][1][]"),
+  @("a byte-order mark before a comment line; the key on line 2", "$([char]0xFEFF)# made in Notepad`r`nK=v`r`n", "[v][1][]"),
+  @("a byte-order mark before another key; the key on line 2", "$([char]0xFEFF)OTHER=1`r`nK=v`r`n", "[v][1][]"),
   @("inner spaces are kept", "K=C:\my vault\data`r`n", "[C:\my vault\data][1][]"),
   @("a commented-out duplicate above", "#K=old`r`nK=new`r`n", "[new][1][]"),
   @("an indented commented-out duplicate above", "  # K=old`r`nK=new`r`n", "[new][1][]"),
@@ -1186,6 +1213,15 @@ $EnvCases = @(
   @("REFUSED: two exclamation marks in an export line with spaces", "export K = a!b!c`r`n", "[][1][1]"),
   @("REFUSED: an exclamation mark in the comment of the line", "K=v # really!`r`n", "[][1][1]"),
   @("REFUSED: an exclamation mark on an earlier assignment of the key", "K=a!b`r`nK=v`r`n", "[][1][1]"),
+  # A key on the first line of a .env that starts with a byte-order mark: the
+  # searches for ==, an exclamation mark and KEY: cannot see behind the mark,
+  # so the line is refused whatever its value.
+  @("REFUSED: a byte-order mark before the key on line 1", "$([char]0xFEFF)K=v`r`n", "[][1][1]"),
+  @("REFUSED: a byte-order mark before an export line", "$([char]0xFEFF)export K=v`r`n", "[][1][1]"),
+  @("REFUSED: a byte-order mark, then the key with an exclamation mark in its value", "$([char]0xFEFF)K=D:\Vault!\data`r`n", "[][1][1]"),
+  @("REFUSED: a byte-order mark, then a value starting with =", "$([char]0xFEFF)K==b`r`n", "[][1][1]"),
+  @("REFUSED: a byte-order mark, then KEY: value", "$([char]0xFEFF)K: v`r`n", "[][1][1]"),
+  @("REFUSED: a byte-order mark, then export KEY: value", "$([char]0xFEFF)export K: v`r`n", "[][1][1]"),
   # Compose puts the home folder in place of a leading ~ in a bind mount's source.
   @("REFUSED: a leading ~ in a folder key", "DATA_DIR=~\blackvault`r`n", "[][1][1]", "DATA_DIR"),
   @("REFUSED: a leading ~ in a double-quoted folder key", "export DATA_DIR = `"~/blackvault`"`r`n", "[][1][1]", "DATA_DIR"),
@@ -1210,6 +1246,9 @@ foreach ($case in $EnvCases) {
   $m = [regex]::Match($last.Output, "(?m)^RESULT=(.*?)\r?$")
   if ($m.Success) { $got = $m.Groups[1].Value }
   Assert ($got -eq $case[2]) "$($case[0]): $($case[2]) (got $got)"
+  if ($case[0] -match "^REFUSED: a byte-order mark") {
+    Assert ($last.Output -match "\.env starts with a byte order mark, and that line is its first\.\s+Save \.env without a byte order mark") "$($case[0]): says to save the file without a byte order mark"
+  }
   if ($case[2].EndsWith("[1][1]")) {
     Assert ($last.Output -match "Note: the $key line in \.env is written in a form this script does not read") "$($case[0]): says the line is not read"
   } else {
@@ -1380,8 +1419,40 @@ Assert ($r.StubLog -notmatch "(?m)^compose stop") "did not stop the app"
 Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "wrote no snapshot of the database in .\data"
 Show-EvidenceIfFailed $r
 
+# ---------------------------------------------------------------- scenario DD1
+# THE INVARIANT: whatever install.bat writes for DATA_DIR is a line its own
+# :env_value reads back as the folder the installer made. An answer that
+# would not be read back is asked for again.
+Write-Scenario "install.bat - a data folder typed with ~ or with an exclamation mark is asked for again; the DATA_DIR line written is read back by :env_value as the folder that was made"
+$d = New-Sandbox "dd1"
+$good = Join-Path $d "good data"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("~\vault", "$d\wow!", $good, "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert (([regex]::Matches($r.Output, "That folder cannot be used as typed")).Count -eq 2) "both answers were refused, each with the reason"
+Assert ((Get-EnvValue $d "DATA_DIR") -eq $good) "DATA_DIR in .env is the third answer"
+Assert (Test-Path (Join-Path $good "db")) "the folder that was made is that one"
+Assert (-not (Test-Path (Join-Path $d "~"))) "no folder literally named ~ was made"
+Assert (-not (Test-Path (Join-Path $d "wow!")) -and -not (Test-Path (Join-Path $d "wow"))) "no folder was made for the answer with the exclamation mark"
+Show-EvidenceIfFailed $r
+New-EnvValueDriver $d
+$back = Invoke-Bat -Dir $d -Script "envdrv.bat" -NoPad -TimeoutSeconds 60 -EnvVars @{ "BV_EV_KEY" = "DATA_DIR" }
+Assert ($back.Output.Contains("RESULT=[$good][1][]")) "install.bat's own :env_value reads the line back as that folder, and does not refuse it"
+Show-EvidenceIfFailed $back
+
+# ---------------------------------------------------------------- scenario DD2
+Write-Scenario "install.bat - three data folders in a row that would not be read back (a dollar sign, a leading apostrophe, ~): stops with exit 1, writes no .env, makes no folder"
+$d = New-Sandbox "dd2"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("$d\a`$b", "'$d\quoted'", "~") -NoPad
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert (([regex]::Matches($r.Output, "That folder cannot be used as typed")).Count -eq 3) "each answer was refused"
+Assert ($r.Output -match "ERROR: no usable data directory was given\. Nothing was changed\.") "says nothing was changed"
+Assert (-not (Test-Path (Join-Path $d ".env"))) "no .env was written"
+Assert (-not (Test-Path (Join-Path $d "~")) -and -not (Test-Path (Join-Path $d "a`$b"))) "no folder was made"
+Assert ($r.StubLog -notmatch "compose (build|up)") "nothing was built or started"
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario UR2c
-Write-Scenario "scripts\db-snapshot.bat - a UTF-8 byte-order mark before DATA_DIR on line 1 of .env: the folder is read (as update.bat reads it), and the snapshot is of the database in it"
+Write-Scenario "scripts\db-snapshot.bat - a UTF-8 byte-order mark before DATA_DIR on line 1 of .env: every batch script refuses that line alike, so none reads .\data in its place; with a comment line first the folder is read"
 $d = New-Sandbox "db-snapshot-bom"
 Set-SqliteInstall $d "7054"
 New-Item -ItemType Directory -Force -Path (Join-Path $d "vault\db"), (Join-Path $d "vault\uploads") | Out-Null
@@ -1390,10 +1461,18 @@ Set-Content -Path (Join-Path $d "vault\db\vault.db") -Value "the real database" 
 @("@echo off", "setlocal EnableDelayedExpansion", "call scripts\db-snapshot.bat", "echo RC=!errorlevel!") |
   Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
 $r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
-Assert ($r.Output -match "RC=0") "errorlevel 0"
-Assert ($r.Output -notmatch "Note:") "the line is read: no note"
+Assert ($r.Output -match "RC=1") "errorlevel 1"
+Assert ($r.Output -match "Save \.env without a byte order mark") "the note says how to save the file"
+Assert ($r.Output -match "database snapshot failed: DATA_DIR in \.env could not be read") "says why"
+Assert ($r.StubLog -notmatch "(?m)^compose stop") "did not stop the app"
+Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "wrote no snapshot of the database in .\data"
+Show-EvidenceIfFailed $r
+[IO.File]::WriteAllText((Join-Path $d ".env"), "$([char]0xFEFF)# BlackVault configuration`r`nDATA_DIR=$d\vault`r`nPORT=7054`r`nBLACKVAULT_DB_PROVIDER=sqlite`r`n", (New-Object Text.UTF8Encoding $false))
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
+Assert ($r.Output -match "RC=0") "a comment line first: errorlevel 0"
+Assert ($r.Output -notmatch "Note:") "a comment line first: no note"
 $snap = @(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue)
-Assert ($snap.Count -eq 1 -and (Get-Content $snap[0].FullName -Raw) -match "the real database") "the snapshot is of the database in the folder the line names, not of .\data"
+Assert ($snap.Count -eq 1 -and (Get-Content $snap[0].FullName -Raw) -match "the real database") "a comment line first: the snapshot is of the database in the folder the line names"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario UR2d
@@ -3465,6 +3544,35 @@ if ($steps.Count -eq 7) {
 }
 Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The system cannot find the file specified") "apostrophe, state 'started': the line is valid at a command prompt and the dump file was found"
 Show-EvidenceIfFailed $c
+
+# -------------------------------------------------------------- scenario RS19b
+# restore.bat looks for BOTH lines in the handoff file before it lets the
+# restore program run: ready=1, and a db= line that is not empty (the path a
+# rollback is made from). RS19 below loses every line at once; here the lines
+# of that check are cut out of restore.bat and run on handoff files that lack
+# only one of them.
+Write-Scenario "restore.bat - the handoff check, run on its own: a file without its db line, or with an empty one, is refused although ready=1 is there"
+$d = Join-Path $Sandboxes "handoff-check"
+New-Item -ItemType Directory -Force -Path $d | Out-Null
+$lines = [IO.File]::ReadAllText((Join-Path $RepoRoot "restore.bat")) -split "`r`n"
+$from = [Array]::IndexOf($lines, 'findstr /x /c:"ready=1" "!BV_HANDOFF!" >nul 2>&1')
+$to = [Array]::IndexOf($lines, 'findstr /b /r /c:"db=." "!BV_HANDOFF!" >nul 2>&1')
+Assert ($from -gt 0 -and $to -gt $from -and $lines[$to + 1] -eq "if errorlevel 1 goto :handoff_failed") "both checks are in restore.bat, the db line second (lines $from and $to)"
+$driver = @("@echo off", "setlocal EnableDelayedExpansion", "set `"BV_HANDOFF=%~dp0handoff.txt`"") + $lines[$from..($to + 1)] + @("echo RESULT=go-on", "exit /b 0", ":handoff_failed", "echo RESULT=handoff-failed", "exit /b 0", "")
+[IO.File]::WriteAllText((Join-Path $d "handoffdrv.bat"), ($driver -join "`r`n"), [Text.Encoding]::ASCII)
+$HandoffCases = @(
+  @("both lines", "phase=prepare`r`ndb=backups\blackvault-20261003-000000.db`r`nuploads=`r`nready=1`r`n", "go-on"),
+  @("no db line", "phase=prepare`r`nuploads=`r`nready=1`r`n", "handoff-failed"),
+  @("an empty db line", "phase=prepare`r`ndb=`r`nuploads=`r`nready=1`r`n", "handoff-failed"),
+  @("db= only inside another line", "phase=prepare`r`nuploads=db=x`r`nready=1`r`n", "handoff-failed"),
+  @("no ready line", "phase=prepare`r`ndb=backups\blackvault-20261003-000000.db`r`nuploads=`r`n", "handoff-failed")
+)
+foreach ($case in $HandoffCases) {
+  [IO.File]::WriteAllText((Join-Path $d "handoff.txt"), $case[1], [Text.Encoding]::ASCII)
+  $r = Invoke-Bat -Dir $d -Script "handoffdrv.bat" -NoPad -TimeoutSeconds 60
+  Assert ($r.Output -match ("(?m)^RESULT=" + $case[2] + "\r?$")) "$($case[0]): $($case[2])"
+  Show-EvidenceIfFailed $r
+}
 
 # --------------------------------------------------------------- scenario RS19
 # Steps 5-7 run in a child cmd.exe that hands back, through a small file in

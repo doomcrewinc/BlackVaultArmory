@@ -296,9 +296,17 @@ echo Waiting for health check...
 :: Only the status word "healthy" ends the wait: "unhealthy" and "starting"
 :: keep polling, and the last status seen decides what is reported.
 set "_HW=0"
+set "_HF=0"
 :upd_health_wait
 call :health_status
 if "!HEALTH!"=="healthy" goto :upd_health_done
+:: Seen restarting, exited or missing three times: the app refuses to start
+:: by exiting, and Docker starts it over and over. That is a failed start,
+:: not a slow one, and the wait ends.
+if "!HEALTH!"=="restarting" set /a _HF+=1
+if "!HEALTH!"=="exited" set /a _HF+=1
+if "!HEALTH!"=="missing" set /a _HF+=1
+if !_HF! GEQ 3 goto :upd_health_done
 set /a _HW+=1
 if !_HW! GEQ 60 goto :upd_health_done
 timeout /t 2 /nobreak >nul
@@ -306,6 +314,9 @@ goto :upd_health_wait
 :upd_health_done
 set "STATUS=did not become healthy within two minutes, check the logs"
 if "!HEALTH!"=="unhealthy" set "STATUS=UNHEALTHY - the container's health check is failing, check the logs"
+if "!HEALTH!"=="restarting" set "STATUS=NOT RUNNING - the container keeps restarting: the app stops during startup, and says why in its log"
+if "!HEALTH!"=="exited" set "STATUS=NOT RUNNING - the container has exited: the app stopped during startup, and says why in its log"
+if "!HEALTH!"=="missing" set "STATUS=NOT RUNNING - no running BlackVault container was found"
 if "!HEALTH!"=="healthy" set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
@@ -325,10 +336,13 @@ echo.
 :: ── First-time setup token (only while no admin account exists) ──
 call :show_setup_token ENV_PUBLIC_URL
 pause
-:: A container that reports unhealthy is a failed update for whoever started
-:: this script. One that is still starting when the wait ran out is not: a
-:: slow first start can still come up. As update.sh.
+:: A container that is unhealthy, keeps restarting, has exited or is not there
+:: is a failed start for whoever started this script. One that is still
+:: starting when the wait ran out is not: a slow first start can still come up.
 if "!HEALTH!"=="unhealthy" exit /b 1
+if "!HEALTH!"=="restarting" exit /b 1
+if "!HEALTH!"=="exited" exit /b 1
+if "!HEALTH!"=="missing" exit /b 1
 exit /b 0
 
 :restore_marker_left
@@ -517,6 +531,8 @@ goto :eof
 ::   delayed expansion would drop it from the value without a trace;
 ::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
 ::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
 :: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
 :: nothing); Compose takes the value from the environment for such a line.
 :: The backslash rules were probed against one version of Compose (compose-go
@@ -526,13 +542,21 @@ set "_EV="
 set "_EV_SET="
 set "_EV_BAD="
 set "_EV_CUT="
+set "_EV_BOM="
 if not exist ".env" goto :eof
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%L"=="" if "%%K"=="﻿%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%M"=="" if "%%K"=="﻿export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%K"=="﻿%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿%~1:" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1:" set "_EV_BOM=1"
 )
+:: A .env that starts with a byte order mark and sets the key on its first
+:: line (KEY=, KEY:, with or without export) refuses the key: the searches
+:: below look for the key at the start of a line and cannot see behind the
+:: mark, so a == or an exclamation mark on that line would go unnoticed.
+if defined _EV_BOM goto :env_value_bom
 :: for /f took every = after the key as one separator, so a value that
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
@@ -603,6 +627,15 @@ set "_EV=!_EV:~1,-1!"
 if not defined _EV goto :env_value_done
 if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
 if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
 goto :env_value_done
 :env_value_bad
 set "_EV="
@@ -698,19 +731,27 @@ for %%I in ("%~1") do set "_ATTR=%%~aI"
 if defined _ATTR if /i "!_ATTR:~0,1!"=="d" set "IS_DIR=1"
 goto :eof
 
-:: :health_status - sets HEALTH to healthy or unhealthy from the Status column
-:: of `docker compose ps` ("Up 2 minutes (healthy)", "(unhealthy)",
-:: "(health: starting)"); HEALTH is left undefined for anything else (still
-:: starting, not listed, no health reported). The parentheses are part of
-:: the match, so "(unhealthy)" is never taken for "(healthy)". Mirrors
-:: container_health in scripts/compose-provider.sh: change them together.
+:: :health_status - sets HEALTH from the Status column of `docker compose ps`:
+::   healthy     "Up 2 minutes (healthy)"
+::   unhealthy   "Up 2 minutes (unhealthy)"
+::   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
+::               starting it again
+::   exited      "Exited (1) 4 seconds ago"
+::   missing     nothing is listed: there is no running container
+:: and leaves it undefined for anything else (still starting, no health
+:: reported). The parentheses are part of the match, so "(unhealthy)" is
+:: never taken for "(healthy)". Mirrors container_health in
+:: scripts/compose-provider.sh: change them together.
 :health_status
 set "HEALTH="
 set "_HS="
 for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul`) do set "_HS=%%S"
+if not defined _HS set "HEALTH=missing"
 if not defined _HS goto :eof
 if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"
 if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"
+if "!_HS:~0,10!"=="Restarting" set "HEALTH=restarting"
+if "!_HS:~0,6!"=="Exited" set "HEALTH=exited"
 goto :eof
 
 :: :valid_public_url VAR - errorlevel 0 when the value of VAR is

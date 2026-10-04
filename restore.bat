@@ -225,7 +225,7 @@ if defined _EV_BAD goto :env_unreadable
 set "BV_HOST_DATA=!_EV!"
 if not defined DATA_DIR goto :data_dir_ok
 if "!DATA_DIR!"=="!BV_HOST_DATA!" goto :data_dir_ok
->&2 echo ERROR: DATA_DIR is set in this console and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Run 'set DATA_DIR=' first. Nothing was done.
+>&2 echo ERROR: DATA_DIR is set in this console and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Make them agree: put the folder in .env as DATA_DIR=[absolute path] (preferred, and the fix when .env has no DATA_DIR line), or run 'set DATA_DIR=' if .env is right. Nothing was done.
 exit /b 1
 :data_dir_ok
 if not defined BV_HOST_DATA set "BV_HOST_DATA=.\data"
@@ -923,6 +923,8 @@ exit /b 1
 ::   delayed expansion would drop it from the value without a trace;
 ::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
 ::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
 :: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
 :: nothing); Compose takes the value from the environment for such a line.
 :: The backslash rules were probed against one version of Compose (compose-go
@@ -932,13 +934,21 @@ set "_EV="
 set "_EV_SET="
 set "_EV_BAD="
 set "_EV_CUT="
+set "_EV_BOM="
 if not exist ".env" goto :eof
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%L"=="" if "%%K"=="﻿%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%M"=="" if "%%K"=="﻿export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%K"=="﻿%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿%~1:" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1:" set "_EV_BOM=1"
 )
+:: A .env that starts with a byte order mark and sets the key on its first
+:: line (KEY=, KEY:, with or without export) refuses the key: the searches
+:: below look for the key at the start of a line and cannot see behind the
+:: mark, so a == or an exclamation mark on that line would go unnoticed.
+if defined _EV_BOM goto :env_value_bom
 :: for /f took every = after the key as one separator, so a value that
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
@@ -1009,6 +1019,15 @@ set "_EV=!_EV:~1,-1!"
 if not defined _EV goto :env_value_done
 if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
 if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
 goto :env_value_done
 :env_value_bad
 set "_EV="

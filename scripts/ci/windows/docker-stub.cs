@@ -39,6 +39,9 @@
 //   BV_STUB_HEALTH           what a plain `compose ps` reports for the app:
 //                            "unhealthy" => "Up 4 seconds (unhealthy)",
 //                            "starting" => "Up 4 seconds (health: starting)",
+//                            "restarting" => "Restarting (1) 3 seconds ago",
+//                            "exited" => "Exited (1) 3 seconds ago",
+//                            "missing" => no line at all (no container),
 //                            unset => "Up 4 seconds (healthy)".
 //   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
 //                            ...` prints on stdout (OLD / NEW / NEITHER).
@@ -349,6 +352,9 @@ internal static class DockerStub
             }
             // install.bat / update.bat read the health word in parentheses.
             string health = Environment.GetEnvironmentVariable("BV_STUB_HEALTH");
+            if (health == "missing") return 0;
+            if (health == "restarting") { Console.WriteLine("Restarting (1) 3 seconds ago"); return 0; }
+            if (health == "exited") { Console.WriteLine("Exited (1) 3 seconds ago"); return 0; }
             string healthText = "(healthy)";
             if (health == "unhealthy") healthText = "(unhealthy)";
             if (health == "starting") healthText = "(health: starting)";

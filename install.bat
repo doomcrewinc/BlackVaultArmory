@@ -134,11 +134,26 @@ if /i "!KEEP_INPUT:~0,1!"=="Y" (
 
 :: ── Data directory (if not already chosen) ───────────────────
 :ask_data_dir
-if defined DATA_DIR goto :ask_port
+:: What is written to .env must be a line :env_value reads back as this very
+:: folder (:check_data_dir). A kept folder that fails that stops here; a typed
+:: one is asked for again, three times at most (`set /p` cannot tell the end
+:: of input from an empty answer, so the retries are counted).
+if not defined DATA_DIR goto :ask_data_dir_typed
+call :check_data_dir
+if defined DATA_DIR_OK goto :ask_port
+echo ERROR: the path of that folder cannot be written to .env so that it is read
+echo        back unchanged: it holds a $, an exclamation mark or a # after a space.
+echo        Move the BlackVault folder to a path without those and run this
+echo        script again. Nothing was changed.
+pause
+exit /b 1
+:ask_data_dir_typed
 set "DEFAULT_DATA=!CD!\data"
 echo Where should BlackVault store its data?
 echo   This folder will contain your database and uploaded images.
 echo   Default: !DEFAULT_DATA!
+set "DD_TRIES=0"
+:ask_data_dir_again
 set "DATA_DIR_INPUT="
 set /p "DATA_DIR_INPUT=  Data directory [press Enter for default]: "
 if defined DATA_DIR_INPUT set "DATA_DIR_INPUT=!DATA_DIR_INPUT:"=!"
@@ -146,6 +161,15 @@ if defined DATA_DIR_INPUT (set "DATA_DIR=!DATA_DIR_INPUT!") else set "DATA_DIR=!
 :: Strip one trailing slash, but never from a drive root such as C:\
 if "!DATA_DIR:~-1!"=="\" if not "!DATA_DIR:~-2!"==":\" set "DATA_DIR=!DATA_DIR:~0,-1!"
 if "!DATA_DIR:~-1!"=="/" set "DATA_DIR=!DATA_DIR:~0,-1!"
+call :check_data_dir
+if defined DATA_DIR_OK goto :ask_port
+echo   That folder cannot be used as typed: it would not be read back from .env
+echo   as the same folder. Type the full path, with no $ and no exclamation mark
+echo   in it and not starting with ~ (for example D:\BlackVault\data).
+set "DATA_DIR="
+set /a DD_TRIES+=1
+if !DD_TRIES! GEQ 3 goto :data_dir_refused
+goto :ask_data_dir_again
 
 :: ── Port ─────────────────────────────────────────────────────
 :ask_port
@@ -332,16 +356,27 @@ echo Waiting for health check...
 :: Only the status word "healthy" ends the wait: "unhealthy" and "starting"
 :: keep polling, and the last status seen decides what is reported.
 set "_HW=0"
+set "_HF=0"
 :health_wait
 call :health_status
 if "!HEALTH!"=="healthy" goto :health_ok
+:: Seen restarting, exited or missing three times: the app refuses to start
+:: by exiting, and Docker starts it over and over. That is a failed start,
+:: not a slow one, and the wait ends.
+if "!HEALTH!"=="restarting" set /a _HF+=1
+if "!HEALTH!"=="exited" set /a _HF+=1
+if "!HEALTH!"=="missing" set /a _HF+=1
+if !_HF! GEQ 3 goto :health_timed_out
 set /a _HW+=1
 if !_HW! GEQ 60 goto :health_timed_out
 timeout /t 2 /nobreak >nul
 goto :health_wait
 :health_timed_out
 if "!HEALTH!"=="unhealthy" echo WARNING: the BlackVault container is unhealthy. Check the logs with:
-if not "!HEALTH!"=="unhealthy" echo WARNING: BlackVault did not become healthy within two minutes. Check the logs with:
+if "!HEALTH!"=="restarting" echo WARNING: the BlackVault container keeps restarting: the app stops during startup, and says why in its log. Check the logs with:
+if "!HEALTH!"=="exited" echo WARNING: the BlackVault container has exited: the app stopped during startup, and says why in its log. Check the logs with:
+if "!HEALTH!"=="missing" echo WARNING: no running BlackVault container was found. Check the logs with:
+if not defined HEALTH echo WARNING: BlackVault did not become healthy within two minutes. Check the logs with:
 echo   %COMPOSE% logs -f
 goto :health_done
 :health_ok
@@ -366,10 +401,13 @@ echo.
 :: ── First-time setup token (only while no admin account exists) ──
 call :show_setup_token PUBLIC_URL
 pause
-:: A container that reports unhealthy is a failed install for whoever started
-:: this script. One that is still starting when the wait ran out is not: a
-:: slow first start can still come up. As install.sh.
+:: A container that is unhealthy, keeps restarting, has exited or is not there
+:: is a failed start for whoever started this script. One that is still
+:: starting when the wait ran out is not: a slow first start can still come up.
 if "!HEALTH!"=="unhealthy" exit /b 1
+if "!HEALTH!"=="restarting" exit /b 1
+if "!HEALTH!"=="exited" exit /b 1
+if "!HEALTH!"=="missing" exit /b 1
 exit /b 0
 
 :summary_existing
@@ -395,6 +433,11 @@ exit /b 1
 :public_url_missing
 echo.
 echo No input received; BLACKVAULT_PUBLIC_URL is required. Aborting.
+pause
+exit /b 1
+
+:data_dir_refused
+echo ERROR: no usable data directory was given. Nothing was changed.
 pause
 exit /b 1
 
@@ -496,6 +539,8 @@ goto :eof
 ::   delayed expansion would drop it from the value without a trace;
 ::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
 ::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
 :: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
 :: nothing); Compose takes the value from the environment for such a line.
 :: The backslash rules were probed against one version of Compose (compose-go
@@ -505,13 +550,21 @@ set "_EV="
 set "_EV_SET="
 set "_EV_BAD="
 set "_EV_CUT="
+set "_EV_BOM="
 if not exist ".env" goto :eof
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%L"=="" if "%%K"=="﻿%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%M"=="" if "%%K"=="﻿export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%K"=="﻿%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿%~1:" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1" set "_EV_BOM=1"
+  if "%%K"=="﻿export" if "%%L"=="%~1:" set "_EV_BOM=1"
 )
+:: A .env that starts with a byte order mark and sets the key on its first
+:: line (KEY=, KEY:, with or without export) refuses the key: the searches
+:: below look for the key at the start of a line and cannot see behind the
+:: mark, so a == or an exclamation mark on that line would go unnoticed.
+if defined _EV_BOM goto :env_value_bom
 :: for /f took every = after the key as one separator, so a value that
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
@@ -582,6 +635,15 @@ set "_EV=!_EV:~1,-1!"
 if not defined _EV goto :env_value_done
 if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
 if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
 goto :env_value_done
 :env_value_bad
 set "_EV="
@@ -669,6 +731,25 @@ echo      BLACKVAULT_DATABASE_URL=postgresql://blackvault:^<same password^>@db:5
 echo    See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead.
 goto :eof
 
+:: :check_data_dir - sets DATA_DIR_OK when a line DATA_DIR=[the value of
+:: DATA_DIR], as :write_env writes it, is read back by :env_value as exactly
+:: that value. The line is written to a scratch .env in a folder of its own
+:: under TEMP and read there, so every rule of the reader applies and none
+:: is repeated here.
+:check_data_dir
+set "DATA_DIR_OK="
+set "_CDD=%TEMP%\blackvault-install-%RANDOM%%RANDOM%"
+mkdir "!_CDD!" 2>nul
+if not exist "!_CDD!\" goto :eof
+(echo DATA_DIR=!DATA_DIR!)>"!_CDD!\.env"
+pushd "!_CDD!"
+call :env_value DATA_DIR >nul
+popd
+rd /s /q "!_CDD!" >nul 2>&1
+if defined _EV_BAD goto :eof
+if "!_EV!"=="!DATA_DIR!" set "DATA_DIR_OK=1"
+goto :eof
+
 :: Sets ENV_DATA_DIR and ENV_PORT from .env, as :env_value reads them, and
 :: ENV_UNREADABLE when either line is one it refuses.
 :read_env
@@ -708,19 +789,27 @@ icacls ".env" /inheritance:r >nul 2>&1
 if errorlevel 1 set "ENV_ACL_FAILED=1"
 goto :eof
 
-:: :health_status - sets HEALTH to healthy or unhealthy from the Status column
-:: of `docker compose ps` ("Up 2 minutes (healthy)", "(unhealthy)",
-:: "(health: starting)"); HEALTH is left undefined for anything else (still
-:: starting, not listed, no health reported). The parentheses are part of
-:: the match, so "(unhealthy)" is never taken for "(healthy)". Mirrors
-:: container_health in scripts/compose-provider.sh: change them together.
+:: :health_status - sets HEALTH from the Status column of `docker compose ps`:
+::   healthy     "Up 2 minutes (healthy)"
+::   unhealthy   "Up 2 minutes (unhealthy)"
+::   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
+::               starting it again
+::   exited      "Exited (1) 4 seconds ago"
+::   missing     nothing is listed: there is no running container
+:: and leaves it undefined for anything else (still starting, no health
+:: reported). The parentheses are part of the match, so "(unhealthy)" is
+:: never taken for "(healthy)". Mirrors container_health in
+:: scripts/compose-provider.sh: change them together.
 :health_status
 set "HEALTH="
 set "_HS="
 for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul`) do set "_HS=%%S"
+if not defined _HS set "HEALTH=missing"
 if not defined _HS goto :eof
 if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"
 if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"
+if "!_HS:~0,10!"=="Restarting" set "HEALTH=restarting"
+if "!_HS:~0,6!"=="Exited" set "HEALTH=exited"
 goto :eof
 
 :: :valid_public_url VAR - errorlevel 0 when the value of VAR is
