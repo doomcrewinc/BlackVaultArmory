@@ -316,21 +316,19 @@ set "_EV="
 set "_EV_SET="
 set "_EV_BAD="
 set "_EV_CUT="
-set "_EV_BOM="
 if not exist ".env" goto :eof
+:: A .env saved with a byte order mark, whose FIRST line sets the key (KEY=,
+:: KEY:, with or without export), refuses the key. The mark is one or three
+:: characters to this script, depending on the code page, and `if` treats it
+:: as no character at all on a UTF-8 code page, so nothing below can be
+:: relied on to see the key behind it, or to miss it. Found here by what is
+:: NOT at the start of line 1: a letter, a digit, _, # or white space.
+findstr /n /r /c:"^[^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" ".env" 2>nul | findstr /b /c:"1:" >nul 2>&1
+if not errorlevel 1 goto :env_value_bom
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
-  if "%%K"=="﻿%~1" set "_EV_BOM=1"
-  if "%%K"=="﻿%~1:" set "_EV_BOM=1"
-  if "%%K"=="﻿export" if "%%L"=="%~1" set "_EV_BOM=1"
-  if "%%K"=="﻿export" if "%%L"=="%~1:" set "_EV_BOM=1"
 )
-:: A .env that starts with a byte order mark and sets the key on its first
-:: line (KEY=, KEY:, with or without export) refuses the key: the searches
-:: below look for the key at the start of a line and cannot see behind the
-:: mark, so a == or an exclamation mark on that line would go unnoticed.
-if defined _EV_BOM goto :env_value_bom
 :: for /f took every = after the key as one separator, so a value that
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1

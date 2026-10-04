@@ -338,31 +338,36 @@ describe("all six batch scripts that read .env do it through the one shared :env
 
   it("the reader is the same in all six files, byte for byte, byte-order-mark lines included", () => {
     const install = envValueBlock(BAT["install.bat"]);
-    // The four lines that see a key behind a UTF-8 byte-order mark on line 1 (and refuse it).
-    expect(install.filter((l) => l.includes(BOM))).toHaveLength(4);
+    // No copy holds the bytes of a byte-order mark: the mark is found by an ASCII-only search.
+    expect(install.filter((l) => l.includes(BOM))).toHaveLength(0);
     expect(Object.keys(BAT)).toHaveLength(6);
     for (const name of Object.keys(BAT) as (keyof typeof BAT)[]) {
       expect(envValueBlock(BAT[name]).join(""), `${name} :env_value differs`).toBe(install.join(""));
     }
   });
 
-  it("a key on the first line of a .env that starts with a byte-order mark is refused, with its own note, before the searches that cannot see behind the mark", () => {
+  it("a key on the first line of a .env that starts with a byte-order mark is refused, with its own note, before the file is read", () => {
     const block = envValueBlock(BAT["install.bat"]).map(bare);
-    const loopEnd = block.indexOf(")", block.indexOf(":env_value"));
-    expect(block.slice(loopEnd - 4, loopEnd)).toEqual([
-      `  if "%%K"=="${BOM}%~1" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}%~1:" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}export" if "%%L"=="%~1" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}export" if "%%L"=="%~1:" set "_EV_BOM=1"`,
-    ]);
     const code = block.filter((l) => !l.startsWith("::"));
-    const jump = code.indexOf("if defined _EV_BOM goto :env_value_bom");
-    expect(jump).toBeGreaterThan(0);
-    expect(jump).toBeLessThan(code.findIndex((l) => l.startsWith("findstr ")));
-    const at = block.indexOf(":env_value_bom");
-    expect(block.slice(at + 1, at + 5)).toEqual(['set "_EV="', 'set "_EV_SET=1"', 'set "_EV_BAD=1"', "echo Note: the %~1 line in .env is written in a form this script does not read:"]);
-    expect(block[at + 8]).toBe("goto :env_value_done");
-    expect(block).toContain('set "_EV_BOM="');
+    // What is NOT at the start of line 1 (a letter, a digit, _, # or white space), once or three times, then the key.
+    const junk = "[^a-zA-Z0-9_# \t]";
+    const ws = "[ \t]";
+    const at = code.indexOf('if not exist ".env" goto :eof');
+    expect(code.slice(at + 1, at + 3)).toEqual([
+      "findstr /n /r " +
+        [
+          `/c:"^${junk}${ws}*%~1${ws}*[=:]"`,
+          `/c:"^${junk}${junk}${junk}${ws}*%~1${ws}*[=:]"`,
+          `/c:"^${junk}${ws}*export${ws}${ws}*%~1${ws}*[=:]"`,
+          `/c:"^${junk}${junk}${junk}${ws}*export${ws}${ws}*%~1${ws}*[=:]"`,
+        ].join(" ") +
+        ' ".env" 2>nul | findstr /b /c:"1:" >nul 2>&1',
+      "if not errorlevel 1 goto :env_value_bom",
+    ]);
+    expect(code[at + 3].startsWith("for /f ")).toBe(true);
+    const label = block.indexOf(":env_value_bom");
+    expect(block.slice(label + 1, label + 5)).toEqual(['set "_EV="', 'set "_EV_SET=1"', 'set "_EV_BAD=1"', "echo Note: the %~1 line in .env is written in a form this script does not read:"]);
+    expect(block[label + 8]).toBe("goto :env_value_done");
   });
 
   it("install.bat checks the data folder by writing the line and reading it back with :env_value, and asks again (three times at most)", () => {

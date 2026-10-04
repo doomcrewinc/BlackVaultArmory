@@ -596,17 +596,8 @@ describe("backup.bat (static checks; executed only by the Windows CI job)", () =
     return t.slice(start, t.indexOf("\ngoto :eof\n", t.indexOf('if !_CMAJ! EQU 2', start)));
   };
 
-  it("is pure ASCII, apart from the byte-order mark :env_value compares a key with, and has CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
-    // The four lines of the shared :env_value that see a key behind a UTF-8
-    // byte-order mark hold its three bytes; nothing else may be non-ASCII.
-    const BOM = "\u00ef\u00bb\u00bf";
-    const nonAscii = raw.toString("latin1").split("\r\n").filter((l) => /[^\x00-\x7f]/.test(l));
-    expect(nonAscii).toEqual([
-      `  if "%%K"=="${BOM}%~1" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}%~1:" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}export" if "%%L"=="%~1" set "_EV_BOM=1"`,
-      `  if "%%K"=="${BOM}export" if "%%L"=="%~1:" set "_EV_BOM=1"`,
-    ]);
+  it("is pure ASCII with CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
+    expect(raw.every((b) => b < 0x80)).toBe(true);
     expect(text.replace(/\r\n/g, "")).not.toMatch(/[\r\n]/);
   });
 
