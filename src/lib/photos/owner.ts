@@ -22,6 +22,16 @@ export const OWNER_DELEGATE = {
   supply: "supply",
 } as const satisfies Record<PhotoEntityType, string>;
 
+/** The Prisma model name of each item type, as audit rows record it. */
+export const OWNER_MODEL = {
+  firearm: "Firearm",
+  accessory: "Accessory",
+  gear: "Gear",
+  kit: "Kit",
+  ammo: "AmmoStock",
+  supply: "Supply",
+} as const satisfies Record<PhotoEntityType, string>;
+
 export const SAFE_ENTITY_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 
 export function isPhotoEntityType(v: unknown): v is PhotoEntityType {
