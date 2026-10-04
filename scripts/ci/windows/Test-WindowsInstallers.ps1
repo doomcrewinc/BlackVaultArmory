@@ -995,7 +995,7 @@ Show-EvidenceIfFailed $r
 # The app logs "[auth] First admin created" once, when the first admin is
 # created. An update that changes nothing keeps the container and its log, so
 # the token line is still there: the LAST line of the two kinds decides.
-$AdminCreatedLine = "blackvault  | [auth] First admin created: the setup token is no longer valid"
+$AdminCreatedLine = "blackvault  | [auth] First admin created: first-time setup is closed"
 $SpentTokenLog = $TokenLog + "`n" + $AdminCreatedLine + "`nblackvault  | GET / 200"
 $TokenAfterAdminLog = $AdminCreatedLine + "`n" + $TokenLog
 
@@ -1043,15 +1043,16 @@ Assert ($r.Output -notmatch "First-time setup") "no setup block"
 Show-EvidenceIfFailed $r
 
 # ------------------------------------------- a ; in the port of the typed URL
-# :valid_public_url checks the port with for /f, which skips a value that
-# starts with its eol character (";" by default). The host-and-port character
-# check before it already refuses a ";", and the port check refuses it again on
-# its own, so these scenarios pass with either of the two in place; the test
-# that fails without the port's own guard is scripts/bat-shared-subroutines.test.ts.
+# NOT a proof of the port's own ";" guard. :valid_public_url checks the port
+# with for /f, which skips a value that starts with its eol character (";" by
+# default); but the host-and-port character check before it already refuses a
+# ";", so these two scenarios pass with or without the port's guard. They show
+# only that such a URL is rejected. The proof of the guard is the static test
+# in scripts/bat-shared-subroutines.test.ts.
 $SemicolonUrls = @("https://vault.example.com:;3000", "https://vault.example.com:30;00", "https://;vault.example.com")
 
 # ---------------------------------------------------------------- scenario PS1
-Write-Scenario "install.bat - a ; in the port of the public URL is rejected; a normal port is accepted"
+Write-Scenario "install.bat - a public URL with a ; in it is rejected, a normal port is accepted (does not exercise the port's own ; guard)"
 $d = New-Sandbox "port-semicolon"
 $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers (@("", "") + $SemicolonUrls + @("https://vault.example.com:3000", "", "", "2"))
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
@@ -1062,7 +1063,7 @@ Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database a
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario PS2
-Write-Scenario "update.bat - a ; in the port of the public URL is rejected; a normal port is accepted"
+Write-Scenario "update.bat - a public URL with a ; in it is rejected, a normal port is accepted (does not exercise the port's own ; guard)"
 $origin = New-GitRemote "update-semicolon" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-semicolon"
 Set-SqliteInstall $work "7042"
@@ -1081,6 +1082,9 @@ Show-EvidenceIfFailed $r
 # (the comment lines above the label through the line before the next blank
 # line, as scripts/bat-shared-subroutines.test.ts cuts it) and put under a
 # three-line driver that prints the three variables it sets.
+# The expected column is what Docker Compose's own parser gives for the line
+# (github.com/compose-spec/compose-go/v2 dotenv, v2.16.1, probed case by
+# case), or "refused" where :env_value does not implement what Compose does.
 function New-EnvValueDriver([string]$Dir) {
   $lines = [IO.File]::ReadAllText((Join-Path $RepoRoot "install.bat")) -split "`r`n"
   $at = [Array]::IndexOf($lines, ":env_value")
@@ -1116,9 +1120,18 @@ $EnvCases = @(
   @("single quotes", "K='a b'`r`n", "[a b][1][]"),
   @("a # inside single quotes", "K='a # b'`r`n", "[a # b][1][]"),
   @("inline comment after an unquoted value", "K=v # note`r`n", "[v][1][]"),
-  @("inline comment after a tab", "K=v${tab}# note`r`n", "[v][1][]"),
+  @("two spaces before the comment", "K=a  # b`r`n", "[a][1][]"),
+  @("a tab before a # does not start a comment", "K=v${tab}# note`r`n", "[v${tab}# note][1][]"),
   @("a # with no whitespace before it", "K=a#b`r`n", "[a#b][1][]"),
-  @("a value that is only a comment", "K= # note`r`n", "[][1][]"),
+  @("a # right after the = and its space is the value", "K= # note`r`n", "[# note][1][]"),
+  @("a # as the first character", "K=#abc`r`n", "[#abc][1][]"),
+  @("an apostrophe inside an unquoted value", "K=O'Brien`r`n", "[O'Brien][1][]"),
+  @("a single-quoted Windows path", "K='C:\Users\rob\new data'`r`n", "[C:\Users\rob\new data][1][]"),
+  @("a dollar sign inside single quotes is literal", "K='a`$HOME b'`r`n", "[a`$HOME b][1][]"),
+  @("a dollar sign only in the comment", "K=v # costs `$5`r`n", "[v][1][]"),
+  @("an ampersand and a pipe in the value", "K=a&b|c`r`n", "[a&b|c][1][]"),
+  @("a UTF-8 byte-order mark before the first line", "$([char]0xFEFF)K=v`r`n", "[v][1][]"),
+  @("a byte-order mark before an export line", "$([char]0xFEFF)export K=v`r`n", "[v][1][]"),
   @("inner spaces are kept", "K=C:\my vault\data`r`n", "[C:\my vault\data][1][]"),
   @("a commented-out duplicate above", "#K=old`r`nK=new`r`n", "[new][1][]"),
   @("an indented commented-out duplicate above", "  # K=old`r`nK=new`r`n", "[new][1][]"),
@@ -1142,10 +1155,16 @@ $EnvCases = @(
   @("REFUSED: a double quote inside an unquoted value", "K=a`"b`r`n", "[][1][1]"),
   @("REFUSED: an unterminated double quote", "K=`"abc`r`n", "[][1][1]"),
   @("REFUSED: an unterminated single quote", "K='abc`r`n", "[][1][1]"),
-  @("REFUSED: a value starting with =", "K==b`r`n", "[][1][1]")
+  @("REFUSED: a value starting with =", "K==b`r`n", "[][1][1]"),
+  @("REFUSED: a dollar sign in an unquoted value", "K=`$HOME\x`r`n", "[][1][1]"),
+  @("REFUSED: a dollar sign in a double-quoted value", "export K = `"`${HOME}/x`"`r`n", "[][1][1]"),
+  @("REFUSED: a double-quoted Windows path", "K=`"C:\Users\rob\new data`"`r`n", "[][1][1]"),
+  @("REFUSED: KEY: value", "K: v`r`n", "[][1][1]"),
+  @("REFUSED: export KEY: value", "export K: v`r`n", "[][1][1]"),
+  @("REFUSED: text after the closing single quote", "K='a'b`r`n", "[][1][1]")
 )
 
-# ---------------------------------------------------------------- scenario E1
+# ---------------------------------------------------------------- scenario EV1
 Write-Scenario ":env_value (install.bat's own copy, run on cmd.exe) - every .env form in the table"
 $d = Join-Path $Sandboxes "envvalue"
 New-Item -ItemType Directory -Force -Path $d | Out-Null
@@ -1154,21 +1173,28 @@ $last = $null
 foreach ($case in $EnvCases) {
   $envFile = Join-Path $d ".env"
   Remove-Item -Force $envFile -ErrorAction SilentlyContinue
-  if ($null -ne $case[1]) { [IO.File]::WriteAllText($envFile, $case[1], [Text.Encoding]::ASCII) }
+  $rowBase = $script:Failures.Count
+  # UTF-8 without a byte-order mark of its own: a row that wants one writes it.
+  if ($null -ne $case[1]) { [IO.File]::WriteAllText($envFile, $case[1], (New-Object Text.UTF8Encoding $false)) }
   $last = Invoke-Bat -Dir $d -Script "envdrv.bat" -NoPad -TimeoutSeconds 60
   $got = "(no RESULT line)"
   $m = [regex]::Match($last.Output, "(?m)^RESULT=(.*?)\r?$")
   if ($m.Success) { $got = $m.Groups[1].Value }
   Assert ($got -eq $case[2]) "$($case[0]): $($case[2]) (got $got)"
   if ($case[2].EndsWith("[1][1]")) {
-    Assert ($last.Output -match "Note: the K line in \.env is written in a form this script cannot read") "$($case[0]): says the line cannot be read"
+    Assert ($last.Output -match "Note: the K line in \.env is written in a form this script does not read") "$($case[0]): says the line is not read"
   } else {
     Assert ($last.Output -notmatch "Note:") "$($case[0]): no note"
   }
+  # The evidence of THIS row, when one of its checks failed.
+  if ($script:Failures.Count -gt $rowBase) {
+    $shown = if ($null -eq $case[1]) { "(no .env)" } else { ($case[1] -replace "`r", "<CR>" -replace "`n", "<LF>" -replace "`t", "<TAB>") }
+    Write-Host "    ---- row '$($case[0])': .env = $shown ; the driver printed:" -ForegroundColor Yellow
+    foreach ($l in ($last.Output -split "`r?`n")) { Write-Host "       | $l" }
+  }
 }
-if ($null -ne $last) { Show-EvidenceIfFailed $last }
 
-# ---------------------------------------------------------------- scenario E2
+# ---------------------------------------------------------------- scenario EV2
 Write-Scenario "install.bat - a configured install whose .env uses export, spaces, quotes and comments is started, not reconfigured"
 $d = New-Sandbox "e2"
 New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
@@ -1187,7 +1213,7 @@ Assert ($r.Output -match "http://localhost:7777") "reported the configured port,
 Assert ($r.Output -notmatch "Where should BlackVault store its data") "the wizard did not run"
 Show-EvidenceIfFailed $r
 
-# ---------------------------------------------------------------- scenario E3
+# ---------------------------------------------------------------- scenario EV3
 Write-Scenario "update.bat - public URL, direct access, trusted proxies and the encryption key written with export / quotes / comments: nothing asked again, no key file created"
 $origin = New-GitRemote "update-envforms" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-envforms"
@@ -1215,7 +1241,7 @@ Assert ($r.StubLog -match "compose up -d") "restarted"
 Assert ($r.Output -match "URL:\s+https://vault\.example\.com") "the summary shows the public URL"
 Show-EvidenceIfFailed $r
 
-# ---------------------------------------------------------------- scenario E4
+# ---------------------------------------------------------------- scenario EV4
 Write-Scenario "update.bat - an encryption-key line the batch reader cannot read stops the update: no second key, nothing rebuilt"
 $origin = New-GitRemote "update-envkey-unreadable" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-envkey-unreadable"
@@ -1223,7 +1249,7 @@ Set-ConfiguredSqliteInstall $work "7044"
 Add-Content -Path (Join-Path $work ".env") -Encoding Ascii -Value @("BLACKVAULT_ENCRYPTION_KEY=`"$envKey`" # the field-encryption key")
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
-Assert ($r.Output -match "Note: the BLACKVAULT_ENCRYPTION_KEY line in \.env is written in a form this script cannot read") "says which line it cannot read"
+Assert ($r.Output -match "Note: the BLACKVAULT_ENCRYPTION_KEY line in \.env is written in a form this script does not read") "says which line it does not read"
 Assert ($r.Output -match "ERROR: the BLACKVAULT_ENCRYPTION_KEY line in \.env could not be read") "says why it stopped"
 Assert ($r.Output -match "Nothing was rebuilt or restarted") "says nothing was rebuilt"
 Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "created NO key file"
@@ -1232,7 +1258,7 @@ Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
 Assert ($r.Output -notmatch $envKey) "the key is never echoed"
 Show-EvidenceIfFailed $r
 
-# ---------------------------------------------------------------- scenario E5
+# ---------------------------------------------------------------- scenario EV5
 Write-Scenario "install.bat - a commented-out encryption-key line does not count: the key file is created"
 $d = New-Sandbox "e5"
 New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
@@ -1243,6 +1269,125 @@ $r = Invoke-Bat -Dir $d -Script "install.bat"
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.Output -match "Encryption key created:") "created a key file"
 Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "the key file exists"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------- values Docker Compose would change
+# Compose substitutes $VAR in unquoted and double-quoted values and unescapes
+# \r, \n, \t ... inside double quotes, so DATA_DIR="C:\Users\rob\data" names a
+# folder with a carriage return in it. :env_value refuses such a line instead
+# of handing back the text as typed. A refused DATA_DIR must never be
+# replaced by whatever database sits in a legacy folder.
+function New-UpdateInstall([string]$Name, [string]$DataDirLine, [switch]$NoProvider) {
+  $origin = New-GitRemote "$Name" (Join-Path $RepoRoot "update.bat")
+  $work = New-WorkingClone $origin "$Name"
+  # The real data, in a folder of its own ...
+  New-Item -ItemType Directory -Force -Path (Join-Path $work "vault\db"), (Join-Path $work "vault\uploads") | Out-Null
+  Set-Content -Path (Join-Path $work "vault\db\vault.db") -Value "the real database" -Encoding Ascii
+  # ... and a database in .\data, the first legacy location update.bat looks in.
+  New-Item -ItemType Directory -Force -Path (Join-Path $work "data\db") | Out-Null
+  Set-Content -Path (Join-Path $work "data\db\vault.db") -Value "a stale legacy database" -Encoding Ascii
+  $lines = @($DataDirLine.Replace("<VAULT>", (Join-Path $work "vault")), "PORT=7050")
+  if (-not $NoProvider) { $lines += "BLACKVAULT_DB_PROVIDER=sqlite" }
+  $lines += @("BLACKVAULT_PUBLIC_URL=https://vault.example.com", "BLACKVAULT_DIRECT_ACCESS_INITIAL=on", "BLACKVAULT_TRUSTED_PROXIES=")
+  [IO.File]::WriteAllText((Join-Path $work ".env"), (($lines -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+  return $work
+}
+
+# ---------------------------------------------------------------- scenario UR1
+Write-Scenario "update.bat - DATA_DIR with a comment after it, or in single quotes, is read BEFORE git pull as the folder it names: verified, not relocated, and the snapshot is of that folder"
+$form = 0
+foreach ($line in @("DATA_DIR=<VAULT> # where the data lives", "DATA_DIR='<VAULT>'", "export DATA_DIR = <VAULT>")) {
+  $form++
+  $work = New-UpdateInstall "update-datadir-form$form" $line
+  $before = Get-FileBase64 (Join-Path $work ".env")
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+  Assert ($r.ExitCode -eq 0) "[$line] exits 0 (got $($r.ExitCode))"
+  Assert ($r.Output.Contains("Database verified at: $work\vault\db\vault.db")) "[$line] verified the database in the folder the line names"
+  Assert ($r.Output -notmatch "Auto-updating DATA_DIR") "[$line] did not relocate DATA_DIR to the legacy folder"
+  Assert ($r.Output -notmatch "No database found at expected location") "[$line] no missing-database warning"
+  Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) "[$line] .env left byte-for-byte unchanged"
+  $snap = @(Get-ChildItem (Join-Path $work "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue)
+  Assert ($snap.Count -eq 1 -and (Get-Content $snap[0].FullName -Raw) -match "the real database") "[$line] scripts\db-snapshot.bat copied the real database, not the legacy one"
+  Assert ($r.StubLog -match "compose up -d") "[$line] restarted"
+  Show-EvidenceIfFailed $r
+}
+
+# ---------------------------------------------------------------- scenario UR2
+Write-Scenario "update.bat - a DATA_DIR line Compose would change (double-quoted Windows path, a dollar sign, DATA_DIR: value) is refused: no relocation, .env untouched, and the update stops at the snapshot"
+$form = 0
+foreach ($line in @("DATA_DIR=`"<VAULT>`"", "export DATA_DIR=`$USERPROFILE\vault", "DATA_DIR: <VAULT>")) {
+  $form++
+  $work = New-UpdateInstall "update-datadir-refused$form" $line
+  $before = Get-FileBase64 (Join-Path $work ".env")
+  $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+  Assert ($r.ExitCode -eq 1) "[$line] exits 1 (got $($r.ExitCode))"
+  Assert ($r.Output -match "Note: the DATA_DIR line in \.env is written in a form this script does not read") "[$line] says which line it does not read"
+  Assert ($r.Output -match "A Windows path\s+goes unquoted or in single quotes") "[$line] says how to write a Windows path"
+  Assert ($r.Output -match "WARNING: DATA_DIR in \.env could not be read, so the database check is skipped") "[$line] says the check is skipped"
+  Assert ($r.Output -notmatch "Auto-updating DATA_DIR") "[$line] did not relocate DATA_DIR to the legacy folder"
+  Assert ($r.Output -notmatch "Database verified at") "[$line] verified nothing"
+  Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) "[$line] .env left byte-for-byte unchanged"
+  Assert (-not (Test-Path (Join-Path $work ".env.bak"))) "[$line] no .env.bak: .env was never rewritten"
+  Assert ($r.Output -match "database snapshot failed: DATA_DIR in \.env could not be read") "[$line] scripts\db-snapshot.bat refuses too, instead of assuming .\data"
+  Assert ($r.Output -match "The new version was NOT started") "[$line] the update stopped"
+  Assert ($r.StubLog -notmatch "compose up -d") "[$line] did NOT start the new version"
+  Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "[$line] no snapshot of the legacy database was taken"
+  Show-EvidenceIfFailed $r
+}
+
+# ---------------------------------------------------------------- scenario UR3
+Write-Scenario "update.bat - a database that really is in the legacy folder: an 'export DATA_DIR' line is rewritten, not left beside a new one"
+$work = New-UpdateInstall "update-datadir-relocate" "export DATA_DIR = <VAULT>-moved-away"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Auto-updating DATA_DIR in \.env") "relocated: the folder the line names has no database, the legacy one has"
+Assert ((Get-EnvValue $work "DATA_DIR") -eq "$work\data") "DATA_DIR is now the legacy folder, as a plain line"
+Assert (@(Get-Content (Join-Path $work ".env") | Where-Object { $_ -match "DATA_DIR" }).Count -eq 1) "exactly one DATA_DIR line is left"
+Assert (Test-Path (Join-Path $work ".env.bak")) "the previous .env is kept as .env.bak"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UR4
+Write-Scenario "update.bat - a BLACKVAULT_DB_PROVIDER line it does not read stops before the pull (SQLite is not assumed)"
+$work = New-UpdateInstall "update-provider-refused" "DATA_DIR=<VAULT>" -NoProvider
+Add-Content -Path (Join-Path $work ".env") -Encoding Ascii -Value @("BLACKVAULT_DB_PROVIDER=`$DB")
+$before = Get-FileBase64 (Join-Path $work ".env")
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: \.env holds a BLACKVAULT_DB_PROVIDER line this script does not read") "says why it stopped"
+Assert ($r.Output -match "Nothing was pulled, rebuilt or restarted") "says nothing was done"
+Assert ($r.Output -notmatch "Pulling latest updates") "did NOT pull"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) ".env left byte-for-byte unchanged"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UR5
+Write-Scenario "install.bat - an existing .env whose DATA_DIR line is refused stops the installer: the wizard never writes a new .env over it"
+$d = New-Sandbox "install-datadir-refused"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
+Set-Content -Path (Join-Path $d "data\db\vault.db") -Value "not really sqlite" -Encoding Ascii
+@("DATA_DIR=`"$d\data`"", "PORT=7051", "BLACKVAULT_DB_PROVIDER=sqlite") | Set-Content -Path (Join-Path $d ".env") -Encoding Ascii
+$before = Get-FileBase64 (Join-Path $d ".env")
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Note: the DATA_DIR line in \.env is written in a form this script does not read") "says which line it does not read"
+Assert ($r.Output -match "ERROR: \.env holds a line this script does not read") "says why it stopped"
+Assert ($r.Output -notmatch "Where should BlackVault store its data") "the wizard did not run"
+Assert ((Get-FileBase64 (Join-Path $d ".env")) -eq $before) ".env left byte-for-byte unchanged"
+Assert ([string]::IsNullOrWhiteSpace(($r.StubLog -replace "(?m)^compose version.*\r?\n?", ""))) "docker was asked for its version and nothing else"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "created NO key file"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UR6
+Write-Scenario "install.bat - BLACKVAULT_ENCRYPTION_KEY that is not 64 hex characters (here: only a comment after the =, which Compose passes on as the value) stops: no second key"
+$d = New-Sandbox "install-key-malformed"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
+Set-Content -Path (Join-Path $d "data\db\vault.db") -Value "not really sqlite" -Encoding Ascii
+@("DATA_DIR=$d\data", "PORT=7052", "BLACKVAULT_DB_PROVIDER=sqlite", "BLACKVAULT_ENCRYPTION_KEY= # set me") | Set-Content -Path (Join-Path $d ".env") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: BLACKVAULT_ENCRYPTION_KEY in \.env is not 64 hex characters") "says the key is malformed"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key"))) "created NO key file"
+Assert ($r.StubLog -notmatch "compose up") "did NOT start"
 Show-EvidenceIfFailed $r
 
 # =============================================================================
@@ -2484,6 +2629,26 @@ Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExe
 Show-EvidenceIfFailed $r
 $r = Invoke-Backup $d "--verify `"$(Join-Path $dataDir "backups\$name")`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
 Assert ($r.ExitCode -eq 1 -and @(Get-BackupCalls $r).Count -eq 0) "with BLACKVAULT_BACKUP_DIR set, DATA_DIR\backups is no longer the backup folder (exit $($r.ExitCode))"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario BK8b
+Write-Scenario "backup.bat --verify - .env forms: an export line with a comment is followed; a double-quoted Windows path is refused before docker is touched"
+$name = "blackvault-full-20261002-180405.bvb"
+$dataDir = Join-Path $Sandboxes "backup-envforms-data"
+New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "backups") | Out-Null
+$d = New-BackupSandbox "backup-envforms-read" @("export DATA_DIR = $dataDir # the data")
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $dataDir "backups\$name")`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+$calls = @(Get-BackupCalls $r)
+Assert ($r.ExitCode -eq 0 -and $calls.Count -eq 1 -and $calls[0] -eq "$BackupExec --verify $name") "follows 'export DATA_DIR = path # comment' (exit $($r.ExitCode); got: $($calls -join ' || '))"
+Show-EvidenceIfFailed $r
+$d = New-BackupSandbox "backup-envforms-refused" @("DATA_DIR=`"$dataDir`"")
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Backup $d "--verify `"$(Join-Path $dataDir "backups\$name")`" --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1" }
+Assert ($r.ExitCode -eq 1) "a double-quoted path: exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Note: the DATA_DIR line in \.env is written in a form this script does not read") "says which line it does not read"
+Assert ($r.Output -match "ERROR: \.env holds a line this script does not read") "says why it stopped"
+Assert (@(Get-BackupCalls $r).Count -eq 0) "the backup program was never started"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario BK9
