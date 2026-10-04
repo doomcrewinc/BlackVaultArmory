@@ -10,5 +10,6 @@
   "src/app/api/admin/audit/export/route.real-db.test.ts",
   "scripts/rotate-encryption-key.test.ts",
   "src/lib/auth/admins.real-db.test.ts",
-  "src/lib/capture/pass.real-db.test.ts"
+  "src/lib/capture/pass.real-db.test.ts",
+  "src/lib/capture/upload.real-db.test.ts"
 ]

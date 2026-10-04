@@ -1,14 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
-import { prisma } from "@/lib/prisma";
-import { DOCUMENT_OWNER_INCLUDE } from "@/lib/documents/owner-include";
+import { storeDocument } from "@/lib/documents/store";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { HEIC_MESSAGE, PictureRejected, processPicture } from "@/lib/images/process";
-import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
 
@@ -105,35 +100,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Generate a unique ID for the file
-    const fileId = randomUUID().replace(/-/g, "");
-
-    const fileName = `${fileId}.${detected.extension}`;
-    const relativeUrl = `/api/files/documents/${fileName}`;
-
-    const uploadDir = documentsRoot();
-    const filePath = path.join(uploadDir, fileName);
-
-    await fs.mkdir(uploadDir, { recursive: true });
-
-    await writeEncryptedFile(filePath, stored);
-
-    const doc = await prisma.document.create({
-      data: {
-        name,
-        type,
-        fileUrl: relativeUrl,
-        fileSize: stored.length,
-        mimeType: storedMimeType,
-        notes: notes || null,
-        firearmId: firearmId || null,
-        accessoryId: accessoryId || null,
-        gearId: gearId || null,
-        ammoStockId: ammoStockId || null,
-        supplyId: supplyId || null,
-        kitId: kitId || null,
-      },
-      include: DOCUMENT_OWNER_INCLUDE,
+    const doc = await storeDocument({
+      bytes: stored,
+      extension: detected.extension,
+      mimeType: storedMimeType,
+      name,
+      type,
+      notes: notes || null,
+      owners: { firearmId, accessoryId, gearId, ammoStockId, supplyId, kitId },
     });
 
     return NextResponse.json(doc, { status: 201 });
