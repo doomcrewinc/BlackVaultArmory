@@ -1682,8 +1682,20 @@ Compose would change a value (or reject the line), the scripts used to work with
 written, which is not the value Docker uses. They now stop with an `ERROR` that names the key:
 the installers, the updaters and the backup and restore scripts before anything is rebuilt,
 stopped or changed; a key rotation at its snapshot step, after which it starts BlackVault again.
-A `.env` written by the installer is not affected; a line edited by hand can be. This applies to
-`DATA_DIR`, `BLACKVAULT_BACKUP_DIR`, `BLACKVAULT_DB_PROVIDER` and `BLACKVAULT_ENCRYPTION_KEY`:
+This applies to `DATA_DIR`, `BLACKVAULT_BACKUP_DIR`, `BLACKVAULT_DB_PROVIDER` and
+`BLACKVAULT_ENCRYPTION_KEY`, and in `install.bat` also to `PORT`.
+
+Most installs have no such line, but an installer-written `.env` can: until this release the
+installers wrote the data folder exactly as it was typed. If you answered the data-folder
+question with `~/blackvault` or `$HOME/blackvault`, your `.env` holds `DATA_DIR=~/blackvault` or
+`DATA_DIR=$HOME/blackvault`. That install has been working, because Docker Compose expanded the
+value; the update now stops at its first check, before anything is rebuilt or restarted, and
+your data and `.env` are not changed. Open `.env`, write the folder in full
+(`DATA_DIR=/home/you/blackvault`: the folder your data is in now; in a terminal
+`echo ~/blackvault` or `echo $HOME/blackvault` prints it), and run the update again. From this release the
+installers spell out a leading `~/` or `$HOME/` themselves (`install.sh`) and ask again for a
+folder they could not write as a line that is read back unchanged. A line edited by hand can be
+affected in more ways:
 
 | Written like this | Why it is refused | Write it like this |
 |---|---|---|
@@ -1695,18 +1707,30 @@ A `.env` written by the installer is not affected; a line edited by hand can be.
 | `DATA_DIR="/srv/blackvault` | The quote is not closed | `DATA_DIR=/srv/blackvault` |
 
 On Windows the `.bat` scripts also refuse a quoted value followed by a comment
-(`DATA_DIR="D:\Vault" # note`), a `"` inside a value, a value that starts with `=`, and an
-exclamation mark anywhere on the line. The safe form everywhere is `KEY=value` with the final
-value spelled out: no quotes, no `$`, no `~`, no `!`. A `BLACKVAULT_ENCRYPTION_KEY` line that
-is not 64 hex characters also stops `install` and `update` before the build.
+(`DATA_DIR="D:\Vault" # note`), a `"` inside a value, a value that starts with `=`, an
+exclamation mark anywhere on the line, and one of these keys on the first line of a `.env` that
+was saved with a byte order mark (save it as plain UTF-8, or put a comment line first). The safe
+form everywhere is `KEY=value` with the final value spelled out: no quotes, no `$`, no `~`, no
+`!`. On an install that has no key file yet (`secrets/blackvault_encryption_key`), a
+`BLACKVAULT_ENCRYPTION_KEY` line that is unreadable or not 64 hex characters also stops `install`
+and `update` before the build; with a key file in place that line is not looked at by them.
 
 **2. "NOT healthy", and exit code 1.** After starting the container, `install` and `update` wait up
 to two minutes for its health check. Only `healthy` counts as success; otherwise the summary box
 says `BlackVault was started, but is NOT healthy.` or `Update applied - app NOT healthy.` and
-points at the logs. If the container reports `unhealthy`, the script now ends with exit code 1.
-If it is still starting when the wait runs out, the warning is printed and the exit code stays 0
-(a slow first start is not a failure). A cron job or a script that calls the updater should
-check the exit code.
+points at the logs. The exit code then depends on what `docker compose ps` reports:
+
+| The container | Exit code |
+|---|---|
+| is `healthy` | 0 |
+| is `unhealthy` when the two minutes are over | 1 |
+| keeps restarting, has exited, or is not there (seen three times; the wait ends early) | 1 |
+| is still starting when the two minutes are over | 0, with a warning: a slow first start is not a failure |
+
+A container that keeps restarting is what the app's own refusals to start look like (item 3
+below, two encryption keys, no public URL): the reason is in `docker compose logs blackvault`.
+A cron job or a script that calls the updater should check the exit code. (Re-running
+`install` over an install that is already configured only starts it and does not wait.)
 
 **3. BlackVault does not start on a half-restored install.** If the uploads folder holds a marker
 left by a restore (`uploads/.restore-<time>.db-started`), this version exits at startup. The
