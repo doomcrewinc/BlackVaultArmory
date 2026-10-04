@@ -13,7 +13,7 @@
 # An existing key file is NEVER overwritten or modified: it may be the only
 # key the database is encrypted with.
 #
-# Final review N1: an install may keep its key in BLACKVAULT_ENCRYPTION_KEY
+# An install may keep its key in BLACKVAULT_ENCRYPTION_KEY
 # (in .env, or exported in the shell — Compose passes either to the app)
 # instead of the file. Then NO key file is created: a second, different key
 # would make the app refuse to start (KEY_CONFLICT). Needs env_value from

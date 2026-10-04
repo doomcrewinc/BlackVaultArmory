@@ -819,7 +819,7 @@ goto :eof
 :: key material is written (as rotate-key.bat does); a failed icacls aborts.
 :: errorlevel 0 when the key file exists afterwards, 1 with a message when it
 :: could not be created. Never echoes the key.
-:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: When the key is held in BLACKVAULT_ENCRYPTION_KEY (a
 :: non-empty line in .env, or set in this console) no key file is created -
 :: a second, different key would make the app refuse to start (KEY_CONFLICT).
 :: The .env line is read by :env_value; a line it cannot read, or a value

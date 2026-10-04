@@ -1,5 +1,5 @@
 #!/bin/sh
-# BlackVault container entrypoint (field encryption, Task 7, carry I3).
+# BlackVault container entrypoint.
 #
 # THE PROBLEM. The field-encryption key lives on the host in
 # secrets/blackvault_encryption_key, mode 600, owned by whoever ran
@@ -48,7 +48,7 @@ if [ -d "$SRC" ]; then
   chown nextjs:nodejs "$DST"
   chmod 700 "$DST"
   for name in blackvault_encryption_key blackvault_encryption_key.new; do
-    # Fix round 1 (M9): a symlink would be followed INSIDE the container
+    # A symlink would be followed INSIDE the container
     # (e.g. to /etc/shadow) and its target copied where nextjs can read it.
     if [ -L "$SRC/$name" ]; then
       echo "[entrypoint] Refusing to start: secrets/$name is a symbolic link. Replace it with the key file itself." >&2

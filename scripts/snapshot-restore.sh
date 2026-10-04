@@ -9,7 +9,7 @@
 #   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]
 #   snapshot-restore.sh clear-marker UPLOADS STAMP
 #
-# THE THREE STATES (rulings R24 and R28). STAMP is the restore's <ts>. The
+# THE THREE STATES. STAMP is the restore's <ts>. The
 # restore program leaves a marker, UPLOADS/.restore-<ts>.db-started, just
 # before its database step, and removes it only when everything is in place.
 #   started    the marker exists. The database may hold the backup's
@@ -73,7 +73,7 @@
 # same rule (assertNoUnfinishedRestore in src/lib/files/startup.ts).
 #
 # clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
-#          restore program leaves just before its database step (ruling R24).
+#          restore program leaves just before its database step.
 #          The wrapper calls this once its rollback has worked. `uploads`
 #          never removes it: while it exists, the database still has to be
 #          put back.
@@ -238,7 +238,7 @@ STAGING="$UP/.restore-$STAMP"
 PRE="$UP/.pre-restore-$STAMP"
 STATE=$(restore_state "$UP" "$STAMP")
 
-# Ruling R28: a finished restore is never undone. Nothing below runs: not the
+# A finished restore is never undone. Nothing below runs: not the
 # move-back, and not the comparison with the snapshot, which would copy the
 # old files over the restored ones.
 if [ "$STATE" = "complete" ]; then

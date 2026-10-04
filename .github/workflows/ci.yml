@@ -359,7 +359,7 @@ jobs:
     permissions:
       contents: read
 
-    # Field encryption (Task 7, carry I3). The key file is mode 600 and owned
+    # Field encryption. The key file is mode 600 and owned
     # by the host user; the app runs as uid 1001. Docker Desktop hides any
     # mismatch, so only a real Linux daemon can show that the entrypoint's
     # tmpfs copy works, that the stack still starts without a key (and says
@@ -367,7 +367,7 @@ jobs:
     # does everything as a separate uid-1234 user: the runner's own user is
     # uid 1001, which would mask the problem.
     #
-    # Full backups (spec 3c) are proven here too, in the two steps after it,
+    # Full backups are proven here too, in the two steps after it,
     # because they need the same things: the image this job builds, a host
     # user that is not uid 1001, and the install the first script leaves
     # behind. backup.sh, restore.sh (with a restore that fails after its

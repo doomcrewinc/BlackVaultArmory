@@ -7,7 +7,7 @@
 :: Called as `call scripts\db-snapshot.bat` by update.bat (before the new
 :: image starts) and rotate-key.bat (after it has stopped the app).
 ::
-:: Contract (ruling R4): no arguments; errorlevel 0 only when a snapshot was
+:: Contract: no arguments; errorlevel 0 only when a snapshot was
 :: written (or there is no database yet to copy); any failure returns
 :: errorlevel 1 and the caller stops. It never pauses and never exits the
 :: caller: only `exit /b`. The caller's variables and folder are untouched
@@ -22,7 +22,7 @@
 :: backups\ is restricted to the current user (icacls) BEFORE anything is
 :: copied into it: a snapshot is a plain copy of the database.
 ::
-:: Task 4 (encrypted files at rest): independent of DB_PROVIDER, this script
+:: Encrypted files at rest: independent of DB_PROVIDER, this script
 :: also copies DATA_DIR\uploads into backups\uploads-<TS>\ (skipped, still
 :: errorlevel 0, when uploads\ is missing or has no files), leaving out
 :: .pre-encryption-* folders and *.tmp / *.rot files. backups\uploads-
@@ -170,7 +170,7 @@ echo ERROR: database snapshot failed: !FAIL_MSG!
 popd
 exit /b 1
 
-:: :snapshot_uploads - mirrors the "Uploads snapshot (Task 4)" block in
+:: :snapshot_uploads - mirrors the "Uploads snapshot" block in
 :: scripts/db-snapshot.sh: change them together. Needs DATA_DIR and TS
 :: (both set above, before the provider branch). Sets FAIL_MSG and returns
 :: errorlevel 1 on any failure (the caller does `if errorlevel 1 goto :fail`);

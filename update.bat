@@ -150,8 +150,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-:: The second of the two "byte pad" lines above is a real command (fix round 1,
-:: I4: `call :clear_eol_only_change`, same length as the comment it replaced).
+:: The second of the two "byte pad" lines above is a real command
+:: (`call :clear_eol_only_change`), sized to keep the byte count.
 :: The two-line byte pad above `git pull` is for the e570bd8 update.bat
 :: (what develop shipped before this release). It runs `git pull` as a
 :: top-level line, so once the pull replaces this file cmd.exe resumes here
@@ -258,12 +258,12 @@ echo Snapshotting the database...
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
 
-:: Task 4: scripts\db-snapshot.bat also snapshotted the uploads folder
+:: scripts\db-snapshot.bat also snapshotted the uploads folder
 :: (unless it was empty or missing) and left its path in
 :: backups\.uploads-snapshot-marker. Read it once, then remove it - never
 :: write it to .env - and pass it to the ONE `up` below, so the app's own
 :: startup step does not take a second snapshot of the same files.
-:: Final review FIX 5: never let a value inherited from the caller reach `up`.
+:: Never let a value inherited from the caller reach `up`.
 set "BLACKVAULT_UPLOADS_SNAPSHOT="
 set "UPLOADS_SNAPSHOT_MARKER="
 if exist "backups\.uploads-snapshot-marker" (
@@ -796,7 +796,7 @@ goto :eof
 :: key material is written (as rotate-key.bat does); a failed icacls aborts.
 :: errorlevel 0 when the key file exists afterwards, 1 with a message when it
 :: could not be created. Never echoes the key.
-:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: When the key is held in BLACKVAULT_ENCRYPTION_KEY (a
 :: non-empty line in .env, or set in this console) no key file is created -
 :: a second, different key would make the app refuse to start (KEY_CONFLICT).
 :: The .env line is read by :env_value; a line it cannot read, or a value
@@ -889,7 +889,7 @@ echo ERROR: could not create the encryption key file secrets\blackvault_encrypti
 exit /b 1
 
 :: :clear_eol_only_change - mirrors clear_bat_eol_only_changes in update.sh
-:: (change them together). Runs right before `git pull` (fix rounds 1-2, I4).
+:: (change them together). Runs right before `git pull`.
 :: Releases before this one stored install.bat and update.bat with CRLF in
 :: the index while .gitattributes says `text eol=crlf`, so Git reports both
 :: as modified on every checkout and a pull that changes them aborts with

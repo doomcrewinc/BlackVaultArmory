@@ -158,7 +158,7 @@ exit /b 1
 >&2 echo ERROR: the passphrase file !BV_PASSFILE! is empty.
 exit /b 1
 :need_console
-:: Review Focus 5 (Task Scheduler): nothing to prompt on. Stop now, before
+:: Under Task Scheduler there is nothing to prompt on. Stop now, before
 :: anything else runs; never wait.
 powershell -NoProfile -NonInteractive -Command "if ([Console]::IsInputRedirected) { exit 1 } else { exit 0 }" >nul 2>&1
 if not errorlevel 1 goto :passphrase_source_ok
@@ -239,7 +239,7 @@ if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001:1001 blackvaul
 :: One PowerShell process does all of it; see THE PASSPHRASE NEVER TOUCHES
 :: cmd.exe at the top. The line is shared with restore.bat, character for
 :: character: restore.bat also sets BV_DOCKER_ARGS_2 and BV_BETWEEN to make a
-:: second docker call with the same passphrase (ruling R27). They are
+:: second docker call with the same passphrase. They are
 :: cleared here, so this script makes exactly one call. Details that matter:
 ::   * docker is looked up with Get-Command, which walks PATH in order, as
 ::     cmd.exe does for every other docker call in this script. Handing the

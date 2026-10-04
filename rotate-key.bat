@@ -9,18 +9,18 @@
 :: rotation inside the container in one transaction, and only then swaps the
 :: key files and restarts.
 ::
-:: Fix round 1 (task-6-review.md, C1): scripts\rotate-encryption-key.mjs can
+:: scripts\rotate-encryption-key.mjs can
 :: exit non-zero AFTER its transaction already committed. Treating every
 :: non-zero rotation run as "nothing changed" could delete the only copy of
 :: a key the database is already encrypted with. So a non-zero rotation run
 :: is followed by a read-only --probe (OLD/NEW/NEITHER, by which key opens
 :: the database's key check) before anything is deleted or restarted: NEW
 :: completes the swap exactly as a normal success would, OLD sets the
-:: unused new key aside (renamed to .new.unused-<ts>, never deleted - fix
-:: round 2, N2) and restarts on the old one, and anything else (NEITHER,
+:: unused new key aside (renamed to .new.unused-<ts>, never deleted)
+:: and restarts on the old one, and anything else (NEITHER,
 :: or the probe producing no answer at all) keeps every key file untouched,
 :: does NOT start the app, and prints exact recovery commands.
-:: Exit 3 from the rotation (final review F5) is an up-front refusal: the
+:: Exit 3 from the rotation is an up-front refusal: the
 :: current key file does not open this database, nothing changed, so no
 :: probe; .new is set aside and the app is NOT restarted.
 ::
@@ -38,7 +38,7 @@ echo.
 set "KEY_FILE=secrets\blackvault_encryption_key"
 set "NEW_KEY_FILE=secrets\blackvault_encryption_key.new"
 
-:: I2: a timestamped name, never the bare "secrets\blackvault_encryption_key.old" —
+:: A timestamped name, never the bare "secrets\blackvault_encryption_key.old" —
 :: the pre-rotation snapshot (step 3) is sealed under THIS run's old key, so a
 :: second rotation must never silently overwrite the file that opens it.
 set "OLD_TS="
@@ -46,14 +46,14 @@ for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Comman
 if not defined OLD_TS set "OLD_TS=rotate"
 set "OLD_KEY_FILE=secrets\blackvault_encryption_key.old-!OLD_TS!"
 if exist "!OLD_KEY_FILE!" set "OLD_KEY_FILE=!OLD_KEY_FILE!-%RANDOM%"
-:: Fix round 2 (N2, ruling): the wrappers NEVER delete a key file that may
+:: The wrappers NEVER delete a key file that may
 :: have been handed to the rotation. When the probe confirms OLD, .new is
 :: renamed to this name instead of deleted, in case the probe was wrong.
 set "UNUSED_KEY_FILE=secrets\blackvault_encryption_key.new.unused-!OLD_TS!"
 if exist "!UNUSED_KEY_FILE!" set "UNUSED_KEY_FILE=!UNUSED_KEY_FILE!-%RANDOM%"
 
 :: ── 1. Check the current key exists ───────────────────────────
-:: Final review N1: rotation works on the key FILE. A key held in
+:: Rotation works on the key FILE. A key held in
 :: BLACKVAULT_ENCRYPTION_KEY (.env, or set in this console) would still be
 :: passed to the app after the swap and conflict with the new file
 :: (KEY_CONFLICT), so refuse before anything is stopped.
@@ -72,7 +72,7 @@ if not exist "%KEY_FILE%" (
   pause
   exit /b 1
 )
-:: Fix round 2 (N2): a leftover .new may be the ONLY copy of the key the
+:: A leftover .new may be the ONLY copy of the key the
 :: database is encrypted with (an earlier run that ended ambiguously). Never
 :: overwrite or delete it; refuse before anything is stopped.
 if exist "%NEW_KEY_FILE%" goto :stale_new_key
@@ -83,7 +83,7 @@ if exist "%NEW_KEY_FILE%" goto :stale_new_key
 call :require_compose
 if not defined COMPOSE goto :compose_too_old
 
-:: Task 7 (carry I3): no `-v` mount of secrets\ any more. docker-compose.yml
+:: No `-v` mount of secrets\ is needed. docker-compose.yml
 :: already mounts the whole secrets\ folder into every blackvault container,
 :: `compose run` ones included, and the image's entrypoint copies
 :: blackvault_encryption_key and blackvault_encryption_key.new from it into
@@ -95,13 +95,13 @@ echo Stopping BlackVault...
 if errorlevel 1 goto :stop_failed
 
 :: ── 3. Snapshot the database (same script the update scripts use) ──
-:: Ruling R4: called unconditionally; if it fails (or is missing), stop
+:: Called unconditionally; if it fails (or is missing), stop
 :: here - never rotate without a snapshot.
 echo.
 echo Snapshotting database...
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
-:: Task 4: db-snapshot.bat also snapshotted the uploads folder. This script
+:: db-snapshot.bat also snapshotted the uploads folder. This script
 :: restarts with `compose start`, which does not recreate the container, so
 :: the marker would never reach the app anyway - and is not needed: a
 :: rotation never leaves plaintext uploads for the app to snapshot again.
@@ -121,7 +121,7 @@ if "!NEW_KEY:~63,1!"=="" goto :key_gen_failed
 if not "!NEW_KEY:~64!"=="" goto :key_gen_failed
 for /f "delims=0123456789abcdef" %%X in ("!NEW_KEY!") do goto :key_gen_failed
 
-:: M2: the restrictive ACL is applied to an EMPTY file BEFORE any key
+:: The restrictive ACL is applied to an EMPTY file BEFORE any key
 :: material is written, not after — no window where the new key sits in a
 :: file still carrying the default (inherited) ACL. A failed icacls aborts
 :: the run instead of silently leaving an unhardened key file. .new cannot
@@ -140,18 +140,18 @@ echo Rotating encryption key (this may take a while on a large inventory)...
 %COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new
 if not errorlevel 1 goto :do_swap
 :: Exit 3 exactly (errorlevel N means "N or more"): refused before any
-:: transaction opened (final review F5).
+:: transaction opened.
 if errorlevel 3 if not errorlevel 4 goto :rotate_refused
 
 :: The rotation command itself exited non-zero. That does NOT mean nothing
-:: changed (fix round 1, C1): the transaction may already have committed and
+:: changed: the transaction may already have committed and
 :: only a step after it failed. Ask the database itself before touching
 :: anything.
 echo.
 echo The rotation command exited with an error. Checking which key the database
 echo is actually encrypted with before touching any file...
 ::
-:: Spec 3b: the probe prints a SECOND line, "FILES old=<n> new=<n> rot=<n>".
+:: The probe prints a SECOND line, "FILES old=<n> new=<n> rot=<n>".
 :: Only the FIRST line is the answer: "do set" alone kept the LAST line, which
 :: would have read the FILES line as the answer. The second line is kept
 :: separately for its staged .rot count.
@@ -165,7 +165,7 @@ if "!PROBE_ANSWER!"=="NEW" goto :probe_new
 if "!PROBE_ANSWER!"=="OLD" goto :probe_old
 goto :probe_ambiguous
 
-:: Spec 3b: a crash after the commit can leave re-encrypted uploads staged as
+:: A crash after the commit can leave re-encrypted uploads staged as
 :: <name>.rot. They are left to BlackVault's startup, which runs before it
 :: serves anything and renames every .rot under its current key into place,
 :: after proving it decrypts (src\lib\files\startup.ts). The swap makes the
@@ -179,7 +179,7 @@ if defined PROBE_ROT if not "!PROBE_ROT!"=="0" echo !PROBE_ROT! re-encrypted upl
 echo Completing the key-file swap...
 goto :do_swap
 
-:: N2 (ruling): set the unused .new aside, never delete it.
+:: Set the unused .new aside, never delete it.
 :probe_old
 echo Confirmed: the database is still encrypted with the OLD key; the
 echo rotation did not take effect.
@@ -231,9 +231,9 @@ echo        or the NEW key (probe answered "!PROBE_ANSWER!").
 echo        Nothing was deleted. BlackVault was NOT restarted.
 echo        Do NOT delete %KEY_FILE% or %NEW_KEY_FILE%.
 echo        To resolve by hand:
-:: N4: the probe command is printed on ONE line. A trailing caret would
+:: The probe command is printed on ONE line. A trailing caret would
 :: escape the newline and join the following echo lines into this one.
-:: N1: in this state the active key file still holds the OLD key, the only key for
+:: In this state the active key file still holds the OLD key, the only key for
 :: the pre-rotation snapshot, so step 2 moves it aside first.
 echo          1. Make sure Docker/the database are reachable, then re-run this one line:
 echo             %COMPOSE% run --rm blackvault node scripts/rotate-encryption-key.mjs --probe --old-key-file /run/secrets/blackvault_encryption_key --new-key-file /run/secrets/blackvault_encryption_key.new
@@ -250,10 +250,10 @@ echo             Restore the right key file as %KEY_FILE%, then run the probe ag
 pause
 exit /b 1
 
-:: Final review F5: the rotation refused up front (exit 3). Nothing changed
+:: The rotation refused up front (exit 3). Nothing changed
 :: and nothing could have, so no probe. The unused .new is set aside, never
-:: deleted (N2), and the app is NOT restarted: with a key file that is not
-:: this database's key it would refuse to start anyway. Spec 3b: exit 3 also
+:: deleted, and the app is NOT restarted: with a key file that is not
+:: this database's key it would refuse to start anyway. Exit 3 also
 :: means an uploaded file is under neither key (or damaged, or behind a
 :: symlinked folder); the app refuses to start on that file too.
 :rotate_refused
@@ -311,7 +311,7 @@ echo.
 echo ERROR: rotation succeeded, but renaming the key files failed.
 echo        %KEY_FILE% should still hold the OLD key, unchanged.
 echo        The database itself is now encrypted with the NEW key, in %NEW_KEY_FILE%.
-:: N1: move the OLD key aside FIRST - it is the only key that opens the
+:: Move the OLD key aside FIRST - it is the only key that opens the
 :: pre-rotation snapshot taken in step 3.
 echo        Recover by hand, then restart:
 echo          move /y %KEY_FILE% %OLD_KEY_FILE%
@@ -416,8 +416,8 @@ goto :eof
 :: :restrict_file PATH - restricts PATH to the current user, the same way
 :: install.bat's :restrict_env restricts .env: grant the user full control
 :: first, and only then drop inherited permissions. Sets RESTRICT_OK=1 on
-:: success; leaves it undefined on ANY failure (fix round 1, M2 — the caller
-:: now aborts instead of silently continuing with an unhardened file).
+:: success; leaves it undefined on ANY failure (the caller
+:: aborts instead of silently continuing with an unhardened file).
 :restrict_file
 set "RESTRICT_OK="
 set "_SID="

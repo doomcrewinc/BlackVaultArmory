@@ -148,7 +148,7 @@ done
 [ -n "$FILE" ] || die "no backup file was given. $USAGE"
 
 bv_check_passphrase_source
-# Ruling R21: a restore replaces all data. Nobody at a terminal to confirm → --yes, or stop now.
+# A restore replaces all data. Nobody at a terminal to confirm → --yes, or stop now.
 if [ -z "$YES" ] && [ ! -t 0 ]; then
   die "a restore replaces all data and must be confirmed, but standard input is not a terminal. Add --yes to confirm. Nothing was done."
 fi
@@ -160,7 +160,7 @@ bv_compose_setup
 if [ -n "${DATA_DIR+set}" ] && [ "$DATA_DIR" != "$(env_value DATA_DIR)" ]; then
   die "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Run 'unset DATA_DIR' first. Nothing was done."
 fi
-# Ruling R25: an earlier restore that did not end cleanly left its recovery
+# An earlier restore that did not end cleanly left its recovery
 # file. Never start a second restore on top of a possibly half-restored install.
 for f in backups/restore-*-RECOVERY.txt; do
   [ -e "$f" ] || continue
@@ -319,13 +319,13 @@ rollback_database() {
 
 UPLOADS_ROLLBACK_ARGS=()
 # With the uploads folder and the stamp, the script itself refuses to touch
-# the database unless the restore's marker exists (ruling R28).
+# the database unless the restore's marker exists.
 SQLITE_ROLLBACK_ARGS=()
 rollback_uploads() {
   "${SNAPSHOT_RESTORE[@]}" "${UPLOADS_ROLLBACK_ARGS[@]}" >&2
 }
 
-# Ruling R24. What the restore program left behind:
+# What the restore program left behind:
 #   started    its marker exists: the database step was reached, so the
 #              database may hold the backup's records.
 #   complete   no marker, but .pre-restore-<time> holds a previous folder: the
@@ -343,8 +343,8 @@ rollback_uploads() {
 # could not be asked, and it answers only what it can actually see: a
 # .pre-restore-<time> that exists but cannot be entered is `unknown`, never
 # `untouched`.
-# scripts/snapshot-restore.sh applies the same rule again by itself (ruling
-# R28): its `uploads` mode changes nothing after a finished restore, whatever
+# scripts/snapshot-restore.sh applies the same rule again by itself:
+# its `uploads` mode changes nothing after a finished restore, whatever
 # this function answered.
 container_restore_state() {
   local seen
@@ -436,7 +436,7 @@ marker_left_text() {
   return 0
 }
 
-# Ruling R25. Where the snapshot is and exactly what to run, for when this
+# Where the snapshot is and exactly what to run, for when this
 # script cannot do it itself. Printed before the restore starts, and written
 # to $RECOVERY_FILE. Every path is quoted for pasting into a shell.
 recovery_text() {
@@ -596,7 +596,7 @@ echo "Taking a snapshot of the database and the uploads folder..." >&2
 SNAPSHOT_OUTPUT=$(./scripts/db-snapshot.sh 2>&1)
 SNAPSHOT_RC=$?
 printf '%s\n' "$SNAPSHOT_OUTPUT" >&2
-# "Database snapshot saved: <path>" is db-snapshot.sh's contract (ruling R4: it prints the path it wrote).
+# "Database snapshot saved: <path>" is db-snapshot.sh's contract (it prints the path it wrote).
 DB_SNAPSHOT=$(printf '%s\n' "$SNAPSHOT_OUTPUT" | sed -n 's/^Database snapshot saved: //p' | tail -n 1)
 UPLOADS_SNAPSHOT=""
 if [ -f backups/.uploads-snapshot-marker ]; then
@@ -733,7 +733,7 @@ fi
 # ── 6. The restore failed: put the install back ───────────────
 # The uploads FIRST: that removes the restore's staging folder, which frees
 # the space the database copy may need on a full disk. Then the database,
-# only if the restore had reached it (ruling R24).
+# only if the restore had reached it.
 echo "" >&2
 ROLLED_BACK=1
 if [ "$STATE" = "unknown" ]; then

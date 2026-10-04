@@ -40,7 +40,7 @@ bv_check_passphrase_source() {
   if [ -n "$PASSFILE" ]; then
     bv_check_secret_file "passphrase file" 1
   elif [ ! -t 0 ]; then
-    # Review Focus 5 (cron): nothing to prompt on. Stop now; never wait.
+    # Under cron there is nothing to prompt on. Stop now; never wait.
     die "no passphrase: standard input is not a terminal, so there is nobody to ask. Use --passphrase-file <path>. Nothing was done."
   fi
 }

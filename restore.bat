@@ -58,7 +58,7 @@
 :: the dump is loaded into a NEW database, and only then swapped in.
 ::
 :: THE PASSPHRASE NEVER TOUCHES cmd.exe, exactly as in backup.bat, and it is
-:: asked for ONCE (ruling R27). The backup is opened twice (the check, then
+:: asked for ONCE. The backup is opened twice (the check, then
 :: the restore) and cmd.exe must not hold the passphrase in between. So ONE
 :: PowerShell process (:run_with_passphrase) reads --passphrase-file, or
 :: asks without echo, and then does three things itself, stopping at the
@@ -182,7 +182,7 @@ if defined BV_CONSOLE goto :passphrase_source_ok
 >&2 echo ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file path. Nothing was done.
 exit /b 1
 :passphrase_source_ok
-:: Ruling R21: a restore replaces all data. Nobody at a console to confirm:
+:: A restore replaces all data. Nobody at a console to confirm:
 :: --yes, or stop now.
 if defined BV_YES goto :confirm_source_ok
 if defined BV_CONSOLE goto :confirm_source_ok
@@ -233,7 +233,7 @@ if not defined BV_HOST_DATA set "BV_HOST_DATA=.\data"
 :: accepts. The folder is looked into below with `if exist` and `for`, whose
 :: wildcards need backslashes, so the host-side copy of the path gets them.
 set "BV_HOST_DATA=!BV_HOST_DATA:/=\!"
-:: Ruling R25: an earlier restore that did not end cleanly left its recovery
+:: An earlier restore that did not end cleanly left its recovery
 :: file. Never start a second restore on top of a possibly half-restored install.
 if not exist "backups\restore-*-RECOVERY.txt" goto :no_recovery_pending
 >&2 echo ERROR: an earlier restore did not finish cleanly: a restore-[time]-RECOVERY.txt file is still in !CD!\backups. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done.
@@ -337,7 +337,7 @@ set "BV_HOST_UPLOADS=!BV_HOST_DATA!\uploads"
 set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
 
 :: -- 4. Check the backup; then steps 5 to 7; then restore ------------
-:: One call, one passphrase prompt (ruling R27). :run_with_passphrase runs
+:: One call, one passphrase prompt. :run_with_passphrase runs
 :: the check; if it passes, :prepare_phase (steps 5 to 7: confirm, stop,
 :: snapshot, recovery file) in a child cmd.exe; if that exits 0, the restore.
 >&2 echo Checking the backup !BV_FILE_NAME! (nothing is changed yet)...
@@ -440,7 +440,7 @@ set "BV_SNAP_LOG=%TEMP%\blackvault-restore-snapshot-%RANDOM%%RANDOM%.log"
 call scripts\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1
 set "BV_SNAP_RC=!errorlevel!"
 type "!BV_SNAP_LOG!" 1>&2
-:: "Database snapshot saved: <path>" is db-snapshot.bat's contract (ruling R4).
+:: "Database snapshot saved: <path>" is db-snapshot.bat's contract.
 set "BV_DB_SNAPSHOT="
 for /f "usebackq tokens=1,* delims=:" %%A in (`findstr /b /c:"Database snapshot saved:" "!BV_SNAP_LOG!"`) do set "BV_DB_SNAPSHOT=%%B"
 del /f /q "!BV_SNAP_LOG!" >nul 2>&1
@@ -526,7 +526,7 @@ call :snapshot_names
 set "BV_CLEAR_CMD=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP!"
 if "!BV_RC!"=="0" goto :restore_done
 
-:: Ruling R24. What the restore program left behind:
+:: What the restore program left behind:
 ::   started    its marker exists: the database step was reached.
 ::   complete   no marker, but .pre-restore-<time> holds a previous folder:
 ::              the program removes its marker only after everything is in
@@ -540,7 +540,7 @@ if "!BV_RC!"=="0" goto :restore_done
 ::              BlackVault is not started and the recovery file, whose step
 ::              2 asks inside a container, says what to do (as restore.sh).
 :: scripts/snapshot-restore.sh applies the same rule again by itself, inside
-:: the container (ruling R28): its uploads mode changes nothing after a
+:: the container: its uploads mode changes nothing after a
 :: finished restore, and its sqlite mode nothing unless the marker exists.
 set "BV_STATE=untouched"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
@@ -594,7 +594,7 @@ exit /b 0
 :: -- 8. The restore failed: put the install back ---------------------
 :: The uploads FIRST: that removes the restore's staging folder, which frees
 :: the space the database copy may need on a full disk. Then the database,
-:: only if the restore had reached it (ruling R24).
+:: only if the restore had reached it.
 :rollback
 >&2 echo.
 set "BV_ROLLED_BACK=1"
@@ -683,7 +683,7 @@ for %%F in ("!BV_UPLOADS_SNAPSHOT!") do set "BV_UPLOADS_ARG=/bv-backups/%%~nxF"
 set "BV_UPLOADS_SHOWN=!BV_UPLOADS_SNAPSHOT!"
 goto :eof
 
-:: :write_recovery - ruling R25: writes !BV_RECOVERY!, the file that says
+:: :write_recovery - writes !BV_RECOVERY!, the file that says
 :: where the snapshot is and exactly what to run to put it back. The same
 :: steps as restore.sh's recovery_text. No exclamation mark may appear in
 :: the text (delayed expansion is on). Step 3 is ONE command line joined with

@@ -10,7 +10,7 @@ set -Eeo pipefail
 # it has stopped the app). scripts\db-snapshot.bat is the Windows twin:
 # change them together.
 #
-# Contract (ruling R4): no arguments; exit 0 only when a snapshot was written
+# Contract: no arguments; exit 0 only when a snapshot was written
 # (or there is no database yet to copy); any failure exits non-zero, and the
 # caller stops. Prints the path of the snapshot it wrote.
 #
@@ -23,7 +23,8 @@ set -Eeo pipefail
 # backups/ is mode 700 and every snapshot mode 600: it is a plain copy of the
 # database.
 #
-# Task 4 (encrypted files at rest, spec 3b "Update scripts"): independent of
+# Encrypted files at rest (docs/superpowers/specs/2026-10-01-encrypted-files-design.md,
+# "Update scripts"): independent of
 # PROVIDER, this script also copies $DATA_DIR/uploads into
 # backups/uploads-<YYYYmmdd-HHMMSS>/ (directories mode 700, files mode 600,
 # owned by the app user uid 1001), inside a one-off container of the app
@@ -120,7 +121,7 @@ echo "         encryption was first turned on; otherwise they need the encryptio
 echo "         that was in use when it was taken."
 echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
 
-# ── Uploads snapshot (Task 4) ───────────────────────────────────
+# ── Uploads snapshot ────────────────────────────────────────────
 # A copy of $DATA_DIR/uploads into backups/uploads-<TS>/, written under a
 # .partial name and renamed only once complete — same reason as $OUT above.
 # Every directory is mode 700; every file is created empty and chmod 600
@@ -145,8 +146,8 @@ echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
 UPLOADS_MARKER_FILE="backups/.uploads-snapshot-marker"
 rm -f "$UPLOADS_MARKER_FILE"
 
-# The copy runs INSIDE a one-off container of the app image (spec 3b, fix for
-# Task 6): the uploaded files are BVF1 files mode 600 owned by the app user
+# The copy runs INSIDE a one-off container of the app image:
+# the uploaded files are BVF1 files mode 600 owned by the app user
 # (uid 1001), and the app's .pre-encryption-* folders are mode 700, so on
 # Linux the host user cannot read them. scripts/uploads-snapshot.sh starts as
 # root in the container only to create backups/uploads-<TS>.partial for uid

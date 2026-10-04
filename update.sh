@@ -18,7 +18,7 @@ echo ""
 # shellcheck source=scripts/encryption-key.sh
 . ./scripts/encryption-key.sh
 
-# ── install.bat / update.bat line endings (fix rounds 1-2, I4) ──
+# ── install.bat / update.bat line endings ──
 # Releases before this one stored install.bat and update.bat with CRLF in
 # the index while .gitattributes says `text eol=crlf`, so Git reports both as
 # modified on every checkout, and a pull that changes them aborts ("Your
@@ -130,7 +130,7 @@ fi
 # docker compose must get the BLACKVAULT_* keys from .env only, never from
 # this shell's environment (a shell variable would override .env).
 # BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
-# uploads snapshot; an inherited value must never reach it (final review FIX 5).
+# uploads snapshot; an inherited value must never reach it.
 unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
 env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was pulled, rebuilt or restarted." || exit 1
 DB_PROVIDER=$(provider_from_env)
@@ -284,7 +284,7 @@ if ! ./scripts/db-snapshot.sh; then
   exit 1
 fi
 
-# Task 4: scripts/db-snapshot.sh also snapshotted the uploads folder (unless
+# scripts/db-snapshot.sh also snapshotted the uploads folder (unless
 # it was empty or missing) and left its path in
 # backups/.uploads-snapshot-marker. Read it once, then remove it — never
 # write it to .env — and pass it to the ONE `up` below, so the app's own

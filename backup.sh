@@ -154,7 +154,7 @@ if [ -z "$PASSFILE" ]; then
   if [ "$MODE" = "verify" ]; then
     ask_passphrase "Backup passphrase: "
   else
-    # Ruling R19: a typo here would seal a backup nobody can open. Ask twice.
+    # A typo here would seal a backup nobody can open. Ask twice.
     ask_passphrase "Backup passphrase: "
     FIRST=$PASSPHRASE
     ask_passphrase "Repeat the passphrase: "
