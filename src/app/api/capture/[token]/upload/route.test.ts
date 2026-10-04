@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   findPass: vi.fn(),
   takeSlot: vi.fn(),
   returnSlot: vi.fn(),
+  uploadCountOf: vi.fn(),
   addPhoto: vi.fn(),
   storeDocument: vi.fn(),
   processPicture: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/lib/capture/pass", async (importOriginal) => ({
   findPass: mocks.findPass,
   takeSlot: mocks.takeSlot,
   returnSlot: mocks.returnSlot,
+  uploadCountOf: mocks.uploadCountOf,
 }));
 vi.mock("@/lib/photos/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/photos/store")>()),
@@ -66,6 +68,7 @@ beforeEach(() => {
   mocks.findPass.mockResolvedValue({ ok: true, pass });
   mocks.takeSlot.mockResolvedValue(true);
   mocks.returnSlot.mockResolvedValue(undefined);
+  mocks.uploadCountOf.mockResolvedValue(5);
   mocks.enforceRateLimit.mockResolvedValue({ allowed: true });
   mocks.addPhoto.mockImplementation(async () => {
     mocks.actorSeen(auditStorage.getStore()?.actor);

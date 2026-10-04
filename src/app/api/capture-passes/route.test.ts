@@ -44,9 +44,10 @@ beforeEach(() => {
   mocks.getCurrentUser.mockResolvedValue({ id: "u1", username: "ann", displayName: "Ann", role: "USER", sessionId: "s1" });
   mocks.enforceRateLimit.mockResolvedValue({ allowed: true });
   mocks.findOwnerName.mockResolvedValue("9mm Federal");
-  mocks.updateMany.mockReturnValue("close");
-  mocks.create.mockReturnValue("create");
-  mocks.transaction.mockResolvedValue([{ count: 0 }, { id: "pass1" }]);
+  mocks.updateMany.mockResolvedValue({ count: 0 });
+  mocks.create.mockResolvedValue({ id: "pass1" });
+  const tx = { capturePass: { updateMany: mocks.updateMany, create: mocks.create } };
+  mocks.transaction.mockImplementation(async (fn: (t: typeof tx) => Promise<unknown>) => await fn(tx));
 });
 
 describe("POST /api/capture-passes", () => {

@@ -78,8 +78,7 @@ function suite(getBase: () => PrismaClient, getApp: () => PrismaClient) {
   const open = async (type: "gear" | "ammo" = "gear") => {
     const base = getBase();
     const seeded = await seed(base);
-    // createPass runs on the plain client: on the audited one its array-form transaction needs a second connection.
-    holder.current = base;
+    holder.current = getApp();
     const made = await createPass({
       entityType: type,
       entityId: type === "gear" ? seeded.gearId : seeded.ammoId,
@@ -95,6 +94,18 @@ function suite(getBase: () => PrismaClient, getApp: () => PrismaClient) {
   beforeEach(() => {
     rmSync(ctx.uploads, { recursive: true, force: true });
   });
+
+  it("createPass on the audited client finishes well inside the transaction timeout and closes the first pass", async () => {
+    const first = await open();
+    const second = await createPass({
+      entityType: "gear",
+      entityId: first.gearId,
+      createdById: first.userId,
+      sessionId: first.sessionId,
+    });
+    expect((await getBase().capturePass.findUniqueOrThrow({ where: { id: first.id } })).closedAt).not.toBeNull();
+    expect((await getBase().capturePass.findUniqueOrThrow({ where: { id: second.id } })).closedAt).toBeNull();
+  }, 3_000);
 
   it("two concurrent uploads on a pass at 49: one 201, one 410 full, one Photo row", async () => {
     const pass = await open();
@@ -114,6 +125,7 @@ function suite(getBase: () => PrismaClient, getApp: () => PrismaClient) {
     const pass = await open();
     const res = await handleCaptureUpload(uploadRequest(pass.token, { kind: "photo", gearId: "other" }), pass.token);
     expect(res.status).toBe(201);
+    expect((await res.json()).remaining).toBe(PASS_MAX_UPLOADS - 1);
     const photo = await getBase().photo.findFirstOrThrow();
     expect(photo).toMatchObject({ gearId: pass.gearId, viaPass: true, createdById: pass.userId });
     const [event, ...rest] = await events("Photo");

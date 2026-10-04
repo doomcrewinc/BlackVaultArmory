@@ -8,7 +8,7 @@ import { detectFileSignature } from "@/lib/server/file-signatures";
 import { describeError } from "@/lib/photos/errors";
 import { OWNER_COLUMN } from "@/lib/photos/owner";
 import { addPhoto, normaliseLabel } from "@/lib/photos/store";
-import { PASS_MAX_UPLOADS, findPass, returnSlot, takeSlot, type OpenPass, type PassEndReason } from "./pass";
+import { PASS_MAX_UPLOADS, findPass, returnSlot, takeSlot, uploadCountOf, type OpenPass, type PassEndReason } from "./pass";
 import { captureThrottle } from "./throttle";
 
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{20,100}$/;
@@ -180,7 +180,7 @@ export async function handleCaptureUpload(request: Request, rawToken: string): P
           ).id
         : await storePaperwork(pass, bytes, parsed),
     );
-    const remaining = Math.max(0, PASS_MAX_UPLOADS - (pass.uploadCount + 1));
+    const remaining = Math.max(0, PASS_MAX_UPLOADS - (await uploadCountOf(pass.id)));
     return NextResponse.json({ kind: parsed.kind, id, remaining }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     await giveSlotBack(pass.id);

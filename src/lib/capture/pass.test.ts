@@ -76,9 +76,10 @@ describe("findPass", () => {
 
 describe("createPass", () => {
   it("stores the hash, never the token, and expires 15 minutes out", async () => {
-    mocks.updateMany.mockReturnValue("close");
-    mocks.create.mockReturnValue("create");
-    mocks.transaction.mockResolvedValue([{ count: 0 }, { id: "p9" }]);
+    mocks.updateMany.mockResolvedValue({ count: 0 });
+    mocks.create.mockResolvedValue({ id: "p9" });
+    const tx = { capturePass: { updateMany: mocks.updateMany, create: mocks.create } };
+    mocks.transaction.mockImplementation(async (fn: (t: typeof tx) => Promise<unknown>) => await fn(tx));
 
     const out = await createPass({ entityType: "kit", entityId: "k1", createdById: "u1", sessionId: "s1", now: NOW });
 
@@ -89,7 +90,7 @@ describe("createPass", () => {
     expect(JSON.stringify(data)).not.toContain(out.token);
     expect(data).toMatchObject({ entityType: "kit", entityId: "k1", sessionId: "s1", expiresAt: out.expiresAt });
     expect(mocks.updateMany.mock.calls[0][0].where).toEqual({ entityType: "kit", entityId: "k1", closedAt: null });
-    expect(mocks.transaction).toHaveBeenCalledWith(["close", "create"]);
+    expect(mocks.transaction).toHaveBeenCalledWith(expect.any(Function));
   });
 });
 

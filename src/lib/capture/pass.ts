@@ -28,12 +28,13 @@ export async function createPass(opts: {
   const now = opts.now ?? new Date();
   const token = generateToken();
   const expiresAt = new Date(now.getTime() + PASS_TTL_MS);
-  const [, pass] = await prisma.$transaction([
-    prisma.capturePass.updateMany({
+  // Interactive form: queries built outside a transaction would not run on its connection.
+  const pass = await prisma.$transaction(async (tx) => {
+    await tx.capturePass.updateMany({
       where: { entityType: opts.entityType, entityId: opts.entityId, closedAt: null },
       data: { closedAt: now },
-    }),
-    prisma.capturePass.create({
+    });
+    return await tx.capturePass.create({
       data: {
         tokenHash: hashToken(token),
         entityType: opts.entityType,
@@ -43,8 +44,8 @@ export async function createPass(opts: {
         createdAt: now,
         expiresAt,
       },
-    }),
-  ]);
+    });
+  });
   return { id: pass.id, token, expiresAt };
 }
 
@@ -92,6 +93,12 @@ export async function takeSlot(passId: string, now: Date = new Date()): Promise<
     data: { uploadCount: { increment: 1 } },
   });
   return count === 1;
+}
+
+/** The pass's current upload count, 0 when the pass is gone. */
+export async function uploadCountOf(passId: string): Promise<number> {
+  const row = await prisma.capturePass.findUnique({ where: { id: passId }, select: { uploadCount: true } });
+  return row?.uploadCount ?? 0;
 }
 
 /** Gives a slot back after a failed upload. */
