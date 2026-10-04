@@ -66,7 +66,7 @@ fi
 # .env. If the two differ, the copy below would be of one folder while the
 # caller's compose commands (stop, up) act on another.
 if [[ -n "${DATA_DIR+set}" && "$DATA_DIR" != "$(env_value DATA_DIR)" ]]; then
-  fail "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and this snapshot would use different folders. Run 'unset DATA_DIR' first."
+  fail "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and this snapshot would use different folders. Make them agree: put the folder in .env as DATA_DIR=<absolute path> (preferred, and the fix when .env has no DATA_DIR line), or run 'unset DATA_DIR' if .env is right."
 fi
 PROVIDER=$(provider_from_env)
 TS="$(date -u +%Y%m%d-%H%M%S)"

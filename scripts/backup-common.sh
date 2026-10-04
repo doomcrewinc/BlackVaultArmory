@@ -119,7 +119,6 @@ host_can_enter() {
 # scripts/uploads-snapshot.sh in db-snapshot.sh. Needs COMPOSE.
 SNAPSHOT_RESTORE=()
 bv_snapshot_restore_cmd() {
-  # shellcheck disable=SC2206 # COMPOSE is "docker compose": two words on purpose
   SNAPSHOT_RESTORE=($COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh
     -v "$PWD/backups:/bv-backups:ro"
     -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
@@ -192,11 +191,22 @@ bv_describe_restore_markers() {
 # rebuild or re-key a running BlackVault (update.sh, rotate-key.sh). Returns 1
 # after an ERROR (on standard error) that names every marker and the one
 # command line that removes them; the caller adds what was not done. Returns 0 when there is no
-# marker, when the folder does not exist yet, and, after a Note, when neither
-# the host nor a container could look. Needs COMPOSE.
+# marker, when the folder does not exist yet, and, after a Note, when the
+# check could not be made: neither the host nor a container could look, or a
+# folder above the uploads folder is closed to this user, so that whether it
+# exists cannot be told. Needs COMPOSE.
 bv_restore_marker_refusal() {
-  local dir=$1
+  local dir=$1 above
   if [[ ! -e "$dir" ]]; then
+    # Missing, or hidden behind a folder this user cannot search? The nearest
+    # folder above it that can be seen says which.
+    above=$dir
+    while [[ ! -e "$above" && "$above" == */* ]]; do
+      above=${above%/*}
+    done
+    if [[ -d "$above" && ! -x "$above" ]]; then
+      echo "Note: could not check the uploads folder $dir for a marker left by a restore: $above is closed to this user. Going on without that check."
+    fi
     return 0
   fi
   bv_snapshot_restore_cmd

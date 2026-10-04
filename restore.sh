@@ -158,7 +158,7 @@ bv_compose_setup
 # and this script read .env. If the two differ, the snapshot would be of one
 # install and the restore of another.
 if [ -n "${DATA_DIR+set}" ] && [ "$DATA_DIR" != "$(env_value DATA_DIR)" ]; then
-  die "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Run 'unset DATA_DIR' first. Nothing was done."
+  die "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Make them agree: put the folder in .env as DATA_DIR=<absolute path> (preferred, and the fix when .env has no DATA_DIR line), or run 'unset DATA_DIR' if .env is right. Nothing was done."
 fi
 # An earlier restore that did not end cleanly left its recovery
 # file. Never start a second restore on top of a possibly half-restored install.

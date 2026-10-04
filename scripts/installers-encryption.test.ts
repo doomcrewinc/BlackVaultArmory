@@ -784,6 +784,24 @@ describe("update.sh (no git checkout)", () => {
     expect(callLines(r.calls)).toContain("compose up -d");
   });
 
+  it.skipIf(process.getuid?.() === 0)("the marker check says so when it cannot be made: a folder above the uploads folder is closed to this user; a folder that is simply not there says nothing", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const closed = path.join(dir, "closed");
+    fs.mkdirSync(path.join(closed, "uploads"), { recursive: true });
+    const check = (uploads: string) =>
+      spawnSync("bash", ["-c", '. scripts/compose-provider.sh; . scripts/backup-common.sh; COMPOSE="docker compose"; bv_restore_marker_refusal "$1"; echo "rc=$?"', "bash", uploads], { cwd: dir, encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin` } as unknown as NodeJS.ProcessEnv });
+    fs.chmodSync(closed, 0o000);
+    try {
+      const hidden = check(path.join(closed, "uploads"));
+      expect(hidden.stdout).toBe(`Note: could not check the uploads folder ${closed}/uploads for a marker left by a restore: ${closed} is closed to this user. Going on without that check.\nrc=0\n`);
+    } finally {
+      fs.chmodSync(closed, 0o755);
+    }
+    expect(check(path.join(dir, "nowhere/uploads")).stdout).toBe("rc=0\n");
+    expect(check("uploads-not-there").stdout).toBe("rc=0\n");
+  });
+
   it("scripts/db-snapshot.sh: DATA_DIR exported in the shell and different from .env is refused before the app is stopped", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -791,7 +809,8 @@ describe("update.sh (no git checkout)", () => {
     const r = run(dir, "scripts/db-snapshot.sh", "", { DATA_DIR: path.join(dir, "elsewhere") });
     expect(r.code, r.out).toBe(1);
     expect(r.out).toContain("ERROR: database snapshot failed: DATA_DIR is set in this shell and is not the DATA_DIR in .env");
-    expect(r.out).toContain("unset DATA_DIR");
+    // Both ways to make the two agree: the folder in .env (also the answer when .env has no line), or the variable unset.
+    expect(r.out).toContain("put the folder in .env as DATA_DIR=<absolute path> (preferred, and the fix when .env has no DATA_DIR line), or run 'unset DATA_DIR' if .env is right.");
     expect(r.calls).not.toContain("compose stop");
     expect(backups(dir)).toEqual([]);
     // The same folder, exported: nothing to refuse.

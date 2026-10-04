@@ -104,11 +104,12 @@ own() {
   fi
 }
 
+# Checks STAMP, the restore stamp every mode that takes one has just set: not
+# empty and without a /, so that the names built from it stay inside the
+# uploads folder.
 check_stamp() {
-  local stamp
-  stamp=$1
-  case "$stamp" in
-    "" | */*) fail "'$stamp' is not a restore stamp." ;;
+  case "$STAMP" in
+    "" | */*) fail "'$STAMP' is not a restore stamp." ;;
     *) return 0 ;;
   esac
 }
@@ -132,7 +133,7 @@ case "$MODE" in
   state)
     UP=${2:?usage: snapshot-restore.sh state UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh state UPLOADS STAMP}
-    check_stamp "$STAMP"
+    check_stamp
     [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
     restore_state "$UP" "$STAMP"
     exit 0
@@ -141,7 +142,8 @@ case "$MODE" in
     SNAP=${2:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
     LIVE=${3:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
     if [ -n "${4:-}" ]; then
-      check_stamp "${5:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}"
+      STAMP=${5:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
+      check_stamp
       [ -d "$4" ] || fail "the uploads folder $4 does not exist."
       STATE=$(restore_state "$4" "$5")
       if [ "$STATE" != "started" ]; then
@@ -191,7 +193,7 @@ case "$MODE" in
   clear-marker)
     UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
-    check_stamp "$STAMP"
+    check_stamp
     rm -rf "${UP:?}/.restore-$STAMP.db-started" || fail "could not remove $UP/.restore-$STAMP.db-started."
     exit 0
     ;;
@@ -231,7 +233,7 @@ esac
 UP=${2:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 STAMP=${3:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 SNAP=${4:-}
-check_stamp "$STAMP"
+check_stamp
 case "$0" in /*) SELF=$0 ;; *) SELF="$(pwd)/$0" ;; esac
 [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
 if [ -n "$SNAP" ]; then
