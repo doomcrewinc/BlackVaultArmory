@@ -251,26 +251,36 @@ echo "Waiting for health check..."
 # Polled as in update.sh. The app logs the first-time setup token while it
 # starts, and a first start (migrations, and on PostgreSQL the database) takes
 # longer than a fixed few seconds: once healthy, the token is in the log.
-HEALTHY=""
+# Only the status word "healthy" ends the wait: "unhealthy" and "starting"
+# keep polling (a slow first start can recover), and the last status seen
+# decides what is reported.
+HEALTH=""
 for _ in $(seq 1 60); do
-  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
-    HEALTHY=1
+  HEALTH=$(container_health)
+  if [[ "$HEALTH" == "healthy" ]]; then
     break
   fi
   sleep 2
 done
 
-if [ -n "$HEALTHY" ]; then
+if [[ "$HEALTH" == "healthy" ]]; then
   echo "BlackVault is running."
+elif [[ "$HEALTH" == "unhealthy" ]]; then
+  echo "WARNING: the BlackVault container is unhealthy. Check the logs with:"
+  echo "  $COMPOSE logs -f"
 else
-  echo "Container started — check logs with:"
+  echo "WARNING: BlackVault did not become healthy within two minutes. Check the logs with:"
   echo "  $COMPOSE logs -f"
 fi
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  BlackVault is ready!                                    ║"
+if [[ "$HEALTH" == "healthy" ]]; then
+  echo "║  BlackVault is ready!                                    ║"
+else
+  echo "║  BlackVault was started, but is NOT healthy.             ║"
+fi
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 echo "  URL:         $PUBLIC_URL"

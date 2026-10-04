@@ -324,17 +324,19 @@ echo Waiting for health check...
 :: migrations (and on PostgreSQL waits for the database) and the app logs the
 :: first-time setup token while it starts, so once it is healthy
 :: :show_setup_token below finds the token in the log.
-:: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
+:: Only the status word "healthy" ends the wait: "unhealthy" and "starting"
+:: keep polling, and the last status seen decides what is reported.
 set "_HW=0"
 :health_wait
-%COMPOSE% ps --format "{{.Status}}" blackvault 2>nul | findstr /i "healthy" >nul
-if not errorlevel 1 goto :health_ok
+call :health_status
+if "!HEALTH!"=="healthy" goto :health_ok
 set /a _HW+=1
 if !_HW! GEQ 60 goto :health_timed_out
 timeout /t 2 /nobreak >nul
 goto :health_wait
 :health_timed_out
-echo Container started - check logs with:
+if "!HEALTH!"=="unhealthy" echo WARNING: the BlackVault container is unhealthy. Check the logs with:
+if not "!HEALTH!"=="unhealthy" echo WARNING: BlackVault did not become healthy within two minutes. Check the logs with:
 echo   %COMPOSE% logs -f
 goto :health_done
 :health_ok
@@ -344,7 +346,8 @@ echo BlackVault is running.
 :: ── Summary ───────────────────────────────────────────────────
 echo.
 echo ╔══════════════════════════════════════════════════════════╗
-echo ║  BlackVault is ready^^!                                    ║
+if "!HEALTH!"=="healthy" echo ║  BlackVault is ready^^!                                    ║
+if not "!HEALTH!"=="healthy" echo ║  BlackVault was started, but is NOT healthy.             ║
 echo ╚══════════════════════════════════════════════════════════╝
 echo.
 echo   URL:         !PUBLIC_URL!
@@ -551,6 +554,21 @@ if errorlevel 1 (
 )
 icacls ".env" /inheritance:r >nul 2>&1
 if errorlevel 1 set "ENV_ACL_FAILED=1"
+goto :eof
+
+:: :health_status - sets HEALTH to healthy or unhealthy from the Status column
+:: of `docker compose ps` ("Up 2 minutes (healthy)", "(unhealthy)",
+:: "(health: starting)"); HEALTH is left undefined for anything else (still
+:: starting, not listed, no health reported). The parentheses are part of
+:: the match, so "(unhealthy)" is never taken for "(healthy)". Mirrors
+:: container_health in scripts/compose-provider.sh: change them together.
+:health_status
+set "HEALTH="
+set "_HS="
+for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul`) do set "_HS=%%S"
+if not defined _HS goto :eof
+if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"
+if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"
 goto :eof
 
 :: :valid_public_url VAR - errorlevel 0 when the value of VAR is

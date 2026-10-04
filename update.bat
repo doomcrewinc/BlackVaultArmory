@@ -288,25 +288,27 @@ echo Waiting for health check...
 :: every 30s, so right after `up -d` the status is "health: starting". The
 :: app logs the first-time setup token while it starts, so once it is
 :: healthy :show_setup_token below finds the token in the log.
-:: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
-set "STATUS=started, check logs if the app doesn't load"
+:: Only the status word "healthy" ends the wait: "unhealthy" and "starting"
+:: keep polling, and the last status seen decides what is reported.
 set "_HW=0"
 :upd_health_wait
-%COMPOSE% ps --format "{{.Status}}" blackvault 2>nul | findstr /i "healthy" >nul
-if not errorlevel 1 goto :upd_health_ok
+call :health_status
+if "!HEALTH!"=="healthy" goto :upd_health_done
 set /a _HW+=1
 if !_HW! GEQ 60 goto :upd_health_done
 timeout /t 2 /nobreak >nul
 goto :upd_health_wait
-:upd_health_ok
-set "STATUS=running"
 :upd_health_done
+set "STATUS=did not become healthy within two minutes, check the logs"
+if "!HEALTH!"=="unhealthy" set "STATUS=UNHEALTHY - the container's health check is failing, check the logs"
+if "!HEALTH!"=="healthy" set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
 call :read_env
 echo.
 echo ╔══════════════════════════════════════╗
-echo ║   Update complete.                   ║
+if "!HEALTH!"=="healthy" echo ║   Update complete.                   ║
+if not "!HEALTH!"=="healthy" echo ║   Update applied - app NOT healthy.  ║
 echo ╚══════════════════════════════════════╝
 echo.
 echo   Status:   !STATUS!
@@ -484,6 +486,21 @@ set "IS_DIR="
 set "_ATTR="
 for %%I in ("%~1") do set "_ATTR=%%~aI"
 if defined _ATTR if /i "!_ATTR:~0,1!"=="d" set "IS_DIR=1"
+goto :eof
+
+:: :health_status - sets HEALTH to healthy or unhealthy from the Status column
+:: of `docker compose ps` ("Up 2 minutes (healthy)", "(unhealthy)",
+:: "(health: starting)"); HEALTH is left undefined for anything else (still
+:: starting, not listed, no health reported). The parentheses are part of
+:: the match, so "(unhealthy)" is never taken for "(healthy)". Mirrors
+:: container_health in scripts/compose-provider.sh: change them together.
+:health_status
+set "HEALTH="
+set "_HS="
+for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul`) do set "_HS=%%S"
+if not defined _HS goto :eof
+if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"
+if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"
 goto :eof
 
 :: :valid_public_url VAR - errorlevel 0 when the value of VAR is

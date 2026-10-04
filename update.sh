@@ -295,19 +295,32 @@ echo "Waiting for health check..."
 # The app healthcheck runs every 30s, so the first probe is not instant. Poll
 # for up to two minutes: right after `up -d` the status reads
 # "Up 2 seconds (health: starting)", which is neither healthy nor a failure.
-STATUS="started (check logs if app doesn't load)"
+# Only the status word "healthy" ends the wait; the last status seen decides
+# what is reported.
+HEALTH=""
 for _ in $(seq 1 60); do
-  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
-    STATUS="running"
+  HEALTH=$(container_health)
+  if [[ "$HEALTH" == "healthy" ]]; then
     break
   fi
   sleep 2
 done
+if [[ "$HEALTH" == "healthy" ]]; then
+  STATUS="running"
+elif [[ "$HEALTH" == "unhealthy" ]]; then
+  STATUS="UNHEALTHY - the container's health check is failing, check the logs"
+else
+  STATUS="did not become healthy within two minutes, check the logs"
+fi
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   Update complete.                   ║"
+if [[ "$HEALTH" == "healthy" ]]; then
+  echo "║   Update complete.                   ║"
+else
+  echo "║   Update applied - app NOT healthy.  ║"
+fi
 echo "╚══════════════════════════════════════╝"
 echo ""
 echo "  Status:   $STATUS"

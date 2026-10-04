@@ -69,6 +69,22 @@ check_postgres_env() {
   return 1
 }
 
+# Health of the blackvault container, read from the Status column of
+# `docker compose ps`: "Up 2 minutes (healthy)", "(unhealthy)" or
+# "(health: starting)". Prints healthy, unhealthy or starting; prints nothing
+# when the container is not listed or reports no health. Needs $COMPOSE.
+# install.bat and update.bat mirror it in :health_status.
+container_health() {
+  local status
+  status=$($COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null) || status=""
+  case "$status" in
+    *"(healthy)"*) echo "healthy" ;;
+    *"(unhealthy)"*) echo "unhealthy" ;;
+    *"(health: starting)"*) echo "starting" ;;
+  esac
+  return 0
+}
+
 # ── Docker Compose version floor ─────────────────────────────
 # docker-compose.yml uses depends_on.required: false (so the db service can be
 # off on SQLite). That needs Docker Compose v2.20 or newer: older v2 rejects

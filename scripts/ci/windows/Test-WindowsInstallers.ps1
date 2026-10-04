@@ -186,7 +186,7 @@ function Invoke-Bat {
   Remove-Item -Force $logFile -ErrorAction SilentlyContinue
 
   $saved = @{}
-  $vars = @{ "BV_STUB_LOG" = $logFile; "BV_STUB_COMPOSE_VERSION" = "2.30.1"; "BV_STUB_FAIL_ON" = $null; "BV_STUB_LOGS_FILE" = $null }
+  $vars = @{ "BV_STUB_LOG" = $logFile; "BV_STUB_COMPOSE_VERSION" = "2.30.1"; "BV_STUB_FAIL_ON" = $null; "BV_STUB_LOGS_FILE" = $null; "BV_STUB_HEALTH" = $null }
   foreach ($k in $EnvVars.Keys) { $vars[$k] = $EnvVars[$k] }
   foreach ($k in $vars.Keys) {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -907,6 +907,89 @@ $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_S
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ($r.StubLog -notmatch "compose logs blackvault") "never read the log"
 Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "no token shown without the call"
+Show-EvidenceIfFailed $r
+
+# ------------------------------------------------- health-wait scenarios
+# The health wait reads the Status column of `docker compose ps`. Only the
+# word healthy in parentheses is success: "(unhealthy)" holds the letters
+# "healthy" too. BV_STUB_HEALTH picks what the stub reports. `timeout /t`
+# fails at once under a redirected stdin, so the 60 polls take seconds.
+function Get-HealthPolls([pscustomobject]$Result) {
+  return ([regex]::Matches($Result.StubLog, "(?m)^compose ps --format")).Count
+}
+
+# ---------------------------------------------------------------- scenario H1
+Write-Scenario "install.bat - the container is unhealthy: not reported as running, says unhealthy"
+$d = New-Sandbox "h1"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = "unhealthy" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose up -d") "started the container (premise)"
+Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "WARNING: the BlackVault container is unhealthy") "says the container is unhealthy"
+Assert ($r.Output -notmatch "BlackVault is running\.") "does not say it is running"
+Assert ($r.Output -notmatch "BlackVault is ready") "does not say it is ready"
+Assert ($r.Output -match "BlackVault was started, but is NOT healthy\.") "the summary heading says it is not healthy"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario H2
+Write-Scenario "install.bat - still starting when the wait runs out: says it did not become healthy"
+$d = New-Sandbox "h2"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = "starting" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "WARNING: BlackVault did not become healthy within two minutes") "says it did not become healthy"
+Assert ($r.Output -notmatch "is unhealthy") "does not call a starting container unhealthy"
+Assert ($r.Output -notmatch "BlackVault is running\.") "does not say it is running"
+Assert ($r.Output -notmatch "BlackVault is ready") "does not say it is ready"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario H3
+Write-Scenario "install.bat - healthy on the first poll: success"
+$d = New-Sandbox "h3"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 1) "one poll was enough (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "BlackVault is running\.") "says it is running"
+Assert ($r.Output -match "BlackVault is ready") "says it is ready"
+Assert ($r.Output -notmatch "NOT healthy") "no not-healthy heading"
+Assert ($r.Output -notmatch "WARNING: (the BlackVault container|BlackVault did not)") "no health warning"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario H4
+Write-Scenario "update.bat - the container is unhealthy: Status is not running, says unhealthy"
+$origin = New-GitRemote "update-health" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-health"
+Set-ConfiguredSqliteInstall $work "7040"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = "unhealthy" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose up -d") "restarted the container (premise)"
+Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "Status:\s+UNHEALTHY") "the status line says UNHEALTHY"
+Assert ($r.Output -notmatch "Status:\s+running") "the status line does not say running"
+Assert ($r.Output -match "Update applied - app NOT healthy\.") "the heading says the app is not healthy"
+Assert ($r.Output -notmatch "Update complete\.") "does not say Update complete"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario H5
+Write-Scenario "update.bat - still starting when the wait runs out: says it did not become healthy"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = "starting" }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "Status:\s+did not become healthy within two minutes") "the status line says it did not become healthy"
+Assert ($r.Output -notmatch "UNHEALTHY") "does not call a starting container unhealthy"
+Assert ($r.Output -notmatch "Status:\s+running") "the status line does not say running"
+Assert ($r.Output -notmatch "Update complete\.") "does not say Update complete"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario H6
+Write-Scenario "update.bat - healthy on the first poll: success"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ((Get-HealthPolls $r) -eq 1) "one poll was enough (got $(Get-HealthPolls $r))"
+Assert ($r.Output -match "Status:\s+running") "the status line says running"
+Assert ($r.Output -match "Update complete\.") "says Update complete"
+Assert ($r.Output -notmatch "NOT healthy") "no not-healthy heading"
+Show-EvidenceIfFailed $r
 Show-EvidenceIfFailed $r
 
 # =============================================================================

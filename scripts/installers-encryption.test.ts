@@ -48,7 +48,7 @@ function copyTree(dest: string, files = TREE) {
 
 /**
  * The docker stub. `compose version --short` → 2.30.1; `compose ps` →
- * healthy; `compose exec -T db pg_dump` → a fake dump; the rotation CLI
+ * BV_STUB_PS_STATUS (default: healthy); `compose exec -T db pg_dump` → a fake dump; the rotation CLI
  * (rotate-key.sh) exits BV_STUB_ROTATE_EXIT (default 0) and its --probe
  * prints BV_STUB_PROBE (default OLD); BV_STUB_FAIL_ON=<word>
  * fails any call containing that word. `compose up -d` with no service (the
@@ -73,7 +73,7 @@ case "$*" in
   *"rotate-encryption-key.mjs --probe"*) echo "\${BV_STUB_PROBE:-OLD}" ;;
   *"rotate-encryption-key.mjs"*) [ -n "$BV_STUB_ROTATE_STDERR" ] && echo "$BV_STUB_ROTATE_STDERR" >&2; exit "\${BV_STUB_ROTATE_EXIT:-0}" ;;
   "compose version --short") echo 2.30.1 ;;
-  "compose ps"*) echo "Up 3 seconds (healthy)" ;;
+  "compose ps"*) echo "\${BV_STUB_PS_STATUS-Up 3 seconds (healthy)}" ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
   "compose up -d")
     echo "AT-APP-START backups=[$(ls backups 2>/dev/null | tr '\\n' ' ')] key=$([ -f secrets/blackvault_encryption_key ] && echo yes || echo no) uploads_marker=[\${BLACKVAULT_UPLOADS_SNAPSHOT:-}]" >> "${calls}" ;;
@@ -259,6 +259,75 @@ describe("install.sh", () => {
     expect(second.code, second.out).toBe(0);
     expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(key);
     expect(second.out).not.toContain(BOX_LINE);
+  });
+});
+
+/**
+ * The health wait reads the Status column of `docker compose ps`:
+ * "Up 2 minutes (healthy)", "(unhealthy)" or "(health: starting)". `sleep` is
+ * stubbed so the full 60-poll wait runs in no time.
+ */
+describe("health wait: only the status word healthy is success", () => {
+  const stubSleep = () => fs.writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const polls = (c: string) => callLines(c).filter((l) => l.startsWith("compose ps")).length;
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: unhealthy is not reported as running, and the output says unhealthy", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: "Up 2 minutes (unhealthy)" });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toMatch(/unhealthy/i);
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+  });
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: still starting when the wait runs out: says it did not become healthy", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: "Up 2 minutes (health: starting)" });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy");
+    expect(r.out).not.toMatch(/unhealthy/i);
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+  });
+
+  it("install.sh: healthy on the first poll is success", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", INSTALL_ANSWERS);
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(1);
+    expect(r.out).toContain("BlackVault is running.");
+    expect(r.out).toContain("BlackVault is ready!");
+    expect(r.out).not.toContain("WARNING");
+  });
+
+  it("update.sh: healthy on the first poll is success", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(1);
+    expect(r.out).toMatch(/Status:\s+running/);
+    expect(r.out).toContain("Update complete.");
   });
 });
 

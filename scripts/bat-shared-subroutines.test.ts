@@ -36,6 +36,7 @@ const SUBROUTINES = [
   "show_setup_token",
   // Task 7: the field-encryption key (mirrors scripts/encryption-key.sh).
   "ensure_encryption_key",
+  "health_status",
 ] as const;
 
 const TERMINATOR = /^(exit \/b \d+|goto :eof|goto :[A-Za-z_]+_again)$/i;
@@ -101,5 +102,21 @@ describe("install.bat and update.bat share their public-URL subroutines byte for
     const inUpdate = extractUrlLoop("update", "upd_ask_public_url", "upd_public_url_write");
     expect(inInstall).toContain("goto :public_url_missing");
     expect(inUpdate, "the public URL prompt loop differs between install.bat and update.bat").toBe(inInstall);
+  });
+});
+/**
+ * The health wait reads the Status column of `docker compose ps`, e.g.
+ * "Up 2 minutes (unhealthy)". Matching the bare word healthy takes that for
+ * success; the parentheses must be part of the match.
+ */
+describe("the health wait matches the status word with its parentheses", () => {
+  it.each(["install", "update"] as const)("%s.bat", (fileName) => {
+    const lines = linesOf(FILES[fileName]).map(bare).filter((l) => !l.startsWith("::"));
+    const mentions = lines.filter((l) => /healthy/i.test(l) && !/^\s*(echo|set "STATUS=)/.test(l) && !/^if (not )?"!HEALTH!"==/.test(l));
+    expect(mentions).toEqual([
+      'if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"',
+      'if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"',
+    ]);
+    expect(lines.filter((l) => /findstr[^|]*healthy/i.test(l))).toEqual([]);
   });
 });

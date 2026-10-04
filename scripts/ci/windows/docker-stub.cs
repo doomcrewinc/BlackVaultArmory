@@ -36,6 +36,10 @@
 //                            for the container log the scripts read the
 //                            first-time setup token from. Unset => the generic
 //                            "[stub] ..." line, which holds no token.
+//   BV_STUB_HEALTH           what a plain `compose ps` reports for the app:
+//                            "unhealthy" => "Up 4 seconds (unhealthy)",
+//                            "starting" => "Up 4 seconds (health: starting)",
+//                            unset => "Up 4 seconds (healthy)".
 //   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
 //                            ...` prints on stdout (OLD / NEW / NEITHER).
 //                            Checked independently of BV_STUB_FAIL_ON, so a
@@ -343,9 +347,13 @@ internal static class DockerStub
                 }
                 return 0;
             }
-            // The scripts pipe this into `findstr /i "healthy running"`.
+            // install.bat / update.bat read the health word in parentheses.
+            string health = Environment.GetEnvironmentVariable("BV_STUB_HEALTH");
+            string healthText = "(healthy)";
+            if (health == "unhealthy") healthText = "(unhealthy)";
+            if (health == "starting") healthText = "(health: starting)";
             Console.WriteLine("NAME                STATUS");
-            Console.WriteLine("blackvault-app      Up 4 seconds (healthy)");
+            Console.WriteLine("blackvault-app      Up 4 seconds " + healthText);
             return 0;
         }
 
