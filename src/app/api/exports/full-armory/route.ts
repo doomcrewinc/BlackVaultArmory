@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { csvCell, csvQuote } from "@/lib/csv";
 import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
@@ -265,12 +266,14 @@ function toCsvCellValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * One CSV cell. A string in the row is text someone typed (a name, a note, a
+ * serial) and gets the formula guard; a number, a boolean, a date or a list
+ * is written as it is, so a negative amount stays a number.
+ */
 function csvEscape(value: unknown): string {
-  const text = toCsvCellValue(value);
-  if (/[",\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
+  if (typeof value === "string") return csvCell(value);
+  return csvQuote(toCsvCellValue(value));
 }
 
 function flattenRecord(input: Record<string, unknown>, prefix = ""): Record<string, unknown> {

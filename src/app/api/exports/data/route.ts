@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csvCell } from "@/lib/csv";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
 
@@ -132,11 +133,16 @@ function flattenObject(
   }
 }
 
+/** A whole number or a decimal, as a number field is serialized. */
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+
+/**
+ * One CSV cell. The rows reach this point as text, so a negative number is
+ * told apart from typed text by its shape: it is written as it is, and every
+ * other value gets the formula guard.
+ */
 function toCsvValue(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, "\"\"")}"`;
-  }
-  return value;
+  return PLAIN_NUMBER.test(value) ? value : csvCell(value);
 }
 
 function buildCsv(sections: { section: string; rows: unknown }[]): string {

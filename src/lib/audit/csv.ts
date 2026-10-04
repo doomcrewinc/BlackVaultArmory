@@ -1,24 +1,13 @@
+import { csvCell } from "../csv";
 import type { AuditEventDto } from "./query";
 
 /**
- * CSV export for the audit log. RFC 4180 escaping plus a formula-injection
- * guard: a cell that would be interpreted as a formula by Excel/Sheets
- * (starts with `=`, `+`, `-`, `@`, a tab or a carriage return) is prefixed
- * with `'` before RFC 4180 quoting is applied, so it opens as inert text
- * instead of executing. docs/superpowers/specs/2026-09-29-audit-log-design.md,
- * "CSV export".
+ * CSV export for the audit log: RFC 4180 escaping plus the formula-injection
+ * guard of ../csv.ts (csvCell), which every cell goes through.
+ * docs/superpowers/specs/2026-09-29-audit-log-design.md, "CSV export".
  */
 
-const FORMULA_PREFIX_TRIGGER = /^[=+\-@\t\r]/;
-const NEEDS_QUOTING = /[",\r\n]/;
-
-/** One CSV cell: stringified, formula-guarded, then RFC 4180 quoted if needed. */
-export function csvCell(value: unknown): string {
-  let text = value === null || value === undefined ? "" : String(value);
-  if (FORMULA_PREFIX_TRIGGER.test(text)) text = `'${text}`;
-  if (NEEDS_QUOTING.test(text)) text = `"${text.replace(/"/g, '""')}"`;
-  return text;
-}
+export { csvCell };
 
 const HEADERS = ["at", "actor", "ip", "action", "type", "item", "changes"] as const;
 
