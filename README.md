@@ -562,9 +562,10 @@ valid. Once an admin exists, `/setup` returns 404 and no more tokens are printed
 
 The log keeps its old lines for as long as the container lives, so a used token can still be
 found there. The scripts stop showing it once the log says `[auth] First admin created` after
-it. One case they cannot see: accounts that arrive through a full restore into a running
-install that never finished setup leave the old token line as the last one, and the scripts
-show it once more. It opens nothing, because `/setup` is closed as soon as any account exists.
+it. One case they cannot see: accounts that arrive without the setup page (a database file or
+dump from another install, put in place by hand under a container that keeps its log) leave the
+old token line as the last one, and the scripts show it once more. It opens nothing, because
+`/setup` is closed as soon as any account exists.
 
 > 💡 Re-running `install.sh` / `install.bat` on an existing install won't show you the token —
 > it sees your `.env` already exists and changes nothing. Use the log command above instead.
@@ -872,18 +873,22 @@ an older copy that predates this feature. **All of these snapshots are plain tex
 Delete them once you've confirmed BlackVault is working normally. On Linux, the app's own
 snapshot is owned by uid 1001 (the container's user), so deleting it needs `sudo`.
 
-**Mac/Linux: run `./update.sh` twice** for this specific upgrade. The copy of
-`update.sh` you already have pulls the new code, and then keeps running — bash does not
-reload a script out from under itself — so the rest of that same run is still the *old*
-code: it builds and starts the new image with no encryption key. The new image then exits
-immediately on `KEY_MISSING` and Docker's `restart: unless-stopped` puts it in a restart
-loop. Run `./update.sh` again (or `git pull && ./update.sh` if you'd rather not wait) and
-this second run is the new script end to end: it creates the key, takes its snapshot, and
-starts normally. This is not a Linux-specific quirk — macOS runs the exact same
-`./update.sh` and hits the exact same restart loop. Windows is not affected: `update.bat`
-resumes execution *inside the newly-pulled file* immediately after its own `git pull`
-line, so even a Windows user's very first run is effectively the new script and creates
-the key and the snapshot in one pass.
+**Mac/Linux: run `./update.sh` twice, once only: for the first upgrade from a version older
+than this release.** From this release on, `update.sh` starts itself again with the new copy
+right after `git pull` whenever the pull brought anything new, so one run is enough for every
+later update. The copy of `update.sh` an older version has does not do that: it pulls the new
+code and then keeps running — bash does not reload a script out from under itself — so the
+rest of that run is still the *old* code. It builds and starts the new image with no
+encryption key; the new image exits immediately on `KEY_MISSING` and Docker's
+`restart: unless-stopped` puts it in a restart loop. Run `./update.sh` again (or
+`git pull && ./update.sh` if you'd rather not wait): this second run is the new script end to
+end. It creates the key, takes its snapshot, and starts normally. macOS and Linux run the same
+`./update.sh` and behave the same.
+
+**Windows never needs the second run.** cmd.exe reads a running batch file from disk as it
+goes, so after its own `git pull` an older `update.bat` carries on *inside the newly pulled
+file*: the rest of even the very first run is the new script, which creates the key and takes
+the snapshot in one pass.
 
 **If `git pull` refuses, saying `install.bat` or `update.bat` would be overwritten:**
 some existing clones have those two files marked as locally modified purely because of
@@ -1424,11 +1429,22 @@ The passphrase file:
   with the same passphrase typed at the prompt. A file in another encoding (UTF-16, for example)
   is refused with `the passphrase is not UTF-8 text`, before anything is done.
 - **Windows:** do not create it with `>` or `Out-File` in Windows PowerShell 5.1; they write
-  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell:
+  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell, which asks for the
+  passphrase without showing it and writes UTF-8 with no byte order mark and no line ending:
 
   ```powershell
-  [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", (Read-Host "Passphrase"))
+  $secure = Read-Host "Passphrase" -AsSecureString
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try {
+    [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), (New-Object Text.UTF8Encoding $false))
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
   ```
+
+  This example is not run by BlackVault's automated tests. Check the file once with
+  `backup.bat --passphrase-file <path> --verify <file>` on a backup made with the typed
+  passphrase.
 
 Check the log, or the exit code, now and then: a cron job that has been failing for a month is
 not a backup.
@@ -1473,10 +1489,26 @@ only.)
 document. Accounts, settings and the audit log are not in a backup and are kept as they are.
 
 1. Put the `.bvb` file into the backup folder: `<DATA_DIR>/backups`, or the folder
-   `BLACKVAULT_BACKUP_DIR` names if you set it. On Linux, with the default folder:
+   `BLACKVAULT_BACKUP_DIR` names if you set it. From the BlackVault folder, with the default
+   folder (`./data/backups`):
+
+   **Linux** — the folder belongs to the app's user (uid 1001) and is mode 700, so the copy
+   needs `sudo`:
 
    ```bash
    sudo install -o 1001 -g 1001 -m 600 /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
+   ```
+
+   **Mac** (Docker Desktop, OrbStack) — the folder stays your own, so a plain copy works:
+
+   ```bash
+   cp /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
+   ```
+
+   **Windows:**
+
+   ```bat
+   copy "C:\path\to\blackvault-full-20261003-031500.bvb" data\backups\
    ```
 
 2. From the BlackVault folder:
