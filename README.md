@@ -528,7 +528,8 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 On the SQLite database, a search term containing `%` or `_` in the global search and in the kit
 item picker may show a few extra near-matches (for example `AB_12` also finds `AB-12`), and a term
-made only of those characters matches everything. The audit log search is exact on both databases.
+made only of those characters matches every item that has a value in a searched field. The audit
+log search is exact on both databases.
 PostgreSQL matches `%` and `_` literally everywhere.
 
 ---
@@ -1669,6 +1670,76 @@ For the update to this release only:
 git pull
 ./update.sh
 ```
+
+#### What changes when you update
+
+Read this once before the update to this release. Nothing here loses data; each item is something
+that now behaves differently from the version you have.
+
+**1. A `.env` line the scripts cannot read now stops them.** `install`, `update`, `backup`,
+`restore`, `rotate-key` and the snapshot step read `.env` the way Docker Compose reads it. Where
+Compose would change a value (or reject the line), the scripts used to work with the text as
+written, which is not the value Docker uses. They now stop with an `ERROR` that names the key:
+the installers, the updaters and the backup and restore scripts before anything is rebuilt,
+stopped or changed; a key rotation at its snapshot step, after which it starts BlackVault again.
+A `.env` written by the installer is not affected; a line edited by hand can be. This applies to
+`DATA_DIR`, `BLACKVAULT_BACKUP_DIR`, `BLACKVAULT_DB_PROVIDER` and `BLACKVAULT_ENCRYPTION_KEY`:
+
+| Written like this | Why it is refused | Write it like this |
+|---|---|---|
+| `DATA_DIR=$HOME/blackvault` | Compose substitutes `$HOME` (any `$` outside single quotes) | `DATA_DIR=/home/you/blackvault` |
+| `DATA_DIR=~/blackvault` | Compose puts a home folder in place of the `~` (`DATA_DIR` and `BLACKVAULT_BACKUP_DIR` only) | `DATA_DIR=/home/you/blackvault` |
+| `DATA_DIR="C:\new\data"` | In double quotes a backslash before `a b f n r t v 0`, another backslash, `$` or the closing quote is an escape (`\n` is a line break) | `DATA_DIR=C:\new\data` (no quotes) |
+| `DATA_DIR: /srv/blackvault` | The `KEY: value` form | `DATA_DIR=/srv/blackvault` |
+| `DATA_DIR='/srv/Rob's vault'` | An apostrophe inside single quotes | `DATA_DIR=/srv/Rob's vault` (no quotes) |
+| `DATA_DIR="/srv/blackvault` | The quote is not closed | `DATA_DIR=/srv/blackvault` |
+
+On Windows the `.bat` scripts also refuse a quoted value followed by a comment
+(`DATA_DIR="D:\Vault" # note`), a `"` inside a value, a value that starts with `=`, and an
+exclamation mark anywhere on the line. The safe form everywhere is `KEY=value` with the final
+value spelled out: no quotes, no `$`, no `~`, no `!`. A `BLACKVAULT_ENCRYPTION_KEY` line that
+is not 64 hex characters also stops `install` and `update` before the build.
+
+**2. "NOT healthy", and exit code 1.** After starting the container, `install` and `update` wait up
+to two minutes for its health check. Only `healthy` counts as success; otherwise the summary box
+says `BlackVault was started, but is NOT healthy.` or `Update applied - app NOT healthy.` and
+points at the logs. If the container reports `unhealthy`, the script now ends with exit code 1.
+If it is still starting when the wait runs out, the warning is printed and the exit code stays 0
+(a slow first start is not a failure). A cron job or a script that calls the updater should
+check the exit code.
+
+**3. BlackVault does not start on a half-restored install.** If the uploads folder holds a marker
+left by a restore (`uploads/.restore-<time>.db-started`), this version exits at startup. The
+reason is in the container log, `docker compose logs blackvault`. `update.sh` and `update.bat`
+look for a marker before they rebuild anything and stop there, with the version you have still
+running and the command that removes the marker on screen. An update done another way
+(`git pull && docker compose up -d --build`) gets a container that restarts over and over until
+the marker is dealt with. A full backup (`backup.sh`, `backup.bat`) and a key rotation refuse
+on a marker too. See **[Restoring a full backup](#restoring-a-full-backup)**.
+
+**4. Full Armory export: one more column.** Each item has a new `mgRegistry` field. In the CSV
+its column comes directly after `nfaClass`, so anything that reads the file by column position
+finds every later column one place to the right. Read the columns by name.
+
+**5. CSV exports: text that looks like a formula gets a leading `'`.** In the Full Armory CSV and
+the data export CSV, a text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return
+is written with an apostrophe in front, so that a spreadsheet opens it as text instead of running
+it. Numbers are unchanged, negative ones included. A script that reads these files sees the
+apostrophe as part of the text.
+
+**6. Audit log.** On SQLite, a search containing `%` or `_` looks through a limited stretch of the
+log for each page, so a page can be short, or empty, while more remains: **Load more** stays, and
+the list says when nothing further was found so far. For the API (`/api/admin/audit`), only a
+missing `nextCursor` means the end of the log. **Export CSV** is now sent as it is produced: it has
+no `Content-Length`, it is not cached, and a database error after the download has started ends
+the download with a transfer error instead of an error page.
+
+**7. Search on PostgreSQL takes `%` and `_` literally.** They used to act as wildcards. (SQLite:
+see **[Known limitation: searching for `%` or `_` on SQLite](#known-limitation-searching-for--or-_-on-sqlite)**.)
+
+**8. The image's user.** Inside the container, `nextjs` (uid 1001) now has `nodejs` (gid 1001) as
+its group, so `docker compose exec -u nextjs ...` runs as 1001:1001, as the app itself always
+did. Files on disk are not changed.
 
 ---
 

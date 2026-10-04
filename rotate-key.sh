@@ -69,11 +69,12 @@ PHASE="init"
 # key-file `mv`s, and the post-swap `$COMPOSE start`. Every other failure
 # path (missing/failing snapshot, keygen, writing .new, the rotation run
 # itself, every restart-on-the-old-key) is the CONDITION of an if/||, so
-# with `set -E` the trap still does not fire for it — not in this shell and
-# not in the $(...) / ( ... ) subshells it runs (run bare,
-# `NEW_KEY=$(generate_key)` and the `( umask 077; printf ... )` write would
-# let the trap pre-empt their checks and leave the app stopped). Each
-# prints its own message before `exit 1`, which never fires ERR.
+# with `set -E` the trap still does not fire for it, neither in this shell
+# nor in the $(...) and ( ... ) subshells it runs. That is why
+# `NEW_KEY=$(generate_key)` and the `( umask 077; printf ... )` write are
+# conditions too: as plain statements, a failure in them would fire the trap
+# before their own check ran, and leave the app stopped. Each of these
+# paths prints its own message before `exit 1`, which never fires ERR.
 on_err() {
   local code=$?
   case "$PHASE" in
@@ -170,7 +171,7 @@ require_compose
 if ! env_unreadable DATA_DIR; then
   ROTATE_DATA_DIR=$(env_value DATA_DIR)
   if ! bv_restore_marker_refusal "${ROTATE_DATA_DIR:-./data}/uploads"; then
-    echo "       Then run this script again. Nothing was changed; BlackVault was not stopped."
+    echo "       Then run this script again. Nothing was changed; BlackVault was not stopped." >&2
     exit 1
   fi
 fi

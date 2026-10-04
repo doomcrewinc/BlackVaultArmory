@@ -7,7 +7,7 @@ commits always agree.
 
 | Branch | Off | Into | Purpose |
 |---|---|---|---|
-| `master` | — | — | Production. Only receives merges from `develop` or a hotfix. Tagged. |
+| `master` | — | — | Production. Only receives merges from `develop` or a hotfix. |
 | `develop` | — | — | Integration trunk. GitHub default. All feature PRs land here. |
 | `feat/<slug>` | `develop` | `develop` | New functionality. |
 | `fix/<slug>` | `develop` | `develop` | Bug fixes. |

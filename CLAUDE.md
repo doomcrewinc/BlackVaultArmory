@@ -79,8 +79,10 @@ runs the one test that needs a built app; `npm test` skips it.
 - **Never modify or delete `prisma/prisma/dev.db`.** It is the developer's own local database
   (`dev.sh` creates it). Use a scratch copy or a temporary database.
 - **Code and scripts never put a secret (a backup passphrase, the encryption key) on a command
-  line, in a log or in an error message, and never export one into an environment.** Secrets
-  travel through files and standard input.
+  line, in a log or in an error message, and a script never exports one that did not reach it
+  that way.** Secrets travel through files and standard input. An install that keeps its key in
+  `BLACKVAULT_ENCRYPTION_KEY` (in `.env` or the shell) is supported: Compose passes it to the
+  container, and the scripts leave it where it is.
 - **Comments describe the code as it is.** No task numbers, review labels or change history in
   shipped source; that belongs in commits and PRs.
 - **Stage explicit paths.** Never `git add -A` or `git add .`.
@@ -97,10 +99,11 @@ runs the one test that needs a built app; `npm test` skips it.
   gh pr create --repo doomcrewinc/BlackVaultArmory --base develop
   ```
 
-- A PR needs every check green: `Lint, types and build`, both `Tests (...)` timezone legs,
+- Every check must be green before a PR is merged. No branch protection rule enforces this; it
+  is the convention. From `ci.yml`: `Lint, types and build`, both `Tests (...)` timezone legs,
   `Migration drift (sqlite + postgres)`, `Windows installer logic (Docker stubbed)`,
-  `Encryption key on Linux Docker`, `Docker image builds`, `SonarCloud Code Analysis`,
-  `code/snyk` and `security/snyk`.
+  `Encryption key on Linux Docker`, `Docker image builds`. From outside it (their own GitHub
+  apps): `SonarCloud Code Analysis`, `code/snyk` and `security/snyk`.
 - There are no release tags and no release branches. The version is CalVer plus a short sha
   (`2026.9.26-81f8b3a`), derived from the commit; merging to `develop` or `master` publishes an
   image. See "Versioning" and "Publishing" in `CONTRIBUTING.md`.

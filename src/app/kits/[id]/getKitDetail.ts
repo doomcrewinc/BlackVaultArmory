@@ -261,9 +261,8 @@ function describeSource(item: KitItemRow, field: KitItemSourceField | null) {
  * be 20 queries for a 20-line kit. Instead the whole allocation table comes
  * back once and `allocationByItem` sums it in memory. KitItem rows are a
  * packing list, not a ledger — a few hundred at the outside, six narrow
- * columns each — so this is cheaper than the per-source-kind alternative the
- * brief budgeted for, and it is a constant rather than a function of the
- * page.
+ * columns each — so this is cheaper than one query per source kind, and it
+ * is a constant rather than a function of the page.
  *
  * Returns null for a missing kit so the page can `notFound()`; it throws on a
  * real database failure, which the page turns into SectionLoadError.

@@ -594,7 +594,9 @@ export async function GET(request: NextRequest) {
           url: normalizedUrl,
           // Documents live in <uploadsRoot>/documents, encrypted at rest.
           // "uploads/" matches the Docker volume mount name
-          // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads).
+          // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads). No
+          // other prefix is used: nothing writes to a "storage/uploads/"
+          // folder, so a path under it would name a file that is not there.
           storagePath: normalizedUrl.replace("/api/files/", "uploads/"),
         });
       };

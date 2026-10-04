@@ -15,8 +15,8 @@ export async function register() {
 
     // Field encryption at rest (docs/superpowers/specs/2026-09-30-field-encryption-design.md
     // §2): load and verify the key, then encrypt any pre-encryption data in
-    // one transaction. Refuses to start on ANY failure, in every NODE_ENV
-    // — same mechanism as the public-URL check above. Runs
+    // one transaction. Refuses to start on ANY failure, in every NODE_ENV,
+    // by the same mechanism as the public-URL check above. Runs
     // BEFORE the date migration: reads through the app client are strict
     // (plaintext at rest throws), so nothing may use it on Firearm /
     // Accessory / Gear until this has run.
