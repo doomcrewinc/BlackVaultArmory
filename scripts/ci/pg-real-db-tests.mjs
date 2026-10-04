@@ -20,30 +20,46 @@ if (!adminUrl) {
   process.exit(2);
 }
 
+// One file may take this long; a test that hangs on the database is then
+// killed and counted as failed instead of holding the runner.
+const FILE_TIMEOUT_MS = 10 * 60_000;
+
 const admin = new PrismaClient({ datasourceUrl: adminUrl });
+
+// Creates a database for one test file, runs the file against it, and drops
+// the database whether or not the file passed. Resolves to true when the
+// file passed.
+async function runOnOwnDatabase(file, index) {
+  const name = `bv_scratch_test_${process.pid}_${index}`;
+  await admin.$executeRawUnsafe(`CREATE DATABASE ${name}`);
+  const url = new URL(adminUrl);
+  url.pathname = `/${name}`;
+  try {
+    const run = spawnSync(process.execPath, ["node_modules/vitest/vitest.mjs", "run", file], {
+      stdio: "inherit",
+      env: { ...process.env, ENCRYPTION_REAL_DB_PG_URL: url.href, AUDIT_REAL_DB_PG_URL: url.href, BV_TEST_POSTGRES_URL: url.href },
+      timeout: FILE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    if (run.error?.code === "ETIMEDOUT") {
+      console.error(`TIMED OUT after ${FILE_TIMEOUT_MS / 60_000} minutes: ${file}`);
+    }
+    return run.status === 0;
+  } finally {
+    await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+  }
+}
+
 let failed = 0;
 try {
   // Serial on purpose: every file gets its own database and runs to completion
-  // (and the database is dropped) before the next starts, so the awaits in this
-  // loop are the point, not a missed Promise.all.
+  // (and the database is dropped) before the next starts, so the await in this
+  // loop is the point, not a missed Promise.all.
   for (const [i, file] of FILES.entries()) {
-    const name = `bv_scratch_test_${process.pid}_${i}`;
-    // Serial on purpose (see above): this database must exist before the file runs.
-    await admin.$executeRawUnsafe(`CREATE DATABASE ${name}`);
-    const url = new URL(adminUrl);
-    url.pathname = `/${name}`;
-    try {
-      const run = spawnSync(process.execPath, ["node_modules/vitest/vitest.mjs", "run", file], {
-        stdio: "inherit",
-        env: { ...process.env, ENCRYPTION_REAL_DB_PG_URL: url.href, AUDIT_REAL_DB_PG_URL: url.href, BV_TEST_POSTGRES_URL: url.href },
-      });
-      if (run.status !== 0) {
-        failed += 1;
-        console.error(`FAILED: ${file}`);
-      }
-    } finally {
-      // Serial on purpose (see above): drop this file's database before the next one is created.
-      await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    const passed = await runOnOwnDatabase(file, i);
+    if (!passed) {
+      failed += 1;
+      console.error(`FAILED: ${file}`);
     }
   }
 } finally {

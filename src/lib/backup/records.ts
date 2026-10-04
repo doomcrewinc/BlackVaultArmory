@@ -55,6 +55,17 @@ const READ_TX_MAX_WAIT_MS = 30_000;
  * transaction client carries the encryption layer, so fields still decrypt.
  * Call this outside any other transaction.
  */
+/**
+ * One table's rows, read on the transaction client. The test hook runs after
+ * the read and before this resolves, so the next table is not read until it
+ * has finished.
+ */
+async function readTable(delegate: ReadDelegate, key: string): Promise<BackupRecords[string]> {
+  const rows = await delegate.findMany();
+  await backupRecordHooks.afterRead?.(key);
+  return rows;
+}
+
 export async function collectBackupRecords(): Promise<BackupRecords> {
   const postgres = resolveProvider(process.env.DB_PROVIDER, process.env.DATABASE_URL) !== "sqlite";
   return prisma.$transaction(
@@ -64,8 +75,7 @@ export async function collectBackupRecords(): Promise<BackupRecords> {
       // Awaited one table at a time on purpose: the transaction is one
       // connection, and a concurrent query would deadlock SQLite's single one.
       for (const { delegate, key } of BACKUP_MODELS) {
-        records[key] = await delegates[delegate].findMany();
-        await backupRecordHooks.afterRead?.(key);
+        records[key] = await readTable(delegates[delegate], key);
       }
       return records;
     },

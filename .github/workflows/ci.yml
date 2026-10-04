@@ -116,7 +116,7 @@ jobs:
       # server process (not a directly-called route handler, which never
       # goes through src/proxy.ts), that a sealed backup under
       # next.config.ts's proxyClientMaxBodySize actually restores.
-      - name: Real-server body-size test (review C1)
+      - name: Real-server body-size test
         env:
           RUN_SERVER_TESTS: "1"
         run: npx vitest run src/app/api/backup/restore/route.c1.proxy-body-size.test.ts
@@ -137,6 +137,9 @@ jobs:
   test:
     name: Tests (${{ matrix.label }})
     runs-on: ubuntu-latest
+    # A leg takes about five minutes. Without a limit a hung test would hold
+    # the runner for the six-hour default.
+    timeout-minutes: 30
     permissions:
       contents: read
     # PostgreSQL for the real-database test step below. Only that step gets
