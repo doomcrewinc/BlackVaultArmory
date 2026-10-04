@@ -21,8 +21,19 @@ describe("containsInsensitive", () => {
     expect(containsInsensitive("50%_a\\b", "postgres").contains).toBe("50\\%\\_a\\\\b");
   });
 
-  it("leaves wildcards in place on sqlite, which has no way to escape them", () => {
-    expect(containsInsensitive("50%_", "sqlite").contains).toBe("50%_");
+  it("passes a sqlite term holding wildcards through: the LIKE pattern is already the tightest superset", () => {
+    expect(containsInsensitive("AB_12", "sqlite")).toEqual({ contains: "AB_12" });
+    expect(containsInsensitive("100%", "sqlite")).toEqual({ contains: "100%" });
+    expect(containsInsensitive("_", "sqlite")).toEqual({ contains: "_" });
+  });
+
+  it("leaves an ordinary sqlite term, and one with a backslash, unchanged", () => {
+    expect(containsInsensitive("glock 19", "sqlite")).toEqual({ contains: "glock 19" });
+    expect(containsInsensitive("a\\b", "sqlite")).toEqual({ contains: "a\\b" });
+  });
+
+  it("is a plain field filter, so callers can embed it in OR lists", () => {
+    expect(Object.keys(containsInsensitive("AB_12", "sqlite"))).toEqual(["contains"]);
   });
 });
 

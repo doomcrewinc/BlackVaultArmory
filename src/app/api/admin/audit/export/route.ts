@@ -61,9 +61,13 @@ export async function GET(request: NextRequest) {
     {
       async pull(controller) {
         try {
-          const next = preamble ? first : await iterator.next();
+          let next = preamble ? first : await iterator.next();
           const head = preamble ? CSV_PREAMBLE : "";
           preamble = false;
+          // A page can be empty while `nextCursor` is set (a search that found
+          // nothing in the stretch of the log it read): keep going, writing
+          // nothing for it, until a page has rows or the log ends.
+          while (!next.done && next.value.length === 0) next = await iterator.next();
           if (next.done) {
             if (head) controller.enqueue(encoder.encode(head));
             controller.close();
@@ -84,6 +88,7 @@ export async function GET(request: NextRequest) {
   return new NextResponse(stream, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
+      "Cache-Control": "no-store",
       "Content-Disposition": `attachment; filename="blackvault-audit-${todayUtc()}.csv"`,
     },
   });

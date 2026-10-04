@@ -291,44 +291,78 @@ function buildWhere(filters: AuditFilters): Prisma.AuditEventWhereInput {
 }
 
 /**
+ * Most rows one `listAuditEvents` call reads from SQLite while re-checking a
+ * `q` that holds `%` or `_`. Ten 500-row queries is a few tens of
+ * milliseconds on SQLite and short enough not to hold its single connection
+ * against other requests; a log with rarer matches than that is walked over
+ * several calls, each continuing from the `nextCursor` it returns.
+ */
+export const MAX_LITERAL_SCAN_ROWS = 5000;
+const LITERAL_SCAN_BATCH = 500;
+
+/**
  * Newest first (`at desc, id desc` — `id` breaks ties among events sharing
  * the same `at`, which is what keeps the cursor free of duplicates/gaps when
  * several events share a timestamp). Fetches `limit + 1` rows to know
  * whether another page follows without a separate count query.
+ *
+ * SQLite cannot make `contains` literal, so for a `q` holding `%` or `_` the
+ * rows the database returns are re-checked here (ASCII-case-insensitive, as
+ * SQLite's LIKE is; PostgreSQL's ILIKE folds by locale, a difference that
+ * predates this check). That scan reads at most `MAX_LITERAL_SCAN_ROWS` rows
+ * per call: if it ends there before `limit + 1` matches are found, the page is
+ * SHORT (possibly empty) but `nextCursor` is non-null and marks where the scan
+ * stopped. So a short page does not mean the end of the log; only a null
+ * `nextCursor` does.
  */
 export async function listAuditEvents(
   filters: AuditFilters,
   limit = 50,
 ): Promise<{ events: AuditEventDto[]; nextCursor: string | null }> {
   const wanted = limit + 1;
-  // SQLite cannot make `contains` literal, so a `q` holding `%` or `_`
-  // over-matches in SQL; scan page by page and keep only true matches until
-  // `wanted` rows are collected. Otherwise one query is enough.
   const exactQ = filters.q !== undefined && needsLiteralCheck(filters.q) ? filters.q : undefined;
-  const rows: RawEvent[] = [];
-  let cursor = filters.cursor;
-  for (;;) {
-    const batch = (await prisma.auditEvent.findMany({
-      where: buildWhere({ ...filters, cursor }),
+
+  if (exactQ === undefined) {
+    const rows = (await prisma.auditEvent.findMany({
+      where: buildWhere(filters),
       orderBy: [{ at: "desc" }, { id: "desc" }],
       take: wanted,
     })) as RawEvent[];
-    if (exactQ === undefined) {
-      rows.push(...batch);
-      break;
-    }
-    for (const row of batch) {
-      if (matchesLiteralInsensitive(row.entityLabel, exactQ)) rows.push(row);
-    }
-    const last = batch[batch.length - 1];
-    if (rows.length >= wanted || batch.length < wanted || !last) break;
-    cursor = encodeCursor(last.at, last.id);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page.at(-1);
+    return { events: page.map(toDto), nextCursor: hasMore && last ? encodeCursor(last.at, last.id) : null };
   }
 
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
-  const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor(last.at, last.id) : null;
+  const matches: RawEvent[] = [];
+  const batchSize = Math.max(wanted, LITERAL_SCAN_BATCH);
+  let cursor = filters.cursor;
+  let scanned = 0;
+  let boundary: string | null = null; // where the scan stopped early, if it did
+  while (matches.length < wanted) {
+    const take = Math.min(batchSize, MAX_LITERAL_SCAN_ROWS - scanned);
+    const batch = (await prisma.auditEvent.findMany({
+      where: buildWhere({ ...filters, cursor }),
+      orderBy: [{ at: "desc" }, { id: "desc" }],
+      take,
+    })) as RawEvent[];
+    for (const row of batch) {
+      if (matchesLiteralInsensitive(row.entityLabel, exactQ)) matches.push(row);
+    }
+    const last = batch.at(-1);
+    if (!last || batch.length < take) break; // the log is exhausted
+    scanned += batch.length;
+    cursor = encodeCursor(last.at, last.id);
+    if (scanned >= MAX_LITERAL_SCAN_ROWS) {
+      boundary = cursor;
+      break;
+    }
+  }
 
-  return { events: page.map(toDto), nextCursor };
+  if (matches.length > limit) {
+    const page = matches.slice(0, limit);
+    const last = page.at(-1);
+    return { events: page.map(toDto), nextCursor: last ? encodeCursor(last.at, last.id) : null };
+  }
+  return { events: matches.map(toDto), nextCursor: boundary };
 }

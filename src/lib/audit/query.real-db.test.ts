@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 
@@ -31,7 +31,8 @@ const ctx = vi.hoisted(() => {
 });
 
 import { prisma } from "../prisma";
-import { listAuditEvents } from "./query";
+import { containsInsensitive } from "../db/text-search";
+import { listAuditEvents, MAX_LITERAL_SCAN_ROWS } from "./query";
 
 const SAME_AT = new Date("2026-03-05T12:00:00.000Z");
 
@@ -97,7 +98,7 @@ describe(`listAuditEvents against real ${ctx.pg ? "PostgreSQL" : "SQLite (connec
     expect(events.map((e) => e.id)).toEqual(["later", "tie-4", "tie-3", "tie-2", "tie-1", "tie-0", "earlier"]);
   });
   describe("q is a literal substring, never a LIKE pattern", () => {
-    const LABELS = ["100% sure", "plain", "a_b", "axb", "back\\slash", "bare"];
+    const LABELS = ["100% sure", "plain", "a_b", "axb", "back\\slash", "bare", "xAB_12y", "AB-12", "ABx12", "AB12", "p%_q"];
 
     beforeAll(async () => {
       for (const [i, label] of LABELS.entries()) {
@@ -119,11 +120,11 @@ describe(`listAuditEvents against real ${ctx.pg ? "PostgreSQL" : "SQLite (connec
       (await listAuditEvents({ type: "Wild", q }, 50)).events.map((e) => e.entityLabel).sort();
 
     it("% matches only a label containing a percent sign", async () => {
-      expect(await labelsFor("%")).toEqual(["100% sure"]);
+      expect(await labelsFor("%")).toEqual(["100% sure", "p%_q"]);
     });
 
     it("_ matches only a label containing an underscore", async () => {
-      expect(await labelsFor("_")).toEqual(["a_b"]);
+      expect(await labelsFor("_")).toEqual(["a_b", "p%_q", "xAB_12y"]);
     });
 
     it("a backslash matches only a label containing a backslash", async () => {
@@ -131,13 +132,88 @@ describe(`listAuditEvents against real ${ctx.pg ? "PostgreSQL" : "SQLite (connec
     });
 
     it("finds a match that sits behind several non-matching rows even with limit 1", async () => {
-      const { events, nextCursor } = await listAuditEvents({ type: "Wild", q: "_" }, 1);
+      const { events, nextCursor } = await listAuditEvents({ type: "Wild", q: "a_b" }, 1);
       expect(events.map((e) => e.entityLabel)).toEqual(["a_b"]);
       expect(nextCursor).toBeNull();
     });
 
+    it("AB_12 matches only the label with a literal underscore, not AB-12 or ABx12", async () => {
+      expect(await labelsFor("AB_12")).toEqual(["xAB_12y"]);
+    });
+
+    it("100% matches only the label with a literal percent sign", async () => {
+      expect(await labelsFor("100%")).toEqual(["100% sure"]);
+    });
+
+    it("%_ matches only a label holding those two characters in a row", async () => {
+      expect(await labelsFor("%_")).toEqual(["p%_q"]);
+    });
+
+    it("the SQL filter alone for AB_12 is the LIKE pattern: it excludes AB12, which splitting at the wildcard would let in", async () => {
+      const rows = await prisma.auditEvent.findMany({
+        where: { entityType: "Wild", entityLabel: containsInsensitive("AB_12") },
+      });
+      const found = rows.map((r) => r.entityLabel).sort();
+      expect(found).toEqual(ctx.pg ? ["xAB_12y"] : ["AB-12", "ABx12", "xAB_12y"]);
+    });
+
+    it("an ordinary term is unchanged", async () => {
+      expect(await labelsFor("ab")).toEqual(["AB-12", "AB12", "ABx12", "xAB_12y"]);
+    });
+
     it("case-insensitive matching still works", async () => {
       expect(await labelsFor("PLAIN")).toEqual(["plain"]);
+    });
+  });
+  describe.skipIf(ctx.pg)("a wildcard search on SQLite reads a bounded number of rows per call", () => {
+    const ROWS = 12_000;
+    const matchAt = new Set([100, 7_000, 11_000]);
+    const real = prisma.auditEvent.findMany.bind(prisma.auditEvent);
+
+    beforeAll(async () => {
+      await prisma.auditEvent.createMany({
+        data: Array.from({ length: ROWS }, (_, i) => ({
+          id: `scan-${String(i).padStart(5, "0")}`,
+          at: new Date(Date.UTC(2025, 0, 1) + i * 1000),
+          actorName: "system",
+          action: "CREATE",
+          entityType: "Scan",
+          entityId: String(i),
+          entityLabel: matchAt.has(i) ? `row_${i}` : `row-${i}`,
+        })),
+      });
+    }, 120_000);
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("walks every match across pages, never reading more than the cap in one call, with nothing skipped or repeated", async () => {
+      const seen: string[] = [];
+      const perCall: number[] = [];
+      let shortWithCursor = 0;
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 20; guard++) {
+        let taken = 0;
+        let maxTake = 0;
+        vi.spyOn(prisma.auditEvent, "findMany").mockImplementation(((args: { take: number }) => {
+          taken += args.take;
+          maxTake = Math.max(maxTake, args.take);
+          return real(args as never);
+        }) as never);
+        const { events, nextCursor } = await listAuditEvents({ type: "Scan", q: "_", cursor }, 50);
+        vi.restoreAllMocks();
+        perCall.push(taken);
+        expect(maxTake).toBeLessThanOrEqual(500);
+        seen.push(...events.map((e) => e.entityLabel ?? ""));
+        if (nextCursor && events.length < 50) shortWithCursor++;
+        if (!nextCursor) break;
+        cursor = nextCursor;
+      }
+      expect(seen).toEqual(["row_11000", "row_7000", "row_100"]);
+      expect(Math.max(...perCall)).toBeLessThanOrEqual(MAX_LITERAL_SCAN_ROWS);
+      expect(Math.max(...perCall)).toBeLessThan(ROWS); // the cap is a real limit, not a number the test shares with the code
+      expect(shortWithCursor).toBeGreaterThan(0); // a call that hit the cap returned a short page with a cursor
     });
   });
 });

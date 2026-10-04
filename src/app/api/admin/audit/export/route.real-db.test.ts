@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
@@ -78,6 +78,7 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
 
     const res = await GET(get());
     expect(res.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await body(res)).toBe(GOLDEN);
   });
 
@@ -85,9 +86,18 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
     const BULK = 3000;
     const idOf = (i: number) => `bulk-${String(i).padStart(5, "0")}`;
     const real = prisma.auditEvent.findMany.bind(prisma.auditEvent);
+    let spy: MockInstance | undefined;
+    // The spy is installed once and pointed back at the real query between
+    // tests; restoring it would remove the method from the Prisma client.
+    const intercept = (impl: (args: never) => unknown) => {
+      spy ??= vi.spyOn(prisma.auditEvent, "findMany");
+      spy.mockClear();
+      spy.mockImplementation(impl as never);
+      return spy;
+    };
 
     afterEach(() => {
-      vi.restoreAllMocks();
+      spy?.mockImplementation(real as never);
     });
 
     const idsIn = (csv: string) =>
@@ -112,10 +122,10 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
 
     it("never asks the database for more than one page, and pages lazily", async () => {
       const takes: number[] = [];
-      vi.spyOn(prisma.auditEvent, "findMany").mockImplementation(((args: { take?: number }) => {
+      intercept((args: { take?: number }) => {
         takes.push(args.take ?? -1);
         return real(args as never);
-      }) as never);
+      });
 
       const res = await GET(get("?type=Bulk"));
       const reader = res.body!.getReader();
@@ -131,20 +141,20 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
       const ids = idsIn(text);
       expect(ids).toHaveLength(BULK);
       expect(new Set(ids).size).toBe(BULK);
-      expect(takes.length).toBe(BULK / 500); // 6 pages of 500, each fetched as 500 + 1
+      expect(takes).toHaveLength(BULK / 500); // 6 pages of 500, each fetched as 500 + 1
       expect(Math.max(...takes)).toBeLessThanOrEqual(501);
     });
 
     it("skips and repeats nothing when rows are inserted between two pages", async () => {
       let calls = 0;
-      vi.spyOn(prisma.auditEvent, "findMany").mockImplementation((async (args: never) => {
+      intercept(async (args: never) => {
         if (++calls === 2) {
           // One row newer than everything and one in the middle of the unread region.
           await seed("mid-newer", BASE + 99_000_000, { entityType: "Bulk" });
           await seed("mid-inside", BASE + 10_000_000 + 1_000_000 / 3, { entityType: "Bulk", entityLabel: "mid-inside" });
         }
         return real(args);
-      }) as never);
+      });
 
       const ids = idsIn(await body(await GET(get("?type=Bulk"))));
 
@@ -159,10 +169,10 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
 
     it("a database error on a later page fails the download instead of truncating it", async () => {
       let calls = 0;
-      vi.spyOn(prisma.auditEvent, "findMany").mockImplementation(((args: never) => {
+      intercept((args: never) => {
         if (++calls === 2) return Promise.reject(new Error("db went away"));
         return real(args);
-      }) as never);
+      });
 
       const res = await GET(get("?type=Bulk"));
       expect(res.status).toBe(200);
@@ -170,12 +180,12 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
     });
 
     it("a database error on the first page is an ordinary failure before any response exists", async () => {
-      vi.spyOn(prisma.auditEvent, "findMany").mockRejectedValue(new Error("db down"));
+      intercept(() => Promise.reject(new Error("db down")));
       await expect(GET(get("?type=Bulk"))).rejects.toThrow("db down");
     });
 
     it("a non-admin gets 403 before any row is read", async () => {
-      const spy = vi.spyOn(prisma.auditEvent, "findMany");
+      const spy = intercept(real as never);
       ctx.admin.denied = NextResponse.json({ error: "Admins only" }, { status: 403 });
       try {
         const res = await GET(get("?type=Bulk"));
@@ -186,6 +196,33 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
       }
     });
   });
+
+  describe.skipIf(ctx.pg)("a wildcard search on SQLite whose pages come back empty", () => {
+    const ROWS = 7000; // more than one scan's worth, so the first pages hold no match
+    const matches = ["rare_10", "rare_20", "rare_30"];
+
+    beforeAll(async () => {
+      await prisma.auditEvent.createMany({
+        data: Array.from({ length: ROWS }, (_, i) => ({
+          id: `rare-${String(i).padStart(5, "0")}`,
+          at: new Date(Date.UTC(2024, 0, 1) + i * 1000),
+          actorName: "system",
+          action: "CREATE",
+          entityType: "Rare",
+          entityId: String(i),
+          entityLabel: [10, 20, 30].includes(i) ? `rare_${i}` : `rare-${i}`,
+        })),
+      });
+    }, 120_000);
+
+    it("still exports every match once, in order, after empty pages that carry a cursor", async () => {
+      const res = await GET(get("?type=Rare&q=_"));
+      const lines = (await body(res)).split("\r\n");
+      expect(lines[0]).toBe("\uFEFFat,actor,ip,action,type,item,changes");
+      expect(lines.slice(1).map((line) => line.split(",")[5])).toEqual([...matches].reverse());
+    });
+  });
+
 });
 
 // Captured from the previous collect-everything implementation, before it was replaced.

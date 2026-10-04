@@ -524,6 +524,15 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 ---
 
+### Known limitation: searching for `%` or `_` on SQLite
+
+On the SQLite database, a search term containing `%` or `_` in the global search and in the kit
+item picker may show a few extra near-matches (for example `AB_12` also finds `AB-12`), and a term
+made only of those characters matches everything. The audit log search is exact on both databases.
+PostgreSQL matches `%` and `_` literally everywhere.
+
+---
+
 ## Users and sign-in
 
 BlackVault requires an account. The first time you open it — a fresh install, or right after
