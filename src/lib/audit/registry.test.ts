@@ -23,9 +23,9 @@ describe("audit registry", () => {
     }
   });
 
-  it("excludes Session, AuthToken, User, ImageCache, DateNormalizationAudit, AuditEvent", () => {
+  it("excludes Session, AuthToken, User, ImageCache, DateNormalizationAudit, AuditEvent, CapturePass", () => {
     expect(Object.keys(AUDIT_EXCLUDED_MODELS).sort()).toEqual(
-      ["AuditEvent", "AuthToken", "DateNormalizationAudit", "ImageCache", "Session", "User"].sort(),
+      ["AuditEvent", "AuthToken", "CapturePass", "DateNormalizationAudit", "ImageCache", "Session", "User"].sort(),
     );
   });
 

@@ -23,6 +23,8 @@ export const AUDIT_ACTIONS = [
   "ENCRYPTION_ENABLED",
   "KEY_ROTATED",
   "FILES_ENCRYPTED",
+  "CAPTURE_PASS_CREATED",
+  "CAPTURE_PASS_CLOSED",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

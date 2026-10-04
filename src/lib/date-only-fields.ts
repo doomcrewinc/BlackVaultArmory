@@ -136,4 +136,10 @@ export const DATE_ONLY_EXCLUDED_FIELDS = [
   // ordering ("most recent activity") and never presented as a calendar day
   // the user chose.
   "AuditEvent.at",
+  // A gallery photo's creation moment: row bookkeeping, read for ordering.
+  "Photo.createdAt",
+  // A capture pass's lifetime: true instants compared against the clock.
+  "CapturePass.createdAt",
+  "CapturePass.expiresAt",
+  "CapturePass.closedAt",
 ] as const;

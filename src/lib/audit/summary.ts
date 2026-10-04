@@ -275,6 +275,12 @@ export function summarize(event: AuditEventDto): string {
       return parts.length ? `Encryption enabled: ${parts.join(", ")}` : "Encryption enabled";
     }
 
+    case "CAPTURE_PASS_CREATED":
+      return `Opened a phone capture pass for ${quoted(event.entityLabel)}`;
+
+    case "CAPTURE_PASS_CLOSED":
+      return `Closed the phone capture pass for ${quoted(event.entityLabel)}`;
+
     case "KEY_ROTATED": {
       // `changes: { from, to, counts }` (the key-rotation script).
       const from = isRecord(event.changes) ? asString(event.changes.from) : undefined;

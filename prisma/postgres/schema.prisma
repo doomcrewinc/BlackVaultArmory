@@ -69,6 +69,7 @@ model Firearm {
   documents        Document[]
   maintenanceLogs  MaintenanceLog[]
   kitItems         KitItem[]
+  photos           Photo[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -165,6 +166,7 @@ model Accessory {
 
   batteryChangeLogs      BatteryChangeLog[]
   kitItems               KitItem[]
+  photos                 Photo[]
 
   // NFA paperwork. Applies when type = SUPPRESSOR; cleared server-side otherwise.
   // NfaTransferMethod: FORM_1 | FORM_3 | FORM_4 | FORM_4473 | OTHER
@@ -218,6 +220,7 @@ model Gear {
 
   documents       Document[]
   kitItems        KitItem[]
+  photos          Photo[]
 
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
@@ -250,6 +253,9 @@ model Supply {
   purchaseDate    DateTime?
   storageLocation String?
   notes           String?
+  imageUrl        String?
+  documents       Document[]
+  photos          Photo[]
   kitItems        KitItem[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
@@ -269,15 +275,24 @@ model Document {
   firearmId  String?
   accessoryId String?
   gearId      String?
+  ammoStockId String?
+  supplyId    String?
+  kitId       String?
   firearm    Firearm?  @relation(fields: [firearmId], references: [id], onDelete: SetNull)
   accessory  Accessory? @relation(fields: [accessoryId], references: [id], onDelete: SetNull)
   gear        Gear?      @relation(fields: [gearId], references: [id], onDelete: SetNull)
+  ammoStock   AmmoStock? @relation(fields: [ammoStockId], references: [id], onDelete: SetNull)
+  supply      Supply?    @relation(fields: [supplyId], references: [id], onDelete: SetNull)
+  kit         Kit?       @relation(fields: [kitId], references: [id], onDelete: SetNull)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
   @@index([firearmId])
   @@index([accessoryId])
   @@index([gearId])
+  @@index([ammoStockId])
+  @@index([supplyId])
+  @@index([kitId])
   @@index([type])
   @@index([createdAt])
 }
@@ -312,10 +327,13 @@ model AmmoStock {
   storageLocation String?
   lowStockAlert   Int?
   notes           String?
+  imageUrl        String?
 
   transactions    AmmoTransaction[]
   rangeSessionLinks RangeSessionAmmoLink[]
   kitItems        KitItem[]
+  documents       Document[]
+  photos          Photo[]
 
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
@@ -492,6 +510,7 @@ model User {
   resetTokens  AuthToken[]  @relation("TokenUser")
   issuedTokens AuthToken[]  @relation("TokenIssuer")
   auditEvents  AuditEvent[]
+  capturePasses CapturePass[] @relation("CapturePassIssuer")
 }
 
 model Session {
@@ -503,6 +522,7 @@ model Session {
   lastSeenAt DateTime @default(now())
   expiresAt  DateTime
   userAgent  String?
+  capturePasses CapturePass[]
 
   @@index([userId])
 }
@@ -580,6 +600,8 @@ model Kit {
   notes     String?
   imageUrl  String?
   items     KitItem[]
+  documents Document[]
+  photos    Photo[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
@@ -635,4 +657,61 @@ model KitItem {
   updatedAt      DateTime    @updatedAt
 
   @@index([kitId])
+}
+
+// ─── PHOTOS ───────────────────────────────────────────────────
+// A gallery picture. Exactly one owner column is set; src/lib/photos/owner.ts
+// is the only code that chooses it. The file is
+// <uploadsRoot>/images/photos/<fileName>, its preview
+// <uploadsRoot>/images/photos/thumbs/<id>.webp.
+model Photo {
+  id          String     @id @default(cuid())
+  fileName    String     @unique
+  mimeType    String
+  fileSize    Int
+  width       Int
+  height      Int
+  label       String?
+  firearmId   String?
+  accessoryId String?
+  gearId      String?
+  kitId       String?
+  ammoStockId String?
+  supplyId    String?
+  firearm     Firearm?   @relation(fields: [firearmId], references: [id], onDelete: Cascade)
+  accessory   Accessory? @relation(fields: [accessoryId], references: [id], onDelete: Cascade)
+  gear        Gear?      @relation(fields: [gearId], references: [id], onDelete: Cascade)
+  kit         Kit?       @relation(fields: [kitId], references: [id], onDelete: Cascade)
+  ammoStock   AmmoStock? @relation(fields: [ammoStockId], references: [id], onDelete: Cascade)
+  supply      Supply?    @relation(fields: [supplyId], references: [id], onDelete: Cascade)
+  // The account that added it. No relation: accounts are not in backups.
+  createdById String?
+  viaPass     Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+
+  @@index([firearmId])
+  @@index([accessoryId])
+  @@index([gearId])
+  @@index([kitId])
+  @@index([ammoStockId])
+  @@index([supplyId])
+}
+
+// A short-lived, upload-only pass for one item, opened from a signed-in
+// session and used by a phone with no session. Only the token's hash is stored.
+model CapturePass {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique
+  entityType  String
+  entityId    String
+  createdById String
+  createdBy   User      @relation("CapturePassIssuer", fields: [createdById], references: [id], onDelete: Cascade)
+  sessionId   String
+  session     Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  closedAt    DateTime?
+  uploadCount Int       @default(0)
+
+  @@index([entityType, entityId])
 }

@@ -321,6 +321,17 @@ describe("summarize — encryption events", () => {
   });
 });
 
+describe("summarize — capture passes", () => {
+  it("names the item for CAPTURE_PASS_CREATED and CAPTURE_PASS_CLOSED", () => {
+    expect(summarize(event({ action: "CAPTURE_PASS_CREATED", entityType: "Firearm", entityLabel: "Glock 19" }))).toBe(
+      'Opened a phone capture pass for "Glock 19"',
+    );
+    expect(summarize(event({ action: "CAPTURE_PASS_CLOSED", entityType: "Firearm", entityLabel: "Glock 19" }))).toBe(
+      'Closed the phone capture pass for "Glock 19"',
+    );
+  });
+});
+
 describe("summarize — exhaustiveness (Fix round 1, item 6)", () => {
   // The `default` branch silently handles any action with no dedicated case,
   // producing "<ACTION> — <who>[ — "label"]" — this iterates every real
