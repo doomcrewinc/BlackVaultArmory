@@ -16,7 +16,9 @@
 # read the way Compose reads it:
 #   KEY=value            export KEY=value        KEY = value
 #   KEY="value"          KEY='value'             (the quotes removed; text
-#                                                 after the closing one dropped)
+#                                                 after the closing one dropped,
+#                                                 and a comment there may hold
+#                                                 quotes of its own)
 #   KEY=value # comment                          (cut at the first space-#)
 # with leading whitespace, a UTF-8 BOM on the first line and CRLF line endings
 # allowed, lines starting with # ignored, and the LAST assignment of a key
@@ -33,9 +35,19 @@
 #     closing quote: Compose unescapes the first and refuses the file for the
 #     others;
 #   - KEY: value (the YAML form), when it is the last assignment of the key;
-#   - a quote that is not closed on its line (Compose reads on to the next).
+#   - a quote that is not closed on its line (Compose reads on to the next);
+#   - text after a closing quote that holds another quote of the same kind,
+#     unless that text is a comment (it starts with #);
+#   - a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR and
+#     BLACKVAULT_BACKUP_DIR). Compose puts the home folder of whoever runs it
+#     in place of the ~ in a bind mount's source; this reader does not guess
+#     that folder. Any other key reaches the container as written, ~ included.
 # Otherwise single-quoted values are literal in Compose, $ and \ included, and
 # so are backslashes in an unquoted value: a Windows path is best unquoted.
+#
+# The escape rules above were probed against one version of Compose's parser
+# (compose-go v2.16.1, see scripts/compose-provider.test.ts); an older Docker
+# Compose was not run.
 
 # env_read KEY: parses ./.env and sets ENV_STATE to unset, set or unreadable
 # for the last assignment of KEY, and ENV_VALUE to its value (empty unless
@@ -91,6 +103,12 @@ env_read() {
       fi
       after=${rest#*"$quote"}
       rest=${rest%%"$quote"*}
+      # What follows the closing quote, when it is a comment, may hold
+      # anything.
+      after="${after#"${after%%[![:space:]]*}"}"
+      if [[ "$after" == "#"* ]]; then
+        after=""
+      fi
       # A backslash before the closing quote escapes it, and a second quote
       # of the same kind after it means the value did not end there.
       if [[ "$rest" == *\\ || "$after" == *"$quote"* ]]; then
@@ -101,7 +119,6 @@ env_read() {
         ENV_STATE="unreadable"
         continue
       fi
-      ENV_VALUE=$rest
     else
       # Unquoted: a # after a space starts a comment (a tab does not, and
       # neither does a # that opens the value).
@@ -111,8 +128,12 @@ env_read() {
         ENV_STATE="unreadable"
         continue
       fi
-      ENV_VALUE=$rest
     fi
+    if [[ "$key" == *_DIR && "$rest" == "~"* ]]; then
+      ENV_STATE="unreadable"
+      continue
+    fi
+    ENV_VALUE=$rest
   done < .env
   return 0
 }
@@ -141,7 +162,7 @@ env_unreadable() {
 # One line (no newline at its end) saying that KEY is unreadable, why a line
 # is, and how to write it so that it is read.
 env_unreadable_text() {
-  printf '%s' "$1 in .env could not be read: Docker Compose would change the value of that line, or reject it. Write it as $1=value with the final value spelled out and no \$ in it (best for a Windows path). In single quotes the value must hold no apostrophe and not end in a backslash; in double quotes it must hold no \$ and no backslash before a b f n r t v 0, another backslash or the closing quote. A '$1: value' line must become $1=value."
+  printf '%s' "$1 in .env could not be read: Docker Compose would change the value of that line, or reject it. Write it as $1=value with the final value spelled out and no \$ in it (best for a Windows path). In single quotes the value must hold no apostrophe and not end in a backslash; in double quotes it must hold no \$ and no backslash before a b f n r t v 0, another backslash or the closing quote. A '$1: value' line must become $1=value. A folder must not start with ~: write the full path."
 }
 
 # env_require_readable KEY [WHAT WAS NOT DONE]: returns 1, after an ERROR

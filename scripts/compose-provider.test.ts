@@ -92,6 +92,10 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["empty", "K=\n", ""],
     ["empty quotes", 'K=""\n', ""],
     ["text after the closing quote is dropped", `K='a'b\nX="a"b\n`, "a"],
+    ["a comment holding the same kind of quote after a double-quoted value", 'K="a b" # the "real" one\n', "a b"],
+    ["a comment holding an apostrophe after a single-quoted value", "K='a b'\t# it's here\n", "a b"],
+    ["a comment glued to the closing quote", `K="a"#"b"\n`, "a"],
+    ["a leading ~ in a key that is not a folder", "K=~secret\n", "~secret"],
     ["a double quote inside an unquoted value", 'K=a"b"c\n', 'a"b"c'],
     ["an apostrophe inside an unquoted value", "K=O'Brien\n", "O'Brien"],
     ["a double quote inside single quotes", `K='a"b'\n`, 'a"b'],
@@ -128,6 +132,8 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["KEY: value", "K: v\n", UNREADABLE],
     ["export KEY: value", "export K: v\n", UNREADABLE],
     ["KEY=value, then KEY: value (the last assignment wins, and it is the unreadable one)", "K=w\nK: v\n", UNREADABLE],
+    ["a second quoted part after the closing quote", `K="a" "b"\n`, UNREADABLE],
+    ["text holding a quote after the closing quote, not a comment", `K='a' b'c\n`, UNREADABLE],
     ["a double quote that is not closed on the line", 'K="abc\nX=1\n', UNREADABLE],
     ["a single quote that is not closed on the line", "K='abc\nX=1\n", UNREADABLE],
     ["a longer key with the same suffix", "XK=v\n", ""],
@@ -140,6 +146,26 @@ describe("env_value reads .env the way Docker Compose does", () => {
     const r = value(content);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
+    expect(r.out).toBe(expected === UNREADABLE ? "[]UNREADABLE" : `[${expected}]`);
+  });
+
+  // Compose puts the home folder in place of a leading ~ in the source of a
+  // bind mount, which is where DATA_DIR and BLACKVAULT_BACKUP_DIR are used.
+  // The reader does not guess whose home that is: such a folder is unreadable.
+  // Any other key is passed to the container as written.
+  it.each([
+    ["DATA_DIR", "DATA_DIR=~/blackvault\n", UNREADABLE],
+    ["DATA_DIR", "DATA_DIR=~\n", UNREADABLE],
+    ["DATA_DIR", 'export DATA_DIR = "~/blackvault" # home\n', UNREADABLE],
+    ["DATA_DIR", "DATA_DIR='~rob/blackvault'\n", UNREADABLE],
+    ["BLACKVAULT_BACKUP_DIR", "BLACKVAULT_BACKUP_DIR=~/backups\n", UNREADABLE],
+    ["DATA_DIR", "DATA_DIR=~/old\nDATA_DIR=/srv/blackvault\n", "/srv/blackvault"],
+    ["DATA_DIR", "DATA_DIR=/srv/~blackvault/~\n", "/srv/~blackvault/~"],
+    ["BLACKVAULT_POSTGRES_PASSWORD", "BLACKVAULT_POSTGRES_PASSWORD=~pass~\n", "~pass~"],
+    ["BLACKVAULT_PUBLIC_URL", "BLACKVAULT_PUBLIC_URL=~x\n", "~x"],
+  ] as [string, string, string | typeof UNREADABLE][])("a leading ~ in a folder key is unreadable: %s in %j", (key, content, expected) => {
+    const r = inDir(content, `printf "[%s]" "$(env_value ${key})"; if env_unreadable ${key}; then printf UNREADABLE; fi`);
+    expect(r.err).toBe("");
     expect(r.out).toBe(expected === UNREADABLE ? "[]UNREADABLE" : `[${expected}]`);
   });
 
@@ -218,6 +244,7 @@ describe("env_value reads .env the way Docker Compose does", () => {
     expect(r.out).toContain("Write it as K=value");
     expect(r.out).toContain("single quotes");
     expect(r.out).toContain("double quotes");
+    expect(r.out).toContain("must not start with ~");
     expect(r.out.endsWith("\n")).toBe(false);
   });
 });

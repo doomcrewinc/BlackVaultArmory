@@ -125,6 +125,20 @@ if [ -z "$DATA_DIR" ]; then
   read -rp "  Data directory [press Enter for default]: " DATA_DIR_INPUT
   DATA_DIR="${DATA_DIR_INPUT:-$DEFAULT_DATA}"
   DATA_DIR="${DATA_DIR%/}"   # strip trailing slash
+  # `read` does not expand ~, and Docker Compose would later put the home
+  # folder in its place: write the full path to .env. ~name (another user's
+  # home) is not guessed at.
+  if [[ "$DATA_DIR" == "~" ]]; then
+    DATA_DIR="$HOME"
+  elif [[ "$DATA_DIR" == "~/"* ]]; then
+    DATA_DIR="$HOME/${DATA_DIR#"~/"}"
+  elif [[ "$DATA_DIR" == "~"* ]]; then
+    echo ""
+    echo "ERROR: the data directory $DATA_DIR starts with ~ and is not under your own"
+    echo "       home folder (~/...). Run this script again and type the full path."
+    echo "       Nothing was changed."
+    exit 1
+  fi
 fi
 
 # ── Port ─────────────────────────────────────────────────────

@@ -489,6 +489,9 @@ describe("update.sh (no git checkout)", () => {
     ["a double-quoted path with \\r and \\n in it", (_d: string) => 'DATA_DIR="C:\\Users\\rob\\new data"'],
     ["a single-quoted path with an apostrophe", (d: string) => `DATA_DIR='${d}/Rob's Vault'`],
     ["a single-quoted path ending in a backslash", (_d: string) => "DATA_DIR='C:\\BV\\'"],
+    // Compose puts the home folder in place of a leading ~; the reader does not.
+    ["a leading ~", (_d: string) => "DATA_DIR=~/real"],
+    ["a leading ~ in double quotes", (_d: string) => 'export DATA_DIR="~/real"'],
   ])("update.sh: an unreadable DATA_DIR (%s) stops the update at the preflight: nothing pulled, built or relocated, .env untouched", (_name, line) => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -543,6 +546,34 @@ describe("update.sh (no git checkout)", () => {
     expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
     expect(r.calls).not.toContain("compose up");
     expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+  });
+
+  it.each([
+    ["~/bv-data", (home: string) => `${home}/bv-data`],
+    ["~/bv-data/", (home: string) => `${home}/bv-data`],
+    ["~", (home: string) => home],
+  ])("install.sh: a typed data folder %s is written to .env with the home folder spelled out, and no folder named ~ is made", (typed, expected) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", `${typed}${INSTALL_ANSWERS}`);
+    expect(r.code, r.out).toBe(0);
+    const sourced = spawnSync("bash", ["-c", ". scripts/compose-provider.sh; env_value DATA_DIR; env_unreadable DATA_DIR && echo UNREADABLE"], { cwd: dir, encoding: "utf8" });
+    expect(sourced.stdout).toBe(`${expected(tmp)}\n`);
+    expect(fs.existsSync(path.join(dir, "~"))).toBe(false);
+    expect(fs.statSync(path.join(expected(tmp), "db")).isDirectory()).toBe(true);
+    expect(r.out).toContain(`Data stored: ${expected(tmp)}\n`);
+  });
+
+  it("install.sh: a typed data folder ~name/... is refused before anything is written: whose home that is cannot be told", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", `~rob/bv-data${INSTALL_ANSWERS}`);
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: the data directory ~rob/bv-data starts with ~");
+    expect(r.out).toContain("Nothing was changed.");
+    expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "~rob"))).toBe(false);
+    expect(r.calls).not.toContain("compose up");
   });
 
   it.each(["install.sh", "update.sh"])("%s: an unreadable BLACKVAULT_DB_PROVIDER stops before anything is started (SQLite is not assumed)", (script) => {
