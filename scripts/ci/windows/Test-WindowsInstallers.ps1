@@ -3569,9 +3569,9 @@ $HandoffCases = @(
 )
 foreach ($case in $HandoffCases) {
   [IO.File]::WriteAllText((Join-Path $d "handoff.txt"), $case[1], [Text.Encoding]::ASCII)
-  $r = Invoke-Bat -Dir $d -Script "handoffdrv.bat" -NoPad -TimeoutSeconds 60
-  Assert ($r.Output -match ("(?m)^RESULT=" + $case[2] + "\r?$")) "$($case[0]): $($case[2])"
-  Show-EvidenceIfFailed $r
+  $h = Invoke-Bat -Dir $d -Script "handoffdrv.bat" -NoPad -TimeoutSeconds 60
+  Assert ($h.Output -match ("(?m)^RESULT=" + $case[2] + "\r?$")) "$($case[0]): $($case[2])"
+  Show-EvidenceIfFailed $h
 }
 
 # --------------------------------------------------------------- scenario RS19
