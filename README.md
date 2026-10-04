@@ -1348,7 +1348,8 @@ press **Start Full Backup**.
 - The progress bar has two phases, **Writing the archive** and then **Verifying the archive**
   (the whole file is read back and checked before it gets its final name), each with
   `<n> of <m> files`.
-- **Backup complete** shows the file name, the number of files and their size.
+- **Backup complete** shows the file name, the number of files and their size, in binary units
+  (1 KiB = 1024 bytes, 1 MiB = 1024 KiB, 1 GiB = 1024 MiB).
 - **Backup finished, but it is INCOMPLETE** means some uploaded files could not be read (a damaged
   file, a file name a backup cannot hold). They are listed, each with the reason, and they are
   **not** in the backup. Fix or remove them and make another backup.

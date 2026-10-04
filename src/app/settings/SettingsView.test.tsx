@@ -595,11 +595,23 @@ describe("SettingsView - full backup panel", () => {
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(screen.getByText("Backup complete")).toBeTruthy();
     expect(screen.getByText("blackvault-full-20261002-180405.bvb")).toBeTruthy();
-    expect(screen.getByText(/4 files, 3\.9 KB of uploads/)).toBeTruthy();
+    expect(screen.getByText(/4 files, 3\.9 KiB of uploads/)).toBeTruthy();
 
     const calls = stub.statusCalls();
     await tick(5000);
     expect(stub.statusCalls()).toBe(calls); // no polling once the job is done
+  });
+
+  it.each([
+    [512, "512 B"],
+    [5 * 1024 * 1024, "5.0 MiB"],
+    [3 * 1024 * 1024 * 1024, "3.00 GiB"],
+  ])("labels a %i byte backup in binary units (%s)", async (bytes, label) => {
+    stubFullBackup([
+      { jobId: "j1", state: "succeeded", file: "blackvault-full-20261002-180405.bvb", files: 2, bytes, skipped: [], warnings: [] },
+    ]);
+    await renderPanel();
+    expect(await screen.findByText(new RegExp(`2 files, ${label} of uploads`))).toBeTruthy();
   });
 
   it("picks up a job that is already running on page load", async () => {
