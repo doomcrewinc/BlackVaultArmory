@@ -75,15 +75,15 @@ ensure_encryption_key() {
   # is set" nor "no key", and a new key file beside it could be a second key.
   if [[ -z "${BLACKVAULT_ENCRYPTION_KEY:-}" ]]; then
     if env_unreadable BLACKVAULT_ENCRYPTION_KEY; then
-      echo "ERROR: $(env_unreadable_text BLACKVAULT_ENCRYPTION_KEY)"
-      echo "       This script cannot tell whether an encryption key is already set, so no key file was created."
+      echo "ERROR: $(env_unreadable_text BLACKVAULT_ENCRYPTION_KEY)" >&2
+      echo "       This script cannot tell whether an encryption key is already set, so no key file was created." >&2
       return 1
     fi
     key=$(env_value BLACKVAULT_ENCRYPTION_KEY)
     if [[ -n "$key" && ! "$key" =~ ^[0-9a-fA-F]{64}$ ]]; then
       key=""
-      echo "ERROR: BLACKVAULT_ENCRYPTION_KEY in .env is not 64 hex characters, so the app would refuse to start."
-      echo "       Correct the line, or remove it to have a key file created. No key file was created."
+      echo "ERROR: BLACKVAULT_ENCRYPTION_KEY in .env is not 64 hex characters, so the app would refuse to start." >&2
+      echo "       Correct the line, or remove it to have a key file created. No key file was created." >&2
       return 1
     fi
     key=""
