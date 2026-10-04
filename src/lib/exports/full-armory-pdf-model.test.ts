@@ -92,6 +92,7 @@ function payload(overrides: Partial<FullArmoryExportResponse> = {}): FullArmoryE
         nfaTaxPaid: 200,
         nfaRegisteredTo: "Trust",
         nfaClass: "SBR",
+        mgRegistry: "",
       },
     ],
     attachments: [
@@ -381,5 +382,28 @@ describe("toPdfSafeText", () => {
 
   it("leaves ordinary ASCII untouched", () => {
     expect(toPdfSafeText("SR-15 Mod2 (5.56 NATO) $2,400")).toBe("SR-15 Mod2 (5.56 NATO) $2,400");
+  });
+});
+
+describe("buildFullArmoryPdfModel — machine-gun registry", () => {
+  function paperworkTable(items: FullArmoryExportResponse["items"]) {
+    const model = buildFullArmoryPdfModel(payload({ items }), options());
+    const headingIndex = model.blocks.findIndex((b) => b.kind === "heading" && b.text === "NFA Paperwork");
+    expect(headingIndex).toBeGreaterThanOrEqual(0);
+    return model.blocks.slice(headingIndex).find((b) => b.kind === "table") as Extract<PdfBlock, { kind: "table" }>;
+  }
+
+  it("puts a Registry column right after Class, with the label, and a dash when unset", () => {
+    const [base] = payload().items;
+    const table = paperworkTable([
+      { ...base, nfaClass: "MACHINE_GUN", mgRegistry: "PRE_SAMPLE" },
+      { ...base, itemId: "item-2", nfaClass: "SBR", mgRegistry: "" },
+    ]);
+    const labels = table.columns.map((column) => column.label);
+
+    expect(labels[labels.indexOf("Class") + 1]).toBe("Registry");
+    const at = labels.indexOf("Registry");
+    expect(table.rows[0][at]).toBe("Pre-sample");
+    expect(table.rows[1][at]).toBe(EMPTY_CELL);
   });
 });

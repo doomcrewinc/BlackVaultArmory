@@ -1233,6 +1233,52 @@ describe("GET /api/exports/full-armory", () => {
     expect(redacted).toContain("NFA: Form 1 (make) | Control: N/A | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
   });
 
+  const documentedMachineGun = {
+    ...documentedSbr,
+    id: "firearm-mg",
+    type: "PDW",
+    nfaClass: "MACHINE_GUN",
+    mgRegistry: "PRE_SAMPLE",
+  };
+
+  it("asks the database for mgRegistry", async () => {
+    await GET(new NextRequest("http://localhost/api/exports/full-armory"));
+
+    expect(mocks.findFirearms.mock.calls[0][0].select).toMatchObject({ mgRegistry: true });
+  });
+
+  it("puts mgRegistry right after nfaClass in JSON and CSV, blank when unset", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedMachineGun, documentedSbr]);
+
+    const json = await (await GET(new NextRequest("http://localhost/api/exports/full-armory"))).json();
+    expect(Object.keys(json.items[0]).indexOf("mgRegistry")).toBe(Object.keys(json.items[0]).indexOf("nfaClass") + 1);
+    expect(json.items.map((item: { mgRegistry: string }) => item.mgRegistry)).toEqual([
+      "PRE_SAMPLE",
+      "",
+      // the beforeEach accessory has no registry
+      "",
+    ]);
+
+    const csv = await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))).text();
+    const header = csv.split("\n")[0].split(",");
+    expect(header.indexOf("mgRegistry")).toBe(header.indexOf("nfaClass") + 1);
+    const rows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
+    const column = header.indexOf("mgRegistry");
+    expect(rows[0].split(",")[column]).toBe("PRE_SAMPLE");
+    expect(rows[1].split(",")[column]).toBe("");
+  });
+
+  it("prints the registry label after the class in the PDF only when there is one", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedMachineGun, documentedSbr]);
+
+    const text = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+
+    expect(text).toContain("| Class: Machine Gun | Registry: Pre-sample |");
+    expect(text).toContain("2. FIREARM Acme M4 SBR | Type: RIFLE | Class: SBR | Serial:");
+  });
+
   it("prints no NFA line in the PDF for an item with no paperwork", async () => {
     const text = extractPdfFlatText(
       await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()

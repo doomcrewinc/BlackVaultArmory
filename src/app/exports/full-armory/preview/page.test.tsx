@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const generateFullArmoryPdf = vi.fn();
 vi.mock("@/lib/exports/full-armory-pdf", () => ({ generateFullArmoryPdf }));
@@ -75,6 +75,7 @@ const EXPORT_PAYLOAD = {
       nfaTaxPaid: null,
       nfaRegisteredTo: "",
       nfaClass: "NONE",
+      mgRegistry: "",
     },
   ],
   attachments: [],
@@ -212,5 +213,40 @@ describe("Full Armory preview — Download PDF", () => {
 
     release(OK_RESULT);
     await waitFor(() => expect(screen.getByRole("button", { name: /download pdf/i })).toBeEnabled());
+  });
+});
+
+describe("Full Armory preview — machine-gun registry", () => {
+  it("shows a Registry column beside the NFA class in both tables", async () => {
+    const [base] = EXPORT_PAYLOAD.items;
+    const registered = {
+      ...base,
+      nfaClass: "MACHINE_GUN",
+      mgRegistry: "POST_SAMPLE",
+      nfaTransferMethod: "FORM_4",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ...EXPORT_PAYLOAD, items: [registered, { ...base, itemId: "item-2" }] }), { status: 200 }))
+    );
+    await renderLoaded();
+
+    const tables = screen.getAllByRole("table");
+    for (const heading of ["Master Inventory", "NFA Paperwork"]) {
+      const section = screen.getByText(heading).closest("section") as HTMLElement;
+      const table = section.querySelector("table") as HTMLElement;
+      expect(tables).toContain(table);
+      const headers = within(table).getAllByRole("columnheader").map((th) => th.textContent);
+      const at = headers.indexOf("Registry");
+      expect(at).toBeGreaterThan(0);
+      expect(headers[at - 1]).toMatch(/Class$/);
+      const firstRow = within(table).getAllByRole("row")[1];
+      expect(within(firstRow).getAllByRole("cell")[at].textContent).toBe("Post-sample");
+    }
+    const inventoryRows = within(
+      screen.getByText("Master Inventory").closest("section") as HTMLElement
+    ).getAllByRole("row");
+    const inventoryHeaders = within(inventoryRows[0]).getAllByRole("columnheader").map((th) => th.textContent);
+    expect(within(inventoryRows[2]).getAllByRole("cell")[inventoryHeaders.indexOf("Registry")].textContent).toBe("—");
   });
 });

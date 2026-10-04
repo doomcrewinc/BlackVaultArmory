@@ -8,6 +8,7 @@ import {
   parseExportOptionsFromSearchParams,
   hasNfaPaperwork,
   formatExpiryFootnote,
+  mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
@@ -66,6 +67,7 @@ type FirearmExportRecord = NfaPaperworkRecord & {
   serialNumber: string | null;
   type: string | null;
   nfaClass: string | null;
+  mgRegistry: string | null;
   acquisitionDate: Date | null;
   purchasePrice: number | null;
   currentValue: number | null;
@@ -509,9 +511,10 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     // the NFA line below: this is the renderer an adjuster reads, and the app's
     // own detail pages already show "Form 4 (transfer)".
     const classLabel = nfaClassLabel(item.nfaClass);
+    const registryLabel = mgRegistryLabel(item.mgRegistry);
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""}${registryLabel ? ` | Registry: ${registryLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
     // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
     // line under every Title I item would double the page count to say nothing.
@@ -637,6 +640,7 @@ export async function GET(request: NextRequest) {
         serialNumber: true,
         type: true,
         nfaClass: true,
+        mgRegistry: true,
         nfaTransferMethod: true,
         nfaControlNumber: true,
         nfaApprovalDate: true,
@@ -776,6 +780,7 @@ export async function GET(request: NextRequest) {
           entityType: "FIREARM" as const,
           category: firearm.type || "",
           nfaClass: firearmExportNfaClass(firearm),
+          mgRegistry: firearm.mgRegistry ?? "",
           manufacturer: firearm.manufacturer || "",
           model: firearm.model || firearm.name,
           caliber: firearm.caliber || "",
@@ -814,6 +819,7 @@ export async function GET(request: NextRequest) {
           // An accessory has no class column on its model. Blank, not NONE:
           // "not applicable", as against a firearm's "Title I".
           nfaClass: "",
+          mgRegistry: "",
           manufacturer: accessory.manufacturer || "",
           model: accessory.model || accessory.name,
           caliber: accessory.caliber || "",
