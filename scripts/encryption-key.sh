@@ -44,6 +44,7 @@ env_key_trimmed() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s\n' "$value"
+  return 0
 }
 
 ENCRYPTION_KEY_FILE="secrets/blackvault_encryption_key"
