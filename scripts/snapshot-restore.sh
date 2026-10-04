@@ -109,6 +109,7 @@ check_stamp() {
   stamp=$1
   case "$stamp" in
     "" | */*) fail "'$stamp' is not a restore stamp." ;;
+    *) return 0 ;;
   esac
 }
 
