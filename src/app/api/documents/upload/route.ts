@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { detectFileSignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
+import { PictureRejected, processPicture } from "@/lib/images/process";
 import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
@@ -79,6 +80,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Pictures are re-saved without location or other hidden metadata; PDFs
+    // are stored as uploaded.
+    let stored: Buffer = buffer;
+    let storedMimeType = detected.mimeType;
+    if (detected.extension !== "pdf") {
+      try {
+        const processed = await processPicture(buffer, { maxBytes: MAX_SIZE });
+        stored = processed.bytes;
+        storedMimeType = processed.mimeType;
+      } catch (e) {
+        if (e instanceof PictureRejected) {
+          return NextResponse.json({ error: e.message }, { status: 400 });
+        }
+        throw e;
+      }
+    }
+
     // Generate a unique ID for the file
     const fileId = randomUUID().replace(/-/g, "");
 
@@ -90,15 +108,15 @@ export async function POST(request: NextRequest) {
 
     await fs.mkdir(uploadDir, { recursive: true });
 
-    await writeEncryptedFile(filePath, buffer);
+    await writeEncryptedFile(filePath, stored);
 
     const doc = await prisma.document.create({
       data: {
         name,
         type,
         fileUrl: relativeUrl,
-        fileSize: file.size,
-        mimeType: detected.mimeType,
+        fileSize: stored.length,
+        mimeType: storedMimeType,
         notes: notes || null,
         firearmId: firearmId || null,
         accessoryId: accessoryId || null,

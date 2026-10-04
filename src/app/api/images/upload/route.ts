@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
-import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
-import { ALLOWED_IMAGE_EXTENSIONS, SUPPORTED_IMAGE_FORMATS_LABEL } from "@/lib/image-formats";
+import { PictureRejected, processPicture, type ProcessedPicture } from "@/lib/images/process";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
-
-const ALLOWED_EXTENSIONS = new Set<string>(ALLOWED_IMAGE_EXTENSIONS);
 
 // Every entity whose table carries an `imageUrl` column AND has a form that
 // writes one. "kit" is here because Kit.imageUrl is a dead column unless
@@ -23,7 +20,6 @@ const ALLOWED_ENTITY_TYPES = new Set([
   "gear",
   "kit",
 ]);
-const MAX_SIZE = 10 * 1024 * 1024;
 const SAFE_ENTITY_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 
 // POST /api/images/upload - Upload an image for an entity
@@ -92,40 +88,21 @@ export async function POST(request: NextRequest) {
       return entityAccess.response;
     }
 
-    // Check file size (limit to 10MB)
-    if (file.size > MAX_SIZE) {
-      return NextResponse.json(
-        { error: "File too large. Maximum size is 10MB." },
-        { status: 400 }
-      );
-    }
-
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const detected = detectFileSignature(buffer);
-
-    if (!detected || !ALLOWED_EXTENSIONS.has(detected.extension)) {
-      if (isHeicFamilySignature(buffer) || ["image/heic", "image/heif"].includes(file.type)) {
-        return NextResponse.json(
-          {
-            error: `HEIC/HEIF photos are not supported for Wave 3 uploads. Please export as ${SUPPORTED_IMAGE_FORMATS_LABEL}.`,
-          },
-          { status: 400 }
-        );
+    const buffer = Buffer.from(await file.arrayBuffer());
+    let processed: ProcessedPicture;
+    try {
+      processed = await processPicture(buffer);
+    } catch (e) {
+      if (e instanceof PictureRejected) {
+        return NextResponse.json({ error: e.message }, { status: 400 });
       }
-
-      return NextResponse.json(
-        {
-          error: `Invalid file type. Supported formats: ${SUPPORTED_IMAGE_FORMATS_LABEL}.`,
-        },
-        { status: 400 }
-      );
+      throw e;
     }
 
     // Build paths
     // entityType = "firearm" -> directory = "firearms"
     const entityTypeDir = `${entityType}s`;
-    const fileName = `${sanitizedEntityId}_${Date.now()}.${detected.extension}`;
+    const fileName = `${sanitizedEntityId}_${Date.now()}.${processed.extension}`;
     const relativeUrl = `/uploads/images/${entityTypeDir}/${fileName}`;
 
     // Resolve the absolute path outside the web root
@@ -136,7 +113,7 @@ export async function POST(request: NextRequest) {
     // Ensure the directory exists
     await fs.mkdir(uploadDir, { recursive: true });
 
-    await writeEncryptedFile(filePath, buffer);
+    await writeEncryptedFile(filePath, processed.bytes);
 
     return NextResponse.json(
       {
@@ -144,8 +121,8 @@ export async function POST(request: NextRequest) {
         entityType,
         entityId: sanitizedEntityId,
         fileName,
-        size: file.size,
-        mimeType: detected.mimeType,
+        size: processed.bytes.length,
+        mimeType: processed.mimeType,
       },
       { status: 201 }
     );

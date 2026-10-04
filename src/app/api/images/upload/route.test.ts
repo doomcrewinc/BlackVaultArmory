@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi, Mock } from "vitest";
 import { NextRequest } from "next/server";
+import sharp from "sharp";
 
 vi.mock("@/lib/server/auth", () => ({
   requireAuth: vi.fn().mockResolvedValue(null),
@@ -29,6 +30,7 @@ vi.mock("@/lib/files/storage", () => ({
 }));
 
 import { POST } from "./route";
+import { HEIC_MESSAGE } from "@/lib/images/process";
 
 // Bytes that match no known image signature, so the request is rejected on the
 // file-type check — after the entityType gate. That keeps the assertion about
@@ -45,12 +47,17 @@ function uploadRequest(entityType: string) {
   });
 }
 
-// A real (if minimal) PNG signature so detectFileSignature accepts it, to
-// exercise the actual write path.
-function validPngUploadRequest(entityType: string, entityId: string) {
-  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+async function realPng() {
+  return sharp({
+    create: { width: 4, height: 4, channels: 3, background: { r: 10, g: 20, b: 30 } },
+  })
+    .png()
+    .toBuffer();
+}
+
+function uploadOf(bytes: Uint8Array, name: string, entityType = "firearm", entityId = "gear-1") {
   const form = new FormData();
-  form.set("file", new File([bytes], "photo.png"));
+  form.set("file", new File([bytes as BlobPart], name));
   form.set("entityType", entityType);
   form.set("entityId", entityId);
 
@@ -58,6 +65,10 @@ function validPngUploadRequest(entityType: string, entityId: string) {
     method: "POST",
     body: form,
   });
+}
+
+async function validPngUploadRequest(entityType: string, entityId: string) {
+  return uploadOf(await realPng(), "photo.png", entityType, entityId);
 }
 
 describe("POST /api/images/upload", () => {
@@ -76,7 +87,7 @@ describe("POST /api/images/upload", () => {
 
   it("writes through writeEncryptedFile under uploadsRoot(), never fs.writeFile", async () => {
     const entityId = "cm2x9k3qw-ab_01"; // a cuid can contain - and _
-    const response = await POST(validPngUploadRequest("firearm", entityId));
+    const response = await POST(await validPngUploadRequest("firearm", entityId));
     const json = await response.json();
 
     expect(response.status).toBe(201);
@@ -85,6 +96,43 @@ describe("POST /api/images/upload", () => {
     expect(writtenPath).toBe(`/tmp/blackvault-test-uploads/images/firearms/${json.fileName}`);
     expect(json.fileName).toContain(entityId);
     expect(Buffer.isBuffer(writtenBuffer)).toBe(true);
+  });
+
+  it("writes a JPEG without its GPS EXIF and reports the stored size and type", async () => {
+    const jpeg = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .jpeg()
+      .withMetadata({ exif: { IFD3: { GPSLatitudeRef: "N", GPSLatitude: "40/1 26/1 46/1" } } })
+      .toBuffer();
+    expect((await sharp(jpeg).metadata()).exif).toBeDefined();
+
+    const response = await POST(uploadOf(jpeg, "photo.jpg"));
+    const json = await response.json();
+
+    expect(response.status).toBe(201);
+    const written = storageMocks.writeEncryptedFile.mock.calls[0][1] as Buffer;
+    expect((await sharp(written).metadata()).exif).toBeUndefined();
+    expect(json.size).toBe(written.length);
+    expect(json.mimeType).toBe("image/jpeg");
+    expect(json.fileName).toMatch(/\.jpg$/);
+  });
+
+  it("rejects a HEIC file with the HEIC message and writes nothing", async () => {
+    const heic = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63]);
+    const response = await POST(uploadOf(heic, "photo.heic"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe(HEIC_MESSAGE);
+    expect(storageMocks.writeEncryptedFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects a file of 25 MB plus one byte", async () => {
+    const response = await POST(uploadOf(new Uint8Array(25 * 1024 * 1024 + 1), "big.jpg"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("File too large. Maximum size is 25MB.");
+    expect(storageMocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("accepts gear as an entity type", async () => {
