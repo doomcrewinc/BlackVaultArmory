@@ -62,6 +62,12 @@ fi
 if env_unreadable DATA_DIR; then
   fail "$(env_unreadable_text DATA_DIR)"
 fi
+# docker compose takes DATA_DIR from the shell before .env; this script reads
+# .env. If the two differ, the copy below would be of one folder while the
+# caller's compose commands (stop, up) act on another.
+if [[ -n "${DATA_DIR+set}" && "$DATA_DIR" != "$(env_value DATA_DIR)" ]]; then
+  fail "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and this snapshot would use different folders. Run 'unset DATA_DIR' first."
+fi
 PROVIDER=$(provider_from_env)
 TS="$(date -u +%Y%m%d-%H%M%S)"
 DATA_DIR=$(env_value DATA_DIR)

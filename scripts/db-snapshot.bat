@@ -78,6 +78,13 @@ if defined _EV_BAD (
   set "FAIL_MSG=DATA_DIR in .env could not be read: see the Note above."
   goto :fail
 )
+:: docker compose takes DATA_DIR from the console before .env; this script
+:: reads .env. If the two differ, the copy below would be of one folder while
+:: the caller's compose commands (stop, up) act on another.
+if defined DATA_DIR if not "!DATA_DIR!"=="!_EV!" (
+  set "FAIL_MSG=DATA_DIR is set in this console and is not the DATA_DIR in .env, so docker compose and this snapshot would use different folders. Run 'set DATA_DIR=' first."
+  goto :fail
+)
 set "DATA_DIR=!_EV!"
 if not defined DATA_DIR set "DATA_DIR=.\data"
 
@@ -296,7 +303,14 @@ goto :eof
 ::   closing quote; KEY: value when no KEY= line follows it; a quoted value
 ::   followed by a comment or other text; a double quote anywhere except as
 ::   the one pair around the whole value; a value that starts with =.
-:: A ! in a value is dropped by delayed expansion and is not detected.
+::   a ! anywhere on a line assigning KEY, a comment on it included:
+::   delayed expansion would drop it from the value without a trace;
+::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
+::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+:: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
+:: nothing); Compose takes the value from the environment for such a line.
+:: The backslash rules were probed against one version of Compose (compose-go
+:: v2.16.1); an older Docker Compose was not run.
 :env_value
 set "_EV="
 set "_EV_SET="
@@ -306,11 +320,20 @@ if not exist ".env" goto :eof
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%L"=="" if "%%K"=="﻿%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="﻿export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
 )
 :: for /f took every = after the key as one separator, so a value that
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
 if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A ! on a line assigning the key, anywhere in the file, refuses the key.
+:: The pattern holds a ! of its own, so it is searched for with delayed
+:: expansion off.
+setlocal DisableDelayedExpansion
+findstr /r /c:"^[ 	]*%~1[ 	]*=.*!" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=.*!" ".env" >nul 2>&1
+if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)
+endlocal
 :: A KEY: value line never reached the loop above as KEY. Compose uses the
 :: LAST assignment of a key, so such a line refuses the key only when no
 :: KEY= line comes after it (line numbers from findstr /n).
@@ -381,8 +404,13 @@ echo       out and no $ in it: best for a Windows path. In single quotes the
 echo       value must hold no apostrophe and not end in a backslash. In double
 echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
 echo       another backslash or the closing quote. Nothing may follow a
-echo       closing quote, and a %~1: value line must become %~1=value.
+echo       closing quote, and a %~1: value line must become %~1=value. The
+echo       line must hold no exclamation mark, and a folder must not start
+echo       with ~: write the full path.
 :env_value_done
+set "_EVK=%~1"
+if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad
+set "_EVK="
 set "_EVQ="
 set "_EVC="
 goto :eof

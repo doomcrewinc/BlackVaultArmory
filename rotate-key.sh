@@ -38,6 +38,8 @@ echo ""
 
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/backup-common.sh
+. ./scripts/backup-common.sh
 # shellcheck source=scripts/encryption-key.sh
 . ./scripts/encryption-key.sh
 # rotate-key never passes the uploads snapshot marker
@@ -160,6 +162,18 @@ fi
 # Docker Compose v2.20+ (docker-compose.yml needs it). Exits before anything
 # is touched when it is missing or older, so the running BlackVault keeps running.
 require_compose
+
+# A restore that did not finish left its marker in the uploads folder, and
+# BlackVault refuses to start while it is there. Re-keying a half-restored
+# install would only add to what has to be untangled: refuse before the stop.
+# (An unreadable DATA_DIR is refused by the snapshot step below.)
+if ! env_unreadable DATA_DIR; then
+  ROTATE_DATA_DIR=$(env_value DATA_DIR)
+  if ! bv_restore_marker_refusal "${ROTATE_DATA_DIR:-./data}/uploads"; then
+    echo "       Then run this script again. Nothing was changed; BlackVault was not stopped."
+    exit 1
+  fi
+fi
 
 # Random 64 lowercase hex characters (32 bytes) from the OS CSPRNG — the same
 # approach as install.sh's generate_password, sized for a field-encryption key

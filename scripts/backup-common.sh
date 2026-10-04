@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 #
 # Shared by backup.sh, restore.sh and reencrypt-files.sh (full-backups spec
-# §2 and §3). Source it; do not run it. It must be sourced AFTER scripts/compose-provider.sh
+# §2 and §3); update.sh and rotate-key.sh use its restore-marker check.
+# Source it; do not run it. It must be sourced AFTER scripts/compose-provider.sh
 # (it uses env_value and compose_version_ok) and from the folder that holds
 # docker-compose.yml. backup.bat and restore.bat mirror it.
 #
@@ -94,6 +95,123 @@ bv_quote_cmd() {
   local arg out=""
   for arg in "$@"; do out="$out${out:+ }$(bv_shell_quote "$arg")"; done
   printf '%s\n' "$out"
+}
+
+# ── Markers left by a restore ─────────────────────────────────
+# WHAT COUNTS AS A MARKER, in every script: anything directly under the
+# uploads folder named .restore-<stamp>.db-started, whatever it is (a folder,
+# which is what the restore program creates; a file; a link, dangling or not)
+# and whatever <stamp> is, as long as it is not empty.
+# scripts/snapshot-restore.sh and the app's own start
+# (src/lib/backup/restore-marker.ts) go by the same rule.
+
+host_can_enter() {
+  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
+}
+
+# bv_snapshot_restore_cmd: sets SNAPSHOT_RESTORE to the command that runs
+# scripts/snapshot-restore.sh as root in a one-off container, backups/ mounted
+# read-only. The script is mounted from this checkout, like
+# scripts/uploads-snapshot.sh in db-snapshot.sh. Needs COMPOSE.
+SNAPSHOT_RESTORE=()
+bv_snapshot_restore_cmd() {
+  # shellcheck disable=SC2206 # COMPOSE is "docker compose": two words on purpose
+  SNAPSHOT_RESTORE=($COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh
+    -v "$PWD/backups:/bv-backups:ro"
+    -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
+    blackvault /bv-snapshot-restore.sh)
+}
+
+# bv_collect_restore_markers UPLOADS_DIR: fills OLD_STAMPS with the stamp of
+# every marker in that folder and sets OLD_WHERE to how their paths are shown.
+# From the host when it can enter the folder; otherwise (the folder is closed
+# to this user, or is not where .env says because it is mounted from somewhere
+# else) from inside a container, as root. Returns 1 when neither could say:
+# that is never taken for "no marker", and MARKERS_ERROR then holds what
+# Docker wrote to standard error. The stamps are read one line at a time and
+# never word-split or expanded. Needs SNAPSHOT_RESTORE.
+OLD_STAMPS=()
+OLD_WHERE=""
+MARKERS_ERROR=""
+bv_collect_restore_markers() {
+  local dir=$1 m listed errors rc
+  OLD_STAMPS=()
+  MARKERS_ERROR=""
+  if host_can_enter "$dir"; then
+    OLD_WHERE="$dir/"
+    for m in "$dir"/.restore-*.db-started; do
+      if [[ -e "$m" || -L "$m" ]]; then
+        m=${m##*/.restore-}
+        m=${m%.db-started}
+        [[ -z "$m" ]] || OLD_STAMPS+=("$m")
+      fi
+    done
+    return 0
+  fi
+  OLD_WHERE="/app/uploads/"
+  # The container mounts backups/; if Docker had to create that folder it
+  # would belong to root, and the snapshot could not be written into it.
+  mkdir -p backups 2> /dev/null
+  if errors=$(mktemp 2> /dev/null); then
+    listed=$("${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> "$errors")
+    rc=$?
+    MARKERS_ERROR=$(cat "$errors" 2> /dev/null)
+    rm -f "$errors"
+  else
+    listed=$("${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> /dev/null)
+    rc=$?
+  fi
+  [[ "$rc" -eq 0 ]] || return 1
+  while IFS= read -r m; do
+    [[ -z "$m" ]] || OLD_STAMPS+=("$m")
+  done <<< "$listed"
+  return 0
+}
+
+# bv_describe_restore_markers: from OLD_STAMPS (not empty) and OLD_WHERE, sets
+# OLD_MARKERS to every marker's path and OLD_COMMANDS to ONE command line
+# that removes them all.
+bv_describe_restore_markers() {
+  local stamp
+  OLD_MARKERS=""
+  OLD_COMMANDS=""
+  for stamp in "${OLD_STAMPS[@]}"; do
+    OLD_MARKERS="${OLD_MARKERS:+$OLD_MARKERS, }$OLD_WHERE.restore-$stamp.db-started"
+    OLD_COMMANDS="${OLD_COMMANDS:+$OLD_COMMANDS && }$(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$stamp")"
+  done
+  [[ "$OLD_WHERE" != "/app/uploads/" ]] || OLD_MARKERS="$OLD_MARKERS (inside the container)"
+  return 0
+}
+
+# bv_restore_marker_refusal UPLOADS_DIR: for a script that is about to stop,
+# rebuild or re-key a running BlackVault (update.sh, rotate-key.sh). Returns 1
+# after an ERROR that names every marker and the one command line that
+# removes them; the caller adds what was not done. Returns 0 when there is no
+# marker, when the folder does not exist yet, and, after a Note, when neither
+# the host nor a container could look. Needs COMPOSE.
+bv_restore_marker_refusal() {
+  local dir=$1
+  if [[ ! -e "$dir" ]]; then
+    return 0
+  fi
+  bv_snapshot_restore_cmd
+  if ! bv_collect_restore_markers "$dir"; then
+    [[ -z "$MARKERS_ERROR" ]] || printf '%s\n' "$MARKERS_ERROR"
+    echo "Note: could not check the uploads folder $dir for a marker left by a restore: it cannot be looked into from here, and asking inside a container failed. Going on without that check."
+    return 0
+  fi
+  if [[ "${#OLD_STAMPS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  bv_describe_restore_markers
+  echo "ERROR: the uploads folder holds a marker left by a restore: $OLD_MARKERS."
+  echo "       This version of BlackVault refuses to start while a marker exists: the"
+  echo "       restore that left it may not have finished. If backups/ holds a"
+  echo "       restore-<time>-RECOVERY.txt file, follow it. If BlackVault is running"
+  echo "       and its records, photos and documents are what you expect, remove"
+  echo "       every marker with:"
+  echo "         $OLD_COMMANDS"
+  return 1
 }
 
 # Physical absolute path of a folder. The backup folder is mode 0700 and

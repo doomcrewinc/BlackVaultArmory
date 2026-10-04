@@ -919,10 +919,10 @@ function Get-HealthPolls([pscustomobject]$Result) {
 }
 
 # ---------------------------------------------------------------- scenario H1
-Write-Scenario "install.bat - the container is unhealthy: not reported as running, says unhealthy"
+Write-Scenario "install.bat - the container is unhealthy: not reported as running, says unhealthy, exit code 1"
 $d = New-Sandbox "h1"
 $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = "unhealthy" }
-Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.ExitCode -eq 1) "exits 1: a calling script must see the failure (got $($r.ExitCode))"
 Assert ($r.StubLog -match "compose up -d") "started the container (premise)"
 Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
 Assert ($r.Output -match "WARNING: the BlackVault container is unhealthy") "says the container is unhealthy"
@@ -932,7 +932,7 @@ Assert ($r.Output -match "BlackVault was started, but is NOT healthy\.") "the su
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario H2
-Write-Scenario "install.bat - still starting when the wait runs out: says it did not become healthy"
+Write-Scenario "install.bat - still starting when the wait runs out: says it did not become healthy, exit code 0 (a slow first start is not a failure)"
 $d = New-Sandbox "h2"
 $r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_HEALTH" = "starting" }
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
@@ -956,12 +956,13 @@ Assert ($r.Output -notmatch "WARNING: (the BlackVault container|BlackVault did n
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario H4
-Write-Scenario "update.bat - the container is unhealthy: Status is not running, says unhealthy"
+Write-Scenario "update.bat - the container is unhealthy: Status is not running, says unhealthy, exit code 1"
 $origin = New-GitRemote "update-health" (Join-Path $RepoRoot "update.bat")
 $work = New-WorkingClone $origin "update-health"
 Set-ConfiguredSqliteInstall $work "7040"
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = "unhealthy" }
-Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.ExitCode -eq 1) "exits 1: a calling script must see the failure (got $($r.ExitCode))"
+Assert ($r.Output -match "To check logs:") "the summary, with the log hint, is still printed before the exit"
 Assert ($r.StubLog -match "compose up -d") "restarted the container (premise)"
 Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
 Assert ($r.Output -match "Status:\s+UNHEALTHY") "the status line says UNHEALTHY"
@@ -971,7 +972,7 @@ Assert ($r.Output -notmatch "Update complete\.") "does not say Update complete"
 Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario H5
-Write-Scenario "update.bat - still starting when the wait runs out: says it did not become healthy"
+Write-Scenario "update.bat - still starting when the wait runs out: says it did not become healthy, exit code 0 (a slow first start is not a failure)"
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_HEALTH" = "starting" }
 Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
 Assert ((Get-HealthPolls $r) -eq 60) "polled the full 60 times (got $(Get-HealthPolls $r))"
@@ -1095,7 +1096,7 @@ function New-EnvValueDriver([string]$Dir) {
     "@echo off",
     "setlocal EnableDelayedExpansion",
     "cd /d `"%~dp0`"",
-    "call :env_value K",
+    "call :env_value %BV_EV_KEY%",
     "echo RESULT=[!_EV!][!_EV_SET!][!_EV_BAD!]",
     "exit /b 0",
     ""
@@ -1103,8 +1104,9 @@ function New-EnvValueDriver([string]$Dir) {
   [IO.File]::WriteAllText((Join-Path $Dir "envdrv.bat"), ($driver -join "`r`n"), (New-Object Text.UTF8Encoding $false))
 }
 
-# One row: a name, the .env text ($null: no .env), and what the driver must
-# print as [value][assigned][unreadable].
+# One row: a name, the .env text ($null: no .env), what the driver must print
+# as [value][assigned][unreadable], and optionally the key that is read
+# (default K; the driver takes it from BV_EV_KEY).
 $tab = "`t"
 $EnvCases = @(
   @("plain", "K=v`r`n", "[v][1][]"),
@@ -1155,6 +1157,9 @@ $EnvCases = @(
   @("export glued to the key", "exportK=v`r`n", "[][][]"),
   @("the key only inside another value", "OTHER=K=v`r`n", "[][][]"),
   @("no .env at all", $null, "[][][]"),
+  @("a leading ~ in a key that is not a folder", "K=~secret`r`n", "[~secret][1][]"),
+  @("a ~ inside a folder path", "DATA_DIR=C:\~vault\~`r`n", "[C:\~vault\~][1][]", "DATA_DIR"),
+  @("an exclamation mark only on lines of other keys, and on a commented-out line", "XK=a!b`r`nOTHER=K=a!b`r`n# K=old!`r`nK=v`r`n", "[v][1][]"),
   # Forms the batch reader refuses rather than read wrongly.
   @("REFUSED: a comment after a quoted value", "K=`"a b`" # note`r`n", "[][1][1]"),
   @("REFUSED: a double quote inside an unquoted value", "K=a`"b`r`n", "[][1][1]"),
@@ -1175,7 +1180,16 @@ $EnvCases = @(
   @("REFUSED: KEY=value, then KEY: value (the last assignment is the unreadable one)", "K=w`r`nK: v`r`n", "[][1][1]"),
   @("REFUSED: KEY: value", "K: v`r`n", "[][1][1]"),
   @("REFUSED: export KEY: value", "export K: v`r`n", "[][1][1]"),
-  @("REFUSED: text after the closing single quote", "K='a'b`r`n", "[][1][1]")
+  @("REFUSED: text after the closing single quote", "K='a'b`r`n", "[][1][1]"),
+  # Delayed expansion would drop the ! from the value: D:\Vault!\data would be read as D:\Vault\data.
+  @("REFUSED: an exclamation mark in the value", "K=D:\Vault!\data`r`n", "[][1][1]"),
+  @("REFUSED: two exclamation marks in an export line with spaces", "export K = a!b!c`r`n", "[][1][1]"),
+  @("REFUSED: an exclamation mark in the comment of the line", "K=v # really!`r`n", "[][1][1]"),
+  @("REFUSED: an exclamation mark on an earlier assignment of the key", "K=a!b`r`nK=v`r`n", "[][1][1]"),
+  # Compose puts the home folder in place of a leading ~ in a bind mount's source.
+  @("REFUSED: a leading ~ in a folder key", "DATA_DIR=~\blackvault`r`n", "[][1][1]", "DATA_DIR"),
+  @("REFUSED: a leading ~ in a double-quoted folder key", "export DATA_DIR = `"~/blackvault`"`r`n", "[][1][1]", "DATA_DIR"),
+  @("REFUSED: a lone ~ in single quotes as the backup folder", "BLACKVAULT_BACKUP_DIR='~'`r`n", "[][1][1]", "BLACKVAULT_BACKUP_DIR")
 )
 
 # ---------------------------------------------------------------- scenario EV1
@@ -1190,13 +1204,14 @@ foreach ($case in $EnvCases) {
   $rowBase = $script:Failures.Count
   # UTF-8 without a byte-order mark of its own: a row that wants one writes it.
   if ($null -ne $case[1]) { [IO.File]::WriteAllText($envFile, $case[1], (New-Object Text.UTF8Encoding $false)) }
-  $last = Invoke-Bat -Dir $d -Script "envdrv.bat" -NoPad -TimeoutSeconds 60
+  $key = if ($case.Count -gt 3) { $case[3] } else { "K" }
+  $last = Invoke-Bat -Dir $d -Script "envdrv.bat" -NoPad -TimeoutSeconds 60 -EnvVars @{ "BV_EV_KEY" = $key }
   $got = "(no RESULT line)"
   $m = [regex]::Match($last.Output, "(?m)^RESULT=(.*?)\r?$")
   if ($m.Success) { $got = $m.Groups[1].Value }
   Assert ($got -eq $case[2]) "$($case[0]): $($case[2]) (got $got)"
   if ($case[2].EndsWith("[1][1]")) {
-    Assert ($last.Output -match "Note: the K line in \.env is written in a form this script does not read") "$($case[0]): says the line is not read"
+    Assert ($last.Output -match "Note: the $key line in \.env is written in a form this script does not read") "$($case[0]): says the line is not read"
   } else {
     Assert ($last.Output -notmatch "Note:") "$($case[0]): no note"
   }
@@ -1329,7 +1344,7 @@ foreach ($line in @("DATA_DIR=<VAULT> # where the data lives", "DATA_DIR='<VAULT
 # ---------------------------------------------------------------- scenario UR2
 Write-Scenario "update.bat - a DATA_DIR line Compose would change or reject stops the update at the preflight, BEFORE the pull: nothing pulled, built, relocated or snapshotted, .env untouched"
 $form = 0
-foreach ($line in @("DATA_DIR=`"C:\Users\rob\new data`"", "export DATA_DIR=`$USERPROFILE\vault", "DATA_DIR: <VAULT>", "DATA_DIR='<VAULT>\Rob's data'", "DATA_DIR='<VAULT>\'")) {
+foreach ($line in @("DATA_DIR=`"C:\Users\rob\new data`"", "export DATA_DIR=`$USERPROFILE\vault", "DATA_DIR: <VAULT>", "DATA_DIR='<VAULT>\Rob's data'", "DATA_DIR='<VAULT>\'", "DATA_DIR=~\vault", "DATA_DIR=<VAULT>\really!")) {
   $form++
   $work = New-UpdateInstall "update-datadir-refused$form" $line
   $before = Get-FileBase64 (Join-Path $work ".env")
@@ -1338,7 +1353,7 @@ foreach ($line in @("DATA_DIR=`"C:\Users\rob\new data`"", "export DATA_DIR=`$USE
   Assert ($r.Output -match "Note: the DATA_DIR line in \.env is written in a form this script does not read") "[$line] says which line it does not read"
   Assert ($r.Output -match "as DATA_DIR=value with the final value spelled\s+out and no \$ in it: best for a Windows path") "[$line] says how to write a Windows path"
   Assert ($r.Output -match "ERROR: \.env holds a DATA_DIR line this script does not read") "[$line] says why it stopped"
-  Assert ($r.Output -match "Nothing was pulled, rebuilt or restarted") "[$line] says nothing was done"
+  Assert ($r.Output -match "Nothing was rebuilt or restarted" -and $r.Output -notmatch "Nothing was pulled") "[$line] says nothing was rebuilt or restarted (and makes no claim about the pull)"
   Assert ($r.Output -notmatch "Pulling latest updates") "[$line] did NOT pull"
   Assert ($r.Output -notmatch "Auto-updating DATA_DIR") "[$line] did not relocate DATA_DIR to the legacy folder"
   Assert ($r.Output -notmatch "Database verified at") "[$line] verified nothing"
@@ -1365,6 +1380,71 @@ Assert ($r.StubLog -notmatch "(?m)^compose stop") "did not stop the app"
 Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "wrote no snapshot of the database in .\data"
 Show-EvidenceIfFailed $r
 
+# ---------------------------------------------------------------- scenario UR2c
+Write-Scenario "scripts\db-snapshot.bat - a UTF-8 byte-order mark before DATA_DIR on line 1 of .env: the folder is read (as update.bat reads it), and the snapshot is of the database in it"
+$d = New-Sandbox "db-snapshot-bom"
+Set-SqliteInstall $d "7054"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "vault\db"), (Join-Path $d "vault\uploads") | Out-Null
+Set-Content -Path (Join-Path $d "vault\db\vault.db") -Value "the real database" -Encoding Ascii
+[IO.File]::WriteAllText((Join-Path $d ".env"), "$([char]0xFEFF)DATA_DIR=$d\vault`r`nPORT=7054`r`nBLACKVAULT_DB_PROVIDER=sqlite`r`n", (New-Object Text.UTF8Encoding $false))
+@("@echo off", "setlocal EnableDelayedExpansion", "call scripts\db-snapshot.bat", "echo RC=!errorlevel!") |
+  Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
+Assert ($r.Output -match "RC=0") "errorlevel 0"
+Assert ($r.Output -notmatch "Note:") "the line is read: no note"
+$snap = @(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue)
+Assert ($snap.Count -eq 1 -and (Get-Content $snap[0].FullName -Raw) -match "the real database") "the snapshot is of the database in the folder the line names, not of .\data"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UR2d
+Write-Scenario "scripts\db-snapshot.bat - DATA_DIR set in the console and different from .env: refused before the app is stopped; the same folder in the console is accepted"
+$d = New-Sandbox "db-snapshot-console-datadir"
+Set-SqliteInstall $d "7055"
+@("@echo off", "setlocal EnableDelayedExpansion", "call scripts\db-snapshot.bat", "echo RC=!errorlevel!") |
+  Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad -EnvVars @{ "DATA_DIR" = "C:\somewhere\else" }
+Assert ($r.Output -match "RC=1") "errorlevel 1"
+Assert ($r.Output -match "database snapshot failed: DATA_DIR is set in this console and is not the DATA_DIR in \.env") "says why"
+Assert ($r.StubLog -notmatch "(?m)^compose stop") "did not stop the app"
+Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "wrote no snapshot"
+Show-EvidenceIfFailed $r
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad -EnvVars @{ "DATA_DIR" = "$d\data" }
+Assert ($r.Output -match "RC=0") "the same folder in the console: errorlevel 0"
+Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 1) "the same folder in the console: one snapshot"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario UR2e
+# The new image refuses to start while a restore marker is in the uploads
+# folder. update.bat looks before it asks, rebuilds or stops anything, so the
+# version that is running keeps running.
+Write-Scenario "update.bat - a restore marker in the uploads folder stops the update before the rebuild, with the command that removes it; names that are not markers do not"
+$work = New-UpdateInstall "update-restore-marker" "DATA_DIR=<VAULT>"
+$uploads = Join-Path $work "vault\uploads"
+New-Item -ItemType Directory -Force -Path (Join-Path $uploads ".restore-20261001-101010.db-started") | Out-Null
+Set-Content -Path (Join-Path $uploads ".restore-old one.db-started") -Value "" -Encoding Ascii
+# Not markers: the staging folder, the previous files, and a name with an empty stamp.
+New-Item -ItemType Directory -Force -Path (Join-Path $uploads ".restore-20261001-101010"), (Join-Path $uploads ".pre-restore-20261001-101010"), (Join-Path $uploads ".restore-.db-started") | Out-Null
+$before = Get-FileBase64 (Join-Path $work ".env")
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output.Contains("ERROR: the uploads folder holds a marker left by a restore: $uploads\.restore-20261001-101010.db-started, $uploads\.restore-old one.db-started.")) "names both markers, the folder and the file, and nothing else"
+Assert ($r.Output -match 'docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads "20261001-101010" && docker compose run [^\r\n]* /bv-snapshot-restore\.sh clear-marker /app/uploads "old one"') "gives ONE command line that removes both, each stamp quoted"
+Assert ($r.Output -match "Then run update\.bat again\. Nothing was rebuilt or restarted\.") "says what to do next and that nothing was rebuilt or restarted"
+Assert ($r.Output -notmatch "Public URL is:") "asked nothing"
+Assert ($r.StubLog -notmatch "compose (build|up|stop|run)") "did NOT build, start or stop anything"
+Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) ".env left byte-for-byte unchanged"
+Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "created NO key file"
+Assert (-not (Test-Path (Join-Path $work "backups"))) "took no snapshot"
+Assert (Test-Path (Join-Path $uploads ".restore-20261001-101010.db-started")) "the marker is never removed by the update"
+Show-EvidenceIfFailed $r
+# With both markers gone, the names that are not markers do not stop it.
+Remove-Item -Recurse -Force (Join-Path $uploads ".restore-20261001-101010.db-started"), (Join-Path $uploads ".restore-old one.db-started")
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "without the markers: exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "marker left by a restore") "without the markers: no refusal"
+Assert ($r.StubLog -match "compose up -d") "without the markers: restarted"
+Show-EvidenceIfFailed $r
+
 # ---------------------------------------------------------------- scenario UR3
 Write-Scenario "update.bat - a database that really is in the legacy folder: an 'export DATA_DIR' line is rewritten, not left beside a new one"
 $work = New-UpdateInstall "update-datadir-relocate" "export DATA_DIR = <VAULT>-moved-away"
@@ -1384,7 +1464,7 @@ $before = Get-FileBase64 (Join-Path $work ".env")
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "ERROR: \.env holds a BLACKVAULT_DB_PROVIDER line this script does not read") "says why it stopped"
-Assert ($r.Output -match "Nothing was pulled, rebuilt or restarted") "says nothing was done"
+Assert ($r.Output -match "Nothing was rebuilt or restarted" -and $r.Output -notmatch "Nothing was pulled") "says nothing was rebuilt or restarted"
 Assert ($r.Output -notmatch "Pulling latest updates") "did NOT pull"
 Assert ($r.Output -notmatch "is missing") "no warning about PostgreSQL keys derived from the line that was refused"
 Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
@@ -1857,6 +1937,57 @@ Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from \.env\): move it into
 Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "docker was never invoked (nothing stopped)"
 Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the key file is untouched"
 Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new written"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK9c
+# rotate-key.bat reads .env through the same :env_value as install.bat and
+# update.bat: every form Docker Compose accepts for the line counts as a key
+# held in .env, and so does a line the reader refuses (Compose still passes
+# something to the app for it).
+Write-Scenario "rotate-key.bat - the key line in .env written with export, spaces and quotes, or in a form the reader refuses: refuses before stopping anything; the value is never printed"
+$form = 0
+foreach ($line in @(("export BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)), ("  BLACKVAULT_ENCRYPTION_KEY = '" + ("cd" * 32) + "'"), "BLACKVAULT_ENCRYPTION_KEY=`$BV_KEY", ("BLACKVAULT_ENCRYPTION_KEY: " + ("cd" * 32)))) {
+  $form++
+  $d = New-RotateSandbox "rotate-envkey-form$form" -WithSnapshot
+  Set-Content -Path (Join-Path $d ".env") -Value @("PORT=3000", $line) -Encoding Ascii
+  $keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+  $r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+  Assert ($r.ExitCode -eq 1) "[form $form] exits 1 (got $($r.ExitCode))"
+  Assert ($r.Output -match "BLACKVAULT_ENCRYPTION_KEY \(from \.env\): move it into that file") "[form $form] names .env as the source"
+  Assert ($r.Output -match "Nothing was changed; BlackVault was not stopped\.") "[form $form] says nothing was changed"
+  if ($form -ge 3) { Assert ($r.Output -match "Note: the BLACKVAULT_ENCRYPTION_KEY line in \.env is written in a form this script does not read") "[form $form] the reader's note says which line it does not read" }
+  Assert (-not $r.Output.Contains("cd" * 32)) "[form $form] the key's value is never printed"
+  Assert ([string]::IsNullOrWhiteSpace($r.StubLog)) "[form $form] docker was never invoked (nothing stopped)"
+  Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "[form $form] the key file is untouched"
+  Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "[form $form] no .new written"
+  Show-EvidenceIfFailed $r
+}
+
+# -------------------------------------------------------------- scenario RK9d
+Write-Scenario "rotate-key.bat - an empty key line, a line of spaces in quotes and a commented-out key line are no key: the rotation runs"
+$d = New-RotateSandbox "rotate-envkey-none" -WithSnapshot
+Set-Content -Path (Join-Path $d ".env") -Value @("PORT=3000", ("# BLACKVAULT_ENCRYPTION_KEY=" + ("cd" * 32)), "BLACKVAULT_ENCRYPTION_KEY=`"  `"", "XBLACKVAULT_ENCRYPTION_KEY=abc") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "Your key is in") "not refused"
+Assert ($r.StubLog -match "compose stop blackvault" -and $r.StubLog -match "compose start blackvault") "stopped, rotated and restarted"
+Show-EvidenceIfFailed $r
+
+# -------------------------------------------------------------- scenario RK9e
+Write-Scenario "rotate-key.bat - a restore marker in the uploads folder: refuses before stopping anything, with the command that removes it"
+$d = New-RotateSandbox "rotate-restore-marker" -WithSnapshot
+$marker = Join-Path $d "data\uploads\.restore-20261001-101010.db-started"
+New-Item -ItemType Directory -Force -Path $marker | Out-Null
+$keyBefore = Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw
+$r = Invoke-Bat -Dir $d -Script "rotate-key.bat"
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "ERROR: the uploads folder holds a marker left by a restore: \.\\data\\uploads\\\.restore-20261001-101010\.db-started\.") "names the marker"
+Assert ($r.Output -match '/bv-snapshot-restore\.sh clear-marker /app/uploads "20261001-101010"') "gives the command that removes it"
+Assert ($r.Output -match "Then run rotate-key\.bat again\. Nothing was changed; BlackVault was not stopped\.") "says nothing was changed"
+Assert ([string]::IsNullOrWhiteSpace(($r.StubLog -replace "(?m)^compose version.*\r?\n?", ""))) "docker was asked for its version and nothing else"
+Assert ((Get-Content (Join-Path $d "secrets\blackvault_encryption_key") -Raw) -eq $keyBefore) "the key file is untouched"
+Assert (-not (Test-Path (Join-Path $d "secrets\blackvault_encryption_key.new"))) "no .new written"
+Assert (Test-Path $marker) "the marker is not removed by the script"
 Show-EvidenceIfFailed $r
 
 # -------------------------------------------------------------- scenario RK9b
@@ -3103,6 +3234,7 @@ Set-Content -Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt") 
 $r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{} 60
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "ERROR: an earlier restore did not finish cleanly: a restore-\[time\]-RECOVERY\.txt file is still in .*\\backups\. Read it") "says an earlier restore did not finish, and to read the file"
+Assert ($r.Output -match "delete that file instead; or, if you mean to replace this install with a backup anyway, delete that file\. Then run the restore again\. Nothing was done\.") "says how to go on for someone who means to restore over it anyway"
 Assert (@(Get-RestoreSteps $r).Count -eq 0) "docker was not asked to do anything"
 Assert (Test-Path (Join-Path $d "backups\restore-20260101-000000-RECOVERY.txt")) "the earlier file is left alone"
 Show-EvidenceIfFailed $r
@@ -3233,6 +3365,7 @@ Assert ($iLock -gt 0 -and $steps[$iLock - 1] -eq $RestorePs) "free: the lock is 
 Assert ($iStop -gt $iLock -and (Get-StepIndex $steps $RestoreCallPattern) -gt $iStop) "free: then stop ($iStop), then the restore"
 Assert (@($steps | Where-Object { $_ -eq $RestoreLockStatus }).Count -eq 1) "free: asked once"
 Assert ($r.Output -notmatch "WARNING: could not check") "free: no warning"
+Assert ($r.Output -notmatch "BLACKVAULT_FULL_BACKUP_LOCK") "free: the lock's own line (state=free) is not printed"
 Assert ($r.Output.Contains("Restore complete.")) "free: says the restore is complete"
 Show-EvidenceIfFailed $r
 $d = New-RestoreSandbox "restore-lock-question-fails"
@@ -3243,7 +3376,19 @@ $steps = @(Get-RestoreSteps $r)
 $iLock = Get-StepIndex $steps ('^' + [regex]::Escape($RestoreLockStatus) + '$')
 Assert ($iLock -gt 0 -and (Get-StepIndex $steps '^compose stop blackvault$') -gt $iLock) "question fails: the question was asked (index $iLock) and the restore goes on to the stop"
 Assert ($r.Output.Contains("WARNING: could not check whether a full backup is running (exit 1; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.")) "question fails: one WARNING says so"
+Assert ($r.Output.Contains("full-backup: unknown argument.")) "question fails: what the question printed is shown"
 Assert ($r.Output.Contains("Restore complete.")) "question fails: says the restore is complete"
+Show-EvidenceIfFailed $r
+# Held takes the exit code 2 AND a line that says state=held: an exit 2 from
+# anything else is "could not check", and the restore goes on.
+$d = New-RestoreSandbox "restore-lock-exit2-other"
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_APP_RUNNING" = "1"; "BV_STUB_LOCK_EXIT" = "2"; "BV_STUB_LOCK_STDERR" = "OCI runtime exec failed: the container is restarting"; "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "exit 2 without the line: exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -notmatch "a full backup is running") "exit 2 without the line: not taken for a running backup"
+Assert ($r.Output.Contains("WARNING: could not check whether a full backup is running (exit 2;")) "exit 2 without the line: one WARNING says the question failed"
+Assert ($r.Output.Contains("OCI runtime exec failed: the container is restarting")) "exit 2 without the line: what the question printed is shown"
+Assert ($r.Output.Contains("Restore complete.")) "exit 2 without the line: says the restore is complete"
 Show-EvidenceIfFailed $r
 
 # --------------------------------------------------------------- scenario RS18
@@ -3262,7 +3407,7 @@ $chain = @($during -split "`r?`n" | Where-Object { $_ -match 'psql' -and $_ -mat
 $chain = if ($chain) { $chain.Trim() } else { "" }
 Assert ($chain -match '^for /f %S in \(''docker compose run [^'']* /bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}''\) do if "%S"=="started" docker compose run [^&]* /bv-snapshot-restore\.sh uploads /app/uploads \d{8}-\d{6} /bv-backups/uploads-\d{8}-\d{6} && docker compose up -d --wait db && ') "the line starts with the state test, with ONE percent sign, and the chain is its body (got: $chain)"
 Assert ($chain -match ' -f - < "backups\\blackvault-\d{8}-\d{6}\.sql" && ' -and $chain -match ' && docker compose run [^&]* /bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}$') "it loads the dump from the quoted snapshot path and ends with clear-marker"
-Assert ($during -match "The line asks for the state again first, and does nothing unless the") "the text says the line tests the state itself"
+Assert ($during -match "The line asks for the state again first, and does nothing unless that\s+prints started\.") "the text says the line tests the state itself, in restore.sh's words"
 Show-EvidenceIfFailed $r
 $psql = 'compose exec -T db psql -q -v ON_ERROR_STOP=1 -U blackvault'
 foreach ($state in @("complete", "untouched")) {
@@ -3287,6 +3432,38 @@ if ($steps.Count -eq 7) {
   Assert ($steps[6] -match '/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}$') "started: 7. the marker, last"
 }
 Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The system cannot find the file specified") "state 'started': the line is valid at a command prompt and the dump file was found"
+Show-EvidenceIfFailed $c
+
+# -------------------------------------------------------------- scenario RS18b
+# The same line when the checkout folder has an apostrophe in its name: the
+# state test is `for /f %S in ('...') do`, and the folder is inside it twice
+# (the two -v mounts).
+Write-Scenario "restore.bat - PostgreSQL, a checkout folder with an apostrophe in its name (Rob's vault): the recovery file's rollback line, run as printed, still works in each state"
+$d = New-RestoreSandbox "restore-postgres-rob's vault" -Postgres
+$pf = New-PassFile $d "$BackupPass`n"
+$r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STUB_RESTORE_STDOUT" = $RestoreOkLine }
+Assert ($r.ExitCode -eq 0) "the restore that writes the file exits 0 (got $($r.ExitCode))"
+$during = if (Test-Path (Join-Path $d "__recovery-during.txt")) { [IO.File]::ReadAllText((Join-Path $d "__recovery-during.txt")) } else { "" }
+$chain = @($during -split "`r?`n" | Where-Object { $_ -match 'psql' -and $_ -match 'clear-marker' }) | Select-Object -First 1
+$chain = if ($chain) { $chain.Trim() } else { "" }
+Assert ($chain.Contains("rob's vault\backups:/bv-backups:ro")) "the line holds the folder with its apostrophe (got: $chain)"
+Show-EvidenceIfFailed $r
+foreach ($state in @("complete", "untouched")) {
+  $c = Invoke-CmdLine $d $chain $state
+  $steps = @(Get-RestoreSteps $c)
+  Assert ($steps.Count -eq 1 -and $steps[0] -match '/bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}$') "apostrophe, state '$state': the only docker call is the state question (got: $($steps -join ' || '))"
+  Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The syntax of the command is incorrect") "apostrophe, state '$state': the line is valid at a command prompt"
+  Show-EvidenceIfFailed $c
+}
+$c = Invoke-CmdLine $d $chain "started"
+$steps = @(Get-RestoreSteps $c)
+Assert ($c.ExitCode -eq 0) "apostrophe, state 'started': the line exits 0 (got $($c.ExitCode))"
+Assert ($steps.Count -eq 7) "apostrophe, state 'started': seven docker calls (got $($steps.Count): $($steps -join ' || '))"
+if ($steps.Count -eq 7) {
+  Assert ($steps[0] -match "rob's vault\\backups:/bv-backups:ro .* /bv-snapshot-restore\.sh state /app/uploads \d{8}-\d{6}$") "apostrophe, started: the state question got the mount with the whole folder name"
+  Assert ($steps[6] -match '/bv-snapshot-restore\.sh clear-marker /app/uploads \d{8}-\d{6}$') "apostrophe, started: the marker, last"
+}
+Assert ($c.Output -notmatch "is not recognized as an internal or external command" -and $c.Output -notmatch "was unexpected at this time" -and $c.Output -notmatch "The system cannot find the file specified") "apostrophe, state 'started': the line is valid at a command prompt and the dump file was found"
 Show-EvidenceIfFailed $c
 
 # --------------------------------------------------------------- scenario RS19
@@ -3473,7 +3650,8 @@ $r = Invoke-Restore $d "$RestoreName --yes --passphrase-file `"$pf`"" @{ "BV_STU
 Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 $steps = @(Get-RestoreSteps $r)
 Assert ($steps.Count -eq 1 -and $steps[0] -match '/bv-snapshot-restore\.sh markers /app/uploads$') "the only docker call is the question that failed (calls: $($steps.Count))"
-Assert ($r.Output -match "ERROR: could not check the uploads folder for a marker left by an earlier restore: .*\\uploads is not there to look into, and asking inside a container failed\. BlackVault refuses to start while such a marker exists, so the restore did not start\. Nothing was done\.") "says it could not check, and that nothing was done"
+Assert ($r.Output -match "ERROR: could not check the uploads folder for a marker left by an earlier restore: .*\\uploads is not there to look into, and asking inside a container failed\. BlackVault refuses to start while such a marker exists, so the restore did not start\. Nothing was done\. Check that Docker is running \(docker compose ps\), then run the restore again\.") "says it could not check, that nothing was done, and what to do next"
+Assert ($r.Output.Contains("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_ROLLBACK_EXIT)")) "what Docker wrote to standard error is shown"
 Assert ([IO.File]::ReadAllText((Join-Path $d "data\db\vault.db")) -eq "the database as it was") "the database file is untouched"
 Show-EvidenceIfFailed $r
 

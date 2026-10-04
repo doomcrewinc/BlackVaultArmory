@@ -178,6 +178,11 @@ echo.
 :: exhausted. Three blank answers in a row abort instead: the same outcome
 :: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
 if not exist ".env" goto :no_env_file
+:: A marker left by a restore: the new image refuses to start while one is in
+:: the uploads folder. Found here, before anything is asked, rebuilt or
+:: stopped, the version that is running keeps running. As update.sh.
+call :restore_markers
+if defined BV_MARKERS goto :restore_marker_left
 call :read_env
 if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
 echo.
@@ -320,12 +325,28 @@ echo.
 :: ── First-time setup token (only while no admin account exists) ──
 call :show_setup_token ENV_PUBLIC_URL
 pause
+:: A container that reports unhealthy is a failed update for whoever started
+:: this script. One that is still starting when the wait ran out is not: a
+:: slow first start can still come up. As update.sh.
+if "!HEALTH!"=="unhealthy" exit /b 1
 exit /b 0
+
+:restore_marker_left
+echo ERROR: the uploads folder holds a marker left by a restore: !BV_MARKERS!.
+echo        This version of BlackVault refuses to start while a marker exists: the
+echo        restore that left it may not have finished. If backups\ holds a
+echo        restore-[time]-RECOVERY.txt file, follow it. If BlackVault is running
+echo        and its records, photos and documents are what you expect, remove
+echo        every marker with:
+echo          !BV_MARKER_CMDS!
+echo        Then run update.bat again. Nothing was rebuilt or restarted.
+pause
+exit /b 1
 
 :provider_unreadable
 echo ERROR: .env holds a BLACKVAULT_DB_PROVIDER line this script does not read:
 echo        see the Note above. Correct it and run update.bat again.
-echo        Nothing was pulled, rebuilt or restarted.
+echo        Nothing was rebuilt or restarted.
 pause
 exit /b 1
 
@@ -335,7 +356,7 @@ exit /b 1
 :data_dir_unreadable
 echo ERROR: .env holds a DATA_DIR line this script does not read: see the Note
 echo        above. Correct it and run update.bat again.
-echo        Nothing was pulled, rebuilt or restarted.
+echo        Nothing was rebuilt or restarted.
 pause
 exit /b 1
 
@@ -434,6 +455,42 @@ if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
 if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
 goto :eof
 
+:: :restore_markers - looks in the uploads folder of the DATA_DIR in .env for
+:: markers left by a restore: anything named .restore-[stamp].db-started with
+:: a stamp that is not empty, a folder (what the restore program creates) or a
+:: file. The rule of restore.bat, scripts\snapshot-restore.sh and the app's
+:: own start. Sets BV_MARKERS to their paths (left undefined when there is
+:: none) and BV_MARKER_CMDS to ONE command line that removes them all. A
+:: DATA_DIR line :env_value refuses gives no marker here (the snapshot step
+:: refuses that line), and neither does an uploads folder that is not there.
+:: update.bat and rotate-key.bat carry the same copy: change them together.
+:restore_markers
+set "BV_MARKERS="
+set "BV_MARKER_CMDS="
+call :env_value DATA_DIR
+if defined _EV_BAD goto :eof
+set "BV_UP=!_EV!"
+if not defined BV_UP set "BV_UP=.\data"
+:: .env may spell the folder with forward slashes; `if exist` and `for` need backslashes.
+set "BV_UP=!BV_UP:/=\!\uploads"
+if not exist "!BV_UP!\" goto :eof
+for /d %%M in ("!BV_UP!\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)
+for %%M in ("!BV_UP!\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)
+goto :eof
+
+:: :restore_marker_add - adds the marker named in BV_ONE to BV_MARKERS and its
+:: clear-marker command to BV_MARKER_CMDS, joined with ^&^& so that the whole
+:: is one command line. The stamp is quoted: a hand-made name may hold a space.
+:restore_marker_add
+:: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
+set "BV_ONE=!BV_ONE:~9,-11!"
+if not defined BV_ONE goto :eof
+if defined BV_MARKERS set "BV_MARKERS=!BV_MARKERS!, "
+set "BV_MARKERS=!BV_MARKERS!!BV_UP!\.restore-!BV_ONE!.db-started"
+if defined BV_MARKER_CMDS set "BV_MARKER_CMDS=!BV_MARKER_CMDS! && "
+set "BV_MARKER_CMDS=!BV_MARKER_CMDS!docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads "!BV_ONE!""
+goto :eof
+
 :: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
 :: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
 :: change them together. _EV is undefined when KEY is unset or empty, or there
@@ -456,7 +513,14 @@ goto :eof
 ::   closing quote; KEY: value when no KEY= line follows it; a quoted value
 ::   followed by a comment or other text; a double quote anywhere except as
 ::   the one pair around the whole value; a value that starts with =.
-:: A ! in a value is dropped by delayed expansion and is not detected.
+::   a ! anywhere on a line assigning KEY, a comment on it included:
+::   delayed expansion would drop it from the value without a trace;
+::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
+::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+:: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
+:: nothing); Compose takes the value from the environment for such a line.
+:: The backslash rules were probed against one version of Compose (compose-go
+:: v2.16.1); an older Docker Compose was not run.
 :env_value
 set "_EV="
 set "_EV_SET="
@@ -473,6 +537,13 @@ for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,
 :: starts with = has lost it: such a line, anywhere in the file, refuses the key.
 findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
 if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A ! on a line assigning the key, anywhere in the file, refuses the key.
+:: The pattern holds a ! of its own, so it is searched for with delayed
+:: expansion off.
+setlocal DisableDelayedExpansion
+findstr /r /c:"^[ 	]*%~1[ 	]*=.*!" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=.*!" ".env" >nul 2>&1
+if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)
+endlocal
 :: A KEY: value line never reached the loop above as KEY. Compose uses the
 :: LAST assignment of a key, so such a line refuses the key only when no
 :: KEY= line comes after it (line numbers from findstr /n).
@@ -543,8 +614,13 @@ echo       out and no $ in it: best for a Windows path. In single quotes the
 echo       value must hold no apostrophe and not end in a backslash. In double
 echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
 echo       another backslash or the closing quote. Nothing may follow a
-echo       closing quote, and a %~1: value line must become %~1=value.
+echo       closing quote, and a %~1: value line must become %~1=value. The
+echo       line must hold no exclamation mark, and a folder must not start
+echo       with ~: write the full path.
 :env_value_done
+set "_EVK=%~1"
+if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad
+set "_EVK="
 set "_EVQ="
 set "_EVC="
 goto :eof

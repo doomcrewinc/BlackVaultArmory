@@ -72,7 +72,8 @@ case "$*" in
   # BV_STUB_APP_RUNNING=1: the app container is up.
   "${PS}") [ "\${BV_STUB_APP_RUNNING:-}" = 1 ] && echo "0123456789ab"; exit 0 ;;
   # The lock question, asked in the running app container. BV_STUB_LOCK: free (default), held, old-image (the CLI
-  # does not know the option yet), killed (the exec itself died).
+  # does not know the option yet), killed (the exec itself died), exit-2-other (exit 2 from something that is not
+  # the lock answer).
   "${LOCK_STATUS}")
     cat > "${rec}/stdin-lock-status"
     case "\${BV_STUB_LOCK:-free}" in
@@ -80,6 +81,7 @@ case "$*" in
       held) echo "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=57 hostname=0123456789ab started=2026-10-03T03:15:00.000Z"; exit 2 ;;
       old-image) echo "full-backup: unknown argument. Usage: full-backup [--dir <folder>] [--keep <n>] | [--dir <folder>] --verify <file>; the passphrase is read from standard input." >&2; exit 1 ;;
       killed) exit 137 ;;
+      exit-2-other) echo "OCI runtime exec failed: the container is restarting" >&2; exit 2 ;;
     esac ;;
   *"/bv-uploads-snapshot.sh /app/uploads /bv-backups "*)
     for a in "$@"; do name=$a; done
@@ -661,7 +663,7 @@ describe.skipIf(isWindows)("restore.sh", () => {
       const again = run([NAME, "--yes", "--passphrase-file", passFile()]);
       expect(again.code).toBe(1);
       expect(lines(again.stderr)).toEqual([
-        `ERROR: an earlier restore did not finish cleanly: ${app}/backups/${file} is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done.`,
+        `ERROR: an earlier restore did not finish cleanly: ${app}/backups/${file} is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead; or, if you mean to replace this install with a backup anyway, delete that file. Then run the restore again. Nothing was done.`,
       ]);
       expect(steps()).toEqual([]); // not even the check
     });
@@ -714,11 +716,13 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.stderr).not.toContain("WARNING: 'sync' failed");
       // On the script: the flush follows the write directly, before the text is shown and before the restore's trap and program.
       const sh = lines(fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8")).filter((l) => !l.trimStart().startsWith("#"));
-      const write = sh.indexOf('if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then');
+      // The text is built first; ONE printf writes it, and its status is the write's.
+      const write = sh.indexOf(`if ! (umask 077 && printf '%s\\n' "$RECOVERY_TEXT" > "$RECOVERY_FILE"); then`);
+      expect(sh[write - 1]).toBe("RECOVERY_TEXT=$(recovery_text)");
       const flush = sh.findIndex((l) => l.startsWith("sync || "));
       expect(write).toBeGreaterThan(0);
       expect(sh.slice(write, flush)).toEqual([
-        'if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then',
+        `if ! (umask 077 && printf '%s\\n' "$RECOVERY_TEXT" > "$RECOVERY_FILE"); then`,
         "  trap - INT TERM HUP",
         '  PASSPHRASE=""',
         '  rm -f "$RECOVERY_FILE"',
@@ -953,8 +957,10 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(r.code).toBe(1);
       expect(r.stdout).toBe("");
       expect(steps()).toEqual([`${ROLLBACK()} markers /app/uploads`]);
+      // What Docker said is shown, and the last line ends with what to do next.
       expect(lines(r.stderr)).toEqual([
-        "ERROR: could not check the uploads folder ./data/uploads for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done.",
+        "ERROR: could not restore from the snapshot: [stub] refused",
+        "ERROR: could not check the uploads folder ./data/uploads for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done. Check that Docker is running (docker compose ps), then run the restore again.",
       ]);
     });
 
@@ -977,6 +983,27 @@ describe.skipIf(isWindows)("restore.sh", () => {
       expect(cleared.status, cleared.stderr).toBe(0);
       for (const stamp of stamps) expect(fs.existsSync(markerOf(stamp))).toBe(false);
       expect(install()).toEqual(before);
+    });
+
+    it("a name with nothing between .restore- and .db-started is no marker (the app does not count it either); a stamp starting with a dot is one, and the printed command removes it", () => {
+      const uploads = path.join(app, "data/uploads");
+      fs.mkdirSync(path.join(uploads, ".restore-.db-started"));
+      fs.mkdirSync(markerOf(".hidden"));
+      // The container's own listing (scripts/snapshot-restore.sh markers) goes by the same rule.
+      const listed = spawnSync("sh", [path.join(ROOT, "scripts/snapshot-restore.sh"), "markers", uploads], { encoding: "utf8" });
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(listed.stdout).toBe(".hidden\n");
+      const r = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(r.code).toBe(1);
+      expect(steps()).toEqual([]);
+      const command = clearCommand(".hidden");
+      expect(lines(r.stderr)).toEqual([oldMarkerError(["./data/uploads/.restore-.hidden.db-started"], [command])]);
+      const cleared = runPrinted(command);
+      expect(cleared.status, cleared.stderr).toBe(0);
+      expect(fs.existsSync(markerOf(".hidden"))).toBe(false);
+      // Only the name with the empty stamp is left: the restore goes on.
+      const again = run([NAME, "--yes", "--passphrase-file", passFile()]);
+      expect(again.code, again.stderr).toBe(0);
     });
 
     it("a marker that is a dangling symbolic link counts too", () => {
@@ -1304,6 +1331,8 @@ describe.skipIf(isWindows)("restore.sh", () => {
     it.each([
       ["old-image", 1, "full-backup: unknown argument."],
       ["killed", 137, ""],
+      // Held takes the exit status AND the state=held line: an exit 2 from anything else is not a running backup.
+      ["exit-2-other", 2, "OCI runtime exec failed: the container is restarting"],
     ])("the question itself fails (%s, exit %i): ONE warning and the restore goes on — an image from before the option must not make a restore impossible", (mode, code, shown) => {
       const r = run([NAME, "--yes", "--passphrase-file", passFile()], { env: { ...RUNNING, BV_STUB_LOCK: mode } });
       expect(r.code, r.stderr).toBe(0);
@@ -1531,8 +1560,15 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
   const powershellStep = (lines: string[]) => lines.filter((l) => l.startsWith('powershell -NoProfile -Command "'));
   const sharedTail = (t: string) => t.slice(t.indexOf(":: :env_value KEY - the value of KEY"));
 
-  it("is pure ASCII with CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
-    expect(raw.every((b) => b < 0x80)).toBe(true);
+  it("is pure ASCII, apart from the byte-order mark :env_value compares a key with, and has CRLF line endings throughout (.gitattributes: *.bat eol=crlf)", () => {
+    // The two lines of the shared :env_value that find a key behind a UTF-8
+    // byte-order mark hold its three bytes; nothing else may be non-ASCII.
+    const BOM = "\u00ef\u00bb\u00bf";
+    const nonAscii = raw.toString("latin1").split("\r\n").filter((l) => /[^\x00-\x7f]/.test(l));
+    expect(nonAscii).toEqual([
+      `  if "%%L"=="" if "%%K"=="${BOM}%~1" (set "_EV=%%B"& set "_EV_SET=1")`,
+      `  if "%%M"=="" if "%%K"=="${BOM}export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")`,
+    ]);
     expect(text.replace(/\r\n/g, "")).not.toMatch(/[\r\n]/);
   });
 
@@ -1630,15 +1666,22 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
 
   it("a running full backup is not killed: the running app is asked for the lock after the confirmation and before the stop, as restore.sh does", () => {
     const at = code.indexOf('set "BV_RUNNING="');
-    expect(code.slice(at, at + 13)).toEqual([
+    expect(code.slice(at, at + 18)).toEqual([
       'set "BV_RUNNING="',
       'for /f "usebackq delims=" %%I in (`%COMPOSE% ps --status running -q blackvault 2^>nul`) do set "BV_RUNNING=1"',
       "if not defined BV_RUNNING goto :lock_checked",
-      // Its standard output goes to standard error (standard output is the restore program's line only); it is given no standard input.
-      "%COMPOSE% exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status 1>&2 <nul",
+      // What it prints goes to a file, shown (on standard error) only when the answer is not "free": standard output
+      // is the restore program's line only, and a free lock is not worth a line. It is given no standard input.
+      'set "BV_LOCK_LOG=%TEMP%\\blackvault-restore-lock-%RANDOM%%RANDOM%.log"',
+      '%COMPOSE% exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status >"!BV_LOCK_LOG!" 2>&1 <nul',
       'set "BV_LOCK_RC=!errorlevel!"',
+      'set "BV_LOCK_HELD="',
+      'if not "!BV_LOCK_RC!"=="0" if exist "!BV_LOCK_LOG!" type "!BV_LOCK_LOG!" 1>&2',
+      // Held takes the exit code 2 AND the state=held line.
+      'if "!BV_LOCK_RC!"=="2" findstr /c:"state=held" "!BV_LOCK_LOG!" >nul 2>&1 && set "BV_LOCK_HELD=1"',
+      'del /f /q "!BV_LOCK_LOG!" >nul 2>&1',
       'if "!BV_LOCK_RC!"=="0" goto :lock_checked',
-      'if "!BV_LOCK_RC!"=="2" goto :lock_held',
+      "if defined BV_LOCK_HELD goto :lock_held",
       ">&2 echo WARNING: could not check whether a full backup is running (exit !BV_LOCK_RC!; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.",
       "goto :lock_checked",
       ":lock_held",
@@ -1653,7 +1696,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     // The same call and the same two messages as restore.sh.
     const sh = fs.readFileSync(path.join(ROOT, "restore.sh"), "utf8");
     expect(sh).toContain("$($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status < /dev/null 2>&1)");
-    for (const l of code.slice(at, at + 13).filter((x) => x.startsWith(">&2 echo "))) {
+    expect(sh).toContain('if [[ "$LOCK_RC" -eq 2 && "$LOCK_STATUS" == *"state=held"* ]]; then');
+    for (const l of code.slice(at, at + 18).filter((x) => x.startsWith(">&2 echo "))) {
       expect(sh).toContain(l.slice(">&2 echo ".length).replace(/^(ERROR|WARNING): /, "").replace("!BV_LOCK_RC!", "$LOCK_RC").replace(/^could not/, "WARNING: could not"));
     }
   });
@@ -1662,9 +1706,12 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     // The script the user started takes `ready` to mean "the restore program ran". If the append failed and the child
     // still exited 0, the restore would run and its result would be thrown away: no start, no rollback, no message.
     const at = code.indexOf('>>"!BV_HANDOFF!" echo ready=1');
-    expect(code.slice(at, at + 11)).toEqual([
+    expect(code.slice(at, at + 13)).toEqual([
       '>>"!BV_HANDOFF!" echo ready=1',
       'findstr /x /c:"ready=1" "!BV_HANDOFF!" >nul 2>&1',
+      "if errorlevel 1 goto :handoff_failed",
+      // …and so is the snapshot's path, which a rollback is made from.
+      'findstr /b /r /c:"db=." "!BV_HANDOFF!" >nul 2>&1',
       "if errorlevel 1 goto :handoff_failed",
       ">&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...",
       "exit /b 0",
@@ -1673,7 +1720,7 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
       'del /f /q "!BV_RECOVERY!" >nul 2>&1',
       'if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.',
       "call :start_app_or_warn",
-      ">&2 echo ERROR: could not write to !BV_HANDOFF! (its ready line is missing), so the restore did not start. Nothing was changed.",
+      ">&2 echo ERROR: could not write to !BV_HANDOFF! (its ready line or its db line is missing), so the restore did not start. Nothing was changed.",
       "exit /b 1",
     ]);
     // It is the child phase's ONLY way to say "go on".
@@ -1760,7 +1807,8 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     expect(text.indexOf("  !BV_RB! state /app/uploads !BV_STAMP!")).toBeLessThan(text.indexOf("  !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!"));
     for (const word of ["   complete   ", "   started    ", "   untouched  "]) expect(text.some((l) => l.startsWith(word))).toBe(true);
     expect(text).toContain("   PostgreSQL: the next line ONLY if step 2 printed: started");
-    expect(text).toContain("   The line asks for the state again first, and does nothing unless the");
+    expect(text).toContain("   The line asks for the state again first, and does nothing unless that");
+    expect(text).toContain("   prints started.");
     // The state test is on the PostgreSQL chain only (the SQLite chain's parts check the state themselves), and nothing but that line uses a for variable.
     expect(text.filter((x) => x.includes("%%"))).toHaveLength(1);
     expect(text.filter((x) => x.includes("%%"))[0].startsWith(`  ${ifStarted}!BV_RB! uploads `)).toBe(true);
@@ -1812,16 +1860,22 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
         'set "BV_OLD_COUNT=0"',
         'set "BV_OLD_WHERE=!BV_HOST_DATA!\\uploads\\"',
         'if not exist "!BV_HOST_DATA!\\uploads\\" goto :old_markers_ask',
-        'for /d %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do call :old_marker_named "%%~nxM"',
-        'for %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do call :old_marker_named "%%~nxM"',
+        // A name reaches the subroutine in a variable, never as a \`call\` argument (which cmd parses a second time).
+        'for /d %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :old_marker_named)',
+        'for %%M in ("!BV_HOST_DATA!\\uploads\\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :old_marker_named)',
         "goto :old_markers_known",
         ":old_markers_ask",
         'set "BV_OLD_WHERE=/app/uploads/"',
         'set "BV_MARKERS_ASKED="',
         // The uploads folder is not on the host: a container is asked. The sentinel line is printed only if the command worked.
-        `for /f "usebackq delims=" %%S in (\`%COMPOSE% run ${run} markers /app/uploads 2^>nul ^&^& echo BV-MARKERS-ASKED\`) do call :old_marker_listed "%%S"`,
+        // eol=/: a stamp is a file name, which never starts with /; the default (;) would drop a line. Docker's standard
+        // error is kept in a file and shown when the question failed.
+        'set "BV_MARKERS_ERR=%TEMP%\\blackvault-restore-markers-%RANDOM%%RANDOM%.log"',
+        `for /f "usebackq eol=/ delims=" %%S in (\`%COMPOSE% run ${run} markers /app/uploads 2^>"!BV_MARKERS_ERR!" ^&^& echo BV-MARKERS-ASKED\`) do (set "BV_ONE=%%S"& call :old_marker_listed)`,
+        'if not defined BV_MARKERS_ASKED if exist "!BV_MARKERS_ERR!" type "!BV_MARKERS_ERR!" 1>&2',
+        'del /f /q "!BV_MARKERS_ERR!" >nul 2>&1',
         "if defined BV_MARKERS_ASKED goto :old_markers_known",
-        ">&2 echo ERROR: could not check the uploads folder for a marker left by an earlier restore: !BV_HOST_DATA!\\uploads is not there to look into, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done.",
+        ">&2 echo ERROR: could not check the uploads folder for a marker left by an earlier restore: !BV_HOST_DATA!\\uploads is not there to look into, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done. Check that Docker is running (docker compose ps), then run the restore again.",
         "exit /b 1",
         ":old_markers_known",
         'if "!BV_OLD_COUNT!"=="0" goto :no_old_marker',
@@ -1850,11 +1904,9 @@ describe("restore.bat (static checks; executed only by the Windows CI job)", () 
     const sub = code.slice(at(":old_marker_named"), at(":write_marker_left"));
     expect(sub).toEqual([
       ":old_marker_named",
-      'set "BV_ONE=%~1"',
       'set "BV_ONE=!BV_ONE:~9,-11!"',
       "goto :old_marker_add",
       ":old_marker_listed",
-      'set "BV_ONE=%~1"',
       'if "!BV_ONE!"=="BV-MARKERS-ASKED" set "BV_MARKERS_ASKED=1"',
       'if "!BV_ONE!"=="BV-MARKERS-ASKED" goto :eof',
       ":old_marker_add",

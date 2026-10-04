@@ -106,7 +106,7 @@ own() {
 
 check_stamp() {
   case "$1" in
-    "" | */* | .*) fail "'$1' is not a restore stamp." ;;
+    "" | */*) fail "'$1' is not a restore stamp." ;;
   esac
 }
 
@@ -178,7 +178,9 @@ case "$MODE" in
     for m in "$UP"/.restore-*.db-started; do
       if [ -e "$m" ] || [ -L "$m" ]; then
         m=${m##*/.restore-}
-        echo "${m%.db-started}"
+        m=${m%.db-started}
+        # A name with nothing between the two parts is not a marker.
+        [ -z "$m" ] || echo "$m"
       fi
     done
     exit 0

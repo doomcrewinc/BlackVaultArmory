@@ -27,6 +27,7 @@ const ROOT = path.resolve(__dirname, "..");
 const FILES = {
   install: readFileSync(path.join(ROOT, "install.bat")).toString("latin1"),
   update: readFileSync(path.join(ROOT, "update.bat")).toString("latin1"),
+  rotate: readFileSync(path.join(ROOT, "rotate-key.bat")).toString("latin1"),
 } as const;
 
 const SUBROUTINES = [
@@ -34,7 +35,7 @@ const SUBROUTINES = [
   "prompt_yes_no",
   "prompt_trusted_proxies",
   "show_setup_token",
-  // Task 7: the field-encryption key (mirrors scripts/encryption-key.sh).
+  // The field-encryption key (mirrors scripts/encryption-key.sh).
   "ensure_encryption_key",
   "health_status",
   // The .env reader (mirrors scripts/compose-provider.sh) and its callers.
@@ -110,6 +111,73 @@ describe("install.bat and update.bat share their public-URL subroutines byte for
 });
 
 /**
+ * update.bat and rotate-key.bat both refuse to go on while a restore marker
+ * is in the uploads folder, and print the command that removes it. The
+ * lookup is one subroutine pair, copied.
+ */
+describe("update.bat and rotate-key.bat share the restore-marker lookup byte for byte", () => {
+  it.each(["restore_markers", "restore_marker_add"])(":%s is identical in both files", (label) => {
+    const inUpdate = extract("update", label);
+    expect(inUpdate.length).toBeGreaterThan(100);
+    expect(extract("rotate", label), `:${label} differs between update.bat and rotate-key.bat`).toBe(inUpdate);
+  });
+
+  it("the stamp reaches :restore_marker_add in a variable, never as a `call` argument, and an empty one is skipped", () => {
+    const lines = linesOf(FILES.update).map(bare);
+    expect(lines.filter((l) => l.includes("call :restore_marker_add"))).toEqual([
+      'for /d %%M in ("!BV_UP!\\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)',
+      'for %%M in ("!BV_UP!\\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)',
+    ]);
+    const at = lines.indexOf(":restore_marker_add");
+    expect(lines.slice(at + 2, at + 4)).toEqual(['set "BV_ONE=!BV_ONE:~9,-11!"', "if not defined BV_ONE goto :eof"]);
+  });
+
+  it("update.bat looks for a marker AFTER the `git pull` line (where an older update.bat resumes) and BEFORE the first prompt and the rebuild", () => {
+    const lines = linesOf(FILES.update).map(bare);
+    const at = lines.indexOf("call :restore_markers");
+    expect(lines[at + 1]).toBe("if defined BV_MARKERS goto :restore_marker_left");
+    expect(at).toBeGreaterThan(lines.indexOf("git pull"));
+    expect(at).toBeLessThan(lines.indexOf("call :read_env"));
+    expect(at).toBeLessThan(lines.indexOf("%COMPOSE% build --pull"));
+    const stop = lines.indexOf(":restore_marker_left");
+    expect(lines.slice(stop + 8, stop + 11)).toEqual([
+      "echo        Then run update.bat again. Nothing was rebuilt or restarted.",
+      "pause",
+      "exit /b 1",
+    ]);
+  });
+
+  it("rotate-key.bat looks for a marker before it stops BlackVault", () => {
+    const lines = linesOf(FILES.rotate).map(bare);
+    const at = lines.indexOf("call :restore_markers");
+    expect(lines[at + 1]).toBe("if defined BV_MARKERS goto :restore_marker_left");
+    expect(at).toBeGreaterThan(0);
+    expect(at).toBeLessThan(lines.indexOf("%COMPOSE% stop blackvault"));
+    const stop = lines.indexOf(":restore_marker_left");
+    expect(lines.slice(stop + 8, stop + 11)).toEqual([
+      "echo        Then run rotate-key.bat again. Nothing was changed; BlackVault was not stopped.",
+      "pause",
+      "exit /b 1",
+    ]);
+  });
+});
+
+/**
+ * An unhealthy container ends install.bat and update.bat with exit code 1; a
+ * container still starting when the wait ran out, like a healthy one, with 0.
+ */
+describe("exit code 1 only for an unhealthy container", () => {
+  it.each([
+    ["install", "call :show_setup_token PUBLIC_URL"],
+    ["update", "call :show_setup_token ENV_PUBLIC_URL"],
+  ] as const)("%s.bat", (fileName, lastStep) => {
+    const lines = linesOf(FILES[fileName]).map(bare).filter((l) => !l.startsWith("::"));
+    const at = lines.indexOf(lastStep);
+    expect(lines.slice(at, at + 4)).toEqual([lastStep, "pause", 'if "!HEALTH!"=="unhealthy" exit /b 1', "exit /b 0"]);
+  });
+});
+
+/**
  * `for /f "delims=<allowed characters>" %%X in ("!VAR!") do <reject>` is how
  * these scripts check that a value holds only allowed characters. for /f
  * skips a line whose first character (after leading delimiters) is its eol
@@ -174,12 +242,13 @@ describe("the health wait matches the status word with its parentheses", () => {
  * `DATA_DIR='C:\x'` with its quotes, and the wrong folder then fed the
  * relocation of DATA_DIR in update.bat.
  */
-describe("every batch script reads .env through the one shared :env_value", () => {
+describe("all six batch scripts that read .env do it through the one shared :env_value", () => {
   const BAT = {
     "install.bat": FILES.install,
     "update.bat": FILES.update,
     "backup.bat": readFileSync(path.join(ROOT, "backup.bat")).toString("latin1"),
     "restore.bat": readFileSync(path.join(ROOT, "restore.bat")).toString("latin1"),
+    "rotate-key.bat": readFileSync(path.join(ROOT, "rotate-key.bat")).toString("latin1"),
     "scripts/db-snapshot.bat": readFileSync(path.join(ROOT, "scripts", "db-snapshot.bat")).toString("latin1"),
   } as const;
   const BOM = "\u00ef\u00bb\u00bf"; // the three UTF-8 bytes, as latin1
@@ -222,7 +291,7 @@ describe("every batch script reads .env through the one shared :env_value", () =
     expect(lines.slice(stop + 1, stop + 6)).toEqual([
       "echo ERROR: .env holds a DATA_DIR line this script does not read: see the Note",
       "echo        above. Correct it and run update.bat again.",
-      "echo        Nothing was pulled, rebuilt or restarted.",
+      "echo        Nothing was rebuilt or restarted.",
       "pause",
       "exit /b 1",
     ]);
@@ -232,13 +301,55 @@ describe("every batch script reads .env through the one shared :env_value", () =
     expect(lines.slice(at + 2, check).filter((l) => l.includes('set "ACTIVE_DATA_DIR='))).toEqual([]);
   });
 
-  it("the reader is the same everywhere: install.bat's block, minus its two byte-order-mark lines in the ASCII-only scripts", () => {
+  it("the reader is the same in all six files, byte for byte, byte-order-mark lines included", () => {
     const install = envValueBlock(BAT["install.bat"]);
-    const withoutBom = install.filter((l) => !l.includes(BOM));
-    expect(install.length - withoutBom.length).toBe(2);
-    expect(envValueBlock(BAT["update.bat"]).join("")).toBe(install.join(""));
-    for (const name of ["backup.bat", "restore.bat", "scripts/db-snapshot.bat"] as const) {
-      expect(envValueBlock(BAT[name]).join(""), `${name} :env_value differs`).toBe(withoutBom.join(""));
+    // The two lines that find a key behind a UTF-8 byte-order mark on line 1.
+    expect(install.filter((l) => l.includes(BOM))).toHaveLength(2);
+    expect(Object.keys(BAT)).toHaveLength(6);
+    for (const name of Object.keys(BAT) as (keyof typeof BAT)[]) {
+      expect(envValueBlock(BAT[name]).join(""), `${name} :env_value differs`).toBe(install.join(""));
+    }
+  });
+
+  it("rotate-key.bat decides whether .env holds a key with :env_value: a value, or a line it cannot read, both refuse", () => {
+    const lines = linesOf(BAT["rotate-key.bat"]).map(bare);
+    const at = lines.indexOf("call :env_value BLACKVAULT_ENCRYPTION_KEY");
+    expect(at).toBeGreaterThan(0);
+    expect(at).toBeLessThan(lines.findIndex((l) => l.startsWith("%COMPOSE% stop")));
+    const until = lines.indexOf(":no_env_key");
+    expect(lines.slice(at + 1, until)).toEqual([
+      ":env_key_trim",
+      "if not defined _EV goto :env_key_trimmed",
+      'if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_key_trim',
+      'if "!_EV:~0,1!"=="\t" set "_EV=!_EV:~1!" & goto :env_key_trim',
+      'if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_key_trim',
+      'if "!_EV:~-1!"=="\t" set "_EV=!_EV:~0,-1!" & goto :env_key_trim',
+      ":env_key_trimmed",
+      'if defined _EV set "ENV_KEY_SOURCE=.env"',
+      'set "_EV="',
+      'if defined _EV_BAD set "ENV_KEY_SOURCE=.env"',
+      "if defined ENV_KEY_SOURCE goto :env_key_in_use",
+    ]);
+  });
+
+  it("refuses a ! on a line assigning the key (searched with delayed expansion off) and a leading ~ in a folder key", () => {
+    for (const name of Object.keys(BAT) as (keyof typeof BAT)[]) {
+      const block = envValueBlock(BAT[name]).map(bare);
+      const at = block.indexOf("setlocal DisableDelayedExpansion");
+      expect(at, name).toBeGreaterThan(block.indexOf(":env_value"));
+      expect(block.slice(at, at + 4), name).toEqual([
+        "setlocal DisableDelayedExpansion",
+        'findstr /r /c:"^[ \t]*%~1[ \t]*=.*!" /c:"^[ \t]*export[ \t][ \t]*%~1[ \t]*=.*!" ".env" >nul 2>&1',
+        'if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)',
+        "endlocal",
+      ]);
+      // Before any line that uses the value the loop stored.
+      expect(at, name).toBeLessThan(block.indexOf(":env_value_trim"));
+      const done = block.indexOf(":env_value_done");
+      expect(block.slice(done + 1, done + 3), name).toEqual([
+        'set "_EVK=%~1"',
+        'if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad',
+      ]);
     }
   });
 

@@ -11,6 +11,8 @@ echo ""
 
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/backup-common.sh
+. ./scripts/backup-common.sh
 # shellcheck source=scripts/public-url-prompts.sh
 . ./scripts/public-url-prompts.sh
 # shellcheck source=scripts/setup-token.sh
@@ -132,7 +134,9 @@ fi
 # BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
 # uploads snapshot; an inherited value must never reach it.
 unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
-env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was pulled, rebuilt or restarted." || exit 1
+# "Nothing was rebuilt or restarted", not "pulled": this point is reached a
+# second time after the pull, when the new update.sh is started.
+env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was rebuilt or restarted." || exit 1
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 
@@ -141,7 +145,7 @@ echo "Database provider: $DB_PROVIDER"
 # An unreadable DATA_DIR (see scripts/compose-provider.sh) stops here, before
 # the pull: the folder Compose will use is not known, so nothing below can be
 # checked or snapshotted, and no other folder is put in its place.
-env_require_readable DATA_DIR "Nothing was pulled, rebuilt or restarted." || exit 1
+env_require_readable DATA_DIR "Nothing was rebuilt or restarted." || exit 1
 ACTIVE_DATA_DIR=$(env_value DATA_DIR)
 
 # ── Preflight: verify the database exists ─────────────────────
@@ -231,6 +235,15 @@ if [ ! -f ".env" ]; then
   echo "       start without it. Run ./install.sh, or create .env with a line"
   echo "       BLACKVAULT_PUBLIC_URL=https://vault.example.com and re-run ./update.sh."
   echo "       Nothing was rebuilt or restarted."
+  exit 1
+fi
+
+# ── A marker left by a restore ────────────────────────────────
+# The new image refuses to start while a restore marker is in the uploads
+# folder. Found here, before anything is asked, rebuilt or stopped, the
+# version that is running keeps running.
+if ! bv_restore_marker_refusal "${ACTIVE_DATA_DIR:-./data}/uploads"; then
+  echo "       Then run ./update.sh again. Nothing was rebuilt or restarted."
   exit 1
 fi
 
@@ -350,3 +363,10 @@ echo ""
 # Printed only while no admin account exists (see scripts/setup-token.sh).
 # The health wait above means the app has started and logged it by now.
 show_setup_token "$(env_value BLACKVAULT_PUBLIC_URL)"
+
+# A container that reports unhealthy is a failed update for whoever started
+# this script (cron, another script). One that is still starting when the
+# wait ran out is not: a slow first start can still come up.
+if [[ "$HEALTH" == "unhealthy" ]]; then
+  exit 1
+fi

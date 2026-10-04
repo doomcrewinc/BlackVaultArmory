@@ -316,3 +316,10 @@ echo ""
 # ── First-time setup token ────────────────────────────────────
 # Printed only while no admin account exists (see scripts/setup-token.sh).
 show_setup_token "$PUBLIC_URL"
+
+# A container that reports unhealthy is a failed install for whoever started
+# this script (another script, a provisioning tool). One that is still
+# starting when the wait ran out is not: a slow first start can still come up.
+if [[ "$HEALTH" == "unhealthy" ]]; then
+  exit 1
+fi

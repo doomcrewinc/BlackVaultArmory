@@ -28,6 +28,8 @@ const TREE = [
   "docker-compose.yml",
   "secrets/.gitignore",
   "scripts/compose-provider.sh",
+  "scripts/backup-common.sh",
+  "scripts/snapshot-restore.sh",
   "scripts/public-url-prompts.sh",
   "scripts/setup-token.sh",
   "scripts/encryption-key.sh",
@@ -274,13 +276,17 @@ describe("health wait: only the status word healthy is success", () => {
   it.each([
     ["install.sh", INSTALL_ANSWERS],
     ["update.sh", "\n"],
-  ])("%s: unhealthy is not reported as running, and the output says unhealthy", (script, answers) => {
+  ])("%s: unhealthy is not reported as running, the output says unhealthy, and the exit status is 1", (script, answers) => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
     if (script === "update.sh") sqliteInstall(dir);
     stubSleep();
     const r = run(dir, script, answers, { BV_STUB_PS_STATUS: "Up 2 minutes (unhealthy)" });
-    expect(r.code, r.out).toBe(0);
+    // A cron job or a calling script must see the failure; the summary and
+    // the log hint are still printed first.
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("NOT healthy");
+    expect(r.out).toMatch(/logs/);
     expect(polls(r.calls)).toBe(60);
     expect(r.out).toMatch(/unhealthy/i);
     expect(r.out).not.toContain("BlackVault is running.");
@@ -292,7 +298,7 @@ describe("health wait: only the status word healthy is success", () => {
   it.each([
     ["install.sh", INSTALL_ANSWERS],
     ["update.sh", "\n"],
-  ])("%s: still starting when the wait runs out: says it did not become healthy", (script, answers) => {
+  ])("%s: still starting when the wait runs out: says it did not become healthy, and still exits 0 (a slow first start is not a failure)", (script, answers) => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
     if (script === "update.sh") sqliteInstall(dir);
@@ -501,7 +507,8 @@ describe("update.sh (no git checkout)", () => {
     const r = run(dir, "update.sh", "\n");
     expect(r.code, r.out).toBe(1);
     expect(r.out).toContain("ERROR: DATA_DIR in .env could not be read");
-    expect(r.out).toContain("Nothing was pulled, rebuilt or restarted.");
+    expect(r.out).toContain("Nothing was rebuilt or restarted.");
+    expect(r.out).not.toContain("Nothing was pulled");
     expect(r.out).not.toContain("Auto-updating DATA_DIR");
     expect(r.out).not.toContain("Database verified at");
     expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
@@ -678,6 +685,73 @@ describe("update.sh (no git checkout)", () => {
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain(BOX_LINE);
     expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}\n$/);
+  });
+
+  // The new image refuses to start while a restore marker is in the uploads
+  // folder. Found before the rebuild, the version that is running stays up.
+  it.each([
+    ["a folder, as the restore program leaves it", (up: string) => fs.mkdirSync(path.join(up, ".restore-20261001-101010.db-started"))],
+    ["a file with a hand-made stamp", (up: string) => fs.writeFileSync(path.join(up, ".restore-old one.db-started"), "")],
+  ])("update.sh: a restore marker in the uploads folder (%s) stops the update BEFORE the rebuild, with the command that removes it", (_name, plant) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const uploads = path.join(dir, "data/uploads");
+    plant(uploads);
+    const stamp = fs.readdirSync(uploads)[0].slice(".restore-".length, -".db-started".length);
+    const env = fs.readFileSync(path.join(dir, ".env"), "utf8");
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain(`ERROR: the uploads folder holds a marker left by a restore: ${uploads}/.restore-${stamp}.db-started.`);
+    expect(r.out).toContain("refuses to start while a marker exists");
+    expect(r.out).toContain("/bv-snapshot-restore.sh clear-marker /app/uploads ");
+    expect(r.out).toContain(stamp.includes(" ") ? `clear-marker /app/uploads '${stamp}'` : `clear-marker /app/uploads ${stamp}`);
+    expect(r.out).toContain("Nothing was rebuilt or restarted.");
+    expect(r.out).not.toContain("Rebuilding BlackVault image");
+    expect(r.out).not.toContain("Public URL is:");
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+    expect(backups(dir)).toEqual([]);
+    expect(fs.readdirSync(uploads)).toHaveLength(1); // the marker is never removed by the update
+  });
+
+  it("update.sh: names that are not markers (.restore-<stamp> staging, .pre-restore-<stamp>, an empty stamp) do not stop the update", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    for (const name of [".restore-20261001-101010", ".pre-restore-20261001-101010", ".restore-.db-started"]) fs.mkdirSync(path.join(dir, "data/uploads", name));
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain("marker left by a restore");
+    expect(callLines(r.calls)).toContain("compose up -d");
+  });
+
+  it("scripts/db-snapshot.sh: DATA_DIR exported in the shell and different from .env is refused before the app is stopped", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "scripts/db-snapshot.sh", "", { DATA_DIR: path.join(dir, "elsewhere") });
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: database snapshot failed: DATA_DIR is set in this shell and is not the DATA_DIR in .env");
+    expect(r.out).toContain("unset DATA_DIR");
+    expect(r.calls).not.toContain("compose stop");
+    expect(backups(dir)).toEqual([]);
+    // The same folder, exported: nothing to refuse.
+    const same = run(dir, "scripts/db-snapshot.sh", "", { DATA_DIR: path.join(dir, "data") });
+    expect(same.code, same.out).toBe(0);
+    expect(backups(dir)).toHaveLength(1);
+  });
+
+  it("update.sh: DATA_DIR exported in the shell and different from .env: the snapshot refuses, the new image is not started", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "update.sh", "\n", { DATA_DIR: path.join(dir, "elsewhere") });
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("DATA_DIR is set in this shell and is not the DATA_DIR in .env");
+    expect(r.out).toContain("The new version was NOT started.");
+    expect(callLines(r.calls)).not.toContain("compose up -d");
   });
 
   it.skipIf(process.getuid?.() === 0)("a failing snapshot aborts non-zero and never starts the new image", () => {
@@ -962,6 +1036,23 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
     fs.writeFileSync(path.join(dir, KEY_FILE), OLD_KEY, { mode: 0o600 });
   }
   const secrets = (dir: string) => fs.readdirSync(path.join(dir, "secrets")).filter((f) => f !== ".gitignore").sort();
+
+  it("a restore marker in the uploads folder: the rotation refuses before BlackVault is stopped; no new key, nothing snapshotted", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const marker = path.join(dir, "data/uploads/.restore-20261001-101010.db-started");
+    fs.mkdirSync(marker);
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain(`ERROR: the uploads folder holds a marker left by a restore: ${marker}.`);
+    expect(r.out).toContain("clear-marker /app/uploads 20261001-101010");
+    expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
+    expect(backups(dir)).toEqual([]);
+    expect(fs.existsSync(marker)).toBe(true);
+  });
 
   it("success: the key files are swapped (old kept as .old-<ts>) and the app restarts", () => {
     const dir = path.join(tmp, "app");

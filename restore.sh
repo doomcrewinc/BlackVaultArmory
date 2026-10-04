@@ -164,7 +164,7 @@ fi
 # file. Never start a second restore on top of a possibly half-restored install.
 for f in backups/restore-*-RECOVERY.txt; do
   [ -e "$f" ] || continue
-  die "an earlier restore did not finish cleanly: $PWD/$f is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done."
+  die "an earlier restore did not finish cleanly: $PWD/$f is still there. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead; or, if you mean to replace this install with a backup anyway, delete that file. Then run the restore again. Nothing was done."
 done
 
 # docker-compose.yml mounts <DATA_DIR>/uploads at /app/uploads. The restore
@@ -173,55 +173,10 @@ done
 HOST_UPLOADS_DIR="$HOST_DATA_DIR/uploads"
 
 # The rollback's file work: scripts/snapshot-restore.sh as root in a one-off
-# container, backups/ mounted read-only. The script is mounted from this
-# checkout, like scripts/uploads-snapshot.sh in db-snapshot.sh.
-SNAPSHOT_RESTORE=($COMPOSE run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh
-  -v "$PWD/backups:/bv-backups:ro"
-  -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
-  blackvault /bv-snapshot-restore.sh)
-
-host_can_enter() {
-  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
-}
-
-# WHAT COUNTS AS A MARKER, everywhere in this script: anything directly under
-# the uploads folder named .restore-<stamp>.db-started, whatever it is (a
-# folder, which is what the restore program creates; a file; a link, dangling
-# or not) and whatever <stamp> is. scripts/snapshot-restore.sh and the app's
-# own start go by the same rule.
-#
-# collect_leftover_markers: fills OLD_STAMPS with the stamp of every marker
-# in the uploads folder and sets OLD_WHERE to how their paths are shown.
-# From the host when it can enter that folder; otherwise (the folder is
-# closed to this user, or is not where .env says because it is mounted from
-# somewhere else) from inside a container, as root. Returns 1 when neither
-# could say: that is never taken for "no marker". The stamps are read one
-# line at a time and never word-split or expanded.
-OLD_STAMPS=()
-OLD_WHERE=""
-collect_leftover_markers() {
-  local m listed
-  OLD_STAMPS=()
-  if host_can_enter "$HOST_UPLOADS_DIR"; then
-    OLD_WHERE="$HOST_UPLOADS_DIR/"
-    for m in "$HOST_UPLOADS_DIR"/.restore-*.db-started; do
-      if [[ -e "$m" || -L "$m" ]]; then
-        m=${m##*/.restore-}
-        OLD_STAMPS+=("${m%.db-started}")
-      fi
-    done
-    return 0
-  fi
-  OLD_WHERE="/app/uploads/"
-  # The container mounts backups/; if Docker had to create that folder it
-  # would belong to root, and the snapshot could not be written into it.
-  mkdir -p backups 2> /dev/null
-  listed=$("${SNAPSHOT_RESTORE[@]}" markers /app/uploads 2> /dev/null) || return 1
-  while IFS= read -r m; do
-    [[ -z "$m" ]] || OLD_STAMPS+=("$m")
-  done <<< "$listed"
-  return 0
-}
+# container (SNAPSHOT_RESTORE, see scripts/backup-common.sh, which also says
+# what counts as a marker and how the markers in the uploads folder are
+# listed).
+bv_snapshot_restore_cmd
 
 # BlackVault refuses to start while any restore marker is in the uploads
 # folder, whichever restore left it. With a recovery file the check above has
@@ -230,17 +185,13 @@ collect_leftover_markers() {
 # restore is never run on top of it: BlackVault could not be started
 # afterwards, neither after a success nor after a rollback. Every marker is
 # named, with ONE command line that removes them all.
-if ! collect_leftover_markers; then
-  die "could not check the uploads folder $HOST_UPLOADS_DIR for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done."
+if ! bv_collect_restore_markers "$HOST_UPLOADS_DIR"; then
+  # What Docker said when the container could not be asked.
+  [[ -z "$MARKERS_ERROR" ]] || printf '%s\n' "$MARKERS_ERROR" >&2
+  die "could not check the uploads folder $HOST_UPLOADS_DIR for a marker left by an earlier restore: it cannot be looked into from here, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done. Check that Docker is running ($COMPOSE ps), then run the restore again."
 fi
 if [[ "${#OLD_STAMPS[@]}" -gt 0 ]]; then
-  OLD_MARKERS=""
-  OLD_COMMANDS=""
-  for OLD_STAMP in "${OLD_STAMPS[@]}"; do
-    OLD_MARKERS="${OLD_MARKERS:+$OLD_MARKERS, }$OLD_WHERE.restore-$OLD_STAMP.db-started"
-    OLD_COMMANDS="${OLD_COMMANDS:+$OLD_COMMANDS && }$(bv_quote_cmd "${SNAPSHOT_RESTORE[@]}" clear-marker /app/uploads "$OLD_STAMP")"
-  done
-  [[ "$OLD_WHERE" != "/app/uploads/" ]] || OLD_MARKERS="$OLD_MARKERS (inside the container)"
+  bv_describe_restore_markers
   die "the uploads folder holds a marker left by an earlier restore: $OLD_MARKERS. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  $OLD_COMMANDS  Then run the restore again. Nothing was done."
 fi
 
@@ -542,7 +493,7 @@ else
       ;;
     *)
       PASSPHRASE=""
-      die "could not check the uploads folder $HOST_UPLOADS_DIR for what an earlier restore may have left: it cannot be entered from here, and asking inside a container failed. Nothing was changed; BlackVault was not stopped."
+      die "could not check the uploads folder $HOST_UPLOADS_DIR for what an earlier restore may have left: it cannot be entered from here, and asking inside a container failed. Check that Docker is running ($COMPOSE ps), then run the restore again. Nothing was changed; BlackVault was not stopped."
       ;;
   esac
 fi
@@ -552,15 +503,18 @@ fi
 # which takes the same lock, would say "already running" only after the
 # snapshot. So the running app container is asked first, and the rule for
 # "is that lock live" stays the engine's own (scripts/entry/full-backup.ts
-# --lock-status: exit 0 free, exit 2 held, one line naming the holder).
-# Any other answer means the question failed, not that a backup runs — an
-# image from before --lock-status answers 1 — and never blocks a restore.
+# --lock-status: exit 0 free; exit 2 held, with one line that says state=held
+# and names the holder). Held takes both, the exit status and the line: an
+# exit 2 from anything else (docker itself, a program that is not this one)
+# is not a running backup. Any other answer means the question failed, not
+# that a backup runs — an image from before --lock-status answers 1 — and
+# never blocks a restore.
 # With BlackVault stopped there is no container to ask and nothing the stop
 # could end; the restore program's own lock still applies.
 if [[ -n "$($COMPOSE ps --status running -q blackvault 2> /dev/null)" ]]; then
   LOCK_STATUS=$($COMPOSE exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status < /dev/null 2>&1)
   LOCK_RC=$?
-  if [[ "$LOCK_RC" -eq 2 ]]; then
+  if [[ "$LOCK_RC" -eq 2 && "$LOCK_STATUS" == *"state=held"* ]]; then
     PASSPHRASE=""
     printf '%s\n' "$LOCK_STATUS" >&2
     die "a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished."
@@ -621,7 +575,10 @@ UPLOADS_ROLLBACK_ARGS=(uploads /app/uploads "$STAMP")
 [ -z "$UPLOADS_SNAPSHOT" ] || UPLOADS_ROLLBACK_ARGS+=("/bv-backups/$(basename "$UPLOADS_SNAPSHOT")")
 
 # ── 5. The recovery file, then the restore ────────────────────
-if ! (umask 077 && recovery_text > "$RECOVERY_FILE"); then
+# The text is built first and written with one printf, so that a write that
+# fails (a full disk) is seen: a recovery file cut short must not be relied on.
+RECOVERY_TEXT=$(recovery_text)
+if ! (umask 077 && printf '%s\n' "$RECOVERY_TEXT" > "$RECOVERY_FILE"); then
   trap - INT TERM HUP
   PASSPHRASE=""
   rm -f "$RECOVERY_FILE"
@@ -704,10 +661,12 @@ if [ "$RC" -eq 0 ] || [ "$STATE" = "complete" ]; then
       NOT_REMOVED="its marker $MARKER_HOST, if it is still there (the uploads folder cannot be looked into from here), could not be removed"
     fi
     if ! clear_marker; then
-      # Written beside the recovery file and renamed over it, so that file
-      # is always one whole text: the new one, or (when this fails) the one
-      # written before the restore.
-      if (umask 077 && marker_left_text > "$RECOVERY_FILE.new") 2> /dev/null && mv -f "$RECOVERY_FILE.new" "$RECOVERY_FILE" 2> /dev/null; then
+      # Built first, written beside the recovery file with one printf (its
+      # status is the write's) and renamed over it, so that file is always
+      # one whole text: the new one, or (when this fails) the one written
+      # before the restore.
+      LEFT_TEXT=$(marker_left_text)
+      if (umask 077 && printf '%s\n' "$LEFT_TEXT" > "$RECOVERY_FILE.new") 2> /dev/null && mv -f "$RECOVERY_FILE.new" "$RECOVERY_FILE" 2> /dev/null; then
         WHERE_ELSE="The same is in $PWD/$RECOVERY_FILE."
       else
         rm -f "$RECOVERY_FILE.new" 2> /dev/null
