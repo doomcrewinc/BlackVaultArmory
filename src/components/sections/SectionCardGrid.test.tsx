@@ -18,8 +18,9 @@ function cardFor(label: string): HTMLElement {
   return screen.getByText(label).closest("a") as HTMLElement;
 }
 
+/** The card grid: the element that holds the section links. */
 function gridOf(container: HTMLElement): HTMLElement {
-  return container.querySelector("[data-counts-status]") as HTMLElement;
+  return (container.querySelector("a") as HTMLElement).parentElement as HTMLElement;
 }
 
 async function flush() {
@@ -44,7 +45,6 @@ describe.each([
     const { container } = render(<Page />);
     await flush();
 
-    expect(gridOf(container)).toHaveAttribute("data-counts-status", "loading");
     expect(gridOf(container)).toHaveAttribute("aria-busy", "true");
     expect(cardFor(first.label)).toHaveAttribute("href", sectionHref(first));
     expectNoNumbers();
@@ -58,7 +58,6 @@ describe.each([
     const { container } = render(<Page />);
     await flush();
 
-    expect(gridOf(container)).toHaveAttribute("data-counts-status", "ready");
     expect(gridOf(container)).not.toHaveAttribute("aria-busy");
     expect(within(cardFor(second.label)).getByText("7")).toBeInTheDocument();
     expect(within(cardFor(first.label)).getByText("0")).toBeInTheDocument();
@@ -72,7 +71,6 @@ describe.each([
     const { container } = render(<Page />);
     await flush();
 
-    expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
     expect(gridOf(container)).not.toHaveAttribute("aria-busy");
     expectNoNumbers();
     expect(cardFor(first.label)).toHaveAttribute("href", sectionHref(first));
@@ -83,7 +81,7 @@ describe.each([
     const { container } = render(<Page />);
     await flush();
 
-    expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
+    expect(gridOf(container)).not.toHaveAttribute("aria-busy");
     expectNoNumbers();
   });
 });

@@ -49,7 +49,6 @@ export function SectionCardGrid({ group }: Readonly<{ group: SectionGroup }>) {
   return (
     <div
       className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
-      data-counts-status={state.status}
       aria-busy={state.status === "loading" ? true : undefined}
     >
       {sections.map((section) => (

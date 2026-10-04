@@ -222,7 +222,6 @@ describe(`audit CSV export against real ${ctx.pg ? "PostgreSQL" : "SQLite (conne
       expect(lines.slice(1).map((line) => line.split(",")[5])).toEqual([...matches].reverse());
     });
   });
-
 });
 
 // Captured from the previous collect-everything implementation, before it was replaced.

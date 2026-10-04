@@ -9,6 +9,11 @@ import type { AuditEventDto } from "@/lib/audit/query";
  * empty state, and a "Load more" control. Used by `/admin/audit` (paged
  * against the full log) and ItemHistory (paged against one item's events) —
  * both own their own fetch/cursor state and pass events + handlers down.
+ *
+ * `lastPageEmpty`: the page loaded last added no row although more of the
+ * log remains (a search looks through a limited stretch of the log per
+ * page). Without a line saying so, pressing Load more would seem to do
+ * nothing.
  */
 export function AuditList({
   events,
@@ -16,12 +21,14 @@ export function AuditList({
   loading = false,
   onLoadMore,
   emptyMessage = "No matching events.",
+  lastPageEmpty = false,
 }: {
   events: AuditEventDto[];
   hasMore?: boolean;
   loading?: boolean;
   onLoadMore?: () => void;
   emptyMessage?: string;
+  lastPageEmpty?: boolean;
 }) {
   const canLoadMore = hasMore && onLoadMore !== undefined;
   // A page can be empty while more of the log remains to be searched (a short
@@ -47,6 +54,12 @@ export function AuditList({
 
       {!loading && events.length === 0 && (
         <p className="px-4 py-6 text-sm text-vault-text-muted">No matches yet in the entries searched so far.</p>
+      )}
+
+      {!loading && canLoadMore && lastPageEmpty && events.length > 0 && (
+        <p className="border-t border-vault-border px-4 pt-3 text-center text-xs text-vault-text-muted">
+          No further matches in the entries searched so far.
+        </p>
       )}
 
       {!loading && canLoadMore && (

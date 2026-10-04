@@ -61,6 +61,28 @@ describe("AuditList", () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
+  it("after a page that added nothing but still has a cursor: the rows stay, and a line above Load more says no further match was found so far", () => {
+    render(<AuditList events={[makeEvent({})]} hasMore onLoadMore={() => undefined} lastPageEmpty />);
+    expect(screen.getByText("Glock 19")).toBeTruthy();
+    expect(screen.getByText("No further matches in the entries searched so far.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+  });
+
+  it("no such line when the last page added rows, when there is nothing more to load, or while loading", () => {
+    const { rerender } = render(<AuditList events={[makeEvent({})]} hasMore onLoadMore={() => undefined} />);
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+    rerender(<AuditList events={[makeEvent({})]} lastPageEmpty />);
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+    rerender(<AuditList events={[makeEvent({})]} hasMore onLoadMore={() => undefined} lastPageEmpty loading />);
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+  });
+
+  it("an empty FIRST page with a cursor keeps its own wording", () => {
+    render(<AuditList events={[]} hasMore onLoadMore={() => undefined} lastPageEmpty />);
+    expect(screen.getByText("No matches yet in the entries searched so far.")).toBeTruthy();
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+  });
+
   it("says there are no matches only when an empty page has no cursor", () => {
     render(<AuditList events={[]} emptyMessage="Nothing here." />);
     expect(screen.getByText("Nothing here.")).toBeTruthy();

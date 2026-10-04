@@ -93,6 +93,9 @@ function AdminAuditPageInner() {
   const [events, setEvents] = useState<AuditEventDto[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  // The page loaded last held no event although the log goes on (a cursor
+  // came back): AuditList says so, or Load more would seem to do nothing.
+  const [lastPageEmpty, setLastPageEmpty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,6 +134,7 @@ function AdminAuditPageInner() {
       setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
       setCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
       setHasMore(Boolean(data.nextCursor));
+      setLastPageEmpty(page.length === 0 && Boolean(data.nextCursor));
     } catch {
       if (requestIdRef.current === requestId) setError("Failed to load audit events.");
     } finally {
@@ -189,6 +193,7 @@ function AdminAuditPageInner() {
           <AuditList
             events={events}
             hasMore={hasMore}
+            lastPageEmpty={lastPageEmpty}
             loading={loadingMore}
             onLoadMore={cursor ? () => fetchPage(filters, cursor) : undefined}
             emptyMessage="No audit events match these filters."
