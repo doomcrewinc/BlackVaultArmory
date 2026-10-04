@@ -27,8 +27,8 @@ const FILE_TIMEOUT_MS = 10 * 60_000;
 const admin = new PrismaClient({ datasourceUrl: adminUrl });
 
 // Creates a database for one test file, runs the file against it, and drops
-// the database whether or not the file passed. Resolves to true when the
-// file passed.
+// the database whether or not the file passed. Resolves to the file and
+// whether it passed.
 async function runOnOwnDatabase(file, index) {
   const name = `bv_scratch_test_${process.pid}_${index}`;
   await admin.$executeRawUnsafe(`CREATE DATABASE ${name}`);
@@ -44,19 +44,25 @@ async function runOnOwnDatabase(file, index) {
     if (run.error?.code === "ETIMEDOUT") {
       console.error(`TIMED OUT after ${FILE_TIMEOUT_MS / 60_000} minutes: ${file}`);
     }
-    return run.status === 0;
+    return { file, passed: run.status === 0 };
   } finally {
     await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
   }
 }
 
+// The files ONE AT A TIME, in list order. A file is started only when the
+// consumer asks for the next result, and a `for await` loop asks only after
+// the previous one has arrived: every file runs to completion, and its
+// database is dropped, before the next database is created.
+async function* resultsInOrder() {
+  for (const [index, file] of FILES.entries()) {
+    yield runOnOwnDatabase(file, index);
+  }
+}
+
 let failed = 0;
 try {
-  // Serial on purpose: every file gets its own database and runs to completion
-  // (and the database is dropped) before the next starts, so the await in this
-  // loop is the point, not a missed Promise.all.
-  for (const [i, file] of FILES.entries()) {
-    const passed = await runOnOwnDatabase(file, i);
+  for await (const { file, passed } of resultsInOrder()) {
     if (!passed) {
       failed += 1;
       console.error(`FAILED: ${file}`);

@@ -31,6 +31,12 @@ export const dbStepMarkerName = (stamp: string): string => `${RESTORE_STAGING_PR
  * the name alone too. Callers that derive something else from the stamp (a
  * recovery file's name) check RESTORE_STAMP themselves.
  */
+/** Orders strings by UTF-16 code unit (never by locale), like `<` on strings. For the restore program's stamps that is oldest first. */
+export function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  return a > b ? 1 : 0;
+}
+
 export function markerStamp(name: string): string | null {
   if (!name.startsWith(RESTORE_STAGING_PREFIX) || !name.endsWith(DB_STEP_MARKER_SUFFIX)) return null;
   const stamp = name.slice(RESTORE_STAGING_PREFIX.length, name.length - DB_STEP_MARKER_SUFFIX.length);

@@ -105,8 +105,10 @@ own() {
 }
 
 check_stamp() {
-  case "$1" in
-    "" | */*) fail "'$1' is not a restore stamp." ;;
+  local stamp
+  stamp=$1
+  case "$stamp" in
+    "" | */*) fail "'$stamp' is not a restore stamp." ;;
   esac
 }
 

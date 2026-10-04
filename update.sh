@@ -243,7 +243,7 @@ fi
 # folder. Found here, before anything is asked, rebuilt or stopped, the
 # version that is running keeps running.
 if ! bv_restore_marker_refusal "${ACTIVE_DATA_DIR:-./data}/uploads"; then
-  echo "       Then run ./update.sh again. Nothing was rebuilt or restarted."
+  echo "       Then run ./update.sh again. Nothing was rebuilt or restarted." >&2
   exit 1
 fi
 

@@ -15,7 +15,7 @@ import { EntryNameSet, printableName } from "./entry-names";
 import { acquireFullBackupLock, CHMOD_REFUSED_CODES, DEFAULT_FULL_BACKUP_DIR } from "./full-lock";
 import { verifyFullBackup } from "./full-verify";
 import { buildManifest, type ManifestFileEntry, type ManifestSkippedEntry } from "./manifest";
-import { markerStamp } from "./restore-marker";
+import { byCodeUnit, markerStamp } from "./restore-marker";
 import { backupCounts, buildBackupPayload, collectBackupRecords } from "./records";
 import { TarWriter } from "./tar";
 
@@ -378,7 +378,7 @@ async function assertNoRestoreMarker(root: string): Promise<void> {
     if (codeOf(e) === "ENOENT") return;
     throw e;
   }
-  const markers = names.filter((name) => markerStamp(name) !== null).sort();
+  const markers = names.filter((name) => markerStamp(name) !== null).sort(byCodeUnit);
   if (markers.length === 0) return;
   throw new FullBackupError(
     "RESTORE_UNFINISHED",

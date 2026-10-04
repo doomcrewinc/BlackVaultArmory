@@ -133,10 +133,12 @@ if [ -z "$DATA_DIR" ]; then
   elif [[ "$DATA_DIR" == "~/"* ]]; then
     DATA_DIR="$HOME/${DATA_DIR#"~/"}"
   elif [[ "$DATA_DIR" == "~"* ]]; then
-    echo ""
-    echo "ERROR: the data directory $DATA_DIR starts with ~ and is not under your own"
-    echo "       home folder (~/...). Run this script again and type the full path."
-    echo "       Nothing was changed."
+    {
+      echo ""
+      echo "ERROR: the data directory $DATA_DIR starts with ~ and is not under your own"
+      echo "       home folder (~/...). Run this script again and type the full path."
+      echo "       Nothing was changed."
+    } >&2
     exit 1
   fi
 fi

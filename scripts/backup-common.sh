@@ -106,7 +106,11 @@ bv_quote_cmd() {
 # (src/lib/backup/restore-marker.ts) go by the same rule.
 
 host_can_enter() {
-  [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
+  local dir=$1
+  if [[ -d "$dir" && -r "$dir" && -x "$dir" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # bv_snapshot_restore_cmd: sets SNAPSHOT_RESTORE to the command that runs
@@ -120,6 +124,7 @@ bv_snapshot_restore_cmd() {
     -v "$PWD/backups:/bv-backups:ro"
     -v "$PWD/scripts/snapshot-restore.sh:/bv-snapshot-restore.sh:ro"
     blackvault /bv-snapshot-restore.sh)
+  return 0
 }
 
 # bv_collect_restore_markers UPLOADS_DIR: fills OLD_STAMPS with the stamp of
@@ -185,8 +190,8 @@ bv_describe_restore_markers() {
 
 # bv_restore_marker_refusal UPLOADS_DIR: for a script that is about to stop,
 # rebuild or re-key a running BlackVault (update.sh, rotate-key.sh). Returns 1
-# after an ERROR that names every marker and the one command line that
-# removes them; the caller adds what was not done. Returns 0 when there is no
+# after an ERROR (on standard error) that names every marker and the one
+# command line that removes them; the caller adds what was not done. Returns 0 when there is no
 # marker, when the folder does not exist yet, and, after a Note, when neither
 # the host nor a container could look. Needs COMPOSE.
 bv_restore_marker_refusal() {
@@ -204,13 +209,15 @@ bv_restore_marker_refusal() {
     return 0
   fi
   bv_describe_restore_markers
-  echo "ERROR: the uploads folder holds a marker left by a restore: $OLD_MARKERS."
-  echo "       This version of BlackVault refuses to start while a marker exists: the"
-  echo "       restore that left it may not have finished. If backups/ holds a"
-  echo "       restore-<time>-RECOVERY.txt file, follow it. If BlackVault is running"
-  echo "       and its records, photos and documents are what you expect, remove"
-  echo "       every marker with:"
-  echo "         $OLD_COMMANDS"
+  {
+    echo "ERROR: the uploads folder holds a marker left by a restore: $OLD_MARKERS."
+    echo "       This version of BlackVault refuses to start while a marker exists: the"
+    echo "       restore that left it may not have finished. If backups/ holds a"
+    echo "       restore-<time>-RECOVERY.txt file, follow it. If BlackVault is running"
+    echo "       and its records, photos and documents are what you expect, remove"
+    echo "       every marker with:"
+    echo "         $OLD_COMMANDS"
+  } >&2
   return 1
 }
 

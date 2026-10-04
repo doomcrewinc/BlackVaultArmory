@@ -8,7 +8,7 @@ import { SNAPSHOT_REUSE_MS, snapshotStamp } from "../encryption/pre-encryption-s
 import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
 import { isSafeDocumentUrl } from "../upload-security";
-import { dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-marker";
+import { byCodeUnit, dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-marker";
 import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
 
 /**
@@ -585,13 +585,6 @@ export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "
       "do not start on this install: restore a full backup with restore.sh or restore.bat, which says how to remove the " +
       'marker first. See the README, "Restoring a full backup".',
   );
-}
-
-/** Orders strings by UTF-16 code unit (never by locale), like `<` on strings. */
-function byCodeUnit(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
 }
 
 /**

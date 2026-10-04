@@ -60,10 +60,23 @@ const READ_TX_MAX_WAIT_MS = 30_000;
  * the read and before this resolves, so the next table is not read until it
  * has finished.
  */
-async function readTable(delegate: ReadDelegate, key: string): Promise<BackupRecords[string]> {
+async function readTable(delegate: ReadDelegate, key: string): Promise<{ key: string; rows: unknown[] }> {
   const rows = await delegate.findMany();
   await backupRecordHooks.afterRead?.(key);
-  return rows;
+  return { key, rows };
+}
+
+/**
+ * Every backup table, ONE AT A TIME and in BACKUP_MODELS order. A table is
+ * read only when the consumer asks for the next value, and a `for await`
+ * loop asks only after the previous one has arrived: the transaction is one
+ * connection, and a second query on it while one is running would deadlock
+ * SQLite's single connection.
+ */
+async function* tablesInOrder(delegates: Record<string, ReadDelegate>): AsyncGenerator<{ key: string; rows: unknown[] }> {
+  for (const { delegate, key } of BACKUP_MODELS) {
+    yield readTable(delegates[delegate], key);
+  }
 }
 
 export async function collectBackupRecords(): Promise<BackupRecords> {
@@ -72,10 +85,9 @@ export async function collectBackupRecords(): Promise<BackupRecords> {
     async (tx) => {
       const delegates = tx as unknown as Record<string, ReadDelegate>;
       const records: BackupRecords = {};
-      // Awaited one table at a time on purpose: the transaction is one
-      // connection, and a concurrent query would deadlock SQLite's single one.
-      for (const { delegate, key } of BACKUP_MODELS) {
-        records[key] = await readTable(delegates[delegate], key);
+      // One table at a time (see tablesInOrder): never Promise.all here.
+      for await (const { key, rows } of tablesInOrder(delegates)) {
+        records[key] = rows;
       }
       return records;
     },

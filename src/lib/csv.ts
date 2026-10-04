@@ -16,7 +16,7 @@ export function csvQuote(text: string): string {
 }
 
 /** One CSV cell: stringified, formula-guarded, then RFC 4180 quoted if needed. */
-export function csvCell(value: unknown): string {
+export function csvCell(value: string | number | boolean | null | undefined): string {
   const text = value === null || value === undefined ? "" : String(value);
   return csvQuote(FORMULA_PREFIX_TRIGGER.test(text) ? `'${text}` : text);
 }
