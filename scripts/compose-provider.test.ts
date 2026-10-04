@@ -37,7 +37,20 @@ describe("env_value reads .env the way Docker Compose does", () => {
     return { code: r.status, out: r.stdout, err: r.stderr };
   }
 
-  const value = (content: string | null) => inDir(content, 'printf "[%s]" "$(env_value K)"');
+  // Prints [value], followed by UNREADABLE when env_unreadable says so.
+  const value = (content: string | null) =>
+    inDir(content, 'printf "[%s]" "$(env_value K)"; if env_unreadable K; then printf UNREADABLE; fi');
+
+  /**
+   * The expected column is what Docker Compose's own parser returns for the
+   * line: every row was run through github.com/compose-spec/compose-go/v2
+   * `dotenv.ParseWithLookup` (v2.16.1). Where Compose changes the value in a
+   * way this reader does not implement (it substitutes $VAR, unescapes \x
+   * inside double quotes, reads KEY: value and multi-line quotes), the row
+   * expects UNREADABLE: the reader must never hand back a non-empty value
+   * that is not the one Compose will use.
+   */
+  const UNREADABLE = Symbol("unreadable");
 
   it.each([
     ["plain", "K=v\n", "v"],
@@ -55,9 +68,12 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["comment after a single-quoted value", "K='a b'\t# note\n", "a b"],
     ["a # inside quotes is part of the value", "K='a # b'\n", "a # b"],
     ["inline comment after an unquoted value", "K=v # note\n", "v"],
-    ["inline comment after a tab", "K=v\t# note\n", "v"],
+    ["two spaces before the comment", "K=a  # b\n", "a"],
+    ["a tab before a # does not start a comment", "K=v\t# note\n", "v\t# note"],
     ["a # with no whitespace before it is part of the value", "K=a#b\n", "a#b"],
-    ["a value that is only a comment", "K= # note\n", ""],
+    ["a # right after the = and its whitespace is the value", "K= # note\n", "# note"],
+    ["a # as the first character", "K=#abc\n", "#abc"],
+    ["a trailing tab is trimmed", "K=v\t\n", "v"],
     ["inner spaces are kept", "K=/srv/my vault/data\n", "/srv/my vault/data"],
     ["CRLF", "K=v\r\n", "v"],
     ["CRLF and quotes", 'K="v"\r\nOTHER=x\r\n', "v"],
@@ -75,24 +91,51 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["a URL with a query", "K=postgresql://u:p@db:5432/x?a=b&c=d\n", "postgresql://u:p@db:5432/x?a=b&c=d"],
     ["empty", "K=\n", ""],
     ["empty quotes", 'K=""\n', ""],
-    ["an unterminated quote is kept as written", 'K="abc\n', '"abc'],
+    ["text after the closing quote is dropped", `K='a'b\nX="a"b\n`, "a"],
+    ["a double quote inside an unquoted value", 'K=a"b"c\n', 'a"b"c'],
+    ["an apostrophe inside an unquoted value", "K=O'Brien\n", "O'Brien"],
+    ["a double quote inside single quotes", `K='a"b'\n`, 'a"b'],
+    ["an unquoted Windows path", "K=C:\\Users\\rob\\new data\n", "C:\\Users\\rob\\new data"],
+    ["a single-quoted Windows path", "K='C:\\Users\\rob\\new data'\n", "C:\\Users\\rob\\new data"],
+    ["a $ inside single quotes is literal", "K='a$HOME b'\n", "a$HOME b"],
+    ["a $ only in the comment", "K=v # costs $5\n", "v"],
+    ["a UTF-8 BOM before the first line", "\uFEFFK=v\n", "v"],
+    ["KEY: value, then KEY=value", "K: v\nK=w\n", "w"],
+    ["an unreadable line, then a readable one", "K=$HOME/x\nK=v\n", "v"],
+    // Compose would give another value than the text: unreadable.
+    ["$VAR in an unquoted value", "K=$HOME/x\n", UNREADABLE],
+    ["${VAR} in an unquoted value", "export K = ${HOME}/x\n", UNREADABLE],
+    ["${VAR} in a double-quoted value", 'K="${HOME}/x"\n', UNREADABLE],
+    ["$$ in an unquoted value", "K=pa$$w\n", UNREADABLE],
+    ["a double-quoted Windows path (\\r and \\n would be unescaped)", 'K="C:\\Users\\rob\\new data"\n', UNREADABLE],
+    ["an escaped quote inside double quotes", 'K="a\\"b"\n', UNREADABLE],
+    ["KEY: value", "K: v\n", UNREADABLE],
+    ["export KEY: value", "export K: v\n", UNREADABLE],
+    ["KEY=value, then KEY: value", "K=w\nK: v\n", UNREADABLE],
+    ["a double quote that is not closed on the line", 'K="abc\nX=1\n', UNREADABLE],
+    ["a single quote that is not closed on the line", "K='abc\nX=1\n", UNREADABLE],
     ["a longer key with the same suffix", "XK=v\n", ""],
     ["a longer key with the same prefix", "K2=v\nKK=w\n", ""],
     ["export glued to the key is another key", "exportK=v\n", ""],
     ["export without an assignment", "export K\n", ""],
     ["the key only inside another value", "OTHER=K=v\n", ""],
     ["no .env at all", null, ""],
-  ])("%s", (_name, content, expected) => {
+  ] as [string, string | null, string | typeof UNREADABLE][])("%s", (_name, content, expected) => {
     const r = value(content);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
-    expect(r.out).toBe(`[${expected}]`);
+    expect(r.out).toBe(expected === UNREADABLE ? "[]UNREADABLE" : `[${expected}]`);
   });
 
-  it("never evaluates the file: $, backticks and $( ) stay literal and nothing runs", () => {
-    const r = value("K=$HOME `touch pwned-1` $(touch pwned-2) ${PATH}\nexport X=$(touch pwned-3)\n");
-    expect(r.err).toBe("");
-    expect(r.out).toBe("[$HOME `touch pwned-1` $(touch pwned-2) ${PATH}]");
+  it("never evaluates the file: backticks and $( ) are text, and nothing runs", () => {
+    const quoted = value("K='$HOME `touch pwned-1` $(touch pwned-2) ${PATH}'\nexport X=$(touch pwned-3)\n");
+    expect(quoted.err).toBe("");
+    expect(quoted.out).toBe("[$HOME `touch pwned-1` $(touch pwned-2) ${PATH}]");
+    const backticks = value("K=`touch pwned-4`\n");
+    expect(backticks.out).toBe("[`touch pwned-4`]");
+    const unquoted = value("K=$(touch pwned-5) `touch pwned-6`\n");
+    expect(unquoted.err).toBe("");
+    expect(unquoted.out).toBe("[]UNREADABLE");
     expect(fs.readdirSync(dir).sort()).toEqual([".env"]);
   });
 
@@ -106,6 +149,8 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["an empty assignment", "K=\n", 0],
     ["an empty export", "export K=\n", 0],
     ["spaces around =", "  K = \n", 0],
+    ["KEY: value", "K: v\n", 0],
+    ["an unreadable value", "K=$HOME\n", 0],
     ["only commented out", "#K=v\n", 1],
     ["another key", "KK=v\n", 1],
     ["no .env at all", null, 1],
@@ -126,6 +171,36 @@ describe("env_value reads .env the way Docker Compose does", () => {
     const r = inDir(env, 'provider_from_env; check_postgres_env && echo "COMPLETE"');
     expect(r.err).toBe("");
     expect(r.out).toBe("postgres\nCOMPLETE\n");
+  });
+
+  it("provider_from_env says unreadable, not sqlite, for a provider line it cannot read", () => {
+    expect(inDir("BLACKVAULT_DB_PROVIDER=$DB\n", "provider_from_env").out).toBe("unreadable\n");
+    expect(inDir('BLACKVAULT_DB_PROVIDER: "postgres"\n', "provider_from_env").out).toBe("unreadable\n");
+  });
+
+  it("check_postgres_env does not call a key missing when its line is only unreadable", () => {
+    const env = [
+      "COMPOSE_PROFILES=postgres",
+      "BLACKVAULT_DB_PROVIDER=postgres",
+      "BLACKVAULT_POSTGRES_PASSWORD=pa$$word",
+      'BLACKVAULT_DATABASE_URL="postgresql://blackvault:${BLACKVAULT_POSTGRES_PASSWORD}@db:5432/blackvault"',
+      "",
+    ].join("\n");
+    const r = inDir(env, 'check_postgres_env && echo "COMPLETE"');
+    expect(r.err).toBe("");
+    expect(r.out).toContain("COMPLETE");
+    expect(r.out).not.toContain("is missing");
+    expect(r.out).toContain("BLACKVAULT_POSTGRES_PASSWORD");
+    expect(r.out).toContain("BLACKVAULT_DATABASE_URL");
+    expect(r.out).toContain("cannot be checked");
+    expect(r.out).not.toContain("pa$");
+  });
+
+  it("env_unreadable_text names the key and the two ways to write a line that is read", () => {
+    const r = inDir("K=$X\n", "env_unreadable_text K");
+    expect(r.out).toContain("K in .env could not be read");
+    expect(r.out).toContain("K=value or K='value'");
+    expect(r.out.endsWith("\n")).toBe(false);
   });
 });
 

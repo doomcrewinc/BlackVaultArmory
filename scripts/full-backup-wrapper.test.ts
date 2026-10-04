@@ -456,6 +456,18 @@ describe.skipIf(isWindows)("backup.sh", () => {
       expect(verifyCall()).toHaveLength(2);
     });
 
+    it("a DATA_DIR, BLACKVAULT_BACKUP_DIR or provider line the .env reader cannot read (Compose would change the value) stops before docker is asked for anything but its version: no default folder is used", () => {
+      for (const line of ['DATA_DIR="${HOME}/blackvault"', "export DATA_DIR=$HOME/blackvault", 'BLACKVAULT_BACKUP_DIR="D:\\new\\backups"', "BLACKVAULT_DB_PROVIDER: sqlite"]) {
+        fs.writeFileSync(path.join(app, ".env"), `${line}\n`);
+        const before = callLines().length;
+        const r = run(["--verify", NAME, "--passphrase-file", passFile()], { env: { BV_STUB_RUNNING: "1" } });
+        expect(r.code, line).toBe(1);
+        expect(r.stderr, line).toContain(`${line.replace(/^export /, "").split(/[=:]/)[0]} in .env could not be read`);
+        expect(r.stderr, line).toContain("Nothing was done.");
+        expect(callLines().slice(before).filter((l) => !l.startsWith("compose version")), line).toEqual([]);
+      }
+    });
+
     it("a path OUTSIDE the backup folder is an error: exit 1, one line naming the folder, the program never started", () => {
       fs.mkdirSync(path.join(app, "data/backups/sub"), { recursive: true });
       const outside = [path.join(tmp, NAME), path.join(app, "data", NAME), path.join(app, "data/backups/sub", NAME), `../${NAME}`, "/etc/passwd"];

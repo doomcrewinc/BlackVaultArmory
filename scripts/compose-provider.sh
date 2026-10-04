@@ -12,25 +12,42 @@
 # exported in the shell override .env, and DATABASE_URL is commonly exported.
 # docker-compose.yml maps them to the names the container uses.
 
-# The .env reader. It reads a line the way Docker Compose does, because
-# Compose is what finally uses the file:
+# The .env reader. Docker Compose is what finally uses the file, so a line is
+# read the way Compose reads it:
 #   KEY=value            export KEY=value        KEY = value
-#   KEY="value"          KEY='value'             (one pair of quotes removed)
-#   KEY=value # comment  KEY="value" # comment   (a # after whitespace)
-# with leading whitespace and CRLF line endings allowed, lines starting with
-# # ignored, and the LAST assignment of a key winning. The file is never
-# evaluated: $, backticks and \ in a value are kept as written (Compose would
-# substitute ${VAR} and unescape inside double quotes; no key read here uses
-# either).
+#   KEY="value"          KEY='value'             (the quotes removed; text
+#                                                 after the closing one dropped)
+#   KEY=value # comment                          (cut at the first space-#)
+# with leading whitespace, a UTF-8 BOM on the first line and CRLF line endings
+# allowed, lines starting with # ignored, and the LAST assignment of a key
+# winning. The file is never evaluated.
+#
+# Compose also changes some values in ways this reader does not implement. A
+# line of that kind is UNREADABLE: no value is returned for it (never the text
+# as written, which is not what Compose will use), and env_unreadable is true:
+#   - a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+#   - a \ in a double-quoted value (Compose unescapes \n, \r, \t, \" ...);
+#   - KEY: value (the YAML form);
+#   - a quote that is not closed on its line (Compose reads on to the next).
+# Single-quoted values are literal in Compose, $ and \ included, and so are
+# backslashes in an unquoted value: a Windows path is read in both forms.
 
-# env_raw_value KEY: prints what follows the = of the last assignment of KEY
-# in ./.env, CR removed, otherwise untouched. Returns 1 when there is none.
-env_raw_value() {
-  local key="$1" line name raw="" found=1
+# env_read KEY: parses ./.env and sets ENV_STATE to unset, set or unreadable
+# for the last assignment of KEY, and ENV_VALUE to its value (empty unless
+# set). Use env_value / env_has_key / env_unreadable; a `$( )` runs in a
+# subshell, so these two variables do not come back out of one.
+env_read() {
+  local key="$1" line name rest quote first=1
+  ENV_STATE="unset"
+  ENV_VALUE=""
   if [[ ! -f .env ]]; then
-    return 1
+    return 0
   fi
   while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ $first -eq 1 ]]; then
+      first=0
+      line=${line#$'\xef\xbb\xbf'}
+    fi
     line=${line%$'\r'}
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in
@@ -40,55 +57,103 @@ env_raw_value() {
         line="${line#"${line%%[![:space:]]*}"}"
         ;;
     esac
-    case "$line" in
-      *=*) ;;
-      *) continue ;;
-    esac
-    name=${line%%=*}
+    # The key ends at the first = or : (Compose accepts either).
+    name=${line%%[=:]*}
+    if [[ "$name" == "$line" ]]; then
+      continue
+    fi
+    rest=${line:${#name}}
     name="${name%"${name##*[![:space:]]}"}"
-    if [[ "$name" == "$key" ]]; then
-      raw=${line#*=}
-      found=0
+    if [[ "$name" != "$key" ]]; then
+      continue
+    fi
+    ENV_VALUE=""
+    if [[ "${rest:0:1}" == ":" ]]; then
+      ENV_STATE="unreadable"
+      continue
+    fi
+    ENV_STATE="set"
+    rest=${rest:1}
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    quote=${rest:0:1}
+    if [[ "$quote" == "'" || "$quote" == '"' ]]; then
+      rest=${rest:1}
+      if [[ "$rest" != *"$quote"* ]]; then
+        ENV_STATE="unreadable"
+        continue
+      fi
+      rest=${rest%%"$quote"*}
+      if [[ "$quote" == '"' && ( "$rest" == *'$'* || "$rest" == *\\* ) ]]; then
+        ENV_STATE="unreadable"
+        continue
+      fi
+      ENV_VALUE=$rest
+    else
+      # Unquoted: a # after a space starts a comment (a tab does not, and
+      # neither does a # that opens the value).
+      rest=${rest%%" #"*}
+      rest="${rest%"${rest##*[![:space:]]}"}"
+      if [[ "$rest" == *'$'* ]]; then
+        ENV_STATE="unreadable"
+        continue
+      fi
+      ENV_VALUE=$rest
     fi
   done < .env
-  if [[ $found -eq 0 ]]; then
-    printf '%s\n' "$raw"
-  fi
-  return "$found"
-}
-
-# 0 when ./.env assigns KEY, even to nothing.
-env_has_key() {
-  env_raw_value "$1" >/dev/null
+  return 0
 }
 
 # Value of KEY in ./.env, as described above. Inner spaces are kept, so
-# DATA_DIR paths with spaces survive. A quote with no closing quote is kept
-# as written. Empty when unset or no .env.
+# DATA_DIR paths with spaces survive. Empty when unset, when there is no .env,
+# and when the line is unreadable: ask env_unreadable to tell that case apart.
 env_value() {
-  local raw value quote
-  raw=$(env_raw_value "$1") || raw=""
-  value="${raw#"${raw%%[![:space:]]*}"}"
-  quote=${value:0:1}
-  if [[ "$quote" == "'" || "$quote" == '"' ]] && [[ "${value:1}" == *"$quote"* ]]; then
-    value=${value:1}
-    value=${value%%"$quote"*}
-  else
-    # Unquoted: a # after whitespace starts a comment. Cut from the text as
-    # it stood after the =, so "KEY= # note" is empty and "KEY=a#b" is whole.
-    value=${raw%%[[:space:]]"#"*}
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
+  env_read "$1"
+  printf '%s\n' "$ENV_VALUE"
+}
+
+# 0 when ./.env assigns KEY, even to nothing or in an unreadable form.
+env_has_key() {
+  env_read "$1"
+  [[ "$ENV_STATE" != "unset" ]]
+}
+
+# 0 when the last assignment of KEY in ./.env is in a form this reader does
+# not read (see the list above). Callers must not fall back to a default then.
+env_unreadable() {
+  env_read "$1"
+  [[ "$ENV_STATE" == "unreadable" ]]
+}
+
+# One line (no newline at its end) saying that KEY is unreadable, why a line
+# is, and how to write it so that it is read.
+env_unreadable_text() {
+  printf '%s' "$1 in .env could not be read: the line holds a \$, a \\ inside double quotes, '$1: value', or a quote that is not closed. Write it as $1=value or $1='value', with the final value spelled out."
+}
+
+# env_require_readable KEY [WHAT WAS NOT DONE]: returns 1, after an ERROR
+# saying the above, when KEY is unreadable; 0 otherwise.
+env_require_readable() {
+  if env_unreadable "$1"; then
+    echo "ERROR: $(env_unreadable_text "$1")"
+    if [[ -n "${2:-}" ]]; then
+      echo "       $2"
+    fi
+    return 1
   fi
-  printf '%s\n' "$value"
+  return 0
 }
 
 # Provider recorded in an existing .env. Installs made before PostgreSQL
 # support have no BLACKVAULT_DB_PROVIDER line (or no .env at all) and were
 # always SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml
-# ignores it.
+# ignores it. Prints "unreadable" when the line cannot be read: SQLite must
+# not be assumed then.
 provider_from_env() {
   local value
+  if env_unreadable BLACKVAULT_DB_PROVIDER; then
+    echo "unreadable"
+    return 0
+  fi
   value=$(env_value BLACKVAULT_DB_PROVIDER | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
   case "$value" in
     "" | sqlite) echo "sqlite" ;;
@@ -98,18 +163,35 @@ provider_from_env() {
 }
 
 # Prints a warning when .env says PostgreSQL but lacks a key the single
-# compose file needs to actually run it. Returns 0 when complete.
+# compose file needs to actually run it. Returns 0 when complete. A key whose
+# line is unreadable is there, so it is not called missing; it is listed as
+# not checked instead.
 check_postgres_env() {
-  local missing=""
-  case ",$(env_value COMPOSE_PROFILES | tr -d '[:space:]')," in
-    *,postgres,*) ;;
-    *) missing="$missing COMPOSE_PROFILES=postgres" ;;
-  esac
-  [ -n "$(env_value BLACKVAULT_POSTGRES_PASSWORD)" ] || missing="$missing BLACKVAULT_POSTGRES_PASSWORD"
-  case "$(env_value BLACKVAULT_DATABASE_URL)" in
-    postgres://* | postgresql://*) ;;
-    *) missing="$missing BLACKVAULT_DATABASE_URL=postgresql://..." ;;
-  esac
+  local missing="" unchecked=""
+  if env_unreadable COMPOSE_PROFILES; then
+    unchecked="$unchecked COMPOSE_PROFILES"
+  else
+    case ",$(env_value COMPOSE_PROFILES | tr -d '[:space:]')," in
+      *,postgres,*) ;;
+      *) missing="$missing COMPOSE_PROFILES=postgres" ;;
+    esac
+  fi
+  if env_unreadable BLACKVAULT_POSTGRES_PASSWORD; then
+    unchecked="$unchecked BLACKVAULT_POSTGRES_PASSWORD"
+  elif [[ -z "$(env_value BLACKVAULT_POSTGRES_PASSWORD)" ]]; then
+    missing="$missing BLACKVAULT_POSTGRES_PASSWORD"
+  fi
+  if env_unreadable BLACKVAULT_DATABASE_URL; then
+    unchecked="$unchecked BLACKVAULT_DATABASE_URL"
+  else
+    case "$(env_value BLACKVAULT_DATABASE_URL)" in
+      postgres://* | postgresql://*) ;;
+      *) missing="$missing BLACKVAULT_DATABASE_URL=postgresql://..." ;;
+    esac
+  fi
+  if [[ -n "$unchecked" ]]; then
+    echo "Note: these .env lines hold a \$ or another form this script does not read, so they cannot be checked:$unchecked"
+  fi
   [ -z "$missing" ] && return 0
   echo "⚠  WARNING: .env says BLACKVAULT_DB_PROVIDER=postgres but is missing:$missing"
   echo "   A PostgreSQL install needs all four of these in .env:"

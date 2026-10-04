@@ -53,6 +53,14 @@ fail() {
   exit 1
 }
 
+# A line this script cannot read is not a missing one: neither SQLite nor
+# ./data is assumed for it.
+if env_unreadable BLACKVAULT_DB_PROVIDER; then
+  fail "$(env_unreadable_text BLACKVAULT_DB_PROVIDER)"
+fi
+if env_unreadable DATA_DIR; then
+  fail "$(env_unreadable_text DATA_DIR)"
+fi
 PROVIDER=$(provider_from_env)
 TS="$(date -u +%Y%m%d-%H%M%S)"
 DATA_DIR=$(env_value DATA_DIR)

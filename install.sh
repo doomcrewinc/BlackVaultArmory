@@ -50,6 +50,10 @@ if [ -f ".env" ]; then
   echo "Existing .env found — BlackVault is already configured."
   echo "To reconfigure, delete .env and re-run this script."
   echo ""
+  # A line this script cannot read is not "no data here": going on to the
+  # wizard would write a new .env over it.
+  env_require_readable DATA_DIR "Nothing was changed." || exit 1
+  env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was changed." || exit 1
   EXISTING_DATA_DIR=$(env_value DATA_DIR)
   EXISTING_PROVIDER=$(provider_from_env)
   if [ -n "$EXISTING_DATA_DIR" ] && {
@@ -76,6 +80,7 @@ if [ ! -f ".env" ] && [ -f ".blackvault.env" ]; then
   cp .blackvault.env .env
   echo "Migrated. Original .blackvault.env kept as backup."
   echo ""
+  env_require_readable DATA_DIR "Correct the line in .env and re-run this script." || exit 1
   EXISTING_DATA_DIR=$(env_value DATA_DIR)
   if [ -n "$EXISTING_DATA_DIR" ] && [ -f "$EXISTING_DATA_DIR/db/vault.db" ]; then
     # Legacy configs predate PostgreSQL support: they are always SQLite, and a

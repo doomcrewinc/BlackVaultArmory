@@ -60,6 +60,15 @@ bv_compose_setup() {
   # container must not inherit an uploads-snapshot marker (see rotate-key.sh).
   unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_BACKUP_DIR BLACKVAULT_UPLOADS_SNAPSHOT
 
+  # A line the .env reader cannot read is not a missing one: no default
+  # folder and no default provider is used in its place.
+  local key
+  for key in DATA_DIR BLACKVAULT_BACKUP_DIR BLACKVAULT_DB_PROVIDER; do
+    if env_unreadable "$key"; then
+      die "$(env_unreadable_text "$key") Nothing was done."
+    fi
+  done
+
   # NOT named DATA_DIR: if the user's shell exports DATA_DIR, assigning it
   # here would change the value docker compose interpolates into every mount.
   HOST_DATA_DIR=$(env_value DATA_DIR)

@@ -69,6 +69,25 @@ ensure_encryption_key() {
     echo "Encryption key: $ENCRYPTION_KEY_FILE (existing, unchanged)"
     return 0
   fi
+  # Compose passes an exported variable to the app before the .env line, so
+  # the .env line only matters when the shell sets none. There it must be a
+  # usable key or absent: an unreadable or malformed line is neither "a key
+  # is set" nor "no key", and a new key file beside it could be a second key.
+  if [[ -z "${BLACKVAULT_ENCRYPTION_KEY:-}" ]]; then
+    if env_unreadable BLACKVAULT_ENCRYPTION_KEY; then
+      echo "ERROR: $(env_unreadable_text BLACKVAULT_ENCRYPTION_KEY)"
+      echo "       This script cannot tell whether an encryption key is already set, so no key file was created."
+      return 1
+    fi
+    key=$(env_value BLACKVAULT_ENCRYPTION_KEY)
+    if [[ -n "$key" && ! "$key" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      key=""
+      echo "ERROR: BLACKVAULT_ENCRYPTION_KEY in .env is not 64 hex characters, so the app would refuse to start."
+      echo "       Correct the line, or remove it to have a key file created. No key file was created."
+      return 1
+    fi
+    key=""
+  fi
   if env_source=$(encryption_key_env_source); then
     echo "Encryption key: BLACKVAULT_ENCRYPTION_KEY (from $env_source) - no key file created"
     # docker-compose.yml bind-mounts secrets/ with create_host_path: false,

@@ -132,12 +132,19 @@ fi
 # BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
 # uploads snapshot; an inherited value must never reach it (final review FIX 5).
 unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
+env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was pulled, rebuilt or restarted." || exit 1
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 
 # ── Read DATA_DIR from .env ────────────────────────────────────
 # Only surrounding whitespace and quotes are stripped: paths may contain spaces.
+# An unreadable DATA_DIR (see scripts/compose-provider.sh) leaves this empty,
+# which skips the check below and its relocation: the folder Compose will use
+# is not known, so no other folder is put in its place.
 ACTIVE_DATA_DIR=$(env_value DATA_DIR)
+if env_unreadable DATA_DIR; then
+  echo "⚠  DATA_DIR in .env could not be read, so the database check is skipped and DATA_DIR is left as it is."
+fi
 
 # ── Preflight: verify the database exists ─────────────────────
 if [ "$DB_PROVIDER" != "sqlite" ]; then
@@ -229,6 +236,10 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
+if env_unreadable BLACKVAULT_PUBLIC_URL; then
+  echo "BLACKVAULT_PUBLIC_URL in .env could not be read (a \$ in it is not substituted here)."
+  echo "Enter it again; it is added to .env as a plain line, which is the one Docker uses."
+fi
 CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
 NEW_URL=$(prompt_public_url "$CURRENT_URL")
 [ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
