@@ -113,6 +113,15 @@ if [ -n "$LEGACY_DATA" ]; then
   if [[ "$KEEP" =~ ^[Yy] ]]; then
     DATA_DIR="$LEGACY_DATA"
     echo "   Using existing data at: $DATA_DIR"
+    if ! data_dir_round_trips "$DATA_DIR"; then
+      {
+        echo "ERROR: the path of that folder cannot be written to .env so that Docker Compose"
+        echo "       reads it back unchanged (it holds a \$, or \" #\"). Move the BlackVault"
+        echo "       folder to a path without those, and run this script again."
+        echo "       Nothing was changed."
+      } >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -122,25 +131,35 @@ if [ -z "$DATA_DIR" ]; then
   echo "Where should BlackVault store its data?"
   echo "  This folder will contain your database and uploaded images."
   echo "  Default: $DEFAULT_DATA"
-  read -rp "  Data directory [press Enter for default]: " DATA_DIR_INPUT
-  DATA_DIR="${DATA_DIR_INPUT:-$DEFAULT_DATA}"
-  DATA_DIR="${DATA_DIR%/}"   # strip trailing slash
-  # `read` does not expand ~, and Docker Compose would later put the home
-  # folder in its place: write the full path to .env. ~name (another user's
-  # home) is not guessed at.
-  if [[ "$DATA_DIR" == "~" ]]; then
-    DATA_DIR="$HOME"
-  elif [[ "$DATA_DIR" == "~/"* ]]; then
-    DATA_DIR="$HOME/${DATA_DIR#"~/"}"
-  elif [[ "$DATA_DIR" == "~"* ]]; then
-    {
+  # What is written to .env must be a line the .env reader reads back as this
+  # folder (see data_dir_round_trips). `read` does not expand anything, and
+  # Docker Compose would later put the home folder in place of a leading ~ and
+  # substitute a $VAR: a leading ~/ or $HOME/ is spelled out here, and any
+  # other answer that would not be read back as typed is asked for again.
+  while true; do
+    if ! read -rp "  Data directory [press Enter for default]: " DATA_DIR_INPUT; then
       echo ""
-      echo "ERROR: the data directory $DATA_DIR starts with ~ and is not under your own"
-      echo "       home folder (~/...). Run this script again and type the full path."
-      echo "       Nothing was changed."
-    } >&2
-    exit 1
-  fi
+      echo "ERROR: no data directory was given. Nothing was changed." >&2
+      exit 1
+    fi
+    DATA_DIR="${DATA_DIR_INPUT:-$DEFAULT_DATA}"
+    DATA_DIR="${DATA_DIR%/}"   # strip trailing slash
+    # The patterns are the literal text ~ and $HOME, as typed.
+    case "$DATA_DIR" in
+      "~" | '$HOME') DATA_DIR="$HOME" ;;
+      "~/"*) DATA_DIR="$HOME/${DATA_DIR#"~/"}" ;;
+      '$HOME/'*) DATA_DIR="$HOME/${DATA_DIR#'$HOME/'}" ;;
+      *) ;;
+    esac
+    if data_dir_round_trips "$DATA_DIR"; then
+      break
+    fi
+    echo "  That folder cannot be used as typed: Docker Compose would read"
+    echo "  DATA_DIR=$DATA_DIR as another folder. Type the full path, with no \$"
+    echo "  in it and not starting with ~ (only a leading ~/ or \$HOME/ is spelled out"
+    echo "  for you)."
+    DATA_DIR=""
+  done
 fi
 
 # ── Port ─────────────────────────────────────────────────────
@@ -272,26 +291,15 @@ echo "Waiting for health check..."
 # Polled as in update.sh. The app logs the first-time setup token while it
 # starts, and a first start (migrations, and on PostgreSQL the database) takes
 # longer than a fixed few seconds: once healthy, the token is in the log.
-# Only the status word "healthy" ends the wait: "unhealthy" and "starting"
-# keep polling (a slow first start can recover), and the last status seen
-# decides what is reported.
-HEALTH=""
-for _ in $(seq 1 60); do
-  HEALTH=$(container_health)
-  if [[ "$HEALTH" == "healthy" ]]; then
-    break
-  fi
-  sleep 2
-done
+# wait_for_health (scripts/compose-provider.sh) says what ends the wait; the
+# last state seen decides what is reported.
+wait_for_health
 
 if [[ "$HEALTH" == "healthy" ]]; then
   echo "BlackVault is running."
-elif [[ "$HEALTH" == "unhealthy" ]]; then
-  echo "WARNING: the BlackVault container is unhealthy. Check the logs with:"
-  echo "  $COMPOSE logs -f"
 else
-  echo "WARNING: BlackVault did not become healthy within two minutes. Check the logs with:"
-  echo "  $COMPOSE logs -f"
+  echo "WARNING: $(health_problem_text). Check the logs with:"
+  echo "  $COMPOSE logs blackvault"
 fi
 
 # ── Summary ───────────────────────────────────────────────────
@@ -319,9 +327,10 @@ echo ""
 # Printed only while no admin account exists (see scripts/setup-token.sh).
 show_setup_token "$PUBLIC_URL"
 
-# A container that reports unhealthy is a failed install for whoever started
-# this script (another script, a provisioning tool). One that is still
-# starting when the wait ran out is not: a slow first start can still come up.
-if [[ "$HEALTH" == "unhealthy" ]]; then
+# A container that is unhealthy, keeps restarting, has exited or is not there
+# is a failed install for whoever started this script (another script, a
+# provisioning tool). One that is still starting when the wait ran out is not:
+# a slow first start can still come up.
+if start_failed; then
   exit 1
 fi

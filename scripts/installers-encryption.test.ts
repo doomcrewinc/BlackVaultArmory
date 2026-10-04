@@ -314,6 +314,45 @@ describe("health wait: only the status word healthy is success", () => {
     expect(r.out).not.toContain("Update complete.");
   });
 
+  // The app's own start refusals (a restore marker, two keys, no public URL)
+  // leave the container restarting over and over: neither unhealthy nor
+  // starting. That is a failed start, seen after a few polls, not a slow one.
+  it.each([
+    ["install.sh", "Restarting (1) 2 seconds ago", INSTALL_ANSWERS, "keeps restarting"],
+    ["update.sh", "Restarting (1) 2 seconds ago", "\n", "keeps restarting"],
+    ["install.sh", "Exited (1) 5 seconds ago", INSTALL_ANSWERS, "has exited"],
+    ["update.sh", "Exited (1) 5 seconds ago", "\n", "has exited"],
+    ["install.sh", "", INSTALL_ANSWERS, "no running BlackVault container"],
+    ["update.sh", "", "\n", "no running BlackVault container"],
+  ])("%s: status %j is a failed start: the wait ends after three sightings, the output says so and names the log command, exit 1", (script, status, answers, words) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: status });
+    expect(r.code, r.out).toBe(1);
+    expect(polls(r.calls)).toBe(3);
+    expect(r.out).toContain(words);
+    expect(r.out).toContain("docker compose logs blackvault");
+    expect(r.out).toContain("NOT healthy");
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+    expect(r.out).not.toContain("did not become healthy");
+  });
+
+  it("a status with no health word at all (an image without a health check) is still the old outcome: the full wait, a warning, exit 0", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, "update.sh", "\n", { BV_STUB_PS_STATUS: "Up 2 minutes" });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy");
+  });
+
   it("install.sh: healthy on the first poll is success", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -555,31 +594,49 @@ describe("update.sh (no git checkout)", () => {
     expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
   });
 
+  /** What the reader gives back for DATA_DIR in dir's .env: [value, unreadable?]. */
+  function dataDirReadBack(dir: string): [string, boolean] {
+    const r = spawnSync("bash", ["-c", '. scripts/compose-provider.sh; env_value DATA_DIR; if env_unreadable DATA_DIR; then echo UNREADABLE; fi'], { cwd: dir, encoding: "utf8" });
+    const lines = r.stdout.split("\n");
+    return [lines[0], lines[1] === "UNREADABLE"];
+  }
+
+  // THE INVARIANT: whatever install.sh writes for DATA_DIR is a line its own
+  // reader reads back as the folder the installer created. A typed answer the
+  // reader would refuse, or read as something else, is asked for again.
   it.each([
-    ["~/bv-data", (home: string) => `${home}/bv-data`],
-    ["~/bv-data/", (home: string) => `${home}/bv-data`],
-    ["~", (home: string) => home],
-  ])("install.sh: a typed data folder %s is written to .env with the home folder spelled out, and no folder named ~ is made", (typed, expected) => {
+    ["an absolute path", (t: string) => `${t}/bv data`, (t: string) => `${t}/bv data`, false],
+    ["~/x", () => "~/bv-data", (t: string) => `${t}/bv-data`, false],
+    ["$HOME/x", () => "$HOME/bv-data", (t: string) => `${t}/bv-data`, false],
+    ["$HOME alone", () => "$HOME", (t: string) => t, false],
+    ["~name/x, then a good path", (t: string) => `~rob/bv-data\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["a $VAR in the middle, then a good path", (t: string) => `${t}/$USER/data\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["${HOME}/x, then a good path", (t: string) => "${HOME}/bv\n" + `${t}/second`, (t: string) => `${t}/second`, true],
+    ["a path holding ' #' (the reader would cut it there), then a good path", (t: string) => `${t}/vault #2\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["a path starting with a quote, then a good path", (t: string) => `"${t}/quoted"\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["three refused answers, then the default", () => "~a/x\n$B/x\n~c/x\n", (_t: string, dir: string) => `${dir}/data`, true],
+  ] as [string, (t: string) => string, (t: string, dir: string) => string, boolean][])("install.sh writes a DATA_DIR line its own reader reads back as the folder it made: %s", (_name, typed, expected, refusedFirst) => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
-    const r = run(dir, "install.sh", `${typed}${INSTALL_ANSWERS}`);
+    const r = run(dir, "install.sh", `${typed(tmp)}${INSTALL_ANSWERS}`);
     expect(r.code, r.out).toBe(0);
-    const sourced = spawnSync("bash", ["-c", ". scripts/compose-provider.sh; env_value DATA_DIR; env_unreadable DATA_DIR && echo UNREADABLE"], { cwd: dir, encoding: "utf8" });
-    expect(sourced.stdout).toBe(`${expected(tmp)}\n`);
-    expect(fs.existsSync(path.join(dir, "~"))).toBe(false);
-    expect(fs.statSync(path.join(expected(tmp), "db")).isDirectory()).toBe(true);
-    expect(r.out).toContain(`Data stored: ${expected(tmp)}\n`);
+    const want = expected(tmp, fs.realpathSync(dir));
+    expect(dataDirReadBack(dir)).toEqual([want, false]);
+    expect(fs.statSync(path.join(want, "db")).isDirectory()).toBe(true);
+    expect(r.out).toContain(`Data stored: ${want}\n`);
+    expect(r.out.includes("That folder cannot be used as typed")).toBe(refusedFirst);
+    // Nothing literally named after what was typed is left in the checkout.
+    expect(fs.readdirSync(dir).filter((n) => /[~$"]/.test(n))).toEqual([]);
   });
 
-  it("install.sh: a typed data folder ~name/... is refused before anything is written: whose home that is cannot be told", () => {
+  it("install.sh: the data-folder question at the end of input stops the installer; nothing is written", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
-    const r = run(dir, "install.sh", `~rob/bv-data${INSTALL_ANSWERS}`);
+    const r = run(dir, "install.sh", "~rob/bv-data\n");
     expect(r.code, r.out).toBe(1);
-    expect(r.out).toContain("ERROR: the data directory ~rob/bv-data starts with ~");
-    expect(r.out).toContain("Nothing was changed.");
+    expect(r.out).toContain("That folder cannot be used as typed");
+    expect(r.out).toContain("ERROR: no data directory was given. Nothing was changed.");
     expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
-    expect(fs.existsSync(path.join(dir, "~rob"))).toBe(false);
     expect(r.calls).not.toContain("compose up");
   });
 

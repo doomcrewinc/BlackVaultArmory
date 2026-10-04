@@ -238,11 +238,17 @@ check_postgres_env() {
   return 1
 }
 
-# Health of the blackvault container, read from the Status column of
-# `docker compose ps`: "Up 2 minutes (healthy)", "(unhealthy)" or
-# "(health: starting)". Prints healthy, unhealthy or starting; prints nothing
-# when the container is not listed or reports no health. Needs $COMPOSE.
-# install.bat and update.bat mirror it in :health_status.
+# State of the blackvault container, read from the Status column of
+# `docker compose ps`:
+#   healthy     "Up 2 minutes (healthy)"
+#   unhealthy   "Up 2 minutes (unhealthy)"
+#   starting    "Up 3 seconds (health: starting)"
+#   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
+#               starting it again (restart: unless-stopped)
+#   exited      "Exited (1) 4 seconds ago"
+#   missing     nothing is listed: there is no running container
+# and nothing for any other text (a running container that reports no health).
+# Needs $COMPOSE. install.bat and update.bat mirror it in :health_status.
 container_health() {
   local status
   status=$($COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null) || status=""
@@ -250,8 +256,76 @@ container_health() {
     *"(healthy)"*) echo "healthy" ;;
     *"(unhealthy)"*) echo "unhealthy" ;;
     *"(health: starting)"*) echo "starting" ;;
+    Restarting*) echo "restarting" ;;
+    Exited*) echo "exited" ;;
+    "") echo "missing" ;;
+    *) ;;
   esac
   return 0
+}
+
+# wait_for_health: polls container_health every two seconds, for up to two
+# minutes, and leaves the last state seen in HEALTH. The app healthcheck runs
+# every 30 s, so right after `up -d` the state is "starting", which is neither
+# success nor failure. The wait ends early on "healthy", and once the
+# container has been seen restarting, exited or missing three times: the app
+# refuses to start (a restore marker, two keys, no public URL) by exiting, and
+# Docker then starts it over and over. "unhealthy" keeps polling: a slow first
+# start can recover.
+wait_for_health() {
+  local failed=0
+  HEALTH=""
+  for _ in $(seq 1 60); do
+    HEALTH=$(container_health)
+    case "$HEALTH" in
+      healthy) return 0 ;;
+      restarting | exited | missing)
+        failed=$((failed + 1))
+        if [[ "$failed" -ge 3 ]]; then
+          return 0
+        fi
+        ;;
+      *) ;;
+    esac
+    sleep 2
+  done
+  return 0
+}
+
+# 0 when HEALTH (see wait_for_health) is a start that failed. "starting" at
+# the end of the wait is not one: a slow first start can still come up.
+start_failed() {
+  case "$HEALTH" in
+    unhealthy | restarting | exited | missing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# One line saying what HEALTH means when it is not healthy.
+health_problem_text() {
+  case "$HEALTH" in
+    unhealthy) printf '%s' "the BlackVault container is unhealthy: its health check is failing" ;;
+    restarting) printf '%s' "the BlackVault container keeps restarting: the app stops during startup, and says why in its log" ;;
+    exited) printf '%s' "the BlackVault container has exited: the app stopped during startup, and says why in its log" ;;
+    missing) printf '%s' "no running BlackVault container was found" ;;
+    *) printf '%s' "BlackVault did not become healthy within two minutes" ;;
+  esac
+  return 0
+}
+
+# data_dir_round_trips VALUE: 0 when a line DATA_DIR=VALUE, as install.sh
+# writes it, is read back by env_read as exactly VALUE. A value holding a $,
+# starting with ~ or a quote, or holding " #" is not: Docker Compose (and this
+# reader) would take another folder than the one typed.
+data_dir_round_trips() {
+  local value=$1 scratch result=1
+  scratch=$(mktemp -d 2>/dev/null) || return 1
+  if printf 'DATA_DIR=%s\n' "$value" > "$scratch/.env" &&
+    (cd "$scratch" && env_read DATA_DIR && [[ "$ENV_STATE" == "set" && "$ENV_VALUE" == "$value" ]]); then
+    result=0
+  fi
+  rm -rf "$scratch"
+  return "$result"
 }
 
 # ── Docker Compose version floor ─────────────────────────────

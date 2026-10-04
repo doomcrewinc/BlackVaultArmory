@@ -319,23 +319,15 @@ fi
 
 echo ""
 echo "Waiting for health check..."
-# The app healthcheck runs every 30s, so the first probe is not instant. Poll
-# for up to two minutes: right after `up -d` the status reads
-# "Up 2 seconds (health: starting)", which is neither healthy nor a failure.
-# Only the status word "healthy" ends the wait; the last status seen decides
-# what is reported.
-HEALTH=""
-for _ in $(seq 1 60); do
-  HEALTH=$(container_health)
-  if [[ "$HEALTH" == "healthy" ]]; then
-    break
-  fi
-  sleep 2
-done
+# wait_for_health (scripts/compose-provider.sh) says what ends the wait; the
+# last state seen decides what is reported.
+wait_for_health
 if [[ "$HEALTH" == "healthy" ]]; then
   STATUS="running"
 elif [[ "$HEALTH" == "unhealthy" ]]; then
   STATUS="UNHEALTHY - the container's health check is failing, check the logs"
+elif start_failed; then
+  STATUS="NOT RUNNING - $(health_problem_text): $COMPOSE logs blackvault"
 else
   STATUS="did not become healthy within two minutes, check the logs"
 fi
@@ -364,9 +356,10 @@ echo ""
 # The health wait above means the app has started and logged it by now.
 show_setup_token "$(env_value BLACKVAULT_PUBLIC_URL)"
 
-# A container that reports unhealthy is a failed update for whoever started
-# this script (cron, another script). One that is still starting when the
-# wait ran out is not: a slow first start can still come up.
-if [[ "$HEALTH" == "unhealthy" ]]; then
+# A container that is unhealthy, keeps restarting, has exited or is not there
+# is a failed update for whoever started this script (cron, another script).
+# One that is still starting when the wait ran out is not: a slow first start
+# can still come up.
+if start_failed; then
   exit 1
 fi
