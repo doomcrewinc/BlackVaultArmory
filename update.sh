@@ -172,6 +172,11 @@ elif [ -n "$ACTIVE_DATA_DIR" ]; then
       echo "   Auto-updating DATA_DIR in .env:"
       echo "     $ACTIVE_DATA_DIR  →  $LEGACY_DATA_DIR"
       sed -i.bak "s|^DATA_DIR=.*|DATA_DIR=$LEGACY_DATA_DIR|" .env
+      # A DATA_DIR line in another form (export, spaces around =) is not
+      # rewritten by the sed above: add a plain line after it, which wins.
+      if [[ "$(env_value DATA_DIR)" != "$LEGACY_DATA_DIR" ]]; then
+        set_env_value .env DATA_DIR "$LEGACY_DATA_DIR"
+      fi
       ACTIVE_DATA_DIR="$LEGACY_DATA_DIR"
       echo "   .env updated. Continuing update..."
       echo ""
@@ -228,7 +233,7 @@ CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
 NEW_URL=$(prompt_public_url "$CURRENT_URL")
 [ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
 
-if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
+if ! env_has_key BLACKVAULT_DIRECT_ACCESS_INITIAL; then
   echo ""
   echo "This release can refuse connections that bypass your reverse proxy."
   if [ "$(prompt_yes_no "Keep allowing direct access by IP (http://<ip>:<port>)?" y)" = "y" ]; then
@@ -238,7 +243,7 @@ if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
   fi
 fi
 
-if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
+if ! env_has_key BLACKVAULT_TRUSTED_PROXIES; then
   set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
 fi
 

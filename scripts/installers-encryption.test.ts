@@ -383,6 +383,98 @@ describe("update.sh (no git checkout)", () => {
     expect(r.calls).toContain("key=no");
   });
 
+  // Every form Docker Compose itself accepts for the line: a missed key here
+  // would create a second, different key (KEY_CONFLICT at the next start).
+  it.each([
+    ["export", (k: string) => `export BLACKVAULT_ENCRYPTION_KEY=${k}`],
+    ["export, quotes and a comment", (k: string) => `export BLACKVAULT_ENCRYPTION_KEY="${k}" # the field-encryption key`],
+    ["spaces around = and single quotes", (k: string) => `BLACKVAULT_ENCRYPTION_KEY = '${k}'`],
+    ["CRLF", (k: string) => `BLACKVAULT_ENCRYPTION_KEY=${k}\r`],
+    ["a commented-out empty line above it", (k: string) => `#BLACKVAULT_ENCRYPTION_KEY=\nexport BLACKVAULT_ENCRYPTION_KEY=${k}`],
+  ])("BLACKVAULT_ENCRYPTION_KEY written in .env as: %s → install.sh and update.sh create no key file", (_name, line) => {
+    for (const script of ["install.sh", "update.sh"]) {
+      const dir = path.join(tmp, `app-${script}`);
+      copyTree(dir);
+      sqliteInstall(dir);
+      fs.appendFileSync(path.join(dir, ".env"), `${line("cd".repeat(32))}\n`);
+      const r = run(dir, script, "\n");
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).toContain("Encryption key: BLACKVAULT_ENCRYPTION_KEY (from .env) - no key file created");
+      expect(r.out).not.toContain(BOX_LINE);
+      expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+      expect(callLines(r.calls)).toContain("compose up -d");
+    }
+  });
+
+  it("a commented-out BLACKVAULT_ENCRYPTION_KEY line does not count: the key file is created", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), `# export BLACKVAULT_ENCRYPTION_KEY=${"cd".repeat(32)}\n`);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}\n$/);
+  });
+
+  it("the public URL, direct access and trusted proxies written with export, quotes and comments: nothing is asked again, .env is untouched", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const env = [
+      `export DATA_DIR="${dir}/data" # where the data lives`,
+      "PORT=3000",
+      "export BLACKVAULT_DB_PROVIDER = sqlite",
+      "#BLACKVAULT_PUBLIC_URL=https://old.example.com",
+      "export BLACKVAULT_PUBLIC_URL='https://vault.example.com' # behind the proxy",
+      "export BLACKVAULT_TRUSTED_PROXIES=",
+      "  export BLACKVAULT_DIRECT_ACCESS_INITIAL=on",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    // Only "Is this still current?" (Enter = yes) may be asked. Any further
+    // prompt would read end of input: the URL prompt aborts on it.
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Public URL is: https://vault.example.com\n");
+    expect(r.out).toContain(`Database verified at: ${dir}/data/db/vault.db`);
+    expect(r.out).not.toContain("Public URL: the address people open");
+    expect(r.out).not.toContain("Keep allowing direct access");
+    expect(r.out).not.toContain("Trusted proxies:");
+    expect(r.out).toMatch(/URL:\s+https:\/\/vault\.example\.com\n/);
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(callLines(r.calls)).toContain("compose up -d");
+  });
+
+  it("install.sh over a configured install whose DATA_DIR line uses export and quotes: starts it, does not run the wizard", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const env = `export DATA_DIR = "${dir}/data"\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\n`;
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "install.sh", "");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`Your data is at: ${dir}/data (sqlite)`);
+    expect(r.out).toContain("Starting with existing configuration...");
+    expect(r.out).not.toContain("Where should BlackVault store its data?");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+  });
+
+  it("the database is in a legacy folder and DATA_DIR is written with export: the new DATA_DIR is what .env now says", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir); // the database is in <dir>/data, a location update.sh knows
+    fs.writeFileSync(
+      path.join(dir, ".env"),
+      `export DATA_DIR=${dir}/moved-away\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`,
+    );
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Auto-updating DATA_DIR in .env");
+    const sourced = spawnSync("bash", ["-c", ". scripts/compose-provider.sh; env_value DATA_DIR"], { cwd: dir, encoding: "utf8" });
+    expect(sourced.stdout.trim()).toBe(`${fs.realpathSync(dir)}/data`); // update.sh builds it from $(pwd)
+    expect(fs.existsSync(path.join(dir, ".env.bak"))).toBe(true);
+  });
+
   it("N1: BLACKVAULT_ENCRYPTION_KEY exported in the shell → no key file either", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);

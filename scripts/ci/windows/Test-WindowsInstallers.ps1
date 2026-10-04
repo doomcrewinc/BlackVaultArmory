@@ -1073,6 +1073,176 @@ Assert ($rejections -eq $SemicolonUrls.Count) "rejected all $($SemicolonUrls.Cou
 Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com:3000") "the URL with a normal port was written"
 Assert ($r.StubLog -match "compose up -d") "reached the restart"
 Show-EvidenceIfFailed $r
+
+# ------------------------------------------------------ .env forms (:env_value)
+# install.bat and update.bat read .env through one shared subroutine,
+# :env_value, which mirrors env_value in scripts/compose-provider.sh. The
+# table below runs that subroutine itself: its block is cut out of install.bat
+# (the comment lines above the label through the line before the next blank
+# line, as scripts/bat-shared-subroutines.test.ts cuts it) and put under a
+# three-line driver that prints the three variables it sets.
+function New-EnvValueDriver([string]$Dir) {
+  $lines = [IO.File]::ReadAllText((Join-Path $RepoRoot "install.bat")) -split "`r`n"
+  $at = [Array]::IndexOf($lines, ":env_value")
+  if ($at -lt 0) { throw "install.bat has no :env_value" }
+  $end = $at
+  while ($end + 1 -lt $lines.Count -and $lines[$end + 1].Trim() -ne "") { $end++ }
+  $driver = @(
+    "@echo off",
+    "setlocal EnableDelayedExpansion",
+    "cd /d `"%~dp0`"",
+    "call :env_value K",
+    "echo RESULT=[!_EV!][!_EV_SET!][!_EV_BAD!]",
+    "exit /b 0",
+    ""
+  ) + $lines[$at..$end] + @("")
+  [IO.File]::WriteAllText((Join-Path $Dir "envdrv.bat"), ($driver -join "`r`n"), (New-Object Text.UTF8Encoding $false))
+}
+
+# One row: a name, the .env text ($null: no .env), and what the driver must
+# print as [value][assigned][unreadable].
+$tab = "`t"
+$EnvCases = @(
+  @("plain", "K=v`r`n", "[v][1][]"),
+  @("LF line endings", "A=1`nK=v`nB=2`n", "[v][1][]"),
+  @("no final newline", "K=v", "[v][1][]"),
+  @("export", "export K=v`r`n", "[v][1][]"),
+  @("export, several spaces and a tab", "export  ${tab}K=v`r`n", "[v][1][]"),
+  @("leading whitespace", "  ${tab}K=v`r`n", "[v][1][]"),
+  @("spaces around =", "K = v`r`n", "[v][1][]"),
+  @("tabs around =", "K${tab}=${tab}v`r`n", "[v][1][]"),
+  @("export with spaces around =", "export K = v`r`n", "[v][1][]"),
+  @("double quotes", "K=`"a b`"`r`n", "[a b][1][]"),
+  @("single quotes", "K='a b'`r`n", "[a b][1][]"),
+  @("a # inside single quotes", "K='a # b'`r`n", "[a # b][1][]"),
+  @("inline comment after an unquoted value", "K=v # note`r`n", "[v][1][]"),
+  @("inline comment after a tab", "K=v${tab}# note`r`n", "[v][1][]"),
+  @("a # with no whitespace before it", "K=a#b`r`n", "[a#b][1][]"),
+  @("a value that is only a comment", "K= # note`r`n", "[][1][]"),
+  @("inner spaces are kept", "K=C:\my vault\data`r`n", "[C:\my vault\data][1][]"),
+  @("a commented-out duplicate above", "#K=old`r`nK=new`r`n", "[new][1][]"),
+  @("an indented commented-out duplicate above", "  # K=old`r`nK=new`r`n", "[new][1][]"),
+  @("a commented-out duplicate below", "K=new`r`n#K=old`r`n", "[new][1][]"),
+  @("the last assignment wins", "K=first`r`nK=second`r`n", "[second][1][]"),
+  @("plain then export", "K=first`r`nexport K=second`r`n", "[second][1][]"),
+  @("export then plain", "export K=first`r`nK=second`r`n", "[second][1][]"),
+  @("a later empty assignment wins", "K=first`r`nK=`r`n", "[][1][]"),
+  @("a value containing =", "K=a=b`r`n", "[a=b][1][]"),
+  @("a URL with a query", "K=postgresql://u:p@db:5432/x?a=b`r`n", "[postgresql://u:p@db:5432/x?a=b][1][]"),
+  @("percent signs stay literal", "K=%TEMP%`r`n", "[%TEMP%][1][]"),
+  @("empty", "K=`r`n", "[][1][]"),
+  @("empty double quotes", "K=`"`"`r`n", "[][1][]"),
+  @("a longer key with the same suffix", "XK=v`r`n", "[][][]"),
+  @("a longer key with the same prefix", "K2=v`r`nKK=w`r`n", "[][][]"),
+  @("export glued to the key", "exportK=v`r`n", "[][][]"),
+  @("the key only inside another value", "OTHER=K=v`r`n", "[][][]"),
+  @("no .env at all", $null, "[][][]"),
+  # Forms the batch reader refuses rather than read wrongly.
+  @("REFUSED: a comment after a quoted value", "K=`"a b`" # note`r`n", "[][1][1]"),
+  @("REFUSED: a double quote inside an unquoted value", "K=a`"b`r`n", "[][1][1]"),
+  @("REFUSED: an unterminated double quote", "K=`"abc`r`n", "[][1][1]"),
+  @("REFUSED: an unterminated single quote", "K='abc`r`n", "[][1][1]"),
+  @("REFUSED: a value starting with =", "K==b`r`n", "[][1][1]")
+)
+
+# ---------------------------------------------------------------- scenario E1
+Write-Scenario ":env_value (install.bat's own copy, run on cmd.exe) - every .env form in the table"
+$d = Join-Path $Sandboxes "envvalue"
+New-Item -ItemType Directory -Force -Path $d | Out-Null
+New-EnvValueDriver $d
+$last = $null
+foreach ($case in $EnvCases) {
+  $envFile = Join-Path $d ".env"
+  Remove-Item -Force $envFile -ErrorAction SilentlyContinue
+  if ($null -ne $case[1]) { [IO.File]::WriteAllText($envFile, $case[1], [Text.Encoding]::ASCII) }
+  $last = Invoke-Bat -Dir $d -Script "envdrv.bat" -NoPad -TimeoutSeconds 60
+  $got = "(no RESULT line)"
+  $m = [regex]::Match($last.Output, "(?m)^RESULT=(.*?)\r?$")
+  if ($m.Success) { $got = $m.Groups[1].Value }
+  Assert ($got -eq $case[2]) "$($case[0]): $($case[2]) (got $got)"
+  if ($case[2].EndsWith("[1][1]")) {
+    Assert ($last.Output -match "Note: the K line in \.env is written in a form this script cannot read") "$($case[0]): says the line cannot be read"
+  } else {
+    Assert ($last.Output -notmatch "Note:") "$($case[0]): no note"
+  }
+}
+if ($null -ne $last) { Show-EvidenceIfFailed $last }
+
+# ---------------------------------------------------------------- scenario E2
+Write-Scenario "install.bat - a configured install whose .env uses export, spaces, quotes and comments is started, not reconfigured"
+$d = New-Sandbox "e2"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
+Set-Content -Path (Join-Path $d "data\db\vault.db") -Value "not really sqlite" -Encoding Ascii
+@("# written by hand", "export DATA_DIR = $d\data # where the data lives", "#PORT=1111", "PORT='7777'", "  export BLACKVAULT_DB_PROVIDER=`"sqlite`"") |
+  Set-Content -Path (Join-Path $d ".env") -Encoding Ascii
+$before = Get-FileBase64 (Join-Path $d ".env")
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "already configured") "says it is already configured"
+Assert ($r.Output.Contains("Your data is at: $d\data (sqlite)")) "found the data folder and the provider through the export / quoted lines"
+Assert ((Get-FileBase64 (Join-Path $d ".env")) -eq $before) ".env left byte-for-byte unchanged"
+Assert ($r.StubLog -match "compose up -d") "started the existing configuration"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ($r.Output -match "http://localhost:7777") "reported the configured port, not the commented-out one"
+Assert ($r.Output -notmatch "Where should BlackVault store its data") "the wizard did not run"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario E3
+Write-Scenario "update.bat - public URL, direct access, trusted proxies and the encryption key written with export / quotes / comments: nothing asked again, no key file created"
+$origin = New-GitRemote "update-envforms" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-envforms"
+Set-SqliteInstall $work "7043"
+$envKey = "cd" * 32
+Add-Content -Path (Join-Path $work ".env") -Encoding Ascii -Value @(
+  "#BLACKVAULT_PUBLIC_URL=https://old.example.com",
+  "export BLACKVAULT_PUBLIC_URL='https://vault.example.com'",
+  "export BLACKVAULT_DIRECT_ACCESS_INITIAL=on # keep direct access",
+  "  export BLACKVAULT_TRUSTED_PROXIES=",
+  "export BLACKVAULT_ENCRYPTION_KEY = `"$envKey`""
+)
+$before = Get-FileBase64 (Join-Path $work ".env")
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Public URL is: https://vault\.example\.com\r?\n") "read the public URL through export and single quotes"
+Assert ($r.Output -notmatch "Public URL: the address people open BlackVault at") "did not ask for the public URL again"
+Assert ($r.Output -notmatch "Keep allowing direct access") "did not ask about direct access again"
+Assert ($r.Output -notmatch "Trusted proxies:") "did not ask for trusted proxies again"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "found the key in .env through export, spaces and double quotes"
+Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "created NO key file (a second key would be a conflict)"
+Assert ($r.Output -notmatch $envKey) "the key is never echoed"
+Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) ".env left byte-for-byte unchanged"
+Assert ($r.StubLog -match "compose up -d") "restarted"
+Assert ($r.Output -match "URL:\s+https://vault\.example\.com") "the summary shows the public URL"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario E4
+Write-Scenario "update.bat - an encryption-key line the batch reader cannot read stops the update: no second key, nothing rebuilt"
+$origin = New-GitRemote "update-envkey-unreadable" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-envkey-unreadable"
+Set-ConfiguredSqliteInstall $work "7044"
+Add-Content -Path (Join-Path $work ".env") -Encoding Ascii -Value @("BLACKVAULT_ENCRYPTION_KEY=`"$envKey`" # the field-encryption key")
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
+Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
+Assert ($r.Output -match "Note: the BLACKVAULT_ENCRYPTION_KEY line in \.env is written in a form this script cannot read") "says which line it cannot read"
+Assert ($r.Output -match "ERROR: the BLACKVAULT_ENCRYPTION_KEY line in \.env could not be read") "says why it stopped"
+Assert ($r.Output -match "Nothing was rebuilt or restarted") "says nothing was rebuilt"
+Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "created NO key file"
+Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
+Assert ($r.StubLog -notmatch "compose up") "did NOT restart"
+Assert ($r.Output -notmatch $envKey) "the key is never echoed"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario E5
+Write-Scenario "install.bat - a commented-out encryption-key line does not count: the key file is created"
+$d = New-Sandbox "e5"
+New-Item -ItemType Directory -Force -Path (Join-Path $d "data\db") | Out-Null
+Set-Content -Path (Join-Path $d "data\db\vault.db") -Value "not really sqlite" -Encoding Ascii
+@("DATA_DIR=$d\data", "PORT=7778", "BLACKVAULT_DB_PROVIDER=sqlite", "# export BLACKVAULT_ENCRYPTION_KEY=$envKey") |
+  Set-Content -Path (Join-Path $d ".env") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "install.bat"
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "Encryption key created:") "created a key file"
+Assert (Test-Path (Join-Path $d "secrets\blackvault_encryption_key")) "the key file exists"
 Show-EvidenceIfFailed $r
 
 # =============================================================================

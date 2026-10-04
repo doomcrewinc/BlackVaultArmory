@@ -454,18 +454,90 @@ if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
 if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
 goto :eof
 
+:: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
+:: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
+:: change them together. _EV is undefined when KEY is unset or empty, or there
+:: is no .env; _EV_SET is 1 when .env assigns KEY at all, even to nothing.
+:: Forms read:
+::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
+::   KEY="value"    KEY='value'           one pair of quotes removed
+::   KEY=value # comment                  cut at a space or tab before a #
+:: with leading whitespace and CRLF allowed, lines starting with # ignored,
+:: and the LAST assignment winning. Forms batch cannot read correctly leave
+:: _EV undefined, set _EV_BAD and print a note, rather than give a wrong value:
+::   a quoted value followed by a comment; a double quote anywhere except as
+::   the one pair around the whole value; a value opened by ' and not closed
+::   by one; a value that itself starts with =.
+:: A ! in a value is dropped by delayed expansion and is not detected; none of
+:: the keys read here holds one unless DATA_DIR is a path with a ! in it.
+:env_value
+set "_EV="
+set "_EV_SET="
+set "_EV_BAD="
+set "_EV_CUT="
+if not exist ".env" goto :eof
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
+  if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+)
+if not defined _EV goto :eof
+:: for /f took every = after the key as one separator: a value that starts
+:: with = has lost it by now, so such a line is refused.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
+if not errorlevel 1 goto :env_value_bad
+set "_EVRAW=!_EV!"
+:env_value_trim
+if not defined _EV goto :env_value_done
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if defined _EV_CUT goto :env_value_done
+:: "KEY= # note": the value is only a comment.
+if "!_EV:~0,1!"=="#" if not "!_EVRAW:~0,1!"=="#" set "_EV=" & goto :env_value_done
+set "_EVQ=!_EV:"=!"
+if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
+if "!_EV:~0,1!"=="'" goto :env_value_squote
+:: Unquoted: cut at the first space or tab that is followed by #.
+set "_EV_CUT=1"
+if "!_EV:#=!"=="!_EV!" goto :env_value_done
+set "_EVI=1"
+:env_value_scan
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_done
+if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+if "!_EV:~%_EVI%,2!"=="	#" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+set /a _EVI+=1
+goto :env_value_scan
+:env_value_dquote
+:: Without its double quotes the value must equal the value without its
+:: first and last characters: exactly one pair, around the whole value.
+if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
+set "_EV=!_EVQ!"
+goto :env_value_done
+:env_value_squote
+if "!_EV:~1,1!"=="" goto :env_value_bad
+if not "!_EV:~-1!"=="'" goto :env_value_bad
+set "_EV=!_EV:~1,-1!"
+goto :env_value_done
+:env_value_bad
+set "_EV="
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script cannot read,
+echo       so it is treated as not set. Write it as %~1=value, with no comment
+echo       after a quoted value.
+:env_value_done
+set "_EVRAW="
+set "_EVQ="
+goto :eof
+
 :: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
 :: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line
 :: in .env, ignoring case, whitespace and quotes. Installs made before
 :: PostgreSQL support have no such line (or no .env at all) and were always
 :: SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml ignores it.
 :provider_from_env
-set "_PV="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
-  )
-)
+call :env_value BLACKVAULT_DB_PROVIDER
+set "_PV=!_EV!"
 if defined _PV set "_PV=!_PV: =!"
 if defined _PV set "_PV=!_PV:	=!"
 if defined _PV set "_PV=!_PV:"=!"
@@ -482,16 +554,13 @@ goto :eof
 :: says BLACKVAULT_DB_PROVIDER=postgres but lacks a key the single compose file needs to
 :: run PostgreSQL. Only warns; never stops the script.
 :check_postgres_env
-set "_CP="
-set "_PW="
-set "_DU="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="COMPOSE_PROFILES" set "_CP=%%B"
-    if "%%A"=="BLACKVAULT_POSTGRES_PASSWORD" set "_PW=%%B"
-    if "%%A"=="BLACKVAULT_DATABASE_URL" set "_DU=%%B"
-  )
-)
+call :env_value COMPOSE_PROFILES
+set "_CP=!_EV!"
+call :env_value BLACKVAULT_POSTGRES_PASSWORD
+set "_PW=!_EV!"
+call :env_value BLACKVAULT_DATABASE_URL
+set "_DU=!_EV!"
+set "_EV="
 if defined _CP set "_CP=!_CP: =!"
 if defined _CP set "_CP=!_CP:"=!"
 if defined _DU set "_DU=!_DU:"=!"
@@ -517,16 +586,12 @@ echo      BLACKVAULT_DATABASE_URL=postgresql://blackvault:^<same password^>@db:5
 echo    See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead.
 goto :eof
 
-:: Sets ENV_DATA_DIR and ENV_PORT from .env (last matching line wins).
+:: Sets ENV_DATA_DIR and ENV_PORT from .env, as :env_value reads them.
 :read_env
-set "ENV_DATA_DIR="
-set "ENV_PORT="
-if not exist ".env" goto :eof
-for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-  if "%%A"=="DATA_DIR" set "ENV_DATA_DIR=%%B"
-  if "%%A"=="PORT" set "ENV_PORT=%%B"
-)
-if defined ENV_DATA_DIR set "ENV_DATA_DIR=!ENV_DATA_DIR:"=!"
+call :env_value DATA_DIR
+set "ENV_DATA_DIR=!_EV!"
+call :env_value PORT
+set "ENV_PORT=!_EV!"
 goto :eof
 
 :: Sets IS_DIR=1 when %1 is an existing directory, else clears it.
@@ -692,6 +757,8 @@ goto :eof
 :: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
 :: non-empty line in .env, or set in this console) no key file is created -
 :: a second, different key would make the app refuse to start (KEY_CONFLICT).
+:: The .env line is read by :env_value; a line it cannot read stops here with
+:: errorlevel 1 instead of being taken for "no key".
 :ensure_encryption_key
 set "_EK=secrets\blackvault_encryption_key"
 if exist "!_EK!" (
@@ -703,9 +770,12 @@ if defined BLACKVAULT_ENCRYPTION_KEY (
   if not exist "secrets\" mkdir "secrets" 2>nul
   exit /b 0
 )
-if not exist ".env" goto :ensure_key_no_env_key
-findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
-if errorlevel 1 goto :ensure_key_no_env_key
+call :env_value BLACKVAULT_ENCRYPTION_KEY
+set "_EK_ENV="
+if defined _EV set "_EK_ENV=1"
+set "_EV="
+if defined _EV_BAD goto :ensure_key_unreadable
+if not defined _EK_ENV goto :ensure_key_no_env_key
 echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
 :: docker-compose.yml mounts secrets\ with create_host_path: false.
 if not exist "secrets\" mkdir "secrets" 2>nul
@@ -742,6 +812,11 @@ echo   drive^). Anyone with this file AND your database can read those records.
 echo ==========================================================================
 echo.
 exit /b 0
+:ensure_key_unreadable
+echo ERROR: the BLACKVAULT_ENCRYPTION_KEY line in .env could not be read, so this script
+echo        cannot tell whether an encryption key is already set. No key file was
+echo        created: a second, different key would stop the app from starting.
+exit /b 1
 :ensure_key_acl_failed
 echo ERROR: could not restrict the key file to your user account with icacls.
 echo        Refusing to write key material to an unhardened file.

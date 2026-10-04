@@ -37,6 +37,10 @@ const SUBROUTINES = [
   // Task 7: the field-encryption key (mirrors scripts/encryption-key.sh).
   "ensure_encryption_key",
   "health_status",
+  // The .env reader (mirrors scripts/compose-provider.sh) and its callers.
+  "env_value",
+  "provider_from_env",
+  "check_postgres_env",
 ] as const;
 
 const TERMINATOR = /^(exit \/b \d+|goto :eof|goto :[A-Za-z_]+_again)$/i;

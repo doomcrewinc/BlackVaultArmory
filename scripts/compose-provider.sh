@@ -12,22 +12,74 @@
 # exported in the shell override .env, and DATABASE_URL is commonly exported.
 # docker-compose.yml maps them to the names the container uses.
 
-# Value of KEY in ./.env (last line wins), with surrounding whitespace, a
-# trailing CR and one pair of matching quotes removed. Inner spaces are kept,
-# so DATA_DIR paths with spaces survive. Empty when unset or no .env.
-env_value() {
-  local line="" value
-  if [ -f .env ]; then
-    line=$(grep "^$1=" .env | tail -n 1 || true)
+# The .env reader. It reads a line the way Docker Compose does, because
+# Compose is what finally uses the file:
+#   KEY=value            export KEY=value        KEY = value
+#   KEY="value"          KEY='value'             (one pair of quotes removed)
+#   KEY=value # comment  KEY="value" # comment   (a # after whitespace)
+# with leading whitespace and CRLF line endings allowed, lines starting with
+# # ignored, and the LAST assignment of a key winning. The file is never
+# evaluated: $, backticks and \ in a value are kept as written (Compose would
+# substitute ${VAR} and unescape inside double quotes; no key read here uses
+# either).
+
+# env_raw_value KEY: prints what follows the = of the last assignment of KEY
+# in ./.env, CR removed, otherwise untouched. Returns 1 when there is none.
+env_raw_value() {
+  local key="$1" line name raw="" found=1
+  if [[ ! -f .env ]]; then
+    return 1
   fi
-  value=${line#*=}
-  value=${value%$'\r'}
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  case "$value" in
-    \"*\") value=${value#\"}; value=${value%\"} ;;
-    \'*\') value=${value#\'}; value=${value%\'} ;;
-  esac
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      "#"*) continue ;;
+      export[[:space:]]*)
+        line=${line#export}
+        line="${line#"${line%%[![:space:]]*}"}"
+        ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    name=${line%%=*}
+    name="${name%"${name##*[![:space:]]}"}"
+    if [[ "$name" == "$key" ]]; then
+      raw=${line#*=}
+      found=0
+    fi
+  done < .env
+  if [[ $found -eq 0 ]]; then
+    printf '%s\n' "$raw"
+  fi
+  return "$found"
+}
+
+# 0 when ./.env assigns KEY, even to nothing.
+env_has_key() {
+  env_raw_value "$1" >/dev/null
+}
+
+# Value of KEY in ./.env, as described above. Inner spaces are kept, so
+# DATA_DIR paths with spaces survive. A quote with no closing quote is kept
+# as written. Empty when unset or no .env.
+env_value() {
+  local raw value quote
+  raw=$(env_raw_value "$1") || raw=""
+  value="${raw#"${raw%%[![:space:]]*}"}"
+  quote=${value:0:1}
+  if [[ "$quote" == "'" || "$quote" == '"' ]] && [[ "${value:1}" == *"$quote"* ]]; then
+    value=${value:1}
+    value=${value%%"$quote"*}
+  else
+    # Unquoted: a # after whitespace starts a comment. Cut from the text as
+    # it stood after the =, so "KEY= # note" is empty and "KEY=a#b" is whole.
+    value=${raw%%[[:space:]]"#"*}
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+  fi
   printf '%s\n' "$value"
 }
 
