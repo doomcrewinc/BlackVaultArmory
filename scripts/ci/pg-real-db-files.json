@@ -1,0 +1,13 @@
+[
+  "src/lib/backup/records.real-db.test.ts",
+  "src/lib/backup/full-backup.real-db.test.ts",
+  "src/lib/backup/full-restore.real-db.test.ts",
+  "src/lib/db/sqlite-to-postgres.p4-encryption.real-db.test.ts",
+  "src/lib/encryption/extension.real-db.test.ts",
+  "src/lib/encryption/startup.real-db.test.ts",
+  "src/lib/audit/extension.real-db.test.ts",
+  "src/lib/audit/query.real-db.test.ts",
+  "src/app/api/admin/audit/export/route.real-db.test.ts",
+  "scripts/rotate-encryption-key.test.ts",
+  "src/lib/auth/admins.real-db.test.ts"
+]
