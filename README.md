@@ -1724,11 +1724,23 @@ points at the logs. The exit code then depends on what `docker compose ps` repor
 |---|---|
 | is `healthy` | 0 |
 | is `unhealthy` when the two minutes are over | 1 |
-| keeps restarting, has exited, or is not there (seen three times; the wait ends early) | 1 |
+| is seen restarting, exited, or not there three times (the wait ends early) | 1 |
 | is still starting when the two minutes are over | 0, with a warning: a slow first start is not a failure |
+| cannot be asked about: the status query itself fails every time | 0, with the same warning |
 
 A container that keeps restarting is what the app's own refusals to start look like (item 3
 below, two encryption keys, no public URL): the reason is in `docker compose logs blackvault`.
+The scripts report it as a failed start when they catch it restarting three times. They may not:
+between two restarts the container reads as "starting", and one that runs for ten seconds or
+more before it stops is restarted at once, so the wait can end with "did not become healthy
+within two minutes" and exit code 0. After that warning, look at the log before you trust the
+install.
+
+The status query uses an option Docker Compose accepts from v2.21. On v2.20, the oldest version
+BlackVault supports, the query fails: the scripts then wait the two minutes, print the warning
+and exit 0 whatever the container is doing (as they did before this release). Everything else
+works on v2.20; check the app yourself with `docker compose ps`.
+
 A cron job or a script that calls the updater should check the exit code. (Re-running
 `install` over an install that is already configured only starts it and does not wait.)
 
