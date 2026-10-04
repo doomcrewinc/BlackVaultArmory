@@ -40,6 +40,7 @@ vi.mock("fs", () => ({
 }));
 
 import { POST } from "./route";
+import { HEIC_MESSAGE } from "@/lib/images/process";
 
 // Real bytes (ASCII, so the string encodes byte-for-byte), which means
 // detectFileSignature is exercised rather than mocked.
@@ -96,6 +97,29 @@ describe("POST /api/documents/upload", () => {
     expect(data.type).toBe("RECEIPT");
     expect(data.mimeType).toBe("application/pdf");
     expect(include.gear).toEqual({ select: { id: true, name: true } });
+  });
+
+  it("stores the ammunition, supply and kit owners", async () => {
+    const response = await POST(
+      uploadRequest({ name: "Lot sheet", ammoStockId: "a1", supplyId: "s1", kitId: "k1" }),
+    );
+
+    expect(response.status).toBe(201);
+    const { data, include } = mocks.create.mock.calls[0][0];
+    expect(data).toMatchObject({ ammoStockId: "a1", supplyId: "s1", kitId: "k1" });
+    expect(include.ammoStock).toEqual({ select: { id: true, caliber: true, brand: true } });
+    expect(include.supply).toEqual({ select: { id: true, name: true } });
+    expect(include.kit).toEqual({ select: { id: true, name: true } });
+  });
+
+  it("answers a HEIC file with the HEIC message", async () => {
+    const heic = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0]);
+
+    const response = await POST(uploadRequest({ name: "Phone" }, heic, "IMG_1.heic"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe(HEIC_MESSAGE);
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("writes through writeEncryptedFile under documentsRoot(), never fs.writeFile, and fileUrl keeps its shape", async () => {

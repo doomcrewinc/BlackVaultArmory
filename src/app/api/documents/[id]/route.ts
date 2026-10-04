@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { prisma } from "@/lib/prisma";
+import { DOCUMENT_OWNER_INCLUDE } from "@/lib/documents/owner-include";
 import { requireAuth } from "@/lib/server/auth";
 import { resolveDocumentStoragePath } from "@/lib/upload-security";
 
@@ -38,10 +39,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     const { id } = await params;
     const doc = await prisma.document.findUnique({
       where: { id },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-      },
+      include: DOCUMENT_OWNER_INCLUDE,
     });
     if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
     return NextResponse.json(doc);
@@ -58,7 +56,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   try {
     const { id } = await params;
     const body = await req.json();
-    const { name, type, notes, firearmId, accessoryId } = body;
+    const { name, type, notes, firearmId, accessoryId, gearId, ammoStockId, supplyId, kitId } = body;
 
     const doc = await prisma.document.update({
       where: { id },
@@ -68,11 +66,12 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         ...(notes !== undefined && { notes: notes || null }),
         ...(firearmId !== undefined && { firearmId: firearmId || null }),
         ...(accessoryId !== undefined && { accessoryId: accessoryId || null }),
+        ...(gearId !== undefined && { gearId: gearId || null }),
+        ...(ammoStockId !== undefined && { ammoStockId: ammoStockId || null }),
+        ...(supplyId !== undefined && { supplyId: supplyId || null }),
+        ...(kitId !== undefined && { kitId: kitId || null }),
       },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-      },
+      include: DOCUMENT_OWNER_INCLUDE,
     });
 
     return NextResponse.json(doc);

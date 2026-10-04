@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ownerWhere } from "@/lib/photos/owner";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
@@ -304,17 +306,26 @@ export async function DELETE(
     });
     const buildIds = builds.map((b) => b.id);
 
+    // The accessories that go with the firearm, and the photos of everything
+    // that will be deleted, are read before the delete.
+    const accessoryIds: string[] = [];
+    if (deleteAccessories && buildIds.length > 0) {
+      const slots = await prisma.buildSlot.findMany({
+        where: { buildId: { in: buildIds }, accessoryId: { not: null } },
+        select: { accessoryId: true },
+      });
+      accessoryIds.push(...(slots.map((s) => s.accessoryId).filter(Boolean) as string[]));
+    }
+    const files = await photoFilesFor(
+      accessoryIds.length > 0
+        ? { OR: [ownerWhere("firearm", id), { accessoryId: { in: accessoryIds } }] }
+        : ownerWhere("firearm", id),
+    );
+
     // Wrap all mutations in a transaction so partial failures don't leave orphaned data
     await prisma.$transaction(async (tx) => {
       if (buildIds.length > 0) {
         if (deleteAccessories) {
-          const slots = await tx.buildSlot.findMany({
-            where: { buildId: { in: buildIds }, accessoryId: { not: null } },
-            select: { accessoryId: true },
-          });
-          const accessoryIds = slots
-            .map((s) => s.accessoryId)
-            .filter(Boolean) as string[];
           if (accessoryIds.length > 0) {
             await tx.accessory.deleteMany({
               where: { id: { in: accessoryIds } },
@@ -330,6 +341,7 @@ export async function DELETE(
 
       await tx.firearm.delete({ where: { id } });
     });
+    await removePhotoFiles(files);
 
     revalidateDashboardData();
 

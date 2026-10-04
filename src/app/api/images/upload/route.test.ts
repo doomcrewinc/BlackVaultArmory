@@ -45,7 +45,7 @@ vi.mock("@/lib/files/storage", () => ({
 }));
 
 import { POST } from "./route";
-import { HEIC_MESSAGE } from "@/lib/images/process";
+import { HEIC_MESSAGE, MAX_PHOTO_BYTES } from "@/lib/images/process";
 
 // Bytes that match no known image signature, so the request is rejected on the
 // file-type check — after the entityType gate. That keeps the assertion about
@@ -99,6 +99,22 @@ describe("POST /api/images/upload", () => {
       sessionId: "session-1",
     });
     storageMocks.writeEncryptedFile.mockResolvedValue(undefined);
+  });
+
+  it("rejects an oversize file before reading its body", async () => {
+    const big = new File([new Uint8Array([1])], "big.png");
+    Object.defineProperty(big, "size", { value: MAX_PHOTO_BYTES + 1 });
+    const arrayBuffer = vi.spyOn(big, "arrayBuffer");
+    const fields: Record<string, unknown> = { file: big, entityType: "firearm", entityId: "f1" };
+    const request = uploadOf(new Uint8Array([1]), "x.png", "firearm", "f1");
+    vi.spyOn(request, "formData").mockResolvedValue({ get: (k: string) => fields[k] ?? null } as unknown as FormData);
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("File too large. Maximum size is 25MB.");
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(storageMocks.writeEncryptedFile).not.toHaveBeenCalled();
   });
 
   it("writes through writeEncryptedFile under uploadsRoot(), never fs.writeFile", async () => {

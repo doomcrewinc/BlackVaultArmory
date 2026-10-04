@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
-import { PictureRejected, processPicture, type ProcessedPicture } from "@/lib/images/process";
+import { MAX_PHOTO_BYTES, PictureRejected, processPicture, type ProcessedPicture } from "@/lib/images/process";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
@@ -86,6 +86,13 @@ export async function POST(request: NextRequest) {
     );
     if (!entityAccess.ok) {
       return entityAccess.response;
+    }
+
+    if (file.size > MAX_PHOTO_BYTES) {
+      return NextResponse.json(
+        { error: "File too large. Maximum size is 25MB." },
+        { status: 400 }
+      );
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());

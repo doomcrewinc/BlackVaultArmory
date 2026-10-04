@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ownerWhere } from "@/lib/photos/owner";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeMoney } from "@/lib/money";
@@ -283,7 +285,9 @@ export async function DELETE(
       );
     }
 
+    const files = await photoFilesFor(ownerWhere("accessory", id));
     await prisma.accessory.delete({ where: { id } });
+    await removePhotoFiles(files);
     revalidateDashboardData();
 
     return NextResponse.json({ success: true, id });

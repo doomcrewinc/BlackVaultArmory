@@ -3,10 +3,11 @@ import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
-import { detectFileSignature } from "@/lib/server/file-signatures";
+import { DOCUMENT_OWNER_INCLUDE } from "@/lib/documents/owner-include";
+import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
-import { PictureRejected, processPicture } from "@/lib/images/process";
+import { HEIC_MESSAGE, PictureRejected, processPicture } from "@/lib/images/process";
 import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
@@ -14,7 +15,8 @@ const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
 const MAX_SIZE = 20 * 1024 * 1024; // 20MB
 
 // POST /api/documents/upload
-// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?, notes?
+// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?,
+// ammoStockId?, supplyId?, kitId?, notes?
 // Saves to <uploadsRoot>/documents/{uuid}.{ext}, encrypted at rest (BVF1).
 // Creates a Document record and returns it.
 export async function POST(request: NextRequest) {
@@ -45,6 +47,9 @@ export async function POST(request: NextRequest) {
     const firearmId = formData.get("firearmId") as string | null;
     const accessoryId = formData.get("accessoryId") as string | null;
     const gearId = formData.get("gearId") as string | null;
+    const ammoStockId = formData.get("ammoStockId") as string | null;
+    const supplyId = formData.get("supplyId") as string | null;
+    const kitId = formData.get("kitId") as string | null;
     const notes = formData.get("notes") as string | null;
 
     if (!file) {
@@ -69,6 +74,9 @@ export async function POST(request: NextRequest) {
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    if (isHeicFamilySignature(buffer)) {
+      return NextResponse.json({ error: HEIC_MESSAGE }, { status: 400 });
+    }
     const detected = detectFileSignature(buffer);
 
     if (!detected || !ALLOWED_EXTENSIONS.has(detected.extension)) {
@@ -121,12 +129,11 @@ export async function POST(request: NextRequest) {
         firearmId: firearmId || null,
         accessoryId: accessoryId || null,
         gearId: gearId || null,
+        ammoStockId: ammoStockId || null,
+        supplyId: supplyId || null,
+        kitId: kitId || null,
       },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-        gear: { select: { id: true, name: true } },
-      },
+      include: DOCUMENT_OWNER_INCLUDE,
     });
 
     return NextResponse.json(doc, { status: 201 });
