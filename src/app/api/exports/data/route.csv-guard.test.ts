@@ -76,6 +76,16 @@ describe("/api/exports/data CSV formula guard", () => {
     expect(cells.name).toBe("'-5 lbs");
   });
 
+  it("a number written with an exponent stays a number: -1e-7, 1e+21", async () => {
+    mocks.firearmFindMany.mockResolvedValue([{ id: "f1", name: "-1e-7 torr gauge", purchasePrice: -1e-7, currentValue: 1e21, roundCount: -2.5e-9 }]);
+    const cells = await firearmCells();
+    expect(cells.purchasePrice).toBe("-1e-7");
+    expect(cells.currentValue).toBe("1e+21");
+    expect(cells.roundCount).toBe("-2.5e-9");
+    // Text that only starts like such a number is still guarded.
+    expect(cells.name).toBe("'-1e-7 torr gauge");
+  });
+
   it("a value holding a bare carriage return is quoted", async () => {
     mocks.firearmFindMany.mockResolvedValue([{ id: "f1", name: "one\rtwo" }]);
     const cells = await firearmCells();

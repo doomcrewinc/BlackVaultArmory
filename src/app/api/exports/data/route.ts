@@ -133,8 +133,8 @@ function flattenObject(
   }
 }
 
-/** A whole number or a decimal, as a number field is serialized. */
-const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+/** A number as a number field is serialized: digits, a decimal part, and for very small or large values an exponent (-1e-7, 1e+21). */
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/;
 
 /**
  * One CSV cell. The rows reach this point as text, so a negative number is
