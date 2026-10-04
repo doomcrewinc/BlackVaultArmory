@@ -51,6 +51,10 @@ export async function POST(request: NextRequest) {
   if (!created) return NextResponse.json(INVALID_CODE, { status: 403 });
 
   markUsersExist();
+  // The install and update scripts read the container log: this line after a
+  // "[auth] Setup token:" line tells them that token is spent, so they stop
+  // showing it (scripts/setup-token.sh). Keep the prefix; no secret, no name.
+  console.log("[auth] First admin created: the setup token is no longer valid");
   // Explicit fields: never echo passwordHash.
   const user = { id: created.id, username, displayName, role: "ADMIN" as const };
   return signInResponse(request, user.id, { user }, 201);

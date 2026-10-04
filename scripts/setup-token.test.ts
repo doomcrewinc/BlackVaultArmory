@@ -30,6 +30,12 @@ const NO_TOKEN_LOG = [
   "",
 ].join("\n");
 
+// The app logs this once, when the first admin account is created
+// (src/app/api/auth/setup/route.ts). From then on the token above it is spent.
+const ADMIN_CREATED = "blackvault  | [auth] First admin created: the setup token is no longer valid";
+const tokenLine = (code: string) =>
+  `blackvault  | [auth] Setup token: ${code} — create the first admin at https://vault.example.com/setup`;
+
 describe("show_setup_token", () => {
   let bin: string;
   let calls: string;
@@ -83,6 +89,38 @@ describe("show_setup_token", () => {
 
   it("prints nothing when the log has no token line (an admin already exists)", () => {
     const r = run("https://vault.example.com", NO_TOKEN_LOG);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("compose logs blackvault");
+    expect(r.out).toBe("");
+  });
+
+  it("prints nothing when the first admin was created after the last token line (the token is spent)", () => {
+    const log = ["blackvault  | starting", tokenLine("ABCD-EFGH-JKMN-PQRS"), "blackvault  | ✓ Ready in 812ms", ADMIN_CREATED, "blackvault  | GET /", ""].join("\n");
+    const r = run("https://vault.example.com", log);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("compose logs blackvault");
+    expect(r.out).toBe("");
+  });
+
+  it("prints the token when it was logged AFTER an admin-created line", () => {
+    // Not a sequence the app produces today (it logs no token once a user
+    // exists); the rule is simply that the LAST of the two kinds of line wins.
+    const log = [tokenLine("ABCD-EFGH-JKMN-PQRS"), ADMIN_CREATED, tokenLine("WXYZ-2345-6789-ABCD"), ""].join("\n");
+    const r = run("https://vault.example.com", log);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("and enter the setup token: WXYZ-2345-6789-ABCD");
+    expect(r.out).not.toContain("ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it("two token lines and no admin yet (a restart before setup): the LATEST token", () => {
+    const log = [tokenLine("ABCD-EFGH-JKMN-PQRS"), "blackvault  | ✓ Ready in 812ms", tokenLine("WXYZ-2345-6789-ABCD"), ""].join("\n");
+    const r = run("https://vault.example.com", log);
+    expect(r.out).toContain("and enter the setup token: WXYZ-2345-6789-ABCD");
+    expect(r.out).not.toContain("ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it("prints nothing for an empty log", () => {
+    const r = run("https://vault.example.com", "");
     expect(r.code).toBe(0);
     expect(r.calls).toContain("compose logs blackvault");
     expect(r.out).toBe("");

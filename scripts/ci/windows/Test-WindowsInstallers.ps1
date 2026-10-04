@@ -991,6 +991,57 @@ Assert ($r.Output -match "Update complete\.") "says Update complete"
 Assert ($r.Output -notmatch "NOT healthy") "no not-healthy heading"
 Show-EvidenceIfFailed $r
 
+# ------------------------------------------------ spent setup-token scenarios
+# The app logs "[auth] First admin created" once, when the first admin is
+# created. An update that changes nothing keeps the container and its log, so
+# the token line is still there: the LAST line of the two kinds decides.
+$AdminCreatedLine = "blackvault  | [auth] First admin created: the setup token is no longer valid"
+$SpentTokenLog = $TokenLog + "`n" + $AdminCreatedLine + "`nblackvault  | GET / 200"
+$TokenAfterAdminLog = $AdminCreatedLine + "`n" + $TokenLog
+
+# ---------------------------------------------------------------- scenario T7
+Write-Scenario "install.bat - the first admin was created after the last token line: no setup block"
+$d = New-Sandbox "t7"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers @("", "", "https://vault.example.com", "", "", "2") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $d $SpentTokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block"
+Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "the spent token is not shown"
+Assert ($r.Output -notmatch "setup token") "no token text at all"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T8
+Write-Scenario "update.bat - the first admin was created after the last token line: no setup block"
+$origin = New-GitRemote "update-token-spent" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-token-spent"
+Set-ConfiguredSqliteInstall $work "7041"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $SpentTokenLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -match "Status:\s+running") "the update itself completed (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block"
+Assert ($r.Output -notmatch "WXYZ-2345-6789-ABCD") "the spent token is not shown"
+Assert ($r.Output -notmatch "setup token") "no token text at all"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T9
+Write-Scenario "update.bat - a token line AFTER the admin-created line is shown (the last line of the two kinds decides)"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = (New-StubLogs $Sandboxes $TokenAfterAdminLog) }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.Output -match "and enter the setup token: WXYZ-2345-6789-ABCD") "the block shows the newest token"
+Assert ($r.Output -notmatch "ABCD-EFGH-JKMN-PQRS") "the older token is not shown"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario T10
+Write-Scenario "update.bat - an empty container log: nothing extra printed"
+$emptyLog = Join-Path $Sandboxes "__docker-logs-empty.txt"
+[IO.File]::WriteAllText($emptyLog, "`n", (New-Object Text.UTF8Encoding $false))
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("") -EnvVars @{ "BV_STUB_LOGS_FILE" = $emptyLog }
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+Assert ($r.StubLog -match "compose logs blackvault") "read the blackvault container log (premise)"
+Assert ($r.Output -notmatch "First-time setup") "no setup block"
+Show-EvidenceIfFailed $r
+
 # ------------------------------------------- a ; in the port of the typed URL
 # :valid_public_url checks the port with for /f, which skips a value that
 # starts with its eol character (";" by default). The host-and-port character

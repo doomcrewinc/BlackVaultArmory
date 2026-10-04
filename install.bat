@@ -643,18 +643,23 @@ goto :eof
 :: container log in a boxed block, with the public URL held in VAR; prints
 :: nothing when the log has no token line (an admin already exists). Mirrors
 :: show_setup_token in scripts/setup-token.sh: change them together. The app
-:: prints a new token at every start while no admin exists, so the LAST
-:: matching line wins. Only the XXXX-XXXX-XXXX-XXXX code is taken from it; the
+:: prints a new token at every start while no admin exists, and one
+:: "[auth] First admin created" line when that admin is created; the LAST
+:: line of either kind decides, so a token that was already used (the log
+:: outlives an update that changes nothing) is not shown again.
+:: Only the XXXX-XXXX-XXXX-XXXX code is taken from the line; the
 :: text around it is ASCII, because the log line's em dash garbles in the
 :: console code page. Takes a variable NAME, like :valid_public_url.
 :show_setup_token
 set "_ST_URL=!%~1!"
 set "_ST_LINE="
 set "_ST_CODE="
-for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:"`) do set "_ST_LINE=%%L"
+for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:" /c:"[auth] First admin created"`) do set "_ST_LINE=%%L"
 if not defined _ST_LINE goto :eof
-:: Everything after "Setup token", then the first word after ": ".
+:: Everything after "Setup token", then the first word after ": ". A line
+:: without "Setup token" (the admin-created line) is left whole by this.
 set "_ST_REST=!_ST_LINE:*Setup token=!"
+if "!_ST_REST!"=="!_ST_LINE!" goto :eof
 for /f "tokens=1 delims=: " %%T in ("!_ST_REST!") do set "_ST_CODE=%%T"
 if not defined _ST_CODE goto :eof
 :: Exactly XXXX-XXXX-XXXX-XXXX: 19 characters, dashes at 5, 10 and 15, and
