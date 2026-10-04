@@ -990,6 +990,38 @@ Assert ($r.Output -match "Status:\s+running") "the status line says running"
 Assert ($r.Output -match "Update complete\.") "says Update complete"
 Assert ($r.Output -notmatch "NOT healthy") "no not-healthy heading"
 Show-EvidenceIfFailed $r
+
+# ------------------------------------------- a ; in the port of the typed URL
+# :valid_public_url checks the port with for /f, which skips a value that
+# starts with its eol character (";" by default). The host-and-port character
+# check before it already refuses a ";", and the port check refuses it again on
+# its own, so these scenarios pass with either of the two in place; the test
+# that fails without the port's own guard is scripts/bat-shared-subroutines.test.ts.
+$SemicolonUrls = @("https://vault.example.com:;3000", "https://vault.example.com:30;00", "https://;vault.example.com")
+
+# ---------------------------------------------------------------- scenario PS1
+Write-Scenario "install.bat - a ; in the port of the public URL is rejected; a normal port is accepted"
+$d = New-Sandbox "port-semicolon"
+$r = Invoke-Bat -Dir $d -Script "install.bat" -Answers (@("", "") + $SemicolonUrls + @("https://vault.example.com:3000", "", "", "2"))
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$rejections = ([regex]::Matches($r.Output, "The URL must start with http:// or https:// and have no path")).Count
+Assert ($rejections -eq $SemicolonUrls.Count) "rejected all $($SemicolonUrls.Count) URLs holding a ; (got $rejections rejections)"
+Assert ((Get-EnvValue $d "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com:3000") "the URL with a normal port was written"
+Assert ((Get-EnvValue $d "BLACKVAULT_DB_PROVIDER") -eq "sqlite") "the database answer still landed on the database prompt"
+Show-EvidenceIfFailed $r
+
+# ---------------------------------------------------------------- scenario PS2
+Write-Scenario "update.bat - a ; in the port of the public URL is rejected; a normal port is accepted"
+$origin = New-GitRemote "update-semicolon" (Join-Path $RepoRoot "update.bat")
+$work = New-WorkingClone $origin "update-semicolon"
+Set-SqliteInstall $work "7042"
+$r = Invoke-Bat -Dir $work -Script "update.bat" -Answers ($SemicolonUrls + @("https://vault.example.com:3000", "", ""))
+Assert ($r.ExitCode -eq 0) "exits 0 (got $($r.ExitCode))"
+$rejections = ([regex]::Matches($r.Output, "The URL must start with http:// or https:// and have no path")).Count
+Assert ($rejections -eq $SemicolonUrls.Count) "rejected all $($SemicolonUrls.Count) URLs holding a ; (got $rejections rejections)"
+Assert ((Get-EnvValue $work "BLACKVAULT_PUBLIC_URL") -eq "https://vault.example.com:3000") "the URL with a normal port was written"
+Assert ($r.StubLog -match "compose up -d") "reached the restart"
+Show-EvidenceIfFailed $r
 Show-EvidenceIfFailed $r
 
 # =============================================================================

@@ -532,6 +532,10 @@ if "!VPU_PORT!"=="!VPU_REST!" exit /b 0
 :: After the first colon: 1-5 digits and nothing else (a second colon fails).
 if not defined VPU_PORT exit /b 1
 if not "!VPU_PORT:~5!"=="" exit /b 1
+:: for /f skips a value whose first character is its eol character, ";" here,
+:: and such a value would pass the digit check unexamined: a ";" anywhere in
+:: the port is refused first.
+if not "!VPU_PORT:;=!"=="!VPU_PORT!" exit /b 1
 for /f "delims=0123456789" %%X in ("!VPU_PORT!") do exit /b 1
 exit /b 0
 

@@ -104,6 +104,38 @@ describe("install.bat and update.bat share their public-URL subroutines byte for
     expect(inUpdate, "the public URL prompt loop differs between install.bat and update.bat").toBe(inInstall);
   });
 });
+
+/**
+ * `for /f "delims=<allowed characters>" %%X in ("!VAR!") do <reject>` is how
+ * these scripts check that a value holds only allowed characters. for /f
+ * skips a line whose first character (after leading delimiters) is its eol
+ * character, ";" unless the options name another, so ";3000" or "30;00"-style
+ * values would pass unexamined. Every such check must either name its own eol
+ * or come right after a line refusing ";" anywhere in the same variable.
+ * Values the script generated itself (hex from the CSPRNG) or read from
+ * `docker compose version` are exempt: nobody types them.
+ */
+describe("character checks with for /f cannot be skipped by a leading ;", () => {
+  const GENERATED = new Set(["POSTGRES_PASSWORD", "_KEY", "_CMAJ!!_CMIN"]);
+  const CHECK = /^for \/f "delims=[^"]+" %%X in \("!(.+)!"\) do /;
+
+  it.each(["install", "update"] as const)("%s.bat", (fileName) => {
+    const lines = linesOf(FILES[fileName]).map(bare);
+    const checks = lines.map((l, i) => ({ m: CHECK.exec(l), i })).filter((c) => c.m !== null);
+    const guarded: string[] = [];
+    for (const { m, i } of checks) {
+      const name = m![1];
+      if (GENERATED.has(name)) continue;
+      expect(lines[i - 1], `${fileName}.bat line ${i + 1}: !${name}! is checked without refusing ";" first`).toBe(
+        `if not "!${name}:;=!"=="!${name}!" exit /b 1`,
+      );
+      guarded.push(name);
+    }
+    // The port of the typed public URL is the one typed value checked this way.
+    expect(guarded).toEqual(["VPU_PORT"]);
+  });
+});
+
 /**
  * The health wait reads the Status column of `docker compose ps`, e.g.
  * "Up 2 minutes (unhealthy)". Matching the bare word healthy takes that for
