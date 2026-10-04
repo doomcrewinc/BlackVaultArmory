@@ -13,7 +13,7 @@ const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
 
 /**
  * Writes every byte of `bytes` to `handle`, looping on `write(2)`'s own
- * short-write behaviour (fix round 1, I1). A single `handle.write(bytes)`
+ * short-write behaviour. A single `handle.write(bytes)`
  * issues exactly one `write(2)`, which POSIX allows to return fewer bytes
  * than asked for without raising an error — most realistically when a disk
  * genuinely runs out of space partway through. The old code trusted that
@@ -38,8 +38,8 @@ async function writeFull(handle: FileHandle, bytes: Buffer): Promise<void> {
 }
 
 /**
- * Encrypted files at rest (spec 3b,
- * docs/superpowers/specs/2026-10-01-encrypted-files-design.md §1-§2).
+ * Encrypted files at rest
+ * (docs/superpowers/specs/2026-10-01-encrypted-files-design.md §1-§2).
  *
  * The one place that knows where uploaded files live on disk and how they
  * are written/read as BVF1 (src/lib/encryption/core.mjs). Both upload routes
@@ -78,22 +78,22 @@ export function legacyDocumentsRoot(cwd: string = process.cwd()): string {
 
 /**
  * The shared tmp/fsync/rename/dir-fsync primitive (spec §1, "Atomic writes").
- * Creates `<absPath>.<8 random hex>.tmp` empty with mode 0600 (fix round 1,
- * I2: a FIXED `<absPath>.tmp` name let two concurrent writers to the same
+ * Creates `<absPath>.<8 random hex>.tmp` empty with mode 0600 (a FIXED
+ * `<absPath>.tmp` name would let two concurrent writers to the same
  * target corrupt each other, and let a pre-planted `.tmp` symlink be
  * followed; the random suffix plus `"wx"` — create-exclusive, refuses an
  * existing path including a symlink — close both. The name still ends in
- * `.tmp`, so Task 3's startup sweep for leftover `*.tmp` files still matches
- * it), writes `bytes` (fully — fix round 1, I1: `writeFull` above retries
+ * `.tmp`, so the startup sweep for leftover `*.tmp` files (./startup.ts) matches
+ * it), writes `bytes` (fully — `writeFull` above retries
  * until every byte lands, since a single `handle.write` only issues one
  * `write(2)` and can silently install a short/truncated file when the
  * underlying write returns fewer bytes than asked without erroring), fsyncs
  * the file, renames it over `absPath`, then fsyncs the directory. On any
- * failure up to and including the rename, the `.tmp` file is removed (fix
- * round 1, m2: a failed rename used to leave an orphaned `.tmp`) and the
+ * failure up to and including the rename, the `.tmp` file is removed
+ * (a failed rename must not leave an orphaned `.tmp`) and the
  * original at `absPath` (if any) is left untouched. A directory-fsync
- * failure with a code Windows is known to raise instead of succeeding (fix
- * round 1, m8) is tolerated: the rename already landed, so the write itself
+ * failure with a code Windows is known to raise instead of succeeding
+ * is tolerated: the rename already landed, so the write itself
  * is not lost.
  */
 export async function writeAtomic(absPath: string, bytes: Buffer): Promise<void> {
@@ -157,8 +157,8 @@ export async function writeEncryptedFile(absPath: string, plaintext: Buffer): Pr
  * - PLAINTEXT_AT_REST: the file on disk does not start with `BVF1`. After
  *   the startup migration this means a write path bypassed encryption.
  * - DECRYPT_FAILED: the file is BVF1 but failed to decrypt — wrong key,
- *   tampered bytes, or any other error core.mjs's decryptFile throws (M6:
- *   a GCM auth failure throws a plain Error with no `code`; it is caught
+ *   tampered bytes, or any other error core.mjs's decryptFile throws
+ *   (a GCM auth failure throws a plain Error with no `code`; it is caught
  *   here like every other decryptFile failure, never left to bubble up as
  *   an unhandled 500).
  */
@@ -168,9 +168,8 @@ export class FileAtRestError extends Error {
   /**
    * The underlying decryptFile failure's own code — `KEY_MISMATCH` or
    * `MALFORMED` (EncryptionKeyError) — or `AUTH_FAILED` for a GCM
-   * authentication failure, which throws a plain, code-less `Error` (M6).
-   * Fix round 1, m3: the serving routes' log line used to name only
-   * `DECRYPT_FAILED`, dropping exactly the detail that would tell Task 5
+   * authentication failure, which throws a plain, code-less `Error`.
+   * It is the detail that tells
    * apart an interrupted rotation (KEY_MISMATCH) from tampering
    * (AUTH_FAILED). `undefined` when `code` is `PLAINTEXT_AT_REST`, since
    * that case has no decrypt failure to name.

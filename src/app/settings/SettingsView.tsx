@@ -41,7 +41,7 @@ const MIN_PASSPHRASE_LENGTH = 12;
  * loopback (http://localhost, 127.0.0.1), which browsers already treat as
  * secure because the traffic never leaves the host. `window.location.protocol`
  * alone would also flag localhost, which is noise: loopback dev/debugging is
- * not the plain-HTTP-on-the-LAN risk this warning exists for (review M5).
+ * not the plain-HTTP-on-the-LAN risk this warning exists for.
  * Reused rather than inventing a new signal — the same kind of "is this
  * connection trustworthy" check the admin page's session-cookie `secure` flag
  * already relies on server-side (`isSecureRequest`, src/lib/server/request-gate.ts).
@@ -296,7 +296,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
       // The response body IS the sealed envelope (field-encryption spec
-      // §Backup UI, P2) — downloaded as-is, never assembled client-side.
+      // §Backup UI) — downloaded as-is, never assembled client-side.
       const blob = await res.blob();
       const filename = res.headers.get("X-Backup-Filename") ?? "blackvault-backup.sealed.json";
       const savedToPathHeader = res.headers.get("X-Backup-Saved-To");
@@ -609,7 +609,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                         // Not "current-password": this is a one-off backup
                         // passphrase, never the admin's own login password —
                         // offering to fill or save it as the site login would
-                        // be actively wrong (review M4). Browsers ignore a
+                        // be actively wrong. Browsers ignore a
                         // bare autoComplete="off" on password fields, so a
                         // distinctive `name` goes with it.
                         autoComplete="off"

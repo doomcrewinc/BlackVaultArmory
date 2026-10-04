@@ -2,7 +2,7 @@
  * The registry of which schema columns are encrypted at rest (field-encryption
  * spec, docs/superpowers/specs/2026-09-30-field-encryption-design.md, D1).
  *
- * This is the one place that lists them. The encryption extension (Task 3)
+ * This is the one place that lists them. The encryption extension (./extension.ts)
  * drives its writes/reads off this list, a guard test below confirms every
  * entry is backed by a `String` column in the Prisma schema (ciphertext can
  * only live in a text column), and another guard test fails if any raw SQL
@@ -16,7 +16,7 @@
  *   - "date":   `nfaApprovalDate`. The column is a type-changed `DateTime` ->
  *               `String` (see the migration). The extension serializes a Date
  *               to an ISO string before encrypting and parses it back on read,
- *               so application code keeps seeing `Date | null` (Task 3).
+ *               so application code keeps seeing `Date | null`.
  *   - "number": `nfaTaxPaid`. Same idea for the type-changed `Float` -> `String`
  *               column: serialized as a JSON number before encrypting, parsed
  *               back to `number | null` on read.
@@ -25,7 +25,7 @@
  * gets an HMAC fingerprint column (`serialNumberHash`) so equality lookups
  * keep working without decrypting every row.
  *
- * P3 (SQLite DateTime representation, recorded here per the plan): the real
+ * P3 (SQLite DateTime representation): the real
  * prisma/prisma/dev.db has no NFA firearm, so a scratch copy (never the real
  * file) was seeded with one through the actual SQLite Prisma client — the
  * same writer the app uses — then inspected directly with sqlite3, BEFORE
@@ -64,10 +64,10 @@
  * format — and a plain numeric string for `nfaTaxPaid` (`"200"`, `"199.99"`,
  * `::text` is lossless for `float8` on Postgres >= 12).
  *
- * Task 4's startup encryption migration must therefore accept, for
+ * The startup encryption migration (./startup.ts) must therefore accept, for
  * `nfaApprovalDate`: a numeric string of epoch milliseconds (what SQLite's
  * data actually is, post-migration) AND an ISO string (what Postgres's data
- * actually is — not merely a possibility plan note P3 allows for); and for
+ * actually is); and for
  * `nfaTaxPaid`: a numeric string (`"200.0"` on SQLite, `"200"`/`"199.99"` on
  * Postgres) or a bare number.
  *

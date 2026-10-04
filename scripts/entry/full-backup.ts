@@ -1,5 +1,5 @@
 /**
- * The full-backup CLI (spec 3c §2). Bundled by scripts/build-scripts.mjs to
+ * The full-backup CLI (full-backups design §2). Bundled by scripts/build-scripts.mjs to
  * dist/scripts/full-backup.mjs and run inside the app container as uid 1001:
  *
  *   node dist/scripts/full-backup.mjs [--dir <folder>] [--keep <n>]   make a backup
@@ -13,7 +13,7 @@
  *             passphrase, minus ONE leading UTF-8 byte order mark and ONE
  *             trailing line ending (LF or CRLF). Input that is not valid
  *             UTF-8, or holds a NUL (a UTF-16 file), is refused before any
- *             work (src/lib/backup/passphrase-input.ts, ruling R37).
+ *             work (src/lib/backup/passphrase-input.ts).
  *
  * --dir       The backup folder. Default /app/backups.
  * --verify    Stream-decrypts <file> and checks every file's sha256 against
@@ -24,12 +24,12 @@
  *             (src/lib/backup/full-prune.ts has the exact rules). <n> is a
  *             whole number, 1 or more; anything else is refused before any
  *             work. It runs here, inside the container, because the host
- *             user cannot list or delete the app user's 0600 files (ruling
- *             R18). Without --keep nothing is ever deleted: backup.sh passes
+ *             user cannot list or delete the app user's 0600 files.
+ *             Without --keep nothing is ever deleted: backup.sh passes
  *             its default of 7, the Settings button never passes it. If the
  *             backup fails (a failed verify included) nothing is deleted and
  *             the exit code is 1. Nothing is deleted either when the new
- *             backup is incomplete (`unreadable` is not 0, ruling R36): the
+ *             backup is incomplete (`unreadable` is not 0): the
  *             older backups may be the only ones holding those files. Not
  *             allowed together with --verify.
  *
@@ -177,7 +177,7 @@ async function main(): Promise<number> {
   try {
     const result = await runFullBackup({ passphrase, dir });
     // A vanished file is normal on a live install; an unreadable one is not,
-    // and the backup is incomplete without it — say so, loudly (ruling R9).
+    // and the backup is incomplete without it — say so, loudly.
     let unreadable = 0;
     for (const skipped of result.skipped) {
       if (skipped.kind === "unreadable") {
@@ -196,7 +196,7 @@ async function main(): Promise<number> {
     // was verified and published as result.file. A failed backup or a failed
     // verify threw above, so nothing is deleted and the exit code is 1.
     // Nothing here can fail the run: the new backup exists and has verified.
-    // Ruling R36: a backup that left out a file it could not read is
+    // A backup that left out a file it could not read is
     // INCOMPLETE, and the older backups may be the only ones that hold that
     // file — so nothing is deleted, however many there are. (A fault that
     // hits every file would otherwise replace every good backup with an

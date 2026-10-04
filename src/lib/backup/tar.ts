@@ -5,8 +5,8 @@ import { Readable, Writable } from "node:stream";
  * node:stream.
  *
  * Why hand-rolled: the full backup's plaintext stream (db.json, then every
- * decrypted upload under files/, then manifest.json LAST — controller ruling
- * for fix round 1, so the engine can hash files while streaming them and
+ * decrypted upload under files/, then manifest.json LAST,
+ * so the engine can hash files while streaming them and
  * record files that vanish mid-run in `skipped`) is piped straight into the
  * BVB1 sealer
  * (core.mjs's createBackupSealer). Pulling in a tar library would add a
@@ -193,7 +193,7 @@ function writeAsync(stream: Writable, chunk: Buffer): Promise<void> {
  * most one chunk is held at a time regardless of the source's total size.
  *
  * A chunk that would take the running total past `size` is rejected BEFORE
- * it is written (review I3), so a file that grows mid-backup is caught on
+ * it is written, so a file that grows mid-backup is caught on
  * the chunk that overruns, not after streaming every extra byte. Throwing
  * out of the `for await` destroys the source. A source that ends short is
  * rejected after its end.
@@ -216,7 +216,7 @@ async function pipeExact(source: Readable, dest: Writable, size: number, path: s
  * Writes a ustar archive to `out`. Call `addFile`/`addBuffer` for each entry
  * in order, one at a time, then `finish()` exactly once.
  *
- * Failed state (review I3): ANY `addFile` error — a bad path or size, a source
+ * Failed state: ANY `addFile` error — a bad path or size, a source
  * that is short or long, a write error — leaves the writer failed, because by
  * then a header and part of a body may already be in `out` and the archive is
  * misaligned. Every later `addFile`/`addBuffer`/`finish` rejects, so a caller
@@ -343,7 +343,7 @@ function isAllZero(buf: Buffer): boolean {
 
 /**
  * The one path rule for archive entries, used by the writer, the reader and
- * the manifest (`files[].path`), so nothing downstream (restore, Task 7) has
+ * the manifest (`files[].path`), so nothing downstream (the restore) has
  * to normalise a path: a path that passes is already canonical.
  *
  * A valid path is non-empty, relative, uses `/` only, and every segment is a
@@ -399,7 +399,7 @@ function parseHeader(block: Buffer): ParsedHeader {
  * Why not `read(n)` + `'readable'` (the first version): attaching a
  * `'readable'` listener while a partial buffer is queued re-emits on the
  * next tick, so waiting for "n bytes" on any multi-chunk async input became a
- * nextTick spin that starved I/O and never received the data (review C1).
+ * nextTick spin that starved I/O and never received the data.
  * The async iterator has no such bookkeeping: `next()` resolves with the next
  * chunk, `done` at a clean end, and rejects with the stream's error.
  *
@@ -598,7 +598,7 @@ class EntryBodyStream extends Readable {
  *   `readTar` too.
  * On rejection the input stream is destroyed.
  *
- * Body contract (review I1): `body` is only valid until `onEntry`'s promise
+ * Body contract: `body` is only valid until `onEntry`'s promise
  * settles. If `onEntry` resolves without reading the whole body — or
  * destroys it — `readTar` destroys the body and skips the unread rest itself,
  * then continues with the next entry. So a consumer may skip an entry simply

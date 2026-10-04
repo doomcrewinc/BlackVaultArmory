@@ -56,7 +56,7 @@ async function actorFor(
   }
   // The store's actor was resolved before any transaction opened (never re-resolved
   // inside one — resolveActor()'s session lookup would deadlock on SQLite
-  // connection_limit=1, spike R5). Outside a transaction there is no store to reuse.
+  // connection_limit=1, audit-log spike). Outside a transaction there is no store to reuse.
   return stored ?? (await resolveActor());
 }
 
@@ -76,7 +76,7 @@ async function actorFor(
  * `extension.ts`'s wrapped `$transaction`) — throws rather than calling
  * `resolveActor()` here: that call needs the database connection the open
  * transaction is holding, which deadlocks on SQLite `connection_limit=1`
- * (spike R5). No current call site hits this; it exists so a future one
+ * (audit-log spike). No current call site hits this; it exists so a future one
  * fails loudly instead of hanging.
  *
  * Deliberately keyed on `store.tx`, NOT on whether `client` was passed: a

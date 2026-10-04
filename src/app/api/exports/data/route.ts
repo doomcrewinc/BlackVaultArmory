@@ -586,10 +586,8 @@ export async function GET(request: NextRequest) {
           kind,
           sourceId: normalizedSourceId,
           url: normalizedUrl,
-          // Fix round 1, m6: documents moved to <uploadsRoot>/documents
-          // (spec 3b) and are now encrypted at rest; the old literal
-          // "storage/uploads/" prefix named a location nothing writes to
-          // any more. "uploads/" matches the Docker volume mount name
+          // Documents live in <uploadsRoot>/documents, encrypted at rest.
+          // "uploads/" matches the Docker volume mount name
           // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads).
           storagePath: normalizedUrl.replace("/api/files/", "uploads/"),
         });

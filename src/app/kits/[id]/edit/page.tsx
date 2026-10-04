@@ -26,9 +26,9 @@ interface Kit {
 }
 
 /**
- * Edit a kit — the container's own fields. `PUT /api/kits/[id]` has existed
- * since task 3 with no caller, which meant a kit could be created and never
- * renamed; this is that caller.
+ * Edit a kit — the container's own fields. This is the caller of
+ * `PUT /api/kits/[id]`: without it a kit could be created and never
+ * renamed.
  *
  * Follows `/gear/item/[id]/edit` deliberately: fetch on mount, controlled
  * `select` and image state, uncontrolled `defaultValue` text fields read back

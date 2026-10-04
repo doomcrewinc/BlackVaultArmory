@@ -16,16 +16,16 @@ import { SYSTEM_ACTOR, type AuditActor } from "./context";
  *
  * Never throws. Must never be called while a transaction is open: the session
  * lookup needs the database connection, and on SQLite (`connection_limit=1`)
- * an open transaction holds the only one (spike, R5 — it blocks until the
+ * an open transaction holds the only one (audit-log spike — it blocks until the
  * transaction times out). The audited client's `$transaction` resolves the
  * actor before it opens the transaction and carries it in the audit store.
  *
  * Memoised once per request: `getCurrentUser()` is NOT memoised in route
- * handlers (React `cache` only works during a server render — spike R5), so a
+ * handlers (React `cache` only works during a server render — audit-log spike), so a
  * request making several audited writes would repeat the session lookup. The
  * memo is keyed on the object `await headers()` resolves to, which Next keeps
- * per request (`workUnitStore.headers`; proven on a real `next start` server
- * — see the Task 4 report). The promise is stored so concurrent writes in one
+ * per request (`workUnitStore.headers`; proven on a real `next start`
+ * server). The promise is stored so concurrent writes in one
  * request share one lookup.
  */
 const perRequest = new WeakMap<object, Promise<AuditActor>>();

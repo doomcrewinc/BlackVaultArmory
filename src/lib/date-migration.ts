@@ -17,7 +17,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { AppPrismaClient } from "./encryption/app-client-types";
 import { isEncryptedField } from "./encryption/fields";
 
-// Fix round 1: moved to their own zero-import module so a CLIENT component
+// These live in their own zero-import module so a CLIENT component
 // (src/lib/audit/summary.ts) can read the classification without pulling
 // this file's `await import("@/lib/prisma")` — and therefore
 // `node:async_hooks` — into the browser bundle. Imported (not just

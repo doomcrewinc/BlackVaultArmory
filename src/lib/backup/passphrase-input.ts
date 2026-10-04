@@ -4,7 +4,7 @@
  * backup.bat / restore.sh / restore.bat send a passphrase FILE's bytes
  * unchanged). It turns those bytes into the text a person would TYPE, so
  * that a backup sealed from a file opens with the passphrase typed later,
- * and the other way round (ruling R37):
+ * and the other way round:
  *
  * - exactly ONE leading UTF-8 byte order mark is dropped (Windows editors
  *   and `Set-Content -Encoding UTF8` write one; nobody types one);

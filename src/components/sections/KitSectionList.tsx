@@ -28,8 +28,7 @@ import {
  *
  * Still a SERVER component, unlike GearClientPage and SupplyClientPage: the
  * card is a link and the "Add Kit" action is a link, so there is nothing to
- * hydrate. Phase 6 task 5 added both — the note that once stood here saying
- * a detail link "would 404" is obsolete now that /kits/[id] exists.
+ * hydrate. The card links to /kits/[id].
  *
  * Every number on the card is resolved SERVER-SIDE by `loadSectionItems`:
  * `expiry` comes from `kitExpiryRollup` against the one `today` that loader

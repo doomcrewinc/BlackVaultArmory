@@ -1,5 +1,5 @@
 /**
- * Which uploaded-file names a full backup may hold (ruling R26). ONE rule,
+ * Which uploaded-file names a full backup may hold. ONE rule,
  * used by all three sides, so that a backup that verifies always restores:
  * - the backup walk (./full-backup.ts) SKIPS a file this refuses and records
  *   it in `manifest.skipped` ("unsupported file name");

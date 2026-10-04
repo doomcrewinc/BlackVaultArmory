@@ -59,7 +59,7 @@ export async function GET(
         console.error(`[uploads] ${error.code}${error.causeCode ? ` (${error.causeCode})` : ""} for ${error.path}`);
         return NextResponse.json({ error: "File unavailable" }, { status: 500 });
       }
-      // Fix round 1, m4: this used to rethrow into the outer catch, which
+      // Not rethrown into the outer catch, which
       // returns a silent, unlogged 404 for EVERY failure — indistinguishable
       // from a genuinely missing file. Only a real ENOENT (the file vanished
       // between the lstat check above and this read) is still a 404; any

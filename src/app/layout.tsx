@@ -28,7 +28,7 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // Ruling A1: conditional on whether someone is signed in, and (Task 10) the
+  // Conditional on whether someone is signed in, and the
   // signed-in user is passed down to Sidebar/MobileHeader for the account
   // block, Log out and the admin-only "Users" link. Auth pages (/login,
   // /setup, /invite/*, /reset/*) render with no chrome at all: no Sidebar, no

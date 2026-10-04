@@ -19,7 +19,8 @@ import { backupCounts, buildBackupPayload, collectBackupRecords } from "./record
 import { TarWriter } from "./tar";
 
 /**
- * The full-backup engine (spec 3c §2): one passphrase-sealed `.bvb` archive
+ * The full-backup engine (docs/superpowers/specs/2026-10-02-full-backups-design.md
+ * §2): one passphrase-sealed `.bvb` archive
  * holding the database records and every uploaded file, decrypted, so it can
  * be restored onto an install with a DIFFERENT encryption key.
  *
@@ -36,8 +37,8 @@ import { TarWriter } from "./tar";
  * 4. streams a ustar tar — `db.json`, then `files/...`, then `manifest.json`
  *    LAST — through the BVB1 sealer into this run's own work file,
  *    `blackvault-full-<ts>.<random token>.bvb.partial` (created empty,
- *    chmod 0600, then written). The manifest is last (controller ruling,
- *    overriding the spec's "first") so each file is hashed while it is
+ *    chmod 0600, then written). The manifest is last (the design document
+ *    says "first") so each file is hashed while it is
  *    streamed and a file that vanishes mid-run can be recorded in
  *    `manifest.skipped`;
  * 5. fsyncs the file, then VERIFIES it (a full stream decrypt plus the
@@ -123,14 +124,14 @@ export interface FullBackupResult {
    * `{ path, reason }`). `vanished`: deleted while the backup ran — expected
    * on a live install. `unreadable`: the file exists but could not be read or
    * decrypted, or has a name a restore would refuse (reason "unsupported file
-   * name …", ruling R26) — the caller must warn about every one of these.
+   * name …") — the caller must warn about every one of these.
    */
   skipped: FullBackupSkipped[];
   /**
    * Things that did not stop the backup but that the user must see: the
    * folder fsync failed after the backup was verified and renamed into place,
    * or the backup folder's filesystem refused to set the file's mode to 600.
-   * Also the lock's own warnings (./full-lock.ts, ruling R34).
+   * Also the lock's own warnings (./full-lock.ts).
    * The backup succeeded. Empty on a normal run.
    */
   warnings: string[];
@@ -148,7 +149,7 @@ const codeOf = (e: unknown): string | undefined => (e as NodeJS.ErrnoException |
  * - ENOENT: the file was deleted after it was listed (spec §2 step 4).
  * - It exists but cannot be decrypted (FileAtRestError: damaged, a foreign
  *   key, plaintext at rest) or cannot be read (an fs error such as EACCES or
- *   EIO): skipped as `unreadable` (ruling R9) — one bad upload must not block
+ *   EIO): skipped as `unreadable` — one bad upload must not block
  *   every backup, but the caller has to say so loudly.
  * Anything else (the encryption key cannot be loaded, a bug) is not a
  * property of this file: skipping would turn "nothing can be read" into a
@@ -220,7 +221,7 @@ async function removeOrphanedPartials(dir: string): Promise<void> {
  * empty and mode 0600 (chmod too: a default ACL on the folder can override
  * the creation mode) before any data is written.
  *
- * `<token>` is 8 random bytes in hex, new for every run (ruling R15). The
+ * `<token>` is 8 random bytes in hex, new for every run. The
  * lock is advisory, so two runs can be active at once; with the token they
  * cannot be writing, verifying or publishing the same path even when they
  * start in the same second. The name still ends in `.bvb.partial` (what
@@ -270,7 +271,7 @@ async function createPartial(dir: string, now: Date): Promise<{ partialPath: str
  * lock normally prevents that) on such a filesystem, publishing in the same
  * second.
  *
- * Which `link` errors fall back (ruling R16): ALL of them except two.
+ * Which `link` errors fall back: ALL of them except two.
  * - EEXIST: the name is taken — try the next second's.
  * - ENOENT: the work file is gone (another run's cleanup removed it) — there
  *   is nothing to publish, so the run fails.
@@ -428,7 +429,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
         // "this file vanished / cannot be read" has to be known by now, and
         // its size settled. A skipped file therefore never has a tar entry.
         let plaintext: Buffer | null = null;
-        // Ruling R26: a name the restore would refuse (a control character,
+        // A name the restore would refuse (a control character,
         // or a second name that differs from an earlier one only by case or
         // Unicode normalisation) is left out and reported, so that every
         // backup that verifies also restores. ./entry-names.ts says which of
@@ -513,7 +514,7 @@ export async function runFullBackup(opts: FullBackupOptions): Promise<FullBackup
       );
     }
 
-    // Ruling R34: the heartbeat could not keep the lock fresh on this folder.
+    // The lock's warnings: the heartbeat could not keep the lock fresh on this folder.
     warnings.push(...lock.warnings());
 
     await recordEventBestEffort(null, {

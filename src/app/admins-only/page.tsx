@@ -8,7 +8,7 @@ import { listAdmins } from "@/lib/auth/admins";
  * Reached only for a signed-in user — decideAuth already requires a session for any
  * non-public path before the admin check runs.
  *
- * Ruling A11: this page is served as HTTP 200, not 403. `NextResponse.rewrite()`'s `status`
+ * This page is served as HTTP 200, not 403. `NextResponse.rewrite()`'s `status`
  * option (see src/proxy.ts) does not carry through to the client for a page rewrite — proven
  * with curl: the response carries an `x-middleware-rewrite` header but the outer status is
  * 200. Only the admin API (`/api/admin/*`) actually returns 403; this page's job is to show

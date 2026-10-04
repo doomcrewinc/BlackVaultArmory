@@ -108,7 +108,7 @@ function AdminAuditPageInner() {
   // The latest filters REQUESTED, whether or not the URL has caught up yet.
   // `filters` state only updates after router.replace changes the URL and the
   // effect below runs, so merging a change against it would drop any earlier
-  // change still in flight (final review P3). The URL effect resets this to
+  // change still in flight. The URL effect resets this to
   // what the URL says, so back/forward still wins.
   const latestFiltersRef = useRef<AuditFiltersState>(EMPTY_AUDIT_FILTERS);
 

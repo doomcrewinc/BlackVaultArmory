@@ -1,5 +1,5 @@
 /**
- * The full-restore CLI (spec 3c §3 step 4). Bundled by
+ * The full-restore CLI (full-backups design §3 step 4). Bundled by
  * scripts/build-scripts.mjs to dist/scripts/full-restore.mjs and run by
  * restore.sh / restore.bat in a one-off container, with the app STOPPED and
  * a snapshot already taken:
@@ -15,7 +15,7 @@
  *             passphrase, minus ONE leading UTF-8 byte order mark and ONE
  *             trailing line ending (LF or CRLF). Input that is not valid
  *             UTF-8, or holds a NUL (a UTF-16 file), is refused before any
- *             work (src/lib/backup/passphrase-input.ts, ruling R37).
+ *             work (src/lib/backup/passphrase-input.ts).
  * <file>      The archive. A bare file name is looked up in the backup
  *             folder; a path is used as given.
  * --dir       The backup folder. Default /app/backups.

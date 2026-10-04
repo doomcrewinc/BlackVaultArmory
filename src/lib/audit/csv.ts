@@ -6,7 +6,7 @@ import type { AuditEventDto } from "./query";
  * (starts with `=`, `+`, `-`, `@`, a tab or a carriage return) is prefixed
  * with `'` before RFC 4180 quoting is applied, so it opens as inert text
  * instead of executing. docs/superpowers/specs/2026-09-29-audit-log-design.md,
- * "CSV export"; Review Focus #4.
+ * "CSV export".
  */
 
 const FORMULA_PREFIX_TRIGGER = /^[=+\-@\t\r]/;

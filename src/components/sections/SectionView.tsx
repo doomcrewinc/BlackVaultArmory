@@ -192,8 +192,8 @@ export function SectionView({
   section: CategorySection;
   payloads: SectionPayload[];
 }) {
-  // A section declaring no source at all is a registry defect (task 6 adds
-  // the invariant test), but it must not render as a heading above a blank
+  // A section declaring no source at all is a registry defect (an invariant
+  // test guards it), but it must not render as a heading above a blank
   // region — the last blank-page shape left in this flow. It gets the same
   // empty state a single empty payload would have produced.
   if (payloads.length === 0) {

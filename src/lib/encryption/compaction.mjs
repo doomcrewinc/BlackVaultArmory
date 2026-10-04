@@ -1,4 +1,4 @@
-// Post-encryption / post-rotation compaction (final review F1). Shared by the
+// Post-encryption / post-rotation compaction. Shared by the
 // app (src/lib/encryption/startup.ts, allowJs) and the plain-JS rotation CLI
 // (scripts/rotate-encryption-key.mjs) — like ./core.mjs, so there is ONE copy.
 //
@@ -7,7 +7,7 @@
 // dead tuples, and autovacuum's ANALYZE copies sample values into
 // pg_statistic. After the startup encryption migration those old bytes are
 // the PLAINTEXT serials / NFA records / audit text; after a key rotation
-// they are OLD-key ciphertext. Measured in the final review (real Docker):
+// they are OLD-key ciphertext. Measured (real Docker):
 // - SQLite: `VACUUM` after the commit → 0 plaintext hits (125 MB in 528 ms).
 //   `PRAGMA secure_delete` would also work but must go through
 //   $queryRawUnsafe ($executeRawUnsafe("PRAGMA …") fails with P2010) and

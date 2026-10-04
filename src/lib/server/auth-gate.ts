@@ -43,7 +43,7 @@ export function decideAuth(input: AuthInput): AuthDecision {
 
   // Rule 1: public paths pass, except a signed-in user landing on /login or
   // /setup — they don't need those pages, so send them home. Invite/reset
-  // links are deliberately excluded from this exception (Review Focus #1):
+  // links are deliberately excluded from this exception:
   // an admin testing their own invite link must still see it work.
   if (isPublicPath(pathname)) {
     if (user && (pathname === "/login" || pathname === "/setup")) {

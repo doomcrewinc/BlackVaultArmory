@@ -148,7 +148,7 @@ export function fileKeyId(buf) {
     throw new EncryptionKeyError("MALFORMED", "Not a BVF1 encrypted file.");
   }
   const id = buf.subarray(5, FILE_HEADER_LEN).toString("ascii");
-  // M3: untrusted header bytes must never reach a log message or a key
+  // Untrusted header bytes must never reach a log message or a key
   // comparison unless they are actually a key id (8 lowercase hex chars).
   if (!FILE_KEY_ID_RE.test(id)) {
     throw new EncryptionKeyError("MALFORMED", "Not a BVF1 encrypted file.");

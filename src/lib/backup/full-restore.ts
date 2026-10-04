@@ -18,7 +18,8 @@ import { DB_STEP_MARKER_SUFFIX, dbStepMarkerName, RESTORE_STAGING_PREFIX, RESTOR
 import { readTar } from "./tar";
 
 /**
- * The full-restore engine (spec 3c §3 step 4): rebuilds a whole install —
+ * The full-restore engine (docs/superpowers/specs/2026-10-02-full-backups-design.md
+ * §3 step 4): rebuilds a whole install —
  * database records, photos, documents — from one `.bvb` archive, onto an
  * install whose encryption key may differ from the one the backup was made
  * under. Run by restore.sh / restore.bat in a one-off container with the app
@@ -44,7 +45,7 @@ import { readTar } from "./tar";
  *    was written.
  * 4. FOLDERS. The live `images/` and `documents/` are renamed into
  *    `<uploads>/.pre-restore-<ts>/` — with every file they hold, including
- *    files the backup does not have (Review Focus 4: nothing is deleted) —
+ *    files the backup does not have (nothing is deleted) —
  *    and the staged folders are renamed into their place.
  * 5. The `RESTORE {full:true, file, files}` audit entry (the audit table is
  *    not part of a backup, so it survives the replace).
@@ -58,7 +59,7 @@ import { readTar } from "./tar";
  * what the wrapper goes by is the marker described below.
  *
  * Just before step 3 it leaves a durable marker, `.restore-<ts>.db-started/`
- * (ruling R24, see DB_STEP_MARKER_SUFFIX): the wrapper puts the DATABASE back
+ * (see DB_STEP_MARKER_SUFFIX): the wrapper puts the DATABASE back
  * only when that marker exists. The whole run holds the full-backup lock.
  *
  * `.pre-restore-<ts>/` is never deleted here. The startup file scan, the
@@ -69,7 +70,7 @@ import { readTar } from "./tar";
 
 export const PRE_RESTORE_PREFIX = ".pre-restore-";
 /**
- * Ruling R24. `<uploads>/.restore-<ts>.db-started/` is created — and flushed
+ * `<uploads>/.restore-<ts>.db-started/` is created — and flushed
  * to disk, with the uploads folder — just BEFORE the database step. While it
  * exists, the database may hold the backup's records: the wrapper puts the
  * database back from its snapshot only when it finds this marker, and never
@@ -163,7 +164,7 @@ const messageOf = (e: unknown): string => (e instanceof Error ? e.message : Stri
 /**
  * Where a `files/...` entry goes under the staging folder, as path segments
  * — or a refusal. The rule is ./entry-names.ts's, shared with the backup
- * walk and with `verifyFullBackup` (ruling R26): a backup never holds a name
+ * walk and with `verifyFullBackup`: a backup never holds a name
  * this refuses, and one that does fails its verify first.
  */
 function stagedSegments(names: EntryNameSet, entryPath: string): string[] {
@@ -253,7 +254,7 @@ export async function runFullRestore(opts: FullRestoreOptions): Promise<FullRest
 
   try {
     const result = await restoreLocked({ opts, stamp, file, fileName, root, staging, preRestoreName, preRestore, marker });
-    // Ruling R34: the heartbeat could not keep the lock fresh on this folder.
+    // The lock's warnings: the heartbeat could not keep the lock fresh on this folder.
     result.warnings.push(...lock.warnings());
     return result;
   } finally {
@@ -338,7 +339,7 @@ async function restoreLocked({ opts, file, fileName, root, staging, preRestoreNa
     if (!prepared.ok) throw new FullRestoreError(`${prepared.error} Nothing was changed.`, false);
 
     // ── 3. Database: one transaction, through the shared restore logic ──
-    // The marker first (ruling R24), durable before the transaction opens.
+    // The marker first, durable before the transaction opens.
     await fsp.mkdir(marker, { mode: 0o700 });
     const started = await fsp.open(path.join(marker, "started"), "wx", 0o600);
     try {

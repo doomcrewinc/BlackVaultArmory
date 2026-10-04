@@ -5,8 +5,7 @@ import { ENCRYPTED_FIELDS } from "./fields";
 import { resolveProvider, type DbProvider } from "../db/provider";
 
 /**
- * The app's own snapshot before the FIRST encryption of existing data
- * (Task 7, carry N4 in the field-encryption ledger).
+ * The app's own snapshot before the FIRST encryption of existing data.
  *
  * Why the app does this, not only the update scripts: `update.sh` git-pulls
  * itself, so the first upgrade INTO field encryption runs the OLD copy of
@@ -21,7 +20,7 @@ import { resolveProvider, type DbProvider } from "../db/provider";
  * - PostgreSQL: the app cannot dump its own server. It says so, and that
  *   ./update.sh / update.bat take one in backups/ before starting a new
  *   version — the app cannot tell whether they did — then continues. No
- *   pg_dump command is printed (final review F3/F4): by the time anyone could
+ *   pg_dump command is printed: by the time anyone could
  *   run it, the data is already encrypted.
  *
  * The copy is PLAINTEXT and stays on the data volume until deleted; the log
@@ -113,7 +112,7 @@ async function isCompleteSnapshot(raw: SnapshotClient, file: string): Promise<bo
 /**
  * The newest complete pre-encryption snapshot in `dir` younger than
  * SNAPSHOT_REUSE_MS, or null. Only final names are considered, and each
- * candidate must pass isCompleteSnapshot (fix round 1, I1).
+ * candidate must pass isCompleteSnapshot.
  */
 async function recentSnapshot(raw: SnapshotClient, dir: string, now: Date, warn: (line: string) => void): Promise<string | null> {
   if (!existsSync(dir)) return null;
@@ -138,7 +137,7 @@ function removeStalePartials(dir: string): void {
 }
 
 /**
- * Where the snapshot is on the HOST (fix round 1, M14). In the container the
+ * Where the snapshot is on the HOST. In the container the
  * database folder is /app/data, which docker-compose.yml mounts from
  * ${DATA_DIR}/db and passes as BLACKVAULT_HOST_DB_DIR. Outside a container
  * the path is already a host path.
@@ -173,7 +172,7 @@ export async function takePreEncryptionSnapshot(
   if (!(await hasPlaintextValues(raw))) return { kind: "none" };
 
   if (provider === "postgres") {
-    // Final review F3 + F4: the app cannot know whether update.sh/update.bat
+    // The app cannot know whether update.sh/update.bat
     // took a snapshot, so it says both cases honestly, and prints no pg_dump
     // command — a dump taken after this line would hold only ciphertext.
     warn(
@@ -196,12 +195,12 @@ export async function takePreEncryptionSnapshot(
     removeStalePartials(dir);
     target = path.join(dir, `${SNAPSHOT_PREFIX}${snapshotStamp(now)}.db`);
     if (existsSync(target)) target = path.join(dir, `${SNAPSHOT_PREFIX}${snapshotStamp(now)}-${process.pid}.db`);
-    // Fix round 1 (I1): written under a .partial name and renamed only once
+    // Written under a .partial name and renamed only once
     // complete, so a copy killed part-way never carries a final name.
     const partial = `${target}.partial`;
     rmSync(partial, { force: true });
     try {
-      // Fix round 2: created EMPTY and mode 0600 BEFORE any data is written
+      // Created EMPTY and mode 0600 BEFORE any data is written
       // (VACUUM INTO accepts an existing empty file); chmod as well, since a
       // default ACL on the folder can override the creation mode.
       writeFileSync(partial, "", { mode: 0o600, flag: "wx" });

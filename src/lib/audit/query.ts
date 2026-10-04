@@ -196,11 +196,11 @@ export function parseAuditFilters(searchParams: URLSearchParams): AuditFilters {
   const type = searchParams.get("type")?.trim();
   if (type && !hasNulByte(type)) filters.type = type;
 
-  // Fix round 1: the browser now sends the VIEWER'S local day as a full ISO
+  // The browser sends the VIEWER'S local day as a full ISO
   // instant (local midnight for `from`, local 23:59:59.999 for `to` —
   // AuditFilters.tsx / page.tsx's toQueryString), because a bare UTC day
-  // silently used UTC's calendar boundary instead of the viewer's and
-  // dropped evening events. A bare `YYYY-MM-DD` is still accepted for
+  // uses UTC's calendar boundary instead of the viewer's and
+  // drops evening events. A bare `YYYY-MM-DD` is still accepted for
   // back-compat (a bookmarked link, or a caller that never had a browser
   // timezone to convert with) and keeps its old UTC-day meaning.
   const fromRaw = searchParams.get("from");

@@ -3,7 +3,7 @@
 // esbuild, for the CLI engines (full-backup, full-restore, reencrypt-files —
 // spec docs/superpowers/specs/2026-10-02-full-backups-design.md) that run
 // inside the app container as `node dist/scripts/<name>.mjs`. This file
-// adds no entry of its own (ruling R1): later tasks only add files under
+// adds no entry of its own: a CLI is a file under
 // scripts/entry/, and with none present the build succeeds, building
 // nothing.
 //

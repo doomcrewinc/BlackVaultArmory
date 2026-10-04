@@ -620,8 +620,8 @@ export default function FullArmoryPreviewPage() {
             A kit is a packing list, not a copy: its contents are listed in full in the sections above. No
             prices or serials here — nine columns that say what each bag is, where it is, and what it is short of.
           </p>
-          {/* MEASURED, not eyeballed. Phase 5's gear table ran 174px off a
-              letter sheet and a reviewer logged it as merely "cramped", so
+          {/* MEASURED, not eyeballed. A table that runs off a letter sheet
+              only looks "cramped" on screen, so
               this one was printed before it shipped: emulating @page letter
               (8.5in less 0.4in margins = 739.2px), max-width:none,
               overflow:visible and print:hidden, the nine columns below measure

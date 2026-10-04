@@ -26,10 +26,9 @@ const KITS_SECTION_SLUG = "kits";
  * the same `loadSectionItems`, and hands the payloads to the same
  * `SectionView` — whose kit branch mounts `KitSectionList`. A change to the
  * card shape, the rollups or the timezone notice lands on both paths at once
- * because there is only one of each to change. The alternative the brief
- * sketched (a second `KitsClientPage` with its own grid) is precisely the
- * duplication this epic has already paid to remove five times over, so it is
- * not what got built; see the task 5 report.
+ * because there is only one of each to change. A second `KitsClientPage`
+ * with its own grid would be the duplication the shared section view exists
+ * to avoid.
  *
  * `notFound()` on a missing or unrenderable section mirrors `/prep/[slug]`
  * exactly, and is safe for the same reason: the registry test asserts the

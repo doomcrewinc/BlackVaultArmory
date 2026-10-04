@@ -12,12 +12,12 @@ import { dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-
 import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
 
 /**
- * The startup file step of encrypted files at rest (spec 3b,
+ * The startup file step of encrypted files at rest (
  * docs/superpowers/specs/2026-10-01-encrypted-files-design.md §2 "Startup"
  * and §3 "Resume"). Called from runEncryptionStartup
- * (src/lib/encryption/startup.ts) after 3a's database migration and
+ * (src/lib/encryption/startup.ts) after the database migration and
  * compaction, on the same raw client, before the app serves — so no request
- * can read a file while this rewrites it (Review Focus 3).
+ * can read a file while this rewrites it.
  *
  * Order:
  * 1. delete leftover `*.tmp` files (an interrupted writeAtomic);
@@ -76,13 +76,13 @@ const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
 
 /**
  * writeAtomic's own temp names (`<name>.<8 random hex>.tmp`, ./storage.ts).
- * Fix round 1, M1: the sweep deletes ONLY these, never some other file that
+ * The sweep deletes ONLY these, never some other file that
  * merely ends in `.tmp`. Rotation's `.rot` staging is written through
  * writeAtomic too, so its temps are `<name>.rot.<8 hex>.tmp` and match.
  */
 export const WRITE_ATOMIC_TMP = /\.[0-9a-f]{8}\.tmp$/;
 
-/** Fix round 1, M7: a progress line every this many files during the snapshot and the encryption. */
+/** A progress line every this many files during the snapshot and the encryption. */
 export const PROGRESS_EVERY = 250;
 
 type Entry = { abs: string; rel: string; name: string };
@@ -92,7 +92,7 @@ const codeOf = (e: unknown): string =>
   (e instanceof Error ? e.message : String(e));
 
 /**
- * Fix round 1, M6: runs one filesystem step and turns any raw error into a
+ * Runs one filesystem step and turns any raw error into a
  * FileStartupError that names the path, the error code and a fix.
  */
 async function fsStep<T>(what: string, target: string, fn: () => Promise<T>): Promise<T> {
@@ -134,10 +134,10 @@ async function syncDir(dir: string): Promise<void> {
 /**
  * Every regular file under `dir` (sorted, relative paths with `/`), never
  * following a symlink and never entering a hidden folder — which includes
- * the `.pre-encryption-*` snapshots (fix round 1, M5: the spec excludes
+ * the `.pre-encryption-*` snapshots (the design excludes
  * hidden files, and a file inside a hidden folder is hidden too).
  * Symlinked files are collected so the caller can report them. A symlinked
- * DIRECTORY the walk would have entered refuses to start (fix round 1, M4):
+ * DIRECTORY the walk would have entered refuses to start:
  * whatever it points at would be scanned, moved into or left plaintext
  * outside the uploads root.
  */
@@ -315,7 +315,7 @@ async function moveAcrossDevices(src: string, dest: string): Promise<void> {
   await writeAtomic(dest, bytes); // copy + fsync file + rename + fsync dir
   const copied = await fsp.readFile(dest);
   if (!copied.equals(bytes)) {
-    // Fix round 1, M3: never leave a suspect copy behind — the next start
+    // Never leave a suspect copy behind — the next start
     // would take it for a collision, keep it and encrypt it. The source is
     // still the good copy.
     await fsp.rm(dest, { force: true });
@@ -329,9 +329,9 @@ type LegacyMove = { src: string; dest: string; name: string };
 /**
  * The legacy documents this start will move. Skipped (and logged): anything
  * not a regular file, hidden files, names a later step would never touch —
- * `.tmp` / `.rot` (fix round 1, M1: such a file was moved, never encrypted,
+ * `.tmp` / `.rot` (such a file would be moved, never encrypted,
  * then deleted by the next start's sweep) — and names that already exist in
- * the new folder (Review Focus 1: the existing file is kept).
+ * the new folder (the existing file is kept).
  */
 async function planLegacyMoves(legacyDir: string, docsDir: string, warn: (l: string) => void): Promise<LegacyMove[]> {
   let entries: Dirent[];
@@ -616,13 +616,13 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   const legacyDir = legacyDocumentsRoot(cwd);
   const isDocument = (e: Entry) => e.rel.startsWith("documents/");
 
-  // Fix round 1, M4: legacy documents are moved INTO documents/, which the
+  // Legacy documents are moved INTO documents/, which the
   // walk below never sees when it is a link. Refuse before anything changes.
   if (await fsStep("check", docsDir, () => fsp.lstat(docsDir).then((st) => st.isSymbolicLink(), () => false))) {
     throw symlinkedFolderError(docsDir);
   }
 
-  // 1. Leftover temp files from an interrupted atomic write — writeAtomic's own names only (M1).
+  // 1. Leftover temp files from an interrupted atomic write — writeAtomic's own names only.
   for (const f of (await walk(root)).files.filter((e) => WRITE_ATOMIC_TMP.test(e.name))) {
     await fsStep("remove the leftover temporary file", f.abs, () => fsp.rm(f.abs, { force: true }));
     log(`[files] Removed a leftover temporary file: ${f.abs}`);
@@ -653,7 +653,7 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
     );
   }
 
-  // 4. Legacy documents onto the volume. Fix round 1, M8: the update script's
+  // 4. Legacy documents onto the volume. The update script's
   // snapshot (the marker) copies only the host uploads folder, never the old
   // in-container documents folder — so with the marker set, the documents
   // about to move are snapshotted here first.
@@ -699,7 +699,7 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   // 7. Missing documents (logged; never a refusal).
   const missing = await findMissingDocuments(raw, docsDir, warn);
 
-  // 8. Audit. While no FILES_ENCRYPTED event exists yet (fix round 1, M2), the
+  // 8. Audit. While no FILES_ENCRYPTED event exists yet, the
   // first one carries the TOTALS — every BVF1 file per folder — so an event
   // lost to a failed audit write, or undercounted after a crash part-way, is
   // recovered by the next start. After that, only a start that changed

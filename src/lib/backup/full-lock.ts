@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * The full-backup lock (spec 3c §2 step 1): `<backup folder>/.full-backup.lock`.
+ * The full-backup lock (full-backups design §2 step 1): `<backup folder>/.full-backup.lock`.
  * One lock for every way a full backup can start — the CLI engine
  * (`scripts/entry/full-backup.ts`, exit 2 when it is taken) and the Settings
  * button's in-process job (HTTP 409) — so both callers tell "already running"
@@ -14,9 +14,9 @@ import path from "node:path";
  * The file holds the owner's pid, start time and HOSTNAME, and the owner
  * refreshes its mtime every 30 s (the heartbeat) for as long as it holds it.
  *
- * Is an existing lock live? (ruling R10)
+ * Is an existing lock live?
  * - Same hostname: live only while its pid is alive AND its heartbeat is
- *   fresh (ruling R12). A dead pid is reclaimed at once. A live pid alone is
+ *   fresh. A dead pid is reclaimed at once. A live pid alone is
  *   not enough: the Settings-button backup runs inside the server process, so
  *   after a crash and an in-place restart (same hostname) the lock names a
  *   pid that is alive again — as the new server, not as a backup. Nothing
@@ -53,7 +53,7 @@ import path from "node:path";
  * fresh guard (someone took it after this contender looked) is linked back
  * and the contender backs off. That closes the two-contender race.
  *
- * WHAT THIS DOES NOT GUARANTEE (accepted, ruling R14 — do not "fix" without
+ * WHAT THIS DOES NOT GUARANTEE (accepted — do not "fix" without
  * reading this). The claim renames whatever is at the guard path BEFORE it
  * can look at it, and the owner's guard check and its lock rename are two
  * separate calls. So, only when a dead reclaimer's guard is present:
@@ -149,7 +149,7 @@ export interface FullBackupLock {
   /** Stops the heartbeat and removes the lock if it is still ours. Safe to call more than once; never throws. */
   release(): Promise<void>;
   /**
-   * What the holder must tell the user at the end of its run (ruling R34):
+   * What the holder must tell the user at the end of its run:
    * today, that the heartbeat could not refresh the lock, so another backup
    * or restore may not see this one as running. Empty on a normal run.
    */
@@ -351,7 +351,7 @@ export async function acquireFullBackupLock(dir: string, opts: FullBackupLockOpt
     };
     // The heartbeat. unref'd: a held lock never keeps the process alive.
     //
-    // Ruling R34. `utimes` with explicit times needs ownership of the file on
+    // `utimes` with explicit times needs ownership of the file on
     // some filesystems, and since a refused chmod is tolerated the lock can
     // sit on one where the app does not own what it creates (a FAT disk, a
     // share mounted for another uid). A swallowed failure there would let
