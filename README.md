@@ -745,13 +745,13 @@ check your proxy's upload size limit (for nginx, `client_max_body_size`) — rev
 proxies default to a much smaller limit than BlackVault's own.
 
 BlackVault itself caps a request body (this is what the sealed-backup restore upload
-uses) at **64 MB**. Set your reverse proxy's own upload limit to at least that — for
+uses) at **64 MiB**. Set your reverse proxy's own upload limit to at least that — for
 example `client_max_body_size 64m;` in nginx / Nginx Proxy Manager, or
-`request_body { max_size 64MB }` in Caddy. This matters even though BlackVault has its
+`request_body { max_size 64MiB }` in Caddy. This matters even though BlackVault has its
 own cap: Next.js buffers an incoming request body in memory *before* it ever checks that
 cap, so an unauthenticated request with no size limit at all in front of it can still
 force the server to hold a very large body in memory. Your reverse proxy's limit is the
-real protection against that; BlackVault's own 64 MB figure only bounds how large a
+real protection against that; BlackVault's own 64 MiB figure only bounds how large a
 legitimate restore upload may be (roughly 37,000 firearms with notes, sealed).
 
 ---
@@ -816,7 +816,7 @@ nothing.
 An older, unsealed (plain JSON) backup from before this release still restores — you'll
 see a warning that the file is not encrypted first.
 
-Restoring a backup is capped at 64 MB (see **Upload size** above for why, and how to
+Restoring a backup is capped at 64 MiB (see **Upload size** above for why, and how to
 also set a matching limit on your reverse proxy). That is comfortably enough for a very
 large inventory (around 37,000 firearms with notes); a household with more than that
 would need a command-line restore path, which does not exist yet.
