@@ -482,6 +482,22 @@ describe("full-backup CLI (bundled, plain node)", () => {
       for (const f of [old[2], created]) expect(cli(["--dir", backups, "--verify", f]).status).toBe(0);
     });
 
+    it("a restore marker in the uploads folder: exit 1 with one ERROR line, no backup is made and --keep deletes nothing", () => {
+      const old = seed(3);
+      const before = old.map((f) => fs.readFileSync(path.join(backups, f)));
+      const root = path.join(tmp, `uploads-marker-${seq}`);
+      fs.mkdirSync(path.join(root, ".restore-20261001-101010.db-started"), { recursive: true });
+      const r = spawnSync(process.execPath, [bundle, "--dir", backups, "--keep", "1"], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: root }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+      expect(r.status, r.stderr).toBe(1);
+      expect(r.stdout).toBe("");
+      const lines = r.stderr.split("\n").filter(Boolean);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("A restore did not finish cleanly: .restore-20261001-101010.db-started is still in the uploads folder");
+      expect(lines[0]).toContain("No backup was made, and no older backup was deleted.");
+      expect(backupFiles()).toEqual(old);
+      old.forEach((f, i) => expect(fs.readFileSync(path.join(backups, f)).equals(before[i])).toBe(true));
+    });
+
     describe("R36: a backup that left out an unreadable file is incomplete, so --keep deletes nothing", () => {
       const KEPT_WARNING = "WARNING: old backups were kept because this backup is incomplete";
       /** An uploads root with `good` readable images and `bad` damaged ones (real files, really undecryptable). */

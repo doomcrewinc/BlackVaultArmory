@@ -548,8 +548,10 @@ const startupUploadsRoot = (env: NodeJS.ProcessEnv, cwd: string): string =>
  * the commands that clear it. A missing uploads root has no marker.
  *
  * Only the app's start calls this (runEncryptionStartup in
- * ../encryption/startup.ts). The restore, rollback, backup and key-rotation
- * commands never do: they are what clears the marker.
+ * ../encryption/startup.ts). The restore and rollback commands never do:
+ * they are what clears the marker. A full backup and a key rotation refuse
+ * on a marker with a check of their own, by the same rule (runFullBackup in
+ * ../backup/full-backup.ts; rotate-key.sh and rotate-key.bat).
  */
 export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "cwd" | "env"> = {}): Promise<void> {
   const env = opts.env ?? process.env;

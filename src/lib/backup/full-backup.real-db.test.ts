@@ -415,6 +415,41 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(await events()).toHaveLength(0);
   });
 
+  // The app refuses to start on a half-restored install; a scheduled backup
+  // must not go on archiving one (and, with --keep, deleting the backups
+  // taken before it).
+  it.each([
+    ["a folder, as the restore program leaves it", (p: string) => mkdirSync(p)],
+    ["a file", (p: string) => writeFileSync(p, "")],
+  ])("a restore marker in the uploads folder (%s) refuses the backup: nothing is written, the lock is released, no audit entry", async (_name, plant) => {
+    const marker = path.join(root, ".restore-20261001-101010.db-started");
+    plant(marker);
+    const err = await run().catch((e) => e);
+    expect(err).toBeInstanceOf(FullBackupError);
+    expect(err.code).toBe("RESTORE_UNFINISHED");
+    expect(err.message).toContain(".restore-20261001-101010.db-started");
+    expect(err.message).toContain("No backup was made");
+    expect(backupFolder()).toEqual([]);
+    expect(await events()).toHaveLength(0);
+    // The marker is never removed by a backup; once it is gone the backup runs.
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker, { recursive: true, force: true });
+    const ok = await run();
+    expect(backupFolder()).toEqual([ok.file]);
+  });
+
+  it("names that are not markers (the staging folder, the previous files, an empty stamp) do not stop a backup", async () => {
+    for (const name of [".restore-20261001-101010", ".pre-restore-20261001-101010", ".restore-.db-started"]) mkdirSync(path.join(root, name));
+    const ok = await run();
+    expect(backupFolder()).toEqual([ok.file]);
+  });
+
+  it("a restore marker while ANOTHER process holds the lock (a restore that is running): the answer is still 'already running'", async () => {
+    mkdirSync(path.join(root, ".restore-20261001-101010.db-started"));
+    writeFileSync(path.join(backups, FULL_BACKUP_LOCK_NAME), JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString(), hostname: os.hostname(), token: "other" }));
+    await expect(run()).rejects.toBeInstanceOf(FullBackupAlreadyRunningError);
+  });
+
   it("a stale lock with a dead pid is reclaimed, and a leftover .partial from the crashed run is removed", async () => {
     await seedUploads();
     writeFileSync(path.join(backups, FULL_BACKUP_LOCK_NAME), JSON.stringify({ pid: deadPid(), startedAt: "2026-01-01T00:00:00.000Z", hostname: os.hostname(), token: "x" }));
