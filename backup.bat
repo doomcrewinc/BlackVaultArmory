@@ -42,9 +42,11 @@
 :: HOW IT RUNS
 ::   app running   docker compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs ...
 ::   app stopped   docker compose run --rm -T blackvault node dist/scripts/full-backup.mjs ...
-:: The first form names the group too (1001:1001): with -u 1001 alone Docker
-:: takes the group from the image's /etc/passwd (nogroup, 65533), and the
-:: backup file came out 1001:65533 instead of the app's own 1001:1001.
+:: The first form names the group too (1001:1001), so the backup file is
+:: owned 1001:1001 like every other file the app writes whatever the image's
+:: /etc/passwd says: with -u 1001 alone Docker takes the group from there. In
+:: the current image that is nodejs (1001); in an image built without that
+:: group it is nogroup (65533).
 :: The one-off container has no --user and no --no-deps on purpose (same as
 :: rotate-key.bat): the image's entrypoint must start as root to copy the
 :: encryption key into /run/secrets before it drops to the app user, and on
@@ -156,7 +158,7 @@ exit /b 1
 >&2 echo ERROR: the passphrase file !BV_PASSFILE! is empty.
 exit /b 1
 :need_console
-:: Review Focus 5 (Task Scheduler): nothing to prompt on. Stop now, before
+:: Under Task Scheduler there is nothing to prompt on. Stop now, before
 :: anything else runs; never wait.
 powershell -NoProfile -NonInteractive -Command "if ([Console]::IsInputRedirected) { exit 1 } else { exit 0 }" >nul 2>&1
 if not errorlevel 1 goto :passphrase_source_ok
@@ -196,9 +198,11 @@ if not "!BV_MODE!"=="verify" goto :verify_mapped
 :: The backup folder on the HOST: the same expression docker-compose.yml
 :: mounts at /app/backups. A relative path is relative to this folder.
 call :env_value BLACKVAULT_BACKUP_DIR
+if defined _EV_BAD goto :env_unreadable
 set "BV_HOST_DIR=!_EV!"
 if defined BV_HOST_DIR goto :host_dir_known
 call :env_value DATA_DIR
+if defined _EV_BAD goto :env_unreadable
 if not defined _EV set "_EV=.\data"
 set "BV_HOST_DIR=!_EV!\backups"
 :host_dir_known
@@ -235,7 +239,7 @@ if defined BV_RUNNING set "BV_DOCKER_ARGS=compose exec -T -u 1001:1001 blackvaul
 :: One PowerShell process does all of it; see THE PASSPHRASE NEVER TOUCHES
 :: cmd.exe at the top. The line is shared with restore.bat, character for
 :: character: restore.bat also sets BV_DOCKER_ARGS_2 and BV_BETWEEN to make a
-:: second docker call with the same passphrase (ruling R27). They are
+:: second docker call with the same passphrase. They are
 :: cleared here, so this script makes exactly one call. Details that matter:
 ::   * docker is looked up with Get-Command, which walks PATH in order, as
 ::     cmd.exe does for every other docker call in this script. Handing the
@@ -269,21 +273,161 @@ exit /b 1
 :: Subroutines
 :: ============================================================
 
-:: :env_value KEY - the value of KEY in .\.env (last line wins) in _EV, with
-:: quotes and surrounding spaces and tabs removed, as env_value in
-:: scripts/compose-provider.sh does; undefined when unset or no .env.
+:: A caller jumps here when :env_value refused the line it asked for (the
+:: Note saying how to write it is already printed): no default is used.
+:env_unreadable
+>&2 echo ERROR: .env holds a line this script does not read: see the Note above. Nothing was done.
+exit /b 1
+
+:: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
+:: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
+:: change them together. _EV is undefined when KEY is unset or empty, or there
+:: is no .env; _EV_SET is 1 when .env assigns KEY at all, even to nothing.
+:: Forms read:
+::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
+::   KEY="value"    KEY='value'           one pair of quotes removed
+::   KEY=value # comment                  cut at the first space before a #
+:: with leading whitespace and CRLF allowed, lines starting with # ignored,
+:: and the LAST assignment winning. A Windows path is best written unquoted.
+:: A line whose value Compose would change or reject, or that batch cannot
+:: split, is REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how
+:: to write the line. The caller must not go on as if the key were unset.
+:: Refused:
+::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+::   in double quotes, a \ before a b f n r t v 0 or another \ (Compose
+::   unescapes those: "C:\new" holds a newline) or before the closing quote;
+::   any other \ there is text, so "C:\BlackVault\Data" is read;
+::   in single quotes, an apostrophe inside the value or a \ before the
+::   closing quote; KEY: value when no KEY= line follows it; a quoted value
+::   followed by a comment or other text; a double quote anywhere except as
+::   the one pair around the whole value; a value that starts with =.
+::   a ! anywhere on a line assigning KEY, a comment on it included:
+::   delayed expansion would drop it from the value without a trace;
+::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
+::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
+:: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
+:: nothing); Compose takes the value from the environment for such a line.
+:: The backslash rules were probed against one version of Compose (compose-go
+:: v2.16.1); an older Docker Compose was not run.
 :env_value
 set "_EV="
+set "_EV_SET="
+set "_EV_BAD="
+set "_EV_CUT="
 if not exist ".env" goto :eof
-for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-  if "%%A"=="%~1" set "_EV=%%B"
+:: A .env saved with a byte order mark, whose FIRST line sets the key (KEY=,
+:: KEY:, with or without export), refuses the key. The mark is one or three
+:: characters to this script, depending on the code page, and `if` treats it
+:: as no character at all on a UTF-8 code page, so nothing below can be
+:: relied on to see the key behind it, or to miss it. Found here by what is
+:: NOT at the start of line 1: a letter, a digit, _, # or white space.
+findstr /n /r /c:"^[^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" ".env" 2>nul | findstr /b /c:"1:" >nul 2>&1
+if not errorlevel 1 goto :env_value_bom
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
+  if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
 )
-if defined _EV set "_EV=!_EV:"=!"
-if defined _EV for /f "tokens=* delims=	 " %%V in ("!_EV!") do set "_EV=%%V"
+:: for /f took every = after the key as one separator, so a value that
+:: starts with = has lost it: such a line, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
+if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A ! on a line assigning the key, anywhere in the file, refuses the key.
+:: The pattern holds a ! of its own, so it is searched for with delayed
+:: expansion off.
+setlocal DisableDelayedExpansion
+findstr /r /c:"^[ 	]*%~1[ 	]*=.*!" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=.*!" ".env" >nul 2>&1
+if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)
+endlocal
+:: A KEY: value line never reached the loop above as KEY. Compose uses the
+:: LAST assignment of a key, so such a line refuses the key only when no
+:: KEY= line comes after it (line numbers from findstr /n).
+set "_EVY=0"
+set "_EVA=0"
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" 2^>nul`) do set "_EVY=%%N"
+if "!_EVY!"=="0" goto :env_value_trim
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*=" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=" ".env" 2^>nul`) do set "_EVA=%%N"
+if !_EVY! GTR !_EVA! set "_EV_SET=1" & goto :env_value_bad
 :env_value_trim
-if not defined _EV goto :eof
+if not defined _EV goto :env_value_done
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
 if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
 if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if defined _EV_CUT goto :env_value_dollar
+set "_EVQ=!_EV:"=!"
+if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
+if "!_EV:~0,1!"=="'" goto :env_value_squote
+:: Unquoted: cut at the first space that is followed by #. A tab before the
+:: # does not start a comment, and neither does a # that opens the value.
+set "_EV_CUT=1"
+if "!_EV:#=!"=="!_EV!" goto :env_value_dollar
+set "_EVI=1"
+:env_value_scan
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_dollar
+if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+set /a _EVI+=1
+goto :env_value_scan
+:env_value_dollar
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
+:env_value_dquote
+:: Without its double quotes the value must equal the value without its
+:: first and last characters: exactly one pair, around the whole value.
+if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
+set "_EV=!_EVQ!"
+if not defined _EV goto :env_value_done
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+if "!_EV:\=!"=="!_EV!" goto :env_value_done
+:: Each \ and the character after it. IF compares with case, as Compose
+:: does: \r is a carriage return to Compose, \R is two characters.
+set "_EVI=0"
+:env_value_escape
+set "_EVC=!_EV:~%_EVI%,2!"
+if not defined _EVC goto :env_value_done
+set /a _EVI+=1
+if not "!_EVC:~0,1!"=="\" goto :env_value_escape
+if "!_EVC!"=="\" goto :env_value_bad
+if "!_EVC!"=="\\" goto :env_value_bad
+for %%E in (a b f n r t v 0) do if "!_EVC!"=="\%%E" goto :env_value_bad
+goto :env_value_escape
+:env_value_squote
+if "!_EV:~1,1!"=="" goto :env_value_bad
+if not "!_EV:~-1!"=="'" goto :env_value_bad
+set "_EV=!_EV:~1,-1!"
+if not defined _EV goto :env_value_done
+if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
+if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
+goto :env_value_done
+:env_value_bad
+set "_EV="
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       Docker Compose would change its value, or reject the line. Rewrite
+echo       that line, or delete it, as %~1=value with the final value spelled
+echo       out and no $ in it: best for a Windows path. In single quotes the
+echo       value must hold no apostrophe and not end in a backslash. In double
+echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
+echo       another backslash or the closing quote. Nothing may follow a
+echo       closing quote, and a %~1: value line must become %~1=value. The
+echo       line must hold no exclamation mark, and a folder must not start
+echo       with ~: write the full path.
+:env_value_done
+set "_EVK=%~1"
+if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad
+set "_EVK="
+set "_EVQ="
+set "_EVC="
 goto :eof
 
 :: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh

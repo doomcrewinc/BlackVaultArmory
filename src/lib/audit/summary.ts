@@ -258,8 +258,8 @@ export function summarize(event: AuditEventDto): string {
     case "ENCRYPTION_ENABLED": {
       // Written once by the startup encryption migration (src/lib/encryption/startup.ts):
       // `changes: { counts: { Firearm, Accessory, Gear }, keyId, scrubbedAuditRows }`.
-      // `scrubbedAuditRows` (Task 4b) is absent on events written before that
-      // task, and 0 whenever nothing needed scrubbing — both read the same as
+      // `scrubbedAuditRows` is absent on events written before the audit-log
+      // scrub existed, and 0 whenever nothing needed scrubbing — both read the same as
       // "nothing to mention", so only a positive count adds a fragment.
       const counts = isRecord(event.changes) && isRecord(event.changes.counts) ? event.changes.counts : {};
       const parts = Object.entries(ENCRYPTED_MODEL_NOUNS)
@@ -276,7 +276,7 @@ export function summarize(event: AuditEventDto): string {
     }
 
     case "KEY_ROTATED": {
-      // `changes: { from, to, counts }` (the key-rotation script, Task 6).
+      // `changes: { from, to, counts }` (the key-rotation script).
       const from = isRecord(event.changes) ? asString(event.changes.from) : undefined;
       const to = isRecord(event.changes) ? asString(event.changes.to) : undefined;
       return from && to ? `Encryption key rotated (${from} → ${to})` : "Encryption key rotated";

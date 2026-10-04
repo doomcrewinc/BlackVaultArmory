@@ -5,7 +5,7 @@ import type { ITXClientDenyList, Types } from "@prisma/client/runtime/library";
  * The app client's TYPE: the generated PrismaClient, with the two type-changed
  * encrypted columns (`nfaApprovalDate`, `nfaTaxPaid` on Firearm and Accessory)
  * typed as the application sees them — `Date | null` and `number | null`, the
- * same as before Task 2 made them String columns.
+ * although the columns themselves are String.
  *
  * Why a typed wrapper and not the extension's `result` component
  * (`needs` / `compute`): a result extension retypes READS only. Prisma's

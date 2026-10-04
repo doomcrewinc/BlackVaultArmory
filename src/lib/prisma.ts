@@ -22,15 +22,15 @@ function loadPrismaClient(): new (options?: object) => PrismaClient {
 }
 
 /**
- * Review (Task 5 fix round 2, M1): the plain-string `log` form (`["error"]`)
+ * The plain-string `log` form (`["error"]`)
  * makes Prisma print each event straight to stdout/stderr ITSELF — Prisma's
  * own doing, not this app's `console.error` calls. For a
  * `PrismaClientValidationError` that printed text is the full
  * pretty-printed invocation: every field of every row in the failing write
  * (reproduced directly against the SQLite client; see
- * src/app/api/backup/restore/route.ts's `logRestoreError` for the same
- * finding at the route-error-handling layer, fixed in round 1 — this is the
- * SEPARATE leak at the Prisma-client-construction layer that round 1 missed).
+ * src/lib/backup/restore-core.ts's `logRestoreError` for the same
+ * leak at the route-error-handling layer — this is the
+ * SEPARATE one at the Prisma-client-construction layer).
  *
  * The object form (`{ emit: "event", level: "error" }`) suppresses that
  * automatic printing and instead emits an `'error'` event on the client,
@@ -48,11 +48,11 @@ function logPrismaErrorEventSafely(client: { $on(event: "error", listener: (e: {
   });
 }
 
-/** Every client this module constructs shares one log config: no automatic row-carrying stdout/stderr output (review M1). */
+/** Every client this module constructs shares one log config: no automatic row-carrying stdout/stderr output. */
 const SAFE_LOG_CONFIG = [{ emit: "event", level: "error" }] as const;
 
 /**
- * A client with NO extensions (ruling R1): neither encryption nor audit. Only
+ * A client with NO extensions: neither encryption nor audit. Only
  * for startup steps that must see and rewrite the stored form itself — the
  * key check and the one-time encryption migration (src/lib/encryption/
  * startup.ts). Each call opens its own connection pool; the caller must

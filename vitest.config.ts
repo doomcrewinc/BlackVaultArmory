@@ -22,7 +22,7 @@ export default {
     // whatever the host falls back to — so `??` would silently un-pin the
     // default leg. `||` treats "" as "not set".
     //
-    // BLACKVAULT_ENCRYPTION_KEY (field encryption, ruling R3): a FIXED test-only
+    // BLACKVAULT_ENCRYPTION_KEY (field encryption): a FIXED test-only
     // key, so every test that writes through the app client (src/lib/prisma.ts →
     // the encryption extension) has a key without each one setting it up. It is
     // pinned unconditionally for the same reason TZ is: a key exported in the

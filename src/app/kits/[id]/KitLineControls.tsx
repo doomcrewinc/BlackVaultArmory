@@ -20,8 +20,8 @@ interface Props {
 }
 
 /**
- * Edit or remove ONE packed line: the callers `PUT` and `DELETE
- * /api/kits/[id]/items/[itemId]` had been waiting for since task 3.
+ * Edit or remove ONE packed line: the callers of `PUT` and `DELETE
+ * /api/kits/[id]/items/[itemId]`.
  *
  * WHAT THIS EDITS, AND WHAT IT DOES NOT. Quantity, target and notes — never
  * the line's SOURCE. Switching a line from gear to supply is delete-and-add,

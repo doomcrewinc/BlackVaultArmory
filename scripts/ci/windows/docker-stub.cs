@@ -36,6 +36,15 @@
 //                            for the container log the scripts read the
 //                            first-time setup token from. Unset => the generic
 //                            "[stub] ..." line, which holds no token.
+//   BV_STUB_HEALTH           what a plain `compose ps` reports for the app:
+//                            "unhealthy" => "Up 4 seconds (unhealthy)",
+//                            "starting" => "Up 4 seconds (health: starting)",
+//                            "restarting" => "Restarting (1) 3 seconds ago",
+//                            "exited" => "Exited (1) 3 seconds ago",
+//                            "missing" => no line at all (no container),
+//                            "queryfail" => an error on stderr and exit 1
+//                            (Compose 2.20 rejects the --format template),
+//                            unset => "Up 4 seconds (healthy)".
 //   BV_STUB_PROBE_ANSWER     fix round 1 (C1): what `compose run ... --probe
 //                            ...` prints on stdout (OLD / NEW / NEITHER).
 //                            Checked independently of BV_STUB_FAIL_ON, so a
@@ -95,11 +104,44 @@
 //                            BV_STUB_ENV_FILE records that call's environment
 //                            too. `compose stop` / `compose start` are failed
 //                            with BV_STUB_FAIL_ON, as for rotate-key.bat.
+//   BV_STUB_LOCK_EXIT / BV_STUB_LOCK_STDOUT / BV_STUB_LOCK_STDERR
+//                            full restore: the lock question restore.bat asks
+//                            the running app before it stops it (any call with
+//                            `--lock-status`): its exit code (unset => 0) and
+//                            the line it prints on each stream. It reads no
+//                            standard input and never touches
+//                            BV_STUB_STDIN_FILE, so the check program's record
+//                            there survives it.
 //   BV_STUB_ROLLBACK_EXIT    full restore: exit code of the rollback container
 //                            (any call naming /bv-snapshot-restore.sh);
 //                            unset/"0" => 0. The stub does NOT run the script:
 //                            what it does to real files is proven on Linux
 //                            (src/lib/backup/full-restore.real-db.test.ts).
+//   BV_STUB_CLEAR_MARKER_EXIT  full restore: exit code of the rollback
+//                            container for `/bv-snapshot-restore.sh
+//                            clear-marker ...` ONLY (the other modes keep
+//                            BV_STUB_ROLLBACK_EXIT); unset/"0" => that knob
+//                            decides. The stub never removes the marker.
+//   BV_STUB_MARKERS_ANSWER   full restore: what the rollback container prints
+//                            for `/bv-snapshot-restore.sh markers ...`: the
+//                            stamps, separated by `;`, one per line; exit 0.
+//                            Unset => it prints nothing (no marker). With
+//                            BV_STUB_ROLLBACK_EXIT set it fails like every
+//                            other mode.
+//   BV_STUB_RECOVERY_READONLY  full restore: "1" makes the restore program
+//                            mark backups\restore-*-RECOVERY.txt read-only,
+//                            so that restore.bat cannot replace that file
+//                            afterwards.
+//   BV_STUB_HANDOFF_READONLY full restore: "1" makes `compose stop` mark the
+//                            file named by BV_HANDOFF (restore.bat's handoff
+//                            file, inherited through the environment) as
+//                            read-only, so that restore.bat's later appends
+//                            to it fail.
+//   BV_STUB_STATE_ANSWER     full restore: what the rollback container prints
+//                            for `/bv-snapshot-restore.sh state ...` (started /
+//                            complete / untouched), exit 0. Unset => the
+//                            generic "[stub] ..." line. For running the
+//                            recovery file's PostgreSQL line as printed.
 //
 // Task 4: `compose up` also appends a line "ENV BLACKVAULT_UPLOADS_SNAPSHOT=
 // [<value>]" to BV_STUB_LOG, reporting what update.bat passed through its own
@@ -157,6 +199,26 @@ internal static class DockerStub
             return 0;
         }
 
+        // The lock question (`full-backup.mjs --lock-status`). Before the
+        // backup program's branch: it is the same script, but it takes no
+        // passphrase and must not be given the backup's knobs.
+        if (Array.IndexOf(args, "--lock-status") >= 0)
+        {
+            string lockOut = Environment.GetEnvironmentVariable("BV_STUB_LOCK_STDOUT");
+            if (!string.IsNullOrEmpty(lockOut))
+            {
+                Console.WriteLine(lockOut);
+            }
+            string lockErr = Environment.GetEnvironmentVariable("BV_STUB_LOCK_STDERR");
+            if (!string.IsNullOrEmpty(lockErr))
+            {
+                Console.Error.WriteLine(lockErr);
+            }
+            string lockExit = Environment.GetEnvironmentVariable("BV_STUB_LOCK_EXIT");
+            int lockCode;
+            return (!string.IsNullOrEmpty(lockExit) && int.TryParse(lockExit, out lockCode)) ? lockCode : 0;
+        }
+
         // Full backups (Task 6): the backup program, through exec or run.
         // Handled before everything else so BV_STUB_FAIL_ON / BV_STUB_RUN_EXIT
         // (the rotation's knobs) never apply to it.
@@ -208,6 +270,13 @@ internal static class DockerStub
                         File.Copy(found[0], recoveryCopy, true);
                     }
                 }
+                if (Environment.GetEnvironmentVariable("BV_STUB_RECOVERY_READONLY") == "1" && Directory.Exists("backups"))
+                {
+                    foreach (string recoveryFile in Directory.GetFiles("backups", "restore-*-RECOVERY.txt"))
+                    {
+                        File.SetAttributes(recoveryFile, File.GetAttributes(recoveryFile) | FileAttributes.ReadOnly);
+                    }
+                }
             }
             string sleepMs = Environment.GetEnvironmentVariable("BV_STUB_BACKUP_SLEEP_MS");
             int ms;
@@ -234,12 +303,38 @@ internal static class DockerStub
         // generic `run` branch so the rotation's knobs never apply to it.
         if (Array.IndexOf(args, "/bv-snapshot-restore.sh") >= 0)
         {
+            int modeAt = Array.IndexOf(args, "/bv-snapshot-restore.sh") + 1;
+            string stateAnswer = Environment.GetEnvironmentVariable("BV_STUB_STATE_ANSWER");
+            if (modeAt < args.Length && args[modeAt] == "state" && !string.IsNullOrEmpty(stateAnswer))
+            {
+                Console.WriteLine(stateAnswer);
+                return 0;
+            }
+            string clearExit = Environment.GetEnvironmentVariable("BV_STUB_CLEAR_MARKER_EXIT");
+            int clearCode;
+            if (modeAt < args.Length && args[modeAt] == "clear-marker" && !string.IsNullOrEmpty(clearExit) && int.TryParse(clearExit, out clearCode) && clearCode != 0)
+            {
+                Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_CLEAR_MARKER_EXIT)");
+                return clearCode;
+            }
             string rollbackExit = Environment.GetEnvironmentVariable("BV_STUB_ROLLBACK_EXIT");
             int rollbackCode;
             if (!string.IsNullOrEmpty(rollbackExit) && int.TryParse(rollbackExit, out rollbackCode) && rollbackCode != 0)
             {
                 Console.Error.WriteLine("ERROR: could not restore from the snapshot: [stub] failing on purpose (BV_STUB_ROLLBACK_EXIT)");
                 return rollbackCode;
+            }
+            if (modeAt < args.Length && args[modeAt] == "markers")
+            {
+                string markersAnswer = Environment.GetEnvironmentVariable("BV_STUB_MARKERS_ANSWER");
+                if (!string.IsNullOrEmpty(markersAnswer))
+                {
+                    foreach (string stamp in markersAnswer.Split(';'))
+                    {
+                        if (stamp.Length > 0) Console.WriteLine(stamp);
+                    }
+                }
+                return 0;
             }
             Console.WriteLine("[stub] docker " + joined);
             return 0;
@@ -257,9 +352,31 @@ internal static class DockerStub
                 }
                 return 0;
             }
-            // The scripts pipe this into `findstr /i "healthy running"`.
+            // install.bat / update.bat read the health word in parentheses.
+            string health = Environment.GetEnvironmentVariable("BV_STUB_HEALTH");
+            if (health == "queryfail")
+            {
+                Console.Error.WriteLine("format value \"{{.Status}}\" could not be parsed");
+                return 1;
+            }
+            // BV_STUB_PS_FAIL_FILE: a file holding how many more times this
+            // query fails before it answers.
+            string failFile = Environment.GetEnvironmentVariable("BV_STUB_PS_FAIL_FILE");
+            int failsLeft;
+            if (!string.IsNullOrEmpty(failFile) && File.Exists(failFile) && int.TryParse(File.ReadAllText(failFile).Trim(), out failsLeft) && failsLeft > 0)
+            {
+                File.WriteAllText(failFile, (failsLeft - 1).ToString());
+                Console.Error.WriteLine("format value \"{{.Status}}\" could not be parsed");
+                return 1;
+            }
+            if (health == "missing") return 0;
+            if (health == "restarting") { Console.WriteLine("Restarting (1) 3 seconds ago"); return 0; }
+            if (health == "exited") { Console.WriteLine("Exited (1) 3 seconds ago"); return 0; }
+            string healthText = "(healthy)";
+            if (health == "unhealthy") healthText = "(unhealthy)";
+            if (health == "starting") healthText = "(health: starting)";
             Console.WriteLine("NAME                STATUS");
-            Console.WriteLine("blackvault-app      Up 4 seconds (healthy)");
+            Console.WriteLine("blackvault-app      Up 4 seconds " + healthText);
             return 0;
         }
 
@@ -316,6 +433,16 @@ internal static class DockerStub
                     }
                     System.Threading.Thread.Sleep(100);
                 }
+            }
+        }
+
+        if (string.Equals(sub, "stop", StringComparison.OrdinalIgnoreCase) &&
+            Environment.GetEnvironmentVariable("BV_STUB_HANDOFF_READONLY") == "1")
+        {
+            string handoff = Environment.GetEnvironmentVariable("BV_HANDOFF");
+            if (!string.IsNullOrEmpty(handoff) && File.Exists(handoff))
+            {
+                File.SetAttributes(handoff, File.GetAttributes(handoff) | FileAttributes.ReadOnly);
             }
         }
 

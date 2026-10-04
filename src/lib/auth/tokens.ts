@@ -64,7 +64,7 @@ function unexpired(now: Date) {
 }
 
 /**
- * An invite is only as good as its issuer (ruling A13): it is redeemable only while the admin who
+ * An invite is only as good as its issuer: it is redeemable only while the admin who
  * minted it is still an active ADMIN. Otherwise a disabled or demoted admin could redeem their own
  * outstanding ADMIN invite and come back as a new admin. changeRoleOrStatus also burns such links,
  * but this check holds even for links it missed (e.g. rows written before that rule existed).

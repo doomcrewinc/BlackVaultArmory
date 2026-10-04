@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { csvCell } from "@/lib/csv";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/server/auth";
 
@@ -132,11 +133,16 @@ function flattenObject(
   }
 }
 
+/** A number as a number field is serialized: digits, a decimal part, and for very small or large values an exponent (-1e-7, 1e+21). */
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/;
+
+/**
+ * One CSV cell. The rows reach this point as text, so a negative number is
+ * told apart from typed text by its shape: it is written as it is, and every
+ * other value gets the formula guard.
+ */
 function toCsvValue(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, "\"\"")}"`;
-  }
-  return value;
+  return PLAIN_NUMBER.test(value) ? value : csvCell(value);
 }
 
 function buildCsv(sections: { section: string; rows: unknown }[]): string {
@@ -586,11 +592,11 @@ export async function GET(request: NextRequest) {
           kind,
           sourceId: normalizedSourceId,
           url: normalizedUrl,
-          // Fix round 1, m6: documents moved to <uploadsRoot>/documents
-          // (spec 3b) and are now encrypted at rest; the old literal
-          // "storage/uploads/" prefix named a location nothing writes to
-          // any more. "uploads/" matches the Docker volume mount name
-          // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads).
+          // Documents live in <uploadsRoot>/documents, encrypted at rest.
+          // "uploads/" matches the Docker volume mount name
+          // (docker-compose.yml: ${DATA_DIR}/uploads -> /app/uploads). No
+          // other prefix is used: nothing writes to a "storage/uploads/"
+          // folder, so a path under it would name a file that is not there.
           storagePath: normalizedUrl.replace("/api/files/", "uploads/"),
         });
       };

@@ -2,8 +2,8 @@ import { validateEntryPath } from "./tar";
 
 /**
  * The full backup's `manifest.json` — the LAST entry in the plaintext ustar
- * stream (order: db.json, files/..., manifest.json; controller ruling in fix
- * round 1, overriding the spec's "first", so the engine can hash files while
+ * stream (order: db.json, files/..., manifest.json; the design document says
+ * "first", but last lets the engine hash files while
  * streaming them and record files that vanish mid-run). It records what a restore should find
  * inside the archive: per-model row counts, and every file's path, size and
  * sha256, plus any file that vanished mid-backup (`skipped`).

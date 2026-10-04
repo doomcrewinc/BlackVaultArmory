@@ -96,6 +96,28 @@ describe("POST /api/auth/setup", () => {
     expect(m.db.session.create).toHaveBeenCalledOnce();
   });
 
+  it("logs one [auth] line when the first admin is created, with no code, name or password in it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect((await POST(req({ ...VALID, setupCode: "ZZZZ-ZZZZ-ZZZZ-ZZZZ" }))).status).toBe(403);
+      expect(log).not.toHaveBeenCalled();
+      expect((await POST(req({ ...VALID, setupCode: CODE }))).status).toBe(201);
+      // scripts/setup-token.sh and :show_setup_token in the .bat installers
+      // look for this exact prefix after the last "[auth] Setup token:" line.
+      const lines = log.mock.calls.map((c) => c.join(" "));
+      expect(lines).toHaveLength(1);
+      expect(lines[0].startsWith("[auth] First admin created")).toBe(true);
+      expect(lines[0]).not.toMatch(/ABCD|jeff|correct horse/i);
+      // The .bat twin takes whatever follows "setup token" (in any letter
+      // case) for the code, so this line must not hold those words.
+      expect(lines[0]).not.toMatch(/setup token/i);
+      expect((await POST(req({ ...VALID, username: "other", setupCode: CODE }))).status).toBe(404);
+      expect(log).toHaveBeenCalledOnce();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("404 once any user exists — even with the same code again", async () => {
     expect((await POST(req({ ...VALID, setupCode: CODE }))).status).toBe(201);
     const res = await POST(req({ ...VALID, username: "other", setupCode: CODE }));

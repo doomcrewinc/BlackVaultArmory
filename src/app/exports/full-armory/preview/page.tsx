@@ -6,6 +6,7 @@ import {
   buildExportQueryString,
   formatExpiryFootnote,
   hasNfaPaperwork,
+  mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
   parseExportOptionsFromSearchParams,
@@ -295,12 +296,13 @@ export default function FullArmoryPreviewPage() {
                   <th className="py-2 pr-4 text-left">Type</th>
                   <th className="py-2 pr-4 text-left">Platform</th>
                   <th className="py-2 pr-4 text-left">NFA Class</th>
+                  <th className="print:hidden py-2 pr-4 text-left">Registry</th>
                   <th className="py-2 pr-4 text-left">Manufacturer</th>
                   <th className="py-2 pr-4 text-left">Model</th>
                   <th className="py-2 pr-4 text-left">Serial</th>
                   <th className="py-2 pr-4 text-right">Purchase</th>
                   <th className="py-2 pr-4 text-right">Replacement</th>
-                  {/* The paperwork half of this table is screen-only: 14 columns
+                  {/* The paperwork half of this table is screen-only: 15 columns
                       do not fit on letter paper, and an overflow-x-auto table does
                       not scroll on paper — it truncates, which silently dropped
                       every one of these columns out of the printout. In print they
@@ -316,7 +318,7 @@ export default function FullArmoryPreviewPage() {
               <tbody>
                 {data.items.length === 0 ? (
                   <tr>
-                    <td className="py-3 text-vault-text-faint" colSpan={14}>
+                    <td className="py-3 text-vault-text-faint" colSpan={15}>
                       No inventory items included for this export.
                     </td>
                   </tr>
@@ -330,6 +332,7 @@ export default function FullArmoryPreviewPage() {
                           for a Title I firearm or an accessory, which has no class. */}
                       <td className="py-2 pr-4">{item.category || "—"}</td>
                       <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || "—"}</td>
+                      <td className="print:hidden py-2 pr-4">{mgRegistryLabel(item.mgRegistry) || "—"}</td>
                       <td className="py-2 pr-4">{item.manufacturer || "—"}</td>
                       <td className="py-2 pr-4">{item.model || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.serialNumber || "—"}</td>
@@ -366,6 +369,7 @@ export default function FullArmoryPreviewPage() {
                     <th className="py-2 pr-4 text-left">Item</th>
                     <th className="py-2 pr-4 text-left">Platform</th>
                     <th className="py-2 pr-4 text-left">Class</th>
+                    <th className="print:hidden py-2 pr-4 text-left">Registry</th>
                     <th className="py-2 pr-4 text-left">Transfer Method</th>
                     <th className="py-2 pr-4 text-left">Control Number</th>
                     <th className="py-2 pr-4 text-left">Approval Date</th>
@@ -386,7 +390,16 @@ export default function FullArmoryPreviewPage() {
                           column exists to remove. Platform has its own cell above,
                           so nothing is lost — an accessory reads SUPPRESSOR there
                           and a dash here, because it has no class. */}
-                      <td className="py-2 pr-4">{nfaClassLabel(item.nfaClass) || "—"}</td>
+                      {/* On paper the registry is folded into the Class cell, so the
+                          printed table keeps the seven columns it was measured at;
+                          the separate Registry column is screen-only. */}
+                      <td className="py-2 pr-4">
+                        {nfaClassLabel(item.nfaClass) || "—"}
+                        {item.mgRegistry && (
+                          <span className="hidden print:inline"> — {mgRegistryLabel(item.mgRegistry)}</span>
+                        )}
+                      </td>
+                      <td className="print:hidden py-2 pr-4">{mgRegistryLabel(item.mgRegistry) || "—"}</td>
                       <td className="py-2 pr-4">{nfaTransferMethodLabel(item.nfaTransferMethod) || "—"}</td>
                       <td className="py-2 pr-4 font-mono">{item.nfaControlNumber || "—"}</td>
                       <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
@@ -607,8 +620,8 @@ export default function FullArmoryPreviewPage() {
             A kit is a packing list, not a copy: its contents are listed in full in the sections above. No
             prices or serials here — nine columns that say what each bag is, where it is, and what it is short of.
           </p>
-          {/* MEASURED, not eyeballed. Phase 5's gear table ran 174px off a
-              letter sheet and a reviewer logged it as merely "cramped", so
+          {/* MEASURED, not eyeballed. A table that runs off a letter sheet
+              only looks "cramped" on screen, so
               this one was printed before it shipped: emulating @page letter
               (8.5in less 0.4in margins = 739.2px), max-width:none,
               overflow:visible and print:hidden, the nine columns below measure

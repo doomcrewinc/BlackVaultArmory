@@ -1,6 +1,8 @@
 import {
+  MG_REGISTRY_LABELS,
   NFA_CLASS_LABELS,
   NFA_TRANSFER_METHOD_LABELS,
+  type MgRegistry,
   type NfaClass,
   type NfaTransferMethod,
 } from "@/lib/types";
@@ -74,6 +76,12 @@ export interface FullArmoryItemRow {
    * while a firearm says NONE for Title I.
    */
   nfaClass: string;
+  /**
+   * The machine-gun registry token (TRANSFERABLE, PRE_SAMPLE, POST_SAMPLE);
+   * blank for anything that is not a machine gun with a recorded registry.
+   * Plain, like nfaClass, and kept directly after it in every renderer.
+   */
+  mgRegistry: string;
 }
 
 export interface FullArmoryAttachmentRow {
@@ -375,6 +383,12 @@ export function nfaClassLabel(token: string): string {
   // and the caller decides what a blank looks like ("—", or an omitted line).
   if (!key || key === "NONE") return "";
   return NFA_CLASS_LABELS[key as NfaClass] ?? token;
+}
+
+export function mgRegistryLabel(token: string): string {
+  const key = token.trim().toUpperCase();
+  if (!key) return "";
+  return MG_REGISTRY_LABELS[key as MgRegistry] ?? token;
 }
 
 export function nfaTransferMethodLabel(token: string): string {

@@ -33,8 +33,10 @@ const hasTimeout = has("timeout");
 const PASS = " wrapper tëst 'pass' \"phrase\" $HOME `id` \\n * ";
 const OK_LINE = "BLACKVAULT_FULL_BACKUP_OK file=blackvault-full-20261002-180405.bvb files=2 bytes=10 archive_bytes=99 skipped=0 unreadable=0";
 // `-u 1001:1001`, not `-u 1001`: with the uid alone Docker takes the group from the image's
-// /etc/passwd, where nextjs's primary group is nogroup (65533), and the backup file came out
-// 1001:65533 instead of the app's own 1001:1001 (found by scripts/ci/full-backup-linux.sh).
+// /etc/passwd. In the current image that is nodejs (1001); in an image built without that group
+// it is nogroup (65533), and the backup file is then 1001:65533 instead of the app's own
+// 1001:1001. Naming both keeps the wrapper independent of the image's passwd entry
+// (scripts/ci/full-backup-linux.sh checks the owner of the file).
 const BACKUP_EXEC = "compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs";
 const BACKUP_RUN = "compose run --rm -T blackvault node dist/scripts/full-backup.mjs";
 
@@ -452,6 +454,18 @@ describe.skipIf(isWindows)("backup.sh", () => {
       const c = run(["--verify", path.join(dataDir, "backups", NAME), "--passphrase-file", passFile()], { env: { BV_STUB_RUNNING: "1" } });
       expect(c.code).toBe(1);
       expect(verifyCall()).toHaveLength(2);
+    });
+
+    it("a DATA_DIR, BLACKVAULT_BACKUP_DIR or provider line the .env reader cannot read (Compose would change the value) stops before docker is asked for anything but its version: no default folder is used", () => {
+      for (const line of ['DATA_DIR="${HOME}/blackvault"', "export DATA_DIR=$HOME/blackvault", 'BLACKVAULT_BACKUP_DIR="D:\\new\\backups"', "BLACKVAULT_DB_PROVIDER: sqlite"]) {
+        fs.writeFileSync(path.join(app, ".env"), `${line}\n`);
+        const before = callLines().length;
+        const r = run(["--verify", NAME, "--passphrase-file", passFile()], { env: { BV_STUB_RUNNING: "1" } });
+        expect(r.code, line).toBe(1);
+        expect(r.stderr, line).toContain(`${line.replace(/^export /, "").split(/[=:]/)[0]} in .env could not be read`);
+        expect(r.stderr, line).toContain("Nothing was done.");
+        expect(callLines().slice(before).filter((l) => !l.startsWith("compose version")), line).toEqual([]);
+      }
     });
 
     it("a path OUTSIDE the backup folder is an error: exit 1, one line naming the folder, the program never started", () => {

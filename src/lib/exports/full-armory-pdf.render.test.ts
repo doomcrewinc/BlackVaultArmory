@@ -99,6 +99,7 @@ function payload(overrides: Partial<FullArmoryExportResponse> = {}): FullArmoryE
         nfaTaxPaid: null,
         nfaRegisteredTo: "",
         nfaClass: "NONE",
+        mgRegistry: "",
       },
     ],
     attachments: [

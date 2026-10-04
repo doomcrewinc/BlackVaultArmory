@@ -24,6 +24,7 @@
 import {
   formatExpiryFootnote,
   hasNfaPaperwork,
+  mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
   type FullArmoryExportOptions,
@@ -281,20 +282,22 @@ export function buildFullArmoryPdfModel(
     blocks.push({
       kind: "table",
       columns: [
-        { label: "Item", weight: 22 },
-        { label: "Class", weight: 13 },
-        { label: "Transfer", weight: 14 },
+        { label: "Item", weight: 18 },
+        { label: "Class", weight: 12 },
+        { label: "Registry", weight: 10 },
+        { label: "Transfer", weight: 12 },
         // nfaControlNumber is gated behind includeSerialNumbers server-side
         // because it identifies a registered item as precisely as a serial.
         // Gated again here for the same reason the serial column is.
-        { label: "Control #", weight: 16 },
-        { label: "Approved", weight: 12 },
-        { label: "Tax", weight: 9, align: "right" },
+        { label: "Control #", weight: 15 },
+        { label: "Approved", weight: 11 },
+        { label: "Tax", weight: 8, align: "right" },
         { label: "Registered To", weight: 14 },
       ],
       rows: nfaItems.map((item) => [
         cell(`${item.manufacturer} ${item.model}`.trim()),
         cell(nfaClassLabel(item.nfaClass)),
+        cell(mgRegistryLabel(item.mgRegistry)),
         cell(nfaTransferMethodLabel(item.nfaTransferMethod)),
         cell(item.nfaControlNumber, serials),
         cell(item.nfaApprovalDate),

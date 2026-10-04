@@ -161,6 +161,31 @@ describe("AdminAuditPage", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
+  it("a Load more that finds nothing but is not at the end of the log says so, and the line goes away when a later page adds rows", async () => {
+    let call = 0;
+    const fetchMock = auditFetchMock(() => {
+      call += 1;
+      if (call === 1) return jsonOk({ events: [event("e1", "Glock 19")], nextCursor: "c1" });
+      if (call === 2) return jsonOk({ events: [], nextCursor: "c2" });
+      return jsonOk({ events: [event("e2", "AR-15")], nextCursor: "c3" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AdminAuditPage />);
+    await waitFor(() => expect(screen.getByText("Glock 19")).toBeTruthy());
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+    await waitFor(() => expect(screen.getByText("No further matches in the entries searched so far.")).toBeTruthy());
+    expect(screen.getByText("Glock 19")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+    await waitFor(() => expect(screen.getByText("AR-15")).toBeTruthy());
+    expect(screen.queryByText(/No further matches/)).toBeNull();
+    const calls = fetchMock.mock.calls.map((c) => String(c[0])).filter(isAuditListCall);
+    expect(calls[2]).toContain("cursor=c2");
+  });
+
   it("shows an error message when the fetch fails", async () => {
     const fetchMock = auditFetchMock(() => ({ ok: false, status: 500, json: async () => ({}) }));
     vi.stubGlobal("fetch", fetchMock);

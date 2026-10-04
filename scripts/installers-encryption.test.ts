@@ -28,6 +28,8 @@ const TREE = [
   "docker-compose.yml",
   "secrets/.gitignore",
   "scripts/compose-provider.sh",
+  "scripts/backup-common.sh",
+  "scripts/snapshot-restore.sh",
   "scripts/public-url-prompts.sh",
   "scripts/setup-token.sh",
   "scripts/encryption-key.sh",
@@ -48,7 +50,7 @@ function copyTree(dest: string, files = TREE) {
 
 /**
  * The docker stub. `compose version --short` → 2.30.1; `compose ps` →
- * healthy; `compose exec -T db pg_dump` → a fake dump; the rotation CLI
+ * BV_STUB_PS_STATUS (default: healthy); `compose exec -T db pg_dump` → a fake dump; the rotation CLI
  * (rotate-key.sh) exits BV_STUB_ROTATE_EXIT (default 0) and its --probe
  * prints BV_STUB_PROBE (default OLD); BV_STUB_FAIL_ON=<word>
  * fails any call containing that word. `compose up -d` with no service (the
@@ -73,7 +75,16 @@ case "$*" in
   *"rotate-encryption-key.mjs --probe"*) echo "\${BV_STUB_PROBE:-OLD}" ;;
   *"rotate-encryption-key.mjs"*) [ -n "$BV_STUB_ROTATE_STDERR" ] && echo "$BV_STUB_ROTATE_STDERR" >&2; exit "\${BV_STUB_ROTATE_EXIT:-0}" ;;
   "compose version --short") echo 2.30.1 ;;
-  "compose ps"*) echo "Up 3 seconds (healthy)" ;;
+  "compose ps"*)
+    # BV_STUB_PS_FAIL=always: the query itself fails every time (Compose 2.20 rejects the Go template).
+    # BV_STUB_PS_FAIL_FILE: a file holding how many more times it fails before it answers.
+    if [ "\${BV_STUB_PS_FAIL:-}" = always ]; then echo 'format value "{{.Status}}" could not be parsed' >&2; exit 1; fi
+    if [ -n "\${BV_STUB_PS_FAIL_FILE:-}" ] && [ -s "\$BV_STUB_PS_FAIL_FILE" ]; then
+      left=$(cat "\$BV_STUB_PS_FAIL_FILE")
+      if [ "\$left" -gt 0 ]; then echo $((left - 1)) > "\$BV_STUB_PS_FAIL_FILE"; echo 'format value "{{.Status}}" could not be parsed' >&2; exit 1; fi
+    fi
+    echo "\${BV_STUB_PS_STATUS-Up 3 seconds (healthy)}" ;;
+  "compose logs"*) [ -n "\${BV_STUB_LOGS_FILE:-}" ] && cat "\$BV_STUB_LOGS_FILE" ;;
   "compose exec -T db pg_dump"*) echo "-- stub pg_dump of blackvault" ;;
   "compose up -d")
     echo "AT-APP-START backups=[$(ls backups 2>/dev/null | tr '\\n' ' ')] key=$([ -f secrets/blackvault_encryption_key ] && echo yes || echo no) uploads_marker=[\${BLACKVAULT_UPLOADS_SNAPSHOT:-}]" >> "${calls}" ;;
@@ -262,6 +273,156 @@ describe("install.sh", () => {
   });
 });
 
+/**
+ * The health wait reads the Status column of `docker compose ps`:
+ * "Up 2 minutes (healthy)", "(unhealthy)" or "(health: starting)". `sleep` is
+ * stubbed so the full 60-poll wait runs in no time.
+ */
+describe("health wait: only the status word healthy is success", () => {
+  const stubSleep = () => fs.writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const polls = (c: string) => callLines(c).filter((l) => l.startsWith("compose ps")).length;
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: unhealthy is not reported as running, the output says unhealthy, and the exit status is 1", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: "Up 2 minutes (unhealthy)" });
+    // A cron job or a calling script must see the failure; the summary and
+    // the log hint are still printed first.
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("NOT healthy");
+    expect(r.out).toMatch(/logs/);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toMatch(/unhealthy/i);
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+  });
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: still starting when the wait runs out: says it did not become healthy, and still exits 0 (a slow first start is not a failure)", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: "Up 2 minutes (health: starting)" });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy");
+    expect(r.out).not.toMatch(/unhealthy/i);
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+  });
+
+  // The app's own start refusals (a restore marker, two keys, no public URL)
+  // leave the container restarting over and over: neither unhealthy nor
+  // starting. That is a failed start, seen after a few polls, not a slow one.
+  it.each([
+    ["install.sh", "Restarting (1) 2 seconds ago", INSTALL_ANSWERS, "keeps restarting"],
+    ["update.sh", "Restarting (1) 2 seconds ago", "\n", "keeps restarting"],
+    ["install.sh", "Exited (1) 5 seconds ago", INSTALL_ANSWERS, "has exited"],
+    ["update.sh", "Exited (1) 5 seconds ago", "\n", "has exited"],
+    ["install.sh", "", INSTALL_ANSWERS, "no running BlackVault container"],
+    ["update.sh", "", "\n", "no running BlackVault container"],
+  ])("%s: status %j is a failed start: the wait ends after three sightings, the output says so and names the log command, exit 1", (script, status, answers, words) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, script, answers, { BV_STUB_PS_STATUS: status });
+    expect(r.code, r.out).toBe(1);
+    expect(polls(r.calls)).toBe(3);
+    expect(r.out).toContain(words);
+    expect(r.out).toContain("docker compose logs blackvault");
+    expect(r.out).toContain("NOT healthy");
+    expect(r.out).not.toContain("BlackVault is running.");
+    expect(r.out).not.toContain("BlackVault is ready!");
+    expect(r.out).not.toMatch(/Status:\s+running/);
+    expect(r.out).not.toContain("Update complete.");
+    expect(r.out).not.toContain("did not become healthy");
+  });
+
+  // Docker Compose 2.20, the documented minimum, rejects `ps --format '{{.Status}}'`.
+  // A query that FAILS says nothing about the container: it is not "missing".
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: the status query fails every time: the full wait, the old warning, exit 0, and the setup token is still shown", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const logs = path.join(tmp, "logs.txt");
+    fs.writeFileSync(logs, "blackvault  | [auth] Setup token: ABCD-EFGH-JKMN-PQRS — create the first admin at https://vault.example.com/setup\n");
+    const r = run(dir, script, answers, { BV_STUB_PS_FAIL: "always", BV_STUB_LOGS_FILE: logs });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy within two minutes");
+    expect(r.out).not.toContain("no running BlackVault container");
+    expect(r.out).toContain("and enter the setup token: ABCD-EFGH-JKMN-PQRS");
+  });
+
+  it.each([
+    ["install.sh", INSTALL_ANSWERS],
+    ["update.sh", "\n"],
+  ])("%s: the status query fails five times, then reports healthy: success, exit 0 (failed queries are not counted as sightings)", (script, answers) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    if (script === "update.sh") sqliteInstall(dir);
+    stubSleep();
+    const left = path.join(tmp, "ps-fail-left");
+    fs.writeFileSync(left, "5\n");
+    const r = run(dir, script, answers, { BV_STUB_PS_FAIL_FILE: left });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(6);
+    expect(r.out).not.toContain("NOT healthy");
+    expect(r.out).not.toContain("did not become healthy");
+    expect(r.out).toMatch(script === "install.sh" ? /BlackVault is running\./ : /Status:\s+running/);
+  });
+
+  it("a status with no health word at all (an image without a health check) is still the old outcome: the full wait, a warning, exit 0", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    stubSleep();
+    const r = run(dir, "update.sh", "\n", { BV_STUB_PS_STATUS: "Up 2 minutes" });
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(60);
+    expect(r.out).toContain("did not become healthy");
+  });
+
+  it("install.sh: healthy on the first poll is success", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", INSTALL_ANSWERS);
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(1);
+    expect(r.out).toContain("BlackVault is running.");
+    expect(r.out).toContain("BlackVault is ready!");
+    expect(r.out).not.toContain("WARNING");
+  });
+
+  it("update.sh: healthy on the first poll is success", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(polls(r.calls)).toBe(1);
+    expect(r.out).toMatch(/Status:\s+running/);
+    expect(r.out).toContain("Update complete.");
+  });
+});
+
 describe("update.sh (no git checkout)", () => {
   it("creates the key only when missing, snapshots SQLite BEFORE starting the new image, prints the plaintext warning", () => {
     const dir = path.join(tmp, "app");
@@ -314,6 +475,303 @@ describe("update.sh (no git checkout)", () => {
     expect(r.calls).toContain("key=no");
   });
 
+  // Every form Docker Compose itself accepts for the line: a missed key here
+  // would create a second, different key (KEY_CONFLICT at the next start).
+  it.each([
+    ["export", (k: string) => `export BLACKVAULT_ENCRYPTION_KEY=${k}`],
+    ["export, quotes and a comment", (k: string) => `export BLACKVAULT_ENCRYPTION_KEY="${k}" # the field-encryption key`],
+    ["spaces around = and single quotes", (k: string) => `BLACKVAULT_ENCRYPTION_KEY = '${k}'`],
+    ["CRLF", (k: string) => `BLACKVAULT_ENCRYPTION_KEY=${k}\r`],
+    ["a commented-out empty line above it", (k: string) => `#BLACKVAULT_ENCRYPTION_KEY=\nexport BLACKVAULT_ENCRYPTION_KEY=${k}`],
+    // The app trims the value, so spaces inside the quotes are still that key.
+    ["spaces inside the quotes", (k: string) => `BLACKVAULT_ENCRYPTION_KEY="  ${k}\t "`],
+    ["upper-case hex", (k: string) => `BLACKVAULT_ENCRYPTION_KEY=${k.toUpperCase()}`],
+  ])("BLACKVAULT_ENCRYPTION_KEY written in .env as: %s → install.sh and update.sh create no key file", (_name, line) => {
+    for (const script of ["install.sh", "update.sh"]) {
+      const dir = path.join(tmp, `app-${script}`);
+      copyTree(dir);
+      sqliteInstall(dir);
+      fs.appendFileSync(path.join(dir, ".env"), `${line("cd".repeat(32))}\n`);
+      const r = run(dir, script, "\n");
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).toContain("Encryption key: BLACKVAULT_ENCRYPTION_KEY (from .env) - no key file created");
+      expect(r.out).not.toContain(BOX_LINE);
+      expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+      expect(callLines(r.calls)).toContain("compose up -d");
+    }
+  });
+
+  it("a commented-out BLACKVAULT_ENCRYPTION_KEY line does not count: the key file is created", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), `# export BLACKVAULT_ENCRYPTION_KEY=${"cd".repeat(32)}\n`);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}\n$/);
+  });
+
+  it("the public URL, direct access and trusted proxies written with export, quotes and comments: nothing is asked again, .env is untouched", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const env = [
+      `export DATA_DIR="${dir}/data" # where the data lives`,
+      "PORT=3000",
+      "export BLACKVAULT_DB_PROVIDER = sqlite",
+      "#BLACKVAULT_PUBLIC_URL=https://old.example.com",
+      "export BLACKVAULT_PUBLIC_URL='https://vault.example.com' # behind the proxy",
+      "export BLACKVAULT_TRUSTED_PROXIES=",
+      "  export BLACKVAULT_DIRECT_ACCESS_INITIAL=on",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    // Only "Is this still current?" (Enter = yes) may be asked. Any further
+    // prompt would read end of input: the URL prompt aborts on it.
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Public URL is: https://vault.example.com\n");
+    expect(r.out).toContain(`Database verified at: ${dir}/data/db/vault.db`);
+    expect(r.out).not.toContain("Public URL: the address people open");
+    expect(r.out).not.toContain("Keep allowing direct access");
+    expect(r.out).not.toContain("Trusted proxies:");
+    expect(r.out).toMatch(/URL:\s+https:\/\/vault\.example\.com\n/);
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(callLines(r.calls)).toContain("compose up -d");
+  });
+
+  it("install.sh over a configured install whose DATA_DIR line uses export and quotes: starts it, does not run the wizard", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const env = `export DATA_DIR = "${dir}/data"\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\n`;
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "install.sh", "");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`Your data is at: ${dir}/data (sqlite)`);
+    expect(r.out).toContain("Starting with existing configuration...");
+    expect(r.out).not.toContain("Where should BlackVault store its data?");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+  });
+
+  it("the database is in a legacy folder and DATA_DIR is written with export: the new DATA_DIR is what .env now says", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir); // the database is in <dir>/data, a location update.sh knows
+    fs.writeFileSync(
+      path.join(dir, ".env"),
+      `export DATA_DIR=${dir}/moved-away\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`,
+    );
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Auto-updating DATA_DIR in .env");
+    const sourced = spawnSync("bash", ["-c", ". scripts/compose-provider.sh; env_value DATA_DIR"], { cwd: dir, encoding: "utf8" });
+    expect(sourced.stdout.trim()).toBe(`${fs.realpathSync(dir)}/data`); // update.sh builds it from $(pwd)
+    expect(fs.existsSync(path.join(dir, ".env.bak"))).toBe(true);
+  });
+
+  // Docker Compose substitutes $VAR and unescapes \x inside double quotes;
+  // the reader does neither, so such a DATA_DIR is unreadable. Using the text
+  // as written would name a folder that does not exist, and the check below
+  // it would then repoint .env at whatever database sits in a legacy folder.
+  it.each([
+    ["$HOME in an export line", (d: string) => `export DATA_DIR=$HOME/${path.basename(d)}/real`],
+    ["${VAR} in double quotes", (_d: string) => 'DATA_DIR = "${BV_DATA}/real"'],
+    ["DATA_DIR: value", (d: string) => `DATA_DIR: ${d}/real`],
+    ["a double-quoted path with \\r and \\n in it", (_d: string) => 'DATA_DIR="C:\\Users\\rob\\new data"'],
+    ["a single-quoted path with an apostrophe", (d: string) => `DATA_DIR='${d}/Rob's Vault'`],
+    ["a single-quoted path ending in a backslash", (_d: string) => "DATA_DIR='C:\\BV\\'"],
+    // Compose puts the home folder in place of a leading ~; the reader does not.
+    ["a leading ~", (_d: string) => "DATA_DIR=~/real"],
+    ["a leading ~ in double quotes", (_d: string) => 'export DATA_DIR="~/real"'],
+  ])("update.sh: an unreadable DATA_DIR (%s) stops the update at the preflight: nothing pulled, built or relocated, .env untouched", (_name, line) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir); // a database in <dir>/data: a legacy location update.sh knows
+    const env = `${line(dir)}\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`;
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: DATA_DIR in .env could not be read");
+    expect(r.out).toContain("Nothing was rebuilt or restarted.");
+    expect(r.out).not.toContain("Nothing was pulled");
+    expect(r.out).not.toContain("Auto-updating DATA_DIR");
+    expect(r.out).not.toContain("Database verified at");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(fs.existsSync(path.join(dir, ".env.bak"))).toBe(false);
+    // Stopped before the prompts, the key file, the build and the snapshot.
+    expect(r.out).not.toContain("Public URL is:");
+    expect(r.out).not.toContain("Rebuilding BlackVault image");
+    expect(r.out).not.toContain("Snapshotting the database");
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
+    expect(backups(dir)).toEqual([]);
+  });
+
+  it("update.sh: a double-quoted Windows-style path with no escape letter in it is read as written (Compose reads it literally)", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const real = path.join(dir, "Data\\Vault"); // a folder name holding a backslash: \V is no escape
+    fs.mkdirSync(path.join(real, "db"), { recursive: true });
+    fs.mkdirSync(path.join(real, "uploads"), { recursive: true });
+    fs.writeFileSync(path.join(real, "db/vault.db"), "SQLite format 3\0 the real database");
+    const env = `DATA_DIR="${real}"\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`;
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`Database verified at: ${real}/db/vault.db`);
+    expect(r.out).not.toContain("Auto-updating DATA_DIR");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+  });
+
+  it("install.sh: an existing .env whose DATA_DIR is unreadable stops the installer; the wizard never overwrites .env", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const env = "export DATA_DIR=$HOME/blackvault\nBLACKVAULT_DB_PROVIDER=sqlite\n";
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "install.sh", INSTALL_ANSWERS);
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: DATA_DIR in .env could not be read");
+    expect(r.out).toContain("Write it as DATA_DIR=value");
+    expect(r.out).not.toContain("Where should BlackVault store its data?");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(r.calls).not.toContain("compose up");
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+  });
+
+  /** What the reader gives back for DATA_DIR in dir's .env: [value, unreadable?]. */
+  function dataDirReadBack(dir: string): [string, boolean] {
+    const r = spawnSync("bash", ["-c", '. scripts/compose-provider.sh; env_value DATA_DIR; if env_unreadable DATA_DIR; then echo UNREADABLE; fi'], { cwd: dir, encoding: "utf8" });
+    const lines = r.stdout.split("\n");
+    return [lines[0], lines[1] === "UNREADABLE"];
+  }
+
+  // THE INVARIANT: whatever install.sh writes for DATA_DIR is a line its own
+  // reader reads back as the folder the installer created. A typed answer the
+  // reader would refuse, or read as something else, is asked for again.
+  it.each([
+    ["an absolute path", (t: string) => `${t}/bv data`, (t: string) => `${t}/bv data`, false],
+    ["~/x", () => "~/bv-data", (t: string) => `${t}/bv-data`, false],
+    ["~/x/ with a trailing slash", () => "~/bv-data/", (t: string) => `${t}/bv-data`, false],
+    ["~ alone", () => "~", (t: string) => t, false],
+    ["$HOME/x", () => "$HOME/bv-data", (t: string) => `${t}/bv-data`, false],
+    ["$HOME alone", () => "$HOME", (t: string) => t, false],
+    ["~name/x, then a good path", (t: string) => `~rob/bv-data\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["a $VAR in the middle, then a good path", (t: string) => `${t}/$USER/data\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["${HOME}/x, then a good path", (t: string) => "${HOME}/bv\n" + `${t}/second`, (t: string) => `${t}/second`, true],
+    ["a path holding ' #' (the reader would cut it there), then a good path", (t: string) => `${t}/vault #2\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["a path starting with a quote, then a good path", (t: string) => `"${t}/quoted"\n${t}/second`, (t: string) => `${t}/second`, true],
+    ["three refused answers, then the default", () => "~a/x\n$B/x\n~c/x\n", (_t: string, dir: string) => `${dir}/data`, true],
+  ] as [string, (t: string) => string, (t: string, dir: string) => string, boolean][])("install.sh writes a DATA_DIR line its own reader reads back as the folder it made: %s", (_name, typed, expected, refusedFirst) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", `${typed(tmp)}${INSTALL_ANSWERS}`);
+    expect(r.code, r.out).toBe(0);
+    const want = expected(tmp, fs.realpathSync(dir));
+    expect(dataDirReadBack(dir)).toEqual([want, false]);
+    expect(fs.statSync(path.join(want, "db")).isDirectory()).toBe(true);
+    expect(r.out).toContain(`Data stored: ${want}\n`);
+    expect(r.out.includes("That folder cannot be used as typed")).toBe(refusedFirst);
+    // Nothing literally named after what was typed is left in the checkout.
+    expect(fs.readdirSync(dir).filter((n) => /[~$"]/.test(n))).toEqual([]);
+  });
+
+  it("install.sh: the data-folder question at the end of input stops the installer; nothing is written", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const r = run(dir, "install.sh", "~rob/bv-data\n");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("That folder cannot be used as typed");
+    expect(r.out).toContain("ERROR: no data directory was given. Nothing was changed.");
+    expect(fs.existsSync(path.join(dir, ".env"))).toBe(false);
+    expect(r.calls).not.toContain("compose up");
+  });
+
+  it.each(["install.sh", "update.sh"])("%s: an unreadable BLACKVAULT_DB_PROVIDER stops before anything is started (SQLite is not assumed)", (script) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), "BLACKVAULT_DB_PROVIDER=$DB\n");
+    const before = fs.readFileSync(path.join(dir, ".env"), "utf8");
+    const r = run(dir, script, "\n");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: BLACKVAULT_DB_PROVIDER in .env could not be read");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(before);
+    expect(r.calls).not.toContain("compose build");
+    expect(r.calls).not.toContain("compose up");
+  });
+
+  it.each([
+    ["a $ in the value", "BLACKVAULT_ENCRYPTION_KEY=$BV_KEY", "could not be read"],
+    ["KEY: value", `BLACKVAULT_ENCRYPTION_KEY: ${"cd".repeat(32)}`, "could not be read"],
+    // Compose passes "# note" to the app, which refuses it: not "no key".
+    ["only a comment after the =", "BLACKVAULT_ENCRYPTION_KEY= # note", "is not 64 hex characters"],
+    ["too short", "BLACKVAULT_ENCRYPTION_KEY=abc123", "is not 64 hex characters"],
+    ["a non-hex character", `BLACKVAULT_ENCRYPTION_KEY="${"cd".repeat(31)}cg"`, "is not 64 hex characters"],
+  ])("BLACKVAULT_ENCRYPTION_KEY in .env with %s: install.sh and update.sh stop, and create NO second key", (_name, line, message) => {
+    for (const script of ["install.sh", "update.sh"]) {
+      const dir = path.join(tmp, `app-${script}`);
+      copyTree(dir);
+      sqliteInstall(dir);
+      fs.appendFileSync(path.join(dir, ".env"), `${line}\n`);
+      const r = run(dir, script, "\n");
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("BLACKVAULT_ENCRYPTION_KEY");
+      expect(r.out).toContain(message);
+      expect(r.out).not.toContain(BOX_LINE);
+      expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+      expect(r.calls).not.toContain("compose build");
+      expect(r.calls).not.toContain("compose up");
+    }
+  });
+
+  it("a UTF-8 BOM before a BLACKVAULT_ENCRYPTION_KEY line on line 1: the key is found, no key file is created", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const rest = fs.readFileSync(path.join(dir, ".env"), "utf8");
+    fs.writeFileSync(path.join(dir, ".env"), `\uFEFFBLACKVAULT_ENCRYPTION_KEY=${"cd".repeat(32)}\n${rest}`);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Encryption key: BLACKVAULT_ENCRYPTION_KEY (from .env) - no key file created");
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+  });
+
+  it("update.sh: an unreadable BLACKVAULT_PUBLIC_URL is asked for again and written as a plain line that wins", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.writeFileSync(
+      path.join(dir, ".env"),
+      `DATA_DIR=${dir}/data\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://$HOST\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`,
+    );
+    const r = run(dir, "update.sh", "https://vault.example.com\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("BLACKVAULT_PUBLIC_URL in .env could not be read");
+    expect(r.out).not.toContain("Public URL is: ");
+    const sourced = spawnSync("bash", ["-c", ". scripts/compose-provider.sh; env_value BLACKVAULT_PUBLIC_URL"], { cwd: dir, encoding: "utf8" });
+    expect(sourced.stdout.trim()).toBe("https://vault.example.com");
+  });
+
+  it("scripts/db-snapshot.sh on its own: an unreadable DATA_DIR or provider is refused, ./data is not assumed", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    fs.writeFileSync(path.join(dir, ".env"), 'DATA_DIR="${HOME}/blackvault"\nBLACKVAULT_DB_PROVIDER=sqlite\n');
+    const r = run(dir, "scripts/db-snapshot.sh", "");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: database snapshot failed: DATA_DIR in .env could not be read");
+    expect(r.calls).not.toContain("compose stop");
+    expect(backups(dir)).toEqual([]);
+    fs.writeFileSync(path.join(dir, ".env"), `DATA_DIR=${dir}/data\nBLACKVAULT_DB_PROVIDER: sqlite\n`);
+    const p = run(dir, "scripts/db-snapshot.sh", "");
+    expect(p.code, p.out).toBe(1);
+    expect(p.out).toContain("ERROR: database snapshot failed: BLACKVAULT_DB_PROVIDER in .env could not be read");
+    expect(p.calls).not.toContain("compose stop");
+  });
+
   it("N1: BLACKVAULT_ENCRYPTION_KEY exported in the shell → no key file either", () => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
@@ -333,6 +791,92 @@ describe("update.sh (no git checkout)", () => {
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain(BOX_LINE);
     expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toMatch(/^[0-9a-f]{64}\n$/);
+  });
+
+  // The new image refuses to start while a restore marker is in the uploads
+  // folder. Found before the rebuild, the version that is running stays up.
+  it.each([
+    ["a folder, as the restore program leaves it", (up: string) => fs.mkdirSync(path.join(up, ".restore-20261001-101010.db-started"))],
+    ["a file with a hand-made stamp", (up: string) => fs.writeFileSync(path.join(up, ".restore-old one.db-started"), "")],
+  ])("update.sh: a restore marker in the uploads folder (%s) stops the update BEFORE the rebuild, with the command that removes it", (_name, plant) => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const uploads = path.join(dir, "data/uploads");
+    plant(uploads);
+    const stamp = fs.readdirSync(uploads)[0].slice(".restore-".length, -".db-started".length);
+    const env = fs.readFileSync(path.join(dir, ".env"), "utf8");
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain(`ERROR: the uploads folder holds a marker left by a restore: ${uploads}/.restore-${stamp}.db-started.`);
+    expect(r.out).toContain("refuses to start while a marker exists");
+    expect(r.out).toContain("/bv-snapshot-restore.sh clear-marker /app/uploads ");
+    expect(r.out).toContain(stamp.includes(" ") ? `clear-marker /app/uploads '${stamp}'` : `clear-marker /app/uploads ${stamp}`);
+    expect(r.out).toContain("Nothing was rebuilt or restarted.");
+    expect(r.out).not.toContain("Rebuilding BlackVault image");
+    expect(r.out).not.toContain("Public URL is:");
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+    expect(backups(dir)).toEqual([]);
+    expect(fs.readdirSync(uploads)).toHaveLength(1); // the marker is never removed by the update
+  });
+
+  it("update.sh: names that are not markers (.restore-<stamp> staging, .pre-restore-<stamp>, an empty stamp) do not stop the update", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    for (const name of [".restore-20261001-101010", ".pre-restore-20261001-101010", ".restore-.db-started"]) fs.mkdirSync(path.join(dir, "data/uploads", name));
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain("marker left by a restore");
+    expect(callLines(r.calls)).toContain("compose up -d");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("the marker check says so when it cannot be made: a folder above the uploads folder is closed to this user; a folder that is simply not there says nothing", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    const closed = path.join(dir, "closed");
+    fs.mkdirSync(path.join(closed, "uploads"), { recursive: true });
+    const check = (uploads: string) =>
+      spawnSync("bash", ["-c", '. scripts/compose-provider.sh; . scripts/backup-common.sh; COMPOSE="docker compose"; bv_restore_marker_refusal "$1"; echo "rc=$?"', "bash", uploads], { cwd: dir, encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin` } as unknown as NodeJS.ProcessEnv });
+    fs.chmodSync(closed, 0o000);
+    try {
+      const hidden = check(path.join(closed, "uploads"));
+      expect(hidden.stdout).toBe(`Note: could not check the uploads folder ${closed}/uploads for a marker left by a restore: ${closed} is closed to this user. Going on without that check.\nrc=0\n`);
+    } finally {
+      fs.chmodSync(closed, 0o755);
+    }
+    expect(check(path.join(dir, "nowhere/uploads")).stdout).toBe("rc=0\n");
+    expect(check("uploads-not-there").stdout).toBe("rc=0\n");
+  });
+
+  it("scripts/db-snapshot.sh: DATA_DIR exported in the shell and different from .env is refused before the app is stopped", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "scripts/db-snapshot.sh", "", { DATA_DIR: path.join(dir, "elsewhere") });
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: database snapshot failed: DATA_DIR is set in this shell and is not the DATA_DIR in .env");
+    // Both ways to make the two agree: the folder in .env (also the answer when .env has no line), or the variable unset.
+    expect(r.out).toContain("put the folder in .env as DATA_DIR=<absolute path> (preferred, and the fix when .env has no DATA_DIR line), or run 'unset DATA_DIR' if .env is right.");
+    expect(r.calls).not.toContain("compose stop");
+    expect(backups(dir)).toEqual([]);
+    // The same folder, exported: nothing to refuse.
+    const same = run(dir, "scripts/db-snapshot.sh", "", { DATA_DIR: path.join(dir, "data") });
+    expect(same.code, same.out).toBe(0);
+    expect(backups(dir)).toHaveLength(1);
+  });
+
+  it("update.sh: DATA_DIR exported in the shell and different from .env: the snapshot refuses, the new image is not started", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const r = run(dir, "update.sh", "\n", { DATA_DIR: path.join(dir, "elsewhere") });
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("DATA_DIR is set in this shell and is not the DATA_DIR in .env");
+    expect(r.out).toContain("The new version was NOT started.");
+    expect(callLines(r.calls)).not.toContain("compose up -d");
   });
 
   it.skipIf(process.getuid?.() === 0)("a failing snapshot aborts non-zero and never starts the new image", () => {
@@ -618,6 +1162,23 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
   }
   const secrets = (dir: string) => fs.readdirSync(path.join(dir, "secrets")).filter((f) => f !== ".gitignore").sort();
 
+  it("a restore marker in the uploads folder: the rotation refuses before BlackVault is stopped; no new key, nothing snapshotted", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    const marker = path.join(dir, "data/uploads/.restore-20261001-101010.db-started");
+    fs.mkdirSync(marker);
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain(`ERROR: the uploads folder holds a marker left by a restore: ${marker}.`);
+    expect(r.out).toContain("clear-marker /app/uploads 20261001-101010");
+    expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+    expect(fs.readFileSync(path.join(dir, KEY_FILE), "utf8")).toBe(OLD_KEY);
+    expect(backups(dir)).toEqual([]);
+    expect(fs.existsSync(marker)).toBe(true);
+  });
+
   it("success: the key files are swapped (old kept as .old-<ts>) and the app restarts", () => {
     const dir = path.join(tmp, "app");
     rotateInstall(dir);
@@ -683,6 +1244,35 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
     expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
     expect(r.calls).toBe(""); // docker never invoked
     expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
+  // A key line the .env reader cannot read (Compose would substitute or
+  // unescape it) is still a key held in the environment: Compose passes its
+  // value to the app, and after a rotation it would conflict with the new file.
+  it.each([
+    ["a $ in an unquoted value", "BLACKVAULT_ENCRYPTION_KEY=$MYKEY"],
+    ["${VAR} in double quotes", 'export BLACKVAULT_ENCRYPTION_KEY="${MYKEY}"'],
+    ["KEY: value", `BLACKVAULT_ENCRYPTION_KEY: ${"cd".repeat(32)}`],
+    ["quotes, spaces and a comment", `BLACKVAULT_ENCRYPTION_KEY = "  ${"cd".repeat(32)}  " # the key`],
+  ])("rotate-key.sh: a BLACKVAULT_ENCRYPTION_KEY line in .env written as %s is refused up front, like any env key", (_l, line) => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), `${line}\n`);
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: Key rotation works on secrets/blackvault_encryption_key. Your key is in");
+    expect(r.out).toContain("BLACKVAULT_ENCRYPTION_KEY (from .env): move it into that file");
+    expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
+    expect(r.calls).toBe(""); // docker never invoked
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
+  it("rotate-key.sh: a BLACKVAULT_ENCRYPTION_KEY line holding only whitespace is no key (the app trims it): rotation is not refused for it", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), 'BLACKVAULT_ENCRYPTION_KEY="   "\n');
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.out).not.toContain("Key rotation works on");
   });
 
   // Spec 3b Task 5: the probe prints a SECOND line, `FILES old=<n> new=<n> rot=<n>`. The wrapper must

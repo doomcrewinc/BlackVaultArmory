@@ -52,7 +52,7 @@ const ENCRYPTED_MODEL_KEYS: ReadonlyArray<{ model: string; key: string }> = [
 ].map((model) => ({ model, key: BACKUP_MODELS.find((m) => m.model === model)!.key }));
 
 /**
- * Carry M6 ("Old backups with pre-V1 values"): a backup written before the
+ * Old backups with pre-V1 values: a backup written before the
  * field-encryption epic can still hold a pre-V1 `enc:...` value (the OLD,
  * now-removed `src/lib/crypto.ts` scheme) in an encrypted field — historically
  * only `serialNumber`. Restore writes go through the app Prisma client
@@ -83,7 +83,7 @@ function decryptLegacyEncInRows(rows: Record<string, unknown[]>): void {
 }
 
 /**
- * Carry ("DateNormalizationAudit rows"): an old backup can carry
+ * DateNormalizationAudit rows: an old backup can carry
  * DateNormalizationAudit rows the pre-encryption date migration wrote for
  * `nfaApprovalDate` (Firearm/Accessory) — plaintext copies of a column that
  * is now encrypted. The startup encryption migration
@@ -110,7 +110,7 @@ const NFA_DATE_FIELDS = ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d
 }));
 
 /**
- * Review I1: an old backup's `nfaApprovalDate` can be a legacy instant that
+ * An old backup's `nfaApprovalDate` can be a legacy instant that
  * is not at UTC midnight (a pre-normalisation value, from before the
  * date-only rule existed). Restoring it used to take the encryption
  * extension's lexical UTC-day read, which silently drops a day in any
@@ -226,8 +226,8 @@ function normalizeGearArmorGroups(rows: Record<string, unknown[]>): void {
 }
 
 /**
- * Review round 2, M2 follow-up: the original `/^P2\d{3}$/` match was too
- * broad. It also matched P2024 (timed out fetching a connection from the
+ * A plain `/^P2\d{3}$/` match would be too
+ * broad. It also matches P2024 (timed out fetching a connection from the
  * pool), P2028 (a transaction API error — e.g. the transaction already
  * closed) and P2034 (a transaction failed due to a write conflict or
  * deadlock, safe to retry) — none of those are about the uploaded FILE's
@@ -275,7 +275,7 @@ const RESTORE_CONTENT_ERROR_CODES: ReadonlySet<string> = new Set([
 
 /**
  * Whether `error` is a CONTENT problem with the uploaded file — a duplicate
- * serial, a wrong type on a column, a non-string serial (review M2) — rather
+ * serial, a wrong type on a column, a non-string serial — rather
  * than a genuine server fault. These shapes are everything the write
  * transaction below can throw for bad file content:
  * - our own `TypeError` (the encryption extension's `serialize()`, or
@@ -300,7 +300,7 @@ function isRestoreContentError(error: unknown): boolean {
 }
 
 /**
- * Logs a restore write failure WITHOUT the failing row's data (review M1):
+ * Logs a restore write failure WITHOUT the failing row's data:
  * error name, code (when present) and which model was being written when it
  * happened — never the error's own `.message` for a `PrismaClientValidationError`,
  * whose message IS the full pretty-printed invocation (every field of every
@@ -380,7 +380,7 @@ export async function prepareBackupRestore(body: unknown, opts: RestoreRecordsOp
     BACKUP_MODELS.map(({ key }) => [key, (body[key] as unknown[] | undefined) ?? []])
   );
 
-  // Carry M6: a legacy enc: serial must be decrypted BEFORE anything is
+  // A legacy enc: serial must be decrypted BEFORE anything is
   // written — this throws (and writes nothing) when VAULT_ENCRYPTION_KEY is
   // missing or wrong for a value that needs it.
   try {
@@ -390,7 +390,7 @@ export async function prepareBackupRestore(body: unknown, opts: RestoreRecordsOp
     throw error;
   }
 
-  // Review I1: zone-correct a legacy non-midnight NFA date BEFORE the NFA
+  // Zone-correct a legacy non-midnight NFA date BEFORE the NFA
   // group is (re)normalised below, which reads whatever value is already
   // there. An unparseable date here is a content problem with the file, not
   // a server fault — 400, and nothing has been written yet.
@@ -440,7 +440,7 @@ async function writeBackupRecords(rows: Record<string, unknown[]>, logLabel: str
       );
     } catch (error) {
       logRestoreError(logLabel, error, failingModel);
-      // Review M2: a content problem with the uploaded file (a duplicate
+      // A content problem with the uploaded file (a duplicate
       // serial, a wrong type on a column) is a 400 with a safe, generic
       // message — the transaction already rolled back, same as the 500
       // case, so "nothing was modified" holds either way. Anything else

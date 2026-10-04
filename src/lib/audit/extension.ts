@@ -323,7 +323,7 @@ export function withAudit<C extends PrismaClient>(base: C): C {
     if (outer?.tx) return body(outer.tx);
 
     // Resolved BEFORE the transaction opens — a session lookup inside one
-    // deadlocks on SQLite connection_limit=1 (spike R5). Not needed when suppressed.
+    // deadlocks on SQLite connection_limit=1 (audit-log spike). Not needed when suppressed.
     const actor = outer?.suppress ? outer.actor : (outer?.actor ?? (await resolveActor()));
     return rawTx(
       (tx) => auditStorage.run({ tx, actor, suppress: outer?.suppress }, async () => await body(tx)),

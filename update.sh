@@ -11,6 +11,8 @@ echo ""
 
 # shellcheck source=scripts/compose-provider.sh
 . ./scripts/compose-provider.sh
+# shellcheck source=scripts/backup-common.sh
+. ./scripts/backup-common.sh
 # shellcheck source=scripts/public-url-prompts.sh
 . ./scripts/public-url-prompts.sh
 # shellcheck source=scripts/setup-token.sh
@@ -18,7 +20,7 @@ echo ""
 # shellcheck source=scripts/encryption-key.sh
 . ./scripts/encryption-key.sh
 
-# ── install.bat / update.bat line endings (fix rounds 1-2, I4) ──
+# ── install.bat / update.bat line endings ──
 # Releases before this one stored install.bat and update.bat with CRLF in
 # the index while .gitattributes says `text eol=crlf`, so Git reports both as
 # modified on every checkout, and a pull that changes them aborts ("Your
@@ -130,13 +132,20 @@ fi
 # docker compose must get the BLACKVAULT_* keys from .env only, never from
 # this shell's environment (a shell variable would override .env).
 # BLACKVAULT_UPLOADS_SNAPSHOT is set below only for the one `up` after the
-# uploads snapshot; an inherited value must never reach it (final review FIX 5).
+# uploads snapshot; an inherited value must never reach it.
 unset BLACKVAULT_DATABASE_URL BLACKVAULT_DB_PROVIDER BLACKVAULT_POSTGRES_PASSWORD BLACKVAULT_UPLOADS_SNAPSHOT
+# "Nothing was rebuilt or restarted", not "pulled": this point is reached a
+# second time after the pull, when the new update.sh is started.
+env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was rebuilt or restarted." || exit 1
 DB_PROVIDER=$(provider_from_env)
 echo "Database provider: $DB_PROVIDER"
 
 # ── Read DATA_DIR from .env ────────────────────────────────────
 # Only surrounding whitespace and quotes are stripped: paths may contain spaces.
+# An unreadable DATA_DIR (see scripts/compose-provider.sh) stops here, before
+# the pull: the folder Compose will use is not known, so nothing below can be
+# checked or snapshotted, and no other folder is put in its place.
+env_require_readable DATA_DIR "Nothing was rebuilt or restarted." || exit 1
 ACTIVE_DATA_DIR=$(env_value DATA_DIR)
 
 # ── Preflight: verify the database exists ─────────────────────
@@ -172,6 +181,11 @@ elif [ -n "$ACTIVE_DATA_DIR" ]; then
       echo "   Auto-updating DATA_DIR in .env:"
       echo "     $ACTIVE_DATA_DIR  →  $LEGACY_DATA_DIR"
       sed -i.bak "s|^DATA_DIR=.*|DATA_DIR=$LEGACY_DATA_DIR|" .env
+      # A DATA_DIR line in another form (export, spaces around =) is not
+      # rewritten by the sed above: add a plain line after it, which wins.
+      if [[ "$(env_value DATA_DIR)" != "$LEGACY_DATA_DIR" ]]; then
+        set_env_value .env DATA_DIR "$LEGACY_DATA_DIR"
+      fi
       ACTIVE_DATA_DIR="$LEGACY_DATA_DIR"
       echo "   .env updated. Continuing update..."
       echo ""
@@ -224,11 +238,24 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
+# ── A marker left by a restore ────────────────────────────────
+# The new image refuses to start while a restore marker is in the uploads
+# folder. Found here, before anything is asked, rebuilt or stopped, the
+# version that is running keeps running.
+if ! bv_restore_marker_refusal "${ACTIVE_DATA_DIR:-./data}/uploads"; then
+  echo "       Then run ./update.sh again. Nothing was rebuilt or restarted." >&2
+  exit 1
+fi
+
+if env_unreadable BLACKVAULT_PUBLIC_URL; then
+  echo "BLACKVAULT_PUBLIC_URL in .env could not be read (a \$ in it is not substituted here)."
+  echo "Enter it again; it is added to .env as a plain line, which is the one Docker uses."
+fi
 CURRENT_URL=$(env_value BLACKVAULT_PUBLIC_URL)
 NEW_URL=$(prompt_public_url "$CURRENT_URL")
 [ "$NEW_URL" = "$CURRENT_URL" ] || set_env_value .env BLACKVAULT_PUBLIC_URL "$NEW_URL"
 
-if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
+if ! env_has_key BLACKVAULT_DIRECT_ACCESS_INITIAL; then
   echo ""
   echo "This release can refuse connections that bypass your reverse proxy."
   if [ "$(prompt_yes_no "Keep allowing direct access by IP (http://<ip>:<port>)?" y)" = "y" ]; then
@@ -238,7 +265,7 @@ if ! grep -q '^BLACKVAULT_DIRECT_ACCESS_INITIAL=' .env; then
   fi
 fi
 
-if ! grep -q '^BLACKVAULT_TRUSTED_PROXIES=' .env; then
+if ! env_has_key BLACKVAULT_TRUSTED_PROXIES; then
   set_env_value .env BLACKVAULT_TRUSTED_PROXIES "$(prompt_trusted_proxies)"
 fi
 
@@ -270,7 +297,7 @@ if ! ./scripts/db-snapshot.sh; then
   exit 1
 fi
 
-# Task 4: scripts/db-snapshot.sh also snapshotted the uploads folder (unless
+# scripts/db-snapshot.sh also snapshotted the uploads folder (unless
 # it was empty or missing) and left its path in
 # backups/.uploads-snapshot-marker. Read it once, then remove it — never
 # write it to .env — and pass it to the ONE `up` below, so the app's own
@@ -292,22 +319,27 @@ fi
 
 echo ""
 echo "Waiting for health check..."
-# The app healthcheck runs every 30s, so the first probe is not instant. Poll
-# for up to two minutes: right after `up -d` the status reads
-# "Up 2 seconds (health: starting)", which is neither healthy nor a failure.
-STATUS="started (check logs if app doesn't load)"
-for _ in $(seq 1 60); do
-  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
-    STATUS="running"
-    break
-  fi
-  sleep 2
-done
+# wait_for_health (scripts/compose-provider.sh) says what ends the wait; the
+# last state seen decides what is reported.
+wait_for_health
+if [[ "$HEALTH" == "healthy" ]]; then
+  STATUS="running"
+elif [[ "$HEALTH" == "unhealthy" ]]; then
+  STATUS="UNHEALTHY - the container's health check is failing, check the logs"
+elif start_failed; then
+  STATUS="NOT RUNNING - $(health_problem_text): $COMPOSE logs blackvault"
+else
+  STATUS="did not become healthy within two minutes, check the logs"
+fi
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   Update complete.                   ║"
+if [[ "$HEALTH" == "healthy" ]]; then
+  echo "║   Update complete.                   ║"
+else
+  echo "║   Update applied - app NOT healthy.  ║"
+fi
 echo "╚══════════════════════════════════════╝"
 echo ""
 echo "  Status:   $STATUS"
@@ -323,3 +355,11 @@ echo ""
 # Printed only while no admin account exists (see scripts/setup-token.sh).
 # The health wait above means the app has started and logged it by now.
 show_setup_token "$(env_value BLACKVAULT_PUBLIC_URL)"
+
+# A container that is unhealthy, keeps restarting, has exited or is not there
+# is a failed update for whoever started this script (cron, another script).
+# One that is still starting when the wait ran out is not: a slow first start
+# can still come up.
+if start_failed; then
+  exit 1
+fi

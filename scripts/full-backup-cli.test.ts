@@ -14,7 +14,7 @@
  * backup engine over 2 GiB of uploads must peak under 300 MB RSS on Linux
  * (512 MB on other platforms — ruling R8).
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -243,6 +243,94 @@ describe("full-backup CLI (bundled, plain node)", () => {
     expect(Date.now() - started).toBeLessThan(15_000);
   });
 
+  describe("--lock-status (read-only: restore.sh asks the running app before it stops it)", () => {
+    const lock = () => path.join(backups, ".full-backup.lock");
+    const plant = (body: unknown, ageMs = 0) => {
+      fs.writeFileSync(lock(), typeof body === "string" ? body : JSON.stringify(body));
+      if (ageMs) {
+        const then = new Date(Date.now() - ageMs);
+        fs.utimesSync(lock(), then, then);
+      }
+    };
+    const folder = () => fs.readdirSync(backups).sort().map((n) => [n, fs.statSync(path.join(backups, n)).isFile() ? fs.readFileSync(path.join(backups, n), "utf8") : "dir", fs.statSync(path.join(backups, n)).mtimeMs]);
+    /** Standard input is a pipe that is NEVER written to or closed: a program that waited for a passphrase would not end. */
+    const status = (args: string[] = ["--dir", backups]) =>
+      new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [bundle, "--lock-status", ...args], { cwd: ROOT, env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.stderr.on("data", (d) => (stderr += d));
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`--lock-status did not end by itself (it is waiting on standard input?) stdout=${stdout} stderr=${stderr}`));
+        }, 60_000);
+        child.on("exit", (code) => {
+          clearTimeout(timer);
+          child.stdin.destroy();
+          resolve({ status: code, stdout, stderr });
+        });
+      });
+
+    it("no lock: exit 0, one stdout line, nothing on stderr; standard input is never read; nothing is created", async () => {
+      const r = await status();
+      expect(r).toEqual({ status: 0, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=free\n", stderr: "" });
+      expect(fs.readdirSync(backups)).toEqual([]);
+      // No backup folder at all is "free" too (nothing can hold a lock there).
+      expect(await status(["--dir", path.join(tmp, "no-such-backups")])).toEqual({ status: 0, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=free\n", stderr: "" });
+    });
+
+    it("a live holder on this host: exit 2 and one line naming it (pid, hostname, start time); the lock is not touched", async () => {
+      const startedAt = new Date().toISOString();
+      plant({ pid: process.pid, startedAt, hostname: os.hostname(), token: "holder" });
+      const before = folder();
+      const r = await status();
+      expect(r).toEqual({ status: 2, stdout: `BLACKVAULT_FULL_BACKUP_LOCK state=held pid=${process.pid} hostname=${os.hostname().replace(/[^A-Za-z0-9._:+-]/g, "?")} started=${startedAt}\n`, stderr: "" });
+      expect(r.stdout).not.toContain("holder"); // the token is nobody's business
+      expect(folder()).toEqual(before);
+    });
+
+    it("a holder on another host: exit 2 while its heartbeat is fresh; exit 0 once it is over 5 minutes old — and the stale lock is left in place, not reclaimed", async () => {
+      plant({ pid: 1, startedAt: "2026-10-03T03:15:00.000Z", hostname: "another-container", token: "theirs" }, 4 * 60_000);
+      expect(await status()).toEqual({ status: 2, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=1 hostname=another-container started=2026-10-03T03:15:00.000Z\n", stderr: "" });
+      plant({ pid: 1, startedAt: "2026-10-03T03:15:00.000Z", hostname: "another-container", token: "theirs" }, 6 * 60_000);
+      const before = folder();
+      expect(await status()).toEqual({ status: 0, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=free\n", stderr: "" });
+      expect(folder()).toEqual(before);
+    });
+
+    it("a dead holder on this host: exit 0 at once, however fresh the heartbeat", async () => {
+      const dead = spawnSync(process.execPath, ["-e", ""], { timeout: 30_000 }).pid;
+      plant({ pid: dead, startedAt: "x", hostname: os.hostname(), token: "gone" });
+      expect((await status()).status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(lock(), "utf8")).token).toBe("gone");
+    });
+
+    it("a lock with no usable owner and a fresh heartbeat: exit 2 with an unknown holder; what the file says is printed as plain words only", async () => {
+      plant("not json");
+      expect(await status()).toEqual({ status: 2, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=0 hostname=unknown started=unknown\n", stderr: "" });
+      plant({ pid: 1, startedAt: "soon\nERROR: forged line", hostname: "evil host;$(id)", token: "t" });
+      expect(await status()).toEqual({ status: 2, stdout: "BLACKVAULT_FULL_BACKUP_LOCK state=held pid=1 hostname=evil?host???id? started=soon?ERROR:?forged?line\n", stderr: "" });
+    });
+
+    it("the lock cannot be read: exit 1 with one stderr line and nothing on stdout", async () => {
+      fs.mkdirSync(lock()); // a folder where the lock file should be
+      const r = await status();
+      expect(r.status).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toMatch(/^full-backup: .*EISDIR.*\n$/);
+    });
+
+    it("cannot be combined with --verify or --keep: exit 1 before anything is read", async () => {
+      for (const extra of [["--verify", "x.bvb"], ["--keep", "3"]]) {
+        const r = await status(["--dir", backups, ...extra]);
+        expect(r.status).toBe(1);
+        expect(r.stdout).toBe("");
+        expect(r.stderr).toMatch(/^full-backup: --lock-status cannot be used with --verify or --keep\./);
+      }
+    });
+  });
+
   it("fix round 1: a folder-fsync failure after the rename → exit 0, the OK line, the .bvb in place, and one WARNING line on stderr", () => {
     // Preloaded into the child: opening the backup FOLDER read-only (the folder fsync) fails with EIO.
     const preload = path.join(tmp, `dir-fsync-eio-${seq}.cjs`);
@@ -392,6 +480,22 @@ describe("full-backup CLI (bundled, plain node)", () => {
       expect(backupFiles()).toEqual([old[2], created]);
       expect(fs.readdirSync(backups).sort()).toEqual([...strangers, old[2], created].sort());
       for (const f of [old[2], created]) expect(cli(["--dir", backups, "--verify", f]).status).toBe(0);
+    });
+
+    it("a restore marker in the uploads folder: exit 1 with one ERROR line, no backup is made and --keep deletes nothing", () => {
+      const old = seed(3);
+      const before = old.map((f) => fs.readFileSync(path.join(backups, f)));
+      const root = path.join(tmp, `uploads-marker-${seq}`);
+      fs.mkdirSync(path.join(root, ".restore-20261001-101010.db-started"), { recursive: true });
+      const r = spawnSync(process.execPath, [bundle, "--dir", backups, "--keep", "1"], { cwd: ROOT, env: { ...childEnv, IMAGE_UPLOAD_DIR: root }, input: `${PASS}\n`, encoding: "utf8", timeout: 120_000 });
+      expect(r.status, r.stderr).toBe(1);
+      expect(r.stdout).toBe("");
+      const lines = r.stderr.split("\n").filter(Boolean);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("A restore did not finish cleanly: .restore-20261001-101010.db-started is still in the uploads folder");
+      expect(lines[0]).toContain("No backup was made, and no older backup was deleted.");
+      expect(backupFiles()).toEqual(old);
+      old.forEach((f, i) => expect(fs.readFileSync(path.join(backups, f)).equals(before[i])).toBe(true));
     });
 
     describe("R36: a backup that left out an unreadable file is incomplete, so --keep deletes nothing", () => {

@@ -7,7 +7,7 @@ commits always agree.
 
 | Branch | Off | Into | Purpose |
 |---|---|---|---|
-| `master` | — | — | Production. Only receives merges from `develop` or a hotfix. Tagged. |
+| `master` | — | — | Production. Only receives merges from `develop` or a hotfix. |
 | `develop` | — | — | Integration trunk. GitHub default. All feature PRs land here. |
 | `feat/<slug>` | `develop` | `develop` | New functionality. |
 | `fix/<slug>` | `develop` | `develop` | Bug fixes. |
@@ -222,6 +222,13 @@ compaction, on the same raw client and before the app serves. Keep `assertEncryp
 `runFileStartup`: the file step finishes `.rot` files that are under the current key and refuses
 on files under any other key, so it must only ever run once the key is proven to be this
 database's. Nothing pins that order yet except this paragraph and the code comments.
+Between the two, right after `assertEncryptionKey()` and before the pre-encryption snapshot and the
+migration, `assertNoUnfinishedRestore()` (`src/lib/files/startup.ts`) refuses to start while a
+full restore's marker (`.restore-<stamp>.db-started`) is in the uploads folder. It stays after the
+key check, so a missing or wrong key is reported as that, and before everything that writes, so
+nothing touches an install that may be half restored (`src/lib/encryption/startup.real-db.test.ts`
+pins both). Only the app's start calls it; what a marker is, is defined once, in
+`src/lib/backup/restore-marker.ts`.
 
 **The rotation script's mirrors.** `scripts/rotate-encryption-key.mjs` runs as plain ESM in the
 container and cannot import TypeScript, so it mirrors `uploadsRoot`, `writeAtomic` (with

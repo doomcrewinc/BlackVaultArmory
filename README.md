@@ -524,6 +524,16 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 ---
 
+### Known limitation: searching for `%` or `_` on SQLite
+
+On the SQLite database, a search term containing `%` or `_` in the global search and in the kit
+item picker may show a few extra near-matches (for example `AB_12` also finds `AB-12`), and a term
+made only of those characters matches every item that has a value in a searched field. The audit
+log search is exact on both databases.
+PostgreSQL matches `%` and `_` literally everywhere.
+
+---
+
 ## Users and sign-in
 
 BlackVault requires an account. The first time you open it — a fresh install, or right after
@@ -550,6 +560,13 @@ Then open `<your public URL>/setup` (e.g. `http://localhost:3000/setup`), enter 
 and choose a username and password — you're the first admin. A fresh token is printed every
 time BlackVault starts while no admin exists yet, so only the most recent line in the log is
 valid. Once an admin exists, `/setup` returns 404 and no more tokens are printed.
+
+The log keeps its old lines for as long as the container lives, so a used token can still be
+found there. The scripts stop showing it once the log says `[auth] First admin created` after
+it. One case they cannot see: accounts that arrive without the setup page (a database file or
+dump from another install, put in place by hand under a container that keeps its log) leave the
+old token line as the last one, and the scripts show it once more. It opens nothing, because
+`/setup` is closed as soon as any account exists.
 
 > 💡 Re-running `install.sh` / `install.bat` on an existing install won't show you the token —
 > it sees your `.env` already exists and changes nothing. Use the log command above instead.
@@ -730,13 +747,13 @@ check your proxy's upload size limit (for nginx, `client_max_body_size`) — rev
 proxies default to a much smaller limit than BlackVault's own.
 
 BlackVault itself caps a request body (this is what the sealed-backup restore upload
-uses) at **64 MB**. Set your reverse proxy's own upload limit to at least that — for
+uses) at **64 MiB**. Set your reverse proxy's own upload limit to at least that — for
 example `client_max_body_size 64m;` in nginx / Nginx Proxy Manager, or
-`request_body { max_size 64MB }` in Caddy. This matters even though BlackVault has its
+`request_body { max_size 64MiB }` in Caddy. This matters even though BlackVault has its
 own cap: Next.js buffers an incoming request body in memory *before* it ever checks that
 cap, so an unauthenticated request with no size limit at all in front of it can still
 force the server to hold a very large body in memory. Your reverse proxy's limit is the
-real protection against that; BlackVault's own 64 MB figure only bounds how large a
+real protection against that; BlackVault's own 64 MiB figure only bounds how large a
 legitimate restore upload may be (roughly 37,000 firearms with notes, sealed).
 
 ---
@@ -801,7 +818,7 @@ nothing.
 An older, unsealed (plain JSON) backup from before this release still restores — you'll
 see a warning that the file is not encrypted first.
 
-Restoring a backup is capped at 64 MB (see **Upload size** above for why, and how to
+Restoring a backup is capped at 64 MiB (see **Upload size** above for why, and how to
 also set a matching limit on your reverse proxy). That is comfortably enough for a very
 large inventory (around 37,000 firearms with notes); a household with more than that
 would need a command-line restore path, which does not exist yet.
@@ -857,18 +874,22 @@ an older copy that predates this feature. **All of these snapshots are plain tex
 Delete them once you've confirmed BlackVault is working normally. On Linux, the app's own
 snapshot is owned by uid 1001 (the container's user), so deleting it needs `sudo`.
 
-**Mac/Linux: run `./update.sh` twice** for this specific upgrade. The copy of
-`update.sh` you already have pulls the new code, and then keeps running — bash does not
-reload a script out from under itself — so the rest of that same run is still the *old*
-code: it builds and starts the new image with no encryption key. The new image then exits
-immediately on `KEY_MISSING` and Docker's `restart: unless-stopped` puts it in a restart
-loop. Run `./update.sh` again (or `git pull && ./update.sh` if you'd rather not wait) and
-this second run is the new script end to end: it creates the key, takes its snapshot, and
-starts normally. This is not a Linux-specific quirk — macOS runs the exact same
-`./update.sh` and hits the exact same restart loop. Windows is not affected: `update.bat`
-resumes execution *inside the newly-pulled file* immediately after its own `git pull`
-line, so even a Windows user's very first run is effectively the new script and creates
-the key and the snapshot in one pass.
+**Mac/Linux: run `./update.sh` twice, once only: for the first upgrade from a version older
+than this release.** From this release on, `update.sh` starts itself again with the new copy
+right after `git pull` whenever the pull brought anything new, so one run is enough for every
+later update. The copy of `update.sh` an older version has does not do that: it pulls the new
+code and then keeps running — bash does not reload a script out from under itself — so the
+rest of that run is still the *old* code. It builds and starts the new image with no
+encryption key; the new image exits immediately on `KEY_MISSING` and Docker's
+`restart: unless-stopped` puts it in a restart loop. Run `./update.sh` again (or
+`git pull && ./update.sh` if you'd rather not wait): this second run is the new script end to
+end. It creates the key, takes its snapshot, and starts normally. macOS and Linux run the same
+`./update.sh` and behave the same.
+
+**Windows never needs the second run.** cmd.exe reads a running batch file from disk as it
+goes, so after its own `git pull` an older `update.bat` carries on *inside the newly pulled
+file*: the rest of even the very first run is the new script, which creates the key and takes
+the snapshot in one pass.
 
 **If `git pull` refuses, saying `install.bat` or `update.bat` would be overwritten:**
 some existing clones have those two files marked as locally modified purely because of
@@ -1339,7 +1360,8 @@ press **Start Full Backup**.
 - The progress bar has two phases, **Writing the archive** and then **Verifying the archive**
   (the whole file is read back and checked before it gets its final name), each with
   `<n> of <m> files`.
-- **Backup complete** shows the file name, the number of files and their size.
+- **Backup complete** shows the file name, the number of files and their size, in binary units
+  (1 KiB = 1024 bytes, 1 MiB = 1024 KiB, 1 GiB = 1024 MiB).
 - **Backup finished, but it is INCOMPLETE** means some uploaded files could not be read (a damaged
   file, a file name a backup cannot hold). They are listed, each with the reason, and they are
   **not** in the backup. Fix or remove them and make another backup.
@@ -1408,11 +1430,22 @@ The passphrase file:
   with the same passphrase typed at the prompt. A file in another encoding (UTF-16, for example)
   is refused with `the passphrase is not UTF-8 text`, before anything is done.
 - **Windows:** do not create it with `>` or `Out-File` in Windows PowerShell 5.1; they write
-  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell:
+  UTF-16. Use Notepad (**Save as**, Encoding **UTF-8**), or in PowerShell, which asks for the
+  passphrase without showing it and writes UTF-8 with no byte order mark and no line ending:
 
   ```powershell
-  [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", (Read-Host "Passphrase"))
+  $secure = Read-Host "Passphrase" -AsSecureString
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try {
+    [IO.File]::WriteAllText("$env:USERPROFILE\blackvault-passphrase.txt", [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), (New-Object Text.UTF8Encoding $false))
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
   ```
+
+  This example is not run by BlackVault's automated tests. Check the file once with
+  `backup.bat --passphrase-file <path> --verify <file>` on a backup made with the typed
+  passphrase.
 
 Check the log, or the exit code, now and then: a cron job that has been failing for a month is
 not a backup.
@@ -1457,10 +1490,26 @@ only.)
 document. Accounts, settings and the audit log are not in a backup and are kept as they are.
 
 1. Put the `.bvb` file into the backup folder: `<DATA_DIR>/backups`, or the folder
-   `BLACKVAULT_BACKUP_DIR` names if you set it. On Linux, with the default folder:
+   `BLACKVAULT_BACKUP_DIR` names if you set it. From the BlackVault folder, with the default
+   folder (`./data/backups`):
+
+   **Linux** — the folder belongs to the app's user (uid 1001) and is mode 700, so the copy
+   needs `sudo`:
 
    ```bash
    sudo install -o 1001 -g 1001 -m 600 /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
+   ```
+
+   **Mac** (Docker Desktop, OrbStack) — the folder stays your own, so a plain copy works:
+
+   ```bash
+   cp /path/to/blackvault-full-20261003-031500.bvb ./data/backups/
+   ```
+
+   **Windows:**
+
+   ```bat
+   copy "C:\path\to\blackvault-full-20261003-031500.bvb" data\backups\
    ```
 
 2. From the BlackVault folder:
@@ -1485,7 +1534,10 @@ does, in this order:
    to ask, so `--yes` is then required; without it the script stops before anything is checked.
 3. **Stops BlackVault and takes a snapshot** of the database and the uploads folder into
    `backups/` (next to `docker-compose.yml`). If the snapshot fails, BlackVault is started again
-   and nothing was changed.
+   and nothing was changed. If a full backup is running when the restore gets here (the
+   **Settings** button, `backup.sh`, a scheduled backup), the restore stops instead, before
+   BlackVault is stopped: `ERROR: a full backup is running`. Nothing was changed; run the restore
+   again when the backup has finished.
 4. **Restores**, in a one-off container. The backup's files are written, encrypted with **this**
    install's key, into `uploads/.restore-<time>/`. The database records are replaced in one
    transaction. Then the current `images/` and `documents/` folders are moved into
@@ -1512,6 +1564,21 @@ closed, the machine restarted) or the automatic rollback failed, which the scrip
 exits. Either way BlackVault is stopped and the install may be half restored. Read the file and
 follow it. **While one exists, a new restore refuses to start.**
 
+**BlackVault does not start on a half-restored install.** A restore that reached its database
+step leaves a marker, `uploads/.restore-<time>.db-started`, until it has finished or been put
+back. While a marker exists BlackVault exits at startup with a message that names it. If
+`backups/restore-<time>-RECOVERY.txt` exists, follow it: it ends by removing the marker, either
+after putting the install back or, when the restore itself had finished and only the marker could
+not be removed, as its one step. If no such file is there, the marker alone does not say whether
+the install is whole: delete the marker folder (on Linux with `sudo`) only if the restore script
+had reported the restore as complete or as put back. Otherwise do not start on that install:
+restore a full backup; the restore script prints the command that removes the marker first.
+
+The restore script follows the same rule. It removes its own marker before it starts BlackVault,
+and if it cannot, it does not start BlackVault, exits 1 and prints the command that removes the
+marker. Markers left by earlier restores stop a new restore before anything is checked, with one
+command that removes them; so does an uploads folder it cannot check for them.
+
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
 uses as much disk as those files did. Once you have checked the restored install, delete it, and
@@ -1520,7 +1587,7 @@ the snapshot in `backups/` (on Linux with `sudo`).
 | Exit code | Meaning |
 |---|---|
 | 0 | Restored. |
-| 1 | Failed. The last lines say which of four it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
+| 1 | Failed. The last lines say which of five it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the restore had finished (or the install was put back) but the restore's marker could not be removed — then BlackVault was **not started**: run the command the last line prints, then `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
 
 ---
 
@@ -1603,6 +1670,112 @@ For the update to this release only:
 git pull
 ./update.sh
 ```
+
+#### What changes when you update
+
+Read this once before the update to this release. Nothing here loses data; each item is something
+that now behaves differently from the version you have.
+
+**1. A `.env` line the scripts cannot read now stops them.** `install`, `update`, `backup`,
+`restore`, `rotate-key` and the snapshot step read `.env` the way Docker Compose reads it. Where
+Compose would change a value (or reject the line), the scripts used to work with the text as
+written, which is not the value Docker uses. They now stop with an `ERROR` that names the key:
+the installers, the updaters and the backup and restore scripts before anything is rebuilt,
+stopped or changed; a key rotation at its snapshot step, after which it starts BlackVault again.
+This applies to `DATA_DIR`, `BLACKVAULT_BACKUP_DIR`, `BLACKVAULT_DB_PROVIDER` and
+`BLACKVAULT_ENCRYPTION_KEY`, and in `install.bat` also to `PORT`.
+
+Most installs have no such line, but an installer-written `.env` can: until this release the
+installers wrote the data folder exactly as it was typed. If you answered the data-folder
+question with `~/blackvault` or `$HOME/blackvault`, your `.env` holds `DATA_DIR=~/blackvault` or
+`DATA_DIR=$HOME/blackvault`. That install has been working, because Docker Compose expanded the
+value; the update now stops at its first check, before anything is rebuilt or restarted, and
+your data and `.env` are not changed. Open `.env`, write the folder in full
+(`DATA_DIR=/home/you/blackvault`: the folder your data is in now; in a terminal
+`echo ~/blackvault` or `echo $HOME/blackvault` prints it), and run the update again. From this release the
+installers spell out a leading `~/` or `$HOME/` themselves (`install.sh`) and ask again for a
+folder they could not write as a line that is read back unchanged. A line edited by hand can be
+affected in more ways:
+
+| Written like this | Why it is refused | Write it like this |
+|---|---|---|
+| `DATA_DIR=$HOME/blackvault` | Compose substitutes `$HOME` (any `$` outside single quotes) | `DATA_DIR=/home/you/blackvault` |
+| `DATA_DIR=~/blackvault` | Compose puts a home folder in place of the `~` (`DATA_DIR` and `BLACKVAULT_BACKUP_DIR` only) | `DATA_DIR=/home/you/blackvault` |
+| `DATA_DIR="C:\new\data"` | In double quotes a backslash before `a b f n r t v 0`, another backslash, `$` or the closing quote is an escape (`\n` is a line break) | `DATA_DIR=C:\new\data` (no quotes) |
+| `DATA_DIR: /srv/blackvault` | The `KEY: value` form | `DATA_DIR=/srv/blackvault` |
+| `DATA_DIR='/srv/Rob's vault'` | An apostrophe inside single quotes | `DATA_DIR=/srv/Rob's vault` (no quotes) |
+| `DATA_DIR="/srv/blackvault` | The quote is not closed | `DATA_DIR=/srv/blackvault` |
+
+On Windows the `.bat` scripts also refuse a quoted value followed by a comment
+(`DATA_DIR="D:\Vault" # note`), a `"` inside a value, a value that starts with `=`, an
+exclamation mark anywhere on the line, and one of these keys on the first line of a `.env` that
+was saved with a byte order mark (save it as plain UTF-8, or put a comment line first). The safe
+form everywhere is `KEY=value` with the final value spelled out: no quotes, no `$`, no `~`, no
+`!`. On an install that has no key file yet (`secrets/blackvault_encryption_key`), a
+`BLACKVAULT_ENCRYPTION_KEY` line that is unreadable or not 64 hex characters also stops `install`
+and `update` before the build; with a key file in place that line is not looked at by them.
+
+**2. "NOT healthy", and exit code 1.** After starting the container, `install` and `update` wait up
+to two minutes for its health check. Only `healthy` counts as success; otherwise the summary box
+says `BlackVault was started, but is NOT healthy.` or `Update applied - app NOT healthy.` and
+points at the logs. The exit code then depends on what `docker compose ps` reports:
+
+| The container | Exit code |
+|---|---|
+| is `healthy` | 0 |
+| is `unhealthy` when the two minutes are over | 1 |
+| is seen restarting, exited, or not there three times (the wait ends early) | 1 |
+| is still starting when the two minutes are over | 0, with a warning: a slow first start is not a failure |
+| cannot be asked about: the status query itself fails every time | 0, with the same warning |
+
+A container that keeps restarting is what the app's own refusals to start look like (item 3
+below, two encryption keys, no public URL): the reason is in `docker compose logs blackvault`.
+The scripts report it as a failed start when they catch it restarting three times. They may not:
+between two restarts the container reads as "starting", and one that runs for ten seconds or
+more before it stops is restarted at once, so the wait can end with "did not become healthy
+within two minutes" and exit code 0. After that warning, look at the log before you trust the
+install.
+
+The status query uses an option Docker Compose accepts from v2.21. On v2.20, the oldest version
+BlackVault supports, the query fails: the scripts then wait the two minutes, print the warning
+and exit 0 whatever the container is doing (as they did before this release). Everything else
+works on v2.20; check the app yourself with `docker compose ps`.
+
+A cron job or a script that calls the updater should check the exit code. (Re-running
+`install` over an install that is already configured only starts it and does not wait.)
+
+**3. BlackVault does not start on a half-restored install.** If the uploads folder holds a marker
+left by a restore (`uploads/.restore-<time>.db-started`), this version exits at startup. The
+reason is in the container log, `docker compose logs blackvault`. `update.sh` and `update.bat`
+look for a marker before they rebuild anything and stop there, with the version you have still
+running and the command that removes the marker on screen. An update done another way
+(`git pull && docker compose up -d --build`) gets a container that restarts over and over until
+the marker is dealt with. A full backup (`backup.sh`, `backup.bat`) and a key rotation refuse
+on a marker too. See **[Restoring a full backup](#restoring-a-full-backup)**.
+
+**4. Full Armory export: one more column.** Each item has a new `mgRegistry` field. In the CSV
+its column comes directly after `nfaClass`, so anything that reads the file by column position
+finds every later column one place to the right. Read the columns by name.
+
+**5. CSV exports: text that looks like a formula gets a leading `'`.** In the Full Armory CSV and
+the data export CSV, a text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return
+is written with an apostrophe in front, so that a spreadsheet opens it as text instead of running
+it. Numbers are unchanged, negative ones included. A script that reads these files sees the
+apostrophe as part of the text.
+
+**6. Audit log.** On SQLite, a search containing `%` or `_` looks through a limited stretch of the
+log for each page, so a page can be short, or empty, while more remains: **Load more** stays, and
+the list says when nothing further was found so far. For the API (`/api/admin/audit`), only a
+missing `nextCursor` means the end of the log. **Export CSV** is now sent as it is produced: it has
+no `Content-Length`, it is not cached, and a database error after the download has started ends
+the download with a transfer error instead of an error page.
+
+**7. Search on PostgreSQL takes `%` and `_` literally.** They used to act as wildcards. (SQLite:
+see **[Known limitation: searching for `%` or `_` on SQLite](#known-limitation-searching-for--or-_-on-sqlite)**.)
+
+**8. The image's user.** Inside the container, `nextjs` (uid 1001) now has `nodejs` (gid 1001) as
+its group, so `docker compose exec -u nextjs ...` runs as 1001:1001, as the app itself always
+did. Files on disk are not changed.
 
 ---
 

@@ -18,14 +18,13 @@ const LABEL_CLASS =
 /**
  * Create a kit — the container only. Its contents are added line by line on
  * the detail page, through `/api/kits/[id]/items`, because a KitItem needs a
- * source picker (task 6) that this form has no business embedding.
+ * source picker that this form has no business embedding.
  *
  * The category `<option>`s come from KIT_CATEGORIES, so the dropdown cannot
  * offer a value `normalizeKitCategory` would silently rewrite.
  *
- * No image field, still — but for a different reason than when this form was
- * written. "kit" is now in ImagePicker's `entityType` union and the upload
- * route's allowlist (task 6), so `Kit.imageUrl` is live; the photo is added on
+ * No image field here. "kit" is in ImagePicker's `entityType` union and the upload
+ * route's allowlist, so `Kit.imageUrl` is live; the photo is added on
  * the EDIT form, where the kit already has an id to name its upload after.
  * Uploading against a temp id from a create form is a separate decision from
  * making the column work, and this form does not need it to ship.

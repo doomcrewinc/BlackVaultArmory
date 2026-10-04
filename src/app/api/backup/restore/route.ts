@@ -5,10 +5,10 @@ import { restoreBackupRecords } from "@/lib/backup/restore-core";
 import { openBackup, SealError } from "@/lib/encryption/core.mjs";
 
 /**
- * Detects the sealed-restore shape on `sealed` alone (review M7): requiring
- * `passphrase` too meant `{ sealed }` with no passphrase fell through to the
- * plain-backup path and failed as "Invalid backup file…" — a sealed envelope
- * is never a valid PLAIN backup body, so that was always a misleading error.
+ * Detects the sealed-restore shape on `sealed` alone: requiring
+ * `passphrase` too would let `{ sealed }` with no passphrase fall through to the
+ * plain-backup path and fail as "Invalid backup file…" — a sealed envelope
+ * is never a valid PLAIN backup body, so that would be a misleading error.
  * The passphrase-presence check right below gives the specific message.
  */
 function isSealedRequest(body: unknown): body is { sealed: unknown; passphrase?: unknown } {

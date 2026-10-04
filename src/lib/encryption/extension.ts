@@ -103,7 +103,7 @@ function isPlainObject(v: unknown): v is Row {
 
 const HASH_FIELD = "serialNumberHash";
 
-// ─── Value codec (reused by Task 4's startup migration and the rotation script) ──
+// ─── Value codec (reused by the startup migration and the rotation script) ──
 
 function serialize(d: EncryptedFieldDescriptor, value: unknown): string {
   switch (d.kind) {
@@ -487,8 +487,8 @@ const FINGERPRINTED: ReadonlySet<string> = new Set(
 
 /**
  * Decrypts every registered field of `model` in a result row (or rows),
- * recursing into included relations, and removes `serialNumberHash` (final
- * review F2): the fingerprint is an internal index — it is only ever written
+ * recursing into included relations, and removes `serialNumberHash`:
+ * the fingerprint is an internal index — it is only ever written
  * by encodeData and compared in `where` (rewriteEncryptedCondition), never
  * read back by the app, so it must not reach API responses, exports, sealed
  * backups or audit rows. Raw clients (startup, rotation, migrator) still see it.
@@ -535,7 +535,7 @@ function rewriteArgs(model: string, operation: string, args: Row): Row {
 }
 
 /**
- * Every operation this file handles (final review FIX 9). On a model with an
+ * Every operation this file handles. On a model with an
  * encrypted field anything else throws: an operation added by a later Prisma
  * (e.g. Prisma 6's `updateManyAndReturn`) would otherwise pass through
  * untouched, writing plaintext and returning ciphertext. Fail closed.

@@ -4,11 +4,12 @@
 # restore.bat run it when a full restore fails (full-backups spec §3 step 5).
 #
 #   snapshot-restore.sh state   UPLOADS STAMP
+#   snapshot-restore.sh markers UPLOADS
 #   snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]
 #   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]
 #   snapshot-restore.sh clear-marker UPLOADS STAMP
 #
-# THE THREE STATES (rulings R24 and R28). STAMP is the restore's <ts>. The
+# THE THREE STATES. STAMP is the restore's <ts>. The
 # restore program leaves a marker, UPLOADS/.restore-<ts>.db-started, just
 # before its database step, and removes it only when everything is in place.
 #   started    the marker exists. The database may hold the backup's
@@ -62,8 +63,17 @@
 #          The folders db-snapshot.sh leaves out are left out here too:
 #          .pre-encryption-*, .restore-*, .pre-restore-*, *.tmp, *.rot.
 #
+# markers  prints the stamp of every marker UPLOADS/.restore-<ts>.db-started,
+#          one per line; nothing when there is none, or when UPLOADS is not
+#          there. Changes nothing.
+#
+# WHAT COUNTS AS A MARKER, in every mode: anything directly under UPLOADS
+# with that name, whatever it is (a folder, which is what the restore program
+# creates; a file; a link, dangling or not). The app's start refuses on the
+# same rule (assertNoUnfinishedRestore in src/lib/files/startup.ts).
+#
 # clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
-#          restore program leaves just before its database step (ruling R24).
+#          restore program leaves just before its database step.
 #          The wrapper calls this once its rollback has worked. `uploads`
 #          never removes it: while it exists, the database still has to be
 #          put back.
@@ -94,18 +104,24 @@ own() {
   fi
 }
 
+# Checks STAMP, the restore stamp every mode that takes one has just set: not
+# empty and without a /, so that the names built from it stay inside the
+# uploads folder.
 check_stamp() {
-  case "$1" in
-    "" | */* | .*) fail "'$1' is not a restore stamp." ;;
+  case "$STAMP" in
+    "" | */*) fail "'$STAMP' is not a restore stamp." ;;
+    *) return 0 ;;
   esac
 }
 
 # restore_state UPLOADS STAMP: prints started, complete or untouched (see the top of this file).
 restore_state() {
-  if [ -e "$1/.restore-$2.db-started" ]; then
+  state_marker="$1/.restore-$2.db-started"
+  state_pre="$1/.pre-restore-$2"
+  if [ -e "$state_marker" ] || [ -L "$state_marker" ]; then
     echo started
-  elif { [ -d "$1/.pre-restore-$2/images" ] && [ ! -L "$1/.pre-restore-$2/images" ]; } ||
-    { [ -d "$1/.pre-restore-$2/documents" ] && [ ! -L "$1/.pre-restore-$2/documents" ]; }; then
+  elif { [ -d "$state_pre/images" ] && [ ! -L "$state_pre/images" ]; } ||
+    { [ -d "$state_pre/documents" ] && [ ! -L "$state_pre/documents" ]; }; then
     echo complete
   else
     echo untouched
@@ -117,7 +133,7 @@ case "$MODE" in
   state)
     UP=${2:?usage: snapshot-restore.sh state UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh state UPLOADS STAMP}
-    check_stamp "$STAMP"
+    check_stamp
     [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
     restore_state "$UP" "$STAMP"
     exit 0
@@ -126,7 +142,8 @@ case "$MODE" in
     SNAP=${2:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
     LIVE=${3:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
     if [ -n "${4:-}" ]; then
-      check_stamp "${5:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}"
+      STAMP=${5:?usage: snapshot-restore.sh sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]}
+      check_stamp
       [ -d "$4" ] || fail "the uploads folder $4 does not exist."
       STATE=$(restore_state "$4" "$5")
       if [ "$STATE" != "started" ]; then
@@ -161,10 +178,22 @@ case "$MODE" in
     exit 0
     ;;
   uploads) ;;
+  markers)
+    UP=${2:?usage: snapshot-restore.sh markers UPLOADS}
+    for m in "$UP"/.restore-*.db-started; do
+      if [ -e "$m" ] || [ -L "$m" ]; then
+        m=${m##*/.restore-}
+        m=${m%.db-started}
+        # A name with nothing between the two parts is not a marker.
+        [ -z "$m" ] || echo "$m"
+      fi
+    done
+    exit 0
+    ;;
   clear-marker)
     UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
-    check_stamp "$STAMP"
+    check_stamp
     rm -rf "${UP:?}/.restore-$STAMP.db-started" || fail "could not remove $UP/.restore-$STAMP.db-started."
     exit 0
     ;;
@@ -196,7 +225,7 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "usage: snapshot-restore.sh state UPLOADS STAMP | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
+    echo "usage: snapshot-restore.sh state UPLOADS STAMP | markers UPLOADS | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
     exit 2
     ;;
 esac
@@ -204,7 +233,7 @@ esac
 UP=${2:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 STAMP=${3:?usage: snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]}
 SNAP=${4:-}
-check_stamp "$STAMP"
+check_stamp
 case "$0" in /*) SELF=$0 ;; *) SELF="$(pwd)/$0" ;; esac
 [ -d "$UP" ] || fail "the uploads folder $UP does not exist."
 if [ -n "$SNAP" ]; then
@@ -216,7 +245,7 @@ STAGING="$UP/.restore-$STAMP"
 PRE="$UP/.pre-restore-$STAMP"
 STATE=$(restore_state "$UP" "$STAMP")
 
-# Ruling R28: a finished restore is never undone. Nothing below runs: not the
+# A finished restore is never undone. Nothing below runs: not the
 # move-back, and not the comparison with the snapshot, which would copy the
 # old files over the restored ones.
 if [ "$STATE" = "complete" ]; then

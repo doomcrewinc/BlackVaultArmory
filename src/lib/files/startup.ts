@@ -8,15 +8,16 @@ import { SNAPSHOT_REUSE_MS, snapshotStamp } from "../encryption/pre-encryption-s
 import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
 import { isSafeDocumentUrl } from "../upload-security";
+import { byCodeUnit, dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-marker";
 import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
 
 /**
- * The startup file step of encrypted files at rest (spec 3b,
+ * The startup file step of encrypted files at rest (
  * docs/superpowers/specs/2026-10-01-encrypted-files-design.md §2 "Startup"
  * and §3 "Resume"). Called from runEncryptionStartup
- * (src/lib/encryption/startup.ts) after 3a's database migration and
+ * (src/lib/encryption/startup.ts) after the database migration and
  * compaction, on the same raw client, before the app serves — so no request
- * can read a file while this rewrites it (Review Focus 3).
+ * can read a file while this rewrites it.
  *
  * Order:
  * 1. delete leftover `*.tmp` files (an interrupted writeAtomic);
@@ -75,13 +76,13 @@ const DIR_FSYNC_TOLERATED_CODES = new Set(["EPERM", "EISDIR", "EINVAL"]);
 
 /**
  * writeAtomic's own temp names (`<name>.<8 random hex>.tmp`, ./storage.ts).
- * Fix round 1, M1: the sweep deletes ONLY these, never some other file that
+ * The sweep deletes ONLY these, never some other file that
  * merely ends in `.tmp`. Rotation's `.rot` staging is written through
  * writeAtomic too, so its temps are `<name>.rot.<8 hex>.tmp` and match.
  */
 export const WRITE_ATOMIC_TMP = /\.[0-9a-f]{8}\.tmp$/;
 
-/** Fix round 1, M7: a progress line every this many files during the snapshot and the encryption. */
+/** A progress line every this many files during the snapshot and the encryption. */
 export const PROGRESS_EVERY = 250;
 
 type Entry = { abs: string; rel: string; name: string };
@@ -91,7 +92,7 @@ const codeOf = (e: unknown): string =>
   (e instanceof Error ? e.message : String(e));
 
 /**
- * Fix round 1, M6: runs one filesystem step and turns any raw error into a
+ * Runs one filesystem step and turns any raw error into a
  * FileStartupError that names the path, the error code and a fix.
  */
 async function fsStep<T>(what: string, target: string, fn: () => Promise<T>): Promise<T> {
@@ -133,10 +134,10 @@ async function syncDir(dir: string): Promise<void> {
 /**
  * Every regular file under `dir` (sorted, relative paths with `/`), never
  * following a symlink and never entering a hidden folder — which includes
- * the `.pre-encryption-*` snapshots (fix round 1, M5: the spec excludes
+ * the `.pre-encryption-*` snapshots (the design excludes
  * hidden files, and a file inside a hidden folder is hidden too).
  * Symlinked files are collected so the caller can report them. A symlinked
- * DIRECTORY the walk would have entered refuses to start (fix round 1, M4):
+ * DIRECTORY the walk would have entered refuses to start:
  * whatever it points at would be scanned, moved into or left plaintext
  * outside the uploads root.
  */
@@ -314,7 +315,7 @@ async function moveAcrossDevices(src: string, dest: string): Promise<void> {
   await writeAtomic(dest, bytes); // copy + fsync file + rename + fsync dir
   const copied = await fsp.readFile(dest);
   if (!copied.equals(bytes)) {
-    // Fix round 1, M3: never leave a suspect copy behind — the next start
+    // Never leave a suspect copy behind — the next start
     // would take it for a collision, keep it and encrypt it. The source is
     // still the good copy.
     await fsp.rm(dest, { force: true });
@@ -328,9 +329,9 @@ type LegacyMove = { src: string; dest: string; name: string };
 /**
  * The legacy documents this start will move. Skipped (and logged): anything
  * not a regular file, hidden files, names a later step would never touch —
- * `.tmp` / `.rot` (fix round 1, M1: such a file was moved, never encrypted,
+ * `.tmp` / `.rot` (such a file would be moved, never encrypted,
  * then deleted by the next start's sweep) — and names that already exist in
- * the new folder (Review Focus 1: the existing file is kept).
+ * the new folder (the existing file is kept).
  */
 async function planLegacyMoves(legacyDir: string, docsDir: string, warn: (l: string) => void): Promise<LegacyMove[]> {
   let entries: Dirent[];
@@ -522,6 +523,79 @@ async function findMissingDocuments(raw: RawClient, docsDir: string, warn: (l: s
   return missing;
 }
 
+// ─── An unfinished restore ──────────────────────────────────────
+
+/** The uploads root the startup steps work on: IMAGE_UPLOAD_DIR, else `<cwd>/uploads`. */
+const startupUploadsRoot = (env: NodeJS.ProcessEnv, cwd: string): string =>
+  env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
+
+/**
+ * Refuses to start while a full restore's database-step marker is directly
+ * under the uploads root. The restore program creates the marker just before
+ * it replaces the database and removes it only when the whole restore has
+ * succeeded; the wrapper (restore.sh / restore.bat) removes it once its
+ * rollback has worked. One that is still there means the database and the
+ * uploads may be half restored — the backup's records with the previous
+ * files, or the other way round — and nothing may serve, migrate or encrypt
+ * that.
+ *
+ * Read-only: one readdir of the uploads root. WHAT COUNTS AS A MARKER is
+ * the name alone (markerStamp in ../backup/restore-marker.ts): any entry
+ * directly under the root called `.restore-<anything>.db-started`, whatever
+ * its type — a folder (what the restore program creates), a file, a link,
+ * a dangling link. scripts/snapshot-restore.sh (`state`, `markers`) and the
+ * wrappers use the same rule, so nothing the app refuses on is invisible to
+ * the commands that clear it. A missing uploads root has no marker.
+ *
+ * Only the app's start calls this (runEncryptionStartup in
+ * ../encryption/startup.ts). The restore and rollback commands never do:
+ * they are what clears the marker. A full backup and a key rotation refuse
+ * on a marker with a check of their own, by the same rule (runFullBackup in
+ * ../backup/full-backup.ts; rotate-key.sh and rotate-key.bat).
+ */
+export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "cwd" | "env"> = {}): Promise<void> {
+  const env = opts.env ?? process.env;
+  const root = startupUploadsRoot(env, opts.cwd ?? process.cwd());
+  let names: string[];
+  try {
+    names = await fsp.readdir(root);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw new FileStartupError(`Could not read the folder ${root} (${codeOf(e)}). Fix its permissions and start again.`, e);
+  }
+  // Code-unit order, which for the restore program's stamps is oldest first.
+  const stamps = names
+    .map(markerStamp)
+    .filter((s): s is string => s !== null)
+    .sort(byCodeUnit);
+  if (stamps.length === 0) return;
+  const one = stamps.length === 1;
+  const markers = stamps.map((s) => restoreMarkerLocation(path.join(root, dbStepMarkerName(s)), env)).join(", ");
+  // A recovery file is named after a stamp the restore program accepts; a marker with any other name has none.
+  const recovery = stamps.filter((s) => RESTORE_STAMP.test(s)).map((s) => `backups/restore-${s}-RECOVERY.txt`);
+  const whatToDo = recovery.length
+    ? `If ${recovery.join(" or ")} exists (in the folder that holds docker-compose.yml), follow it: it ends by removing ` +
+      "the marker. If no such file is there, the marker alone cannot say whether the install is whole: "
+    : "No recovery file belongs to a marker with that name, so the marker alone cannot say whether the install is whole: ";
+  const which = one ? "A restore did not finish cleanly: its marker" : `${stamps.length} restores did not finish cleanly: their markers`;
+  throw new FileStartupError(
+    `${which} ${markers} ${one ? "is" : "are"} still in the uploads folder. The database and the uploaded files may be half restored, so ` +
+      `BlackVault will not start. ${whatToDo}delete the marker folder (on Linux it belongs to uid 1001: use sudo) only if ` +
+      "the restore script had reported the restore as complete or as put back, and then start BlackVault again; otherwise " +
+      "do not start on this install: restore a full backup with restore.sh or restore.bat, which says how to remove the " +
+      'marker first. See the README, "Restoring a full backup".',
+  );
+}
+
+/**
+ * Where a marker is, for the refusal's message: the path as this process sees
+ * it and, in a container, where that is on the host (uploadsHostPath).
+ */
+export function restoreMarkerLocation(abs: string, env: NodeJS.ProcessEnv = process.env): string {
+  const host = uploadsHostPath(abs, env);
+  return host === abs || host.startsWith(abs) ? host : `${abs} (on the host: ${host})`;
+}
+
 // ─── The step ───────────────────────────────────────────────────
 
 export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = {}): Promise<FileStartupResult> {
@@ -532,18 +606,18 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   const warn = (line: string) => console.error(line);
   const keys = getFieldKeys();
 
-  const root = env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
+  const root = startupUploadsRoot(env, cwd);
   const docsDir = path.join(root, "documents");
   const legacyDir = legacyDocumentsRoot(cwd);
   const isDocument = (e: Entry) => e.rel.startsWith("documents/");
 
-  // Fix round 1, M4: legacy documents are moved INTO documents/, which the
+  // Legacy documents are moved INTO documents/, which the
   // walk below never sees when it is a link. Refuse before anything changes.
   if (await fsStep("check", docsDir, () => fsp.lstat(docsDir).then((st) => st.isSymbolicLink(), () => false))) {
     throw symlinkedFolderError(docsDir);
   }
 
-  // 1. Leftover temp files from an interrupted atomic write — writeAtomic's own names only (M1).
+  // 1. Leftover temp files from an interrupted atomic write — writeAtomic's own names only.
   for (const f of (await walk(root)).files.filter((e) => WRITE_ATOMIC_TMP.test(e.name))) {
     await fsStep("remove the leftover temporary file", f.abs, () => fsp.rm(f.abs, { force: true }));
     log(`[files] Removed a leftover temporary file: ${f.abs}`);
@@ -574,7 +648,7 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
     );
   }
 
-  // 4. Legacy documents onto the volume. Fix round 1, M8: the update script's
+  // 4. Legacy documents onto the volume. The update script's
   // snapshot (the marker) copies only the host uploads folder, never the old
   // in-container documents folder — so with the marker set, the documents
   // about to move are snapshotted here first.
@@ -620,7 +694,7 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   // 7. Missing documents (logged; never a refusal).
   const missing = await findMissingDocuments(raw, docsDir, warn);
 
-  // 8. Audit. While no FILES_ENCRYPTED event exists yet (fix round 1, M2), the
+  // 8. Audit. While no FILES_ENCRYPTED event exists yet, the
   // first one carries the TOTALS — every BVF1 file per folder — so an event
   // lost to a failed audit write, or undercounted after a crash part-way, is
   // recovered by the next start. After that, only a start that changed

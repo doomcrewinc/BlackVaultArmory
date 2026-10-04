@@ -10,7 +10,7 @@ set -Eeo pipefail
 # it has stopped the app). scripts\db-snapshot.bat is the Windows twin:
 # change them together.
 #
-# Contract (ruling R4): no arguments; exit 0 only when a snapshot was written
+# Contract: no arguments; exit 0 only when a snapshot was written
 # (or there is no database yet to copy); any failure exits non-zero, and the
 # caller stops. Prints the path of the snapshot it wrote.
 #
@@ -23,7 +23,8 @@ set -Eeo pipefail
 # backups/ is mode 700 and every snapshot mode 600: it is a plain copy of the
 # database.
 #
-# Task 4 (encrypted files at rest, spec 3b "Update scripts"): independent of
+# Encrypted files at rest (docs/superpowers/specs/2026-10-01-encrypted-files-design.md,
+# "Update scripts"): independent of
 # PROVIDER, this script also copies $DATA_DIR/uploads into
 # backups/uploads-<YYYYmmdd-HHMMSS>/ (directories mode 700, files mode 600,
 # owned by the app user uid 1001), inside a one-off container of the app
@@ -53,6 +54,20 @@ fail() {
   exit 1
 }
 
+# A line this script cannot read is not a missing one: neither SQLite nor
+# ./data is assumed for it.
+if env_unreadable BLACKVAULT_DB_PROVIDER; then
+  fail "$(env_unreadable_text BLACKVAULT_DB_PROVIDER)"
+fi
+if env_unreadable DATA_DIR; then
+  fail "$(env_unreadable_text DATA_DIR)"
+fi
+# docker compose takes DATA_DIR from the shell before .env; this script reads
+# .env. If the two differ, the copy below would be of one folder while the
+# caller's compose commands (stop, up) act on another.
+if [[ -n "${DATA_DIR+set}" && "$DATA_DIR" != "$(env_value DATA_DIR)" ]]; then
+  fail "DATA_DIR is set in this shell and is not the DATA_DIR in .env, so docker compose and this snapshot would use different folders. Make them agree: put the folder in .env as DATA_DIR=<absolute path> (preferred, and the fix when .env has no DATA_DIR line), or run 'unset DATA_DIR' if .env is right."
+fi
 PROVIDER=$(provider_from_env)
 TS="$(date -u +%Y%m%d-%H%M%S)"
 DATA_DIR=$(env_value DATA_DIR)
@@ -112,7 +127,7 @@ echo "         encryption was first turned on; otherwise they need the encryptio
 echo "         that was in use when it was taken."
 echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
 
-# ── Uploads snapshot (Task 4) ───────────────────────────────────
+# ── Uploads snapshot ────────────────────────────────────────────
 # A copy of $DATA_DIR/uploads into backups/uploads-<TS>/, written under a
 # .partial name and renamed only once complete — same reason as $OUT above.
 # Every directory is mode 700; every file is created empty and chmod 600
@@ -137,8 +152,8 @@ echo "         Delete it once BlackVault is confirmed working:  rm $OUT"
 UPLOADS_MARKER_FILE="backups/.uploads-snapshot-marker"
 rm -f "$UPLOADS_MARKER_FILE"
 
-# The copy runs INSIDE a one-off container of the app image (spec 3b, fix for
-# Task 6): the uploaded files are BVF1 files mode 600 owned by the app user
+# The copy runs INSIDE a one-off container of the app image:
+# the uploaded files are BVF1 files mode 600 owned by the app user
 # (uid 1001), and the app's .pre-encryption-* folders are mode 700, so on
 # Linux the host user cannot read them. scripts/uploads-snapshot.sh starts as
 # root in the container only to create backups/uploads-<TS>.partial for uid
@@ -146,8 +161,9 @@ rm -f "$UPLOADS_MARKER_FILE"
 # mounted from this checkout, not taken from the image, so an older image
 # still runs the current copy rules. Only root reads the mounted file (it
 # passes the text on to the 1001 stage), so a checkout made under umask 027
-# or 077, where the file is 0640/0600 and owned by the host user, still works. The snapshot belongs to uid 1001: delete
-# it with sudo. It skips .pre-encryption-* folders and *.tmp / *.rot files,
+# or 077, where the file is 0640/0600 and owned by the host user, still works. The snapshot belongs to uid 1001: on
+# Linux the host user needs sudo to delete it (elsewhere Docker Desktop and
+# OrbStack show it as the host user's own). It skips .pre-encryption-* folders and *.tmp / *.rot files,
 # and never follows a symbolic link. Exit 3 from it means "nothing to copy".
 UPLOADS_SRC="$DATA_DIR/uploads"
 if [ ! -d "$UPLOADS_SRC" ]; then
@@ -173,7 +189,12 @@ case "$rc" in
     (umask 077 && : > "$UPLOADS_MARKER_FILE" && chmod 600 "$UPLOADS_MARKER_FILE" && printf '%s' "$UPLOADS_OUT" > "$UPLOADS_MARKER_FILE") ||
       echo "WARNING: could not write $UPLOADS_MARKER_FILE; the app may take its own snapshot of the uploads folder on its next start."
     echo ""
-    echo "Uploads snapshot saved: $UPLOADS_OUT (owned by the app user, uid 1001; delete it with sudo)"
+    if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
+      DELETE_ADVICE="delete it with sudo"
+    else
+      DELETE_ADVICE="delete it once BlackVault is confirmed working"
+    fi
+    echo "Uploads snapshot saved: $UPLOADS_OUT (owned by the app user, uid 1001; $DELETE_ADVICE)"
     ;;
   3)
     echo "No files in $UPLOADS_SRC to snapshot; skipping the uploads snapshot."

@@ -13,7 +13,7 @@ import { isValidTimeZone, normalizeInstant } from "../date-migration";
 import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
 import { clearCompactionPending, compactDatabase, compactionPending } from "./compaction.mjs";
 import { resolveProvider, type DbProvider } from "../db/provider";
-import { runFileStartup } from "../files/startup";
+import { assertNoUnfinishedRestore, runFileStartup } from "../files/startup";
 
 /**
  * Startup steps for field encryption at rest
@@ -21,14 +21,16 @@ import { runFileStartup } from "../files/startup";
  * sequence"), run by src/instrumentation.ts before the app serves:
  *
  * 1. assertEncryptionKey: load the key and verify it (read-only).
+ *    Then assertNoUnfinishedRestore (../files/startup.ts, read-only): refuse
+ *    while a full restore's marker says the install may be half restored.
  * 2. runEncryptionMigration: encrypt every pre-encryption value, once, in one
  *    transaction.
  * 3. compactIfPending: after a committed migration (or key rotation), erase
- *    the old values left in the database's free space (final review F1).
+ *    the old values left in the database's free space.
  *    Best-effort: a failure is a warning, retried on the next start.
  *
- * Both take a RAW client (createRawPrismaClient in src/lib/prisma.ts, ruling
- * R1): they read and write the stored form itself, which the app client's
+ * Both take a RAW client (createRawPrismaClient in src/lib/prisma.ts):
+ * they read and write the stored form itself, which the app client's
  * extension would refuse (strict reads) or re-encrypt. Every failure throws —
  * the caller refuses to start.
  *
@@ -41,7 +43,7 @@ const SETTINGS_ID = "singleton";
 const LEGACY_PREFIX = "enc:";
 
 /**
- * Where the pre-upgrade snapshots really are (Task 7, hint consistency):
+ * Where the pre-upgrade snapshots really are (one wording for every hint):
  * update.sh / update.bat write backups/blackvault-<ts>.db (SQLite) or .sql
  * (PostgreSQL) next to docker-compose.yml; a first start that encrypts
  * SQLite data writes pre-encryption-<ts>.db next to the database itself
@@ -280,7 +282,7 @@ export async function assertEncryptionKey(raw: RawClient): Promise<void> {
  * `zone`: the rule `runLegacyDateMigration` would have applied, except the
  * date migration skips the encrypted NFA fields (src/lib/date-migration.ts).
  *
- * THE ONE place this rule lives (review I1): both the startup encryption
+ * THE ONE place this rule lives: both the startup encryption
  * migration (`plaintextOf`, below) and the restore route's carry for the
  * same values arriving in an old backup call this function, rather than
  * each keeping its own copy of the midnight check — restore had drifted
@@ -364,7 +366,7 @@ function assertNoDuplicateSerial(rows: Row[], updates: Array<{ row: Row; data: R
     if (first) {
       throw new EncryptionMigrationError(
         `Firearms ${first} and ${row.id} have the same serial number once their legacy encrypted serials are read, ` +
-          // Final review FIX 8: the schema migration has already run (NFA
+          // The schema migration has already run (NFA
           // dates are TEXT now), so the previous version can only open the
           // pre-upgrade snapshot, not this database.
           `and serial numbers must be unique. Refusing to start: restore ${SNAPSHOT_HINT}, run the previous BlackVault ` +
@@ -376,14 +378,14 @@ function assertNoDuplicateSerial(rows: Row[], updates: Array<{ row: Row; data: R
   }
 }
 
-// ─── Audit-log scrub (Task 4b) ───────────────────────────────────
+// ─── Audit-log scrub ─────────────────────────────────────────────
 
 /** Rows per page when scanning AuditEvent — bounds memory; connection_limit=1 bounds itself (one tx, one connection). */
 const AUDIT_SCRUB_PAGE = 500;
 
 /**
- * Scrubs plaintext NFA values out of existing AuditEvent rows (spec 2b
- * predates the NFA fields' redaction, so rows written before this branch may
+ * Scrubs plaintext NFA values out of existing AuditEvent rows (the audit log
+ * predates the NFA fields' redaction, so rows written before field encryption may
  * still hold them in `changes`). Runs inside the SAME transaction as the
  * encryption migration, on the raw client: the app client's audit extension
  * makes AuditEvent append-only (src/lib/audit/extension.ts), and that guard
@@ -452,8 +454,8 @@ const MIGRATION_TX = { maxWait: 10_000, timeout: 600_000 } as const;
  *
  * Idempotent: a second run finds nothing to convert and writes nothing.
  *
- * Afterwards it asserts that every row with a serial has a fingerprint (carry
- * M4: a NULL `serialNumberHash` bypasses the duplicate-serial unique index and
+ * Afterwards it asserts that every row with a serial has a fingerprint
+ * (a NULL `serialNumberHash` bypasses the duplicate-serial unique index and
  * makes the serial unfindable); if not, it throws and the transaction rolls
  * back.
  *
@@ -546,10 +548,10 @@ export async function runEncryptionMigration(raw: RawClient): Promise<MigrationR
       where: { OR: ENCRYPTED_FIELDS.filter((d) => d.kind === "date").map((d) => ({ model: d.model, field: d.field })) },
     })) as { count: number };
 
-    // Task 4b: scrub plaintext NFA values out of existing audit entries.
+    // Scrub plaintext NFA values out of existing audit entries.
     // Unconditional — this must happen even when there is no plaintext
     // inventory left to encrypt (an already-encrypted database can still
-    // hold pre-redaction audit rows from spec 2b).
+    // hold pre-redaction audit rows).
     const scrubbedAuditRows = await scrubAuditEvents(tx);
 
     const changed = Object.values(counts).some((n) => n > 0) || scrubbedAuditRows > 0;
@@ -560,7 +562,7 @@ export async function runEncryptionMigration(raw: RawClient): Promise<MigrationR
         changes: { counts, keyId: keys.id, scrubbedAuditRows },
       });
     }
-    // Final review F1: the old (plaintext) bytes of every row rewritten or
+    // The old (plaintext) bytes of every row rewritten or
     // deleted above are still in the database's free space. Marked here, in
     // the same transaction, so a compaction that fails — or a process killed
     // before it runs — is retried by the next start (compactIfPending).
@@ -584,7 +586,14 @@ export async function runEncryptionStartup(): Promise<MigrationResult> {
   const raw = createRawPrismaClient();
   try {
     await assertEncryptionKey(raw);
-    // Task 7 (carry N4): before the transaction opens, and only when there is
+    // A full restore that did not finish (its marker is still in the uploads
+    // folder) refuses to start HERE: after the key check, which only reads —
+    // so a missing or wrong key is still reported as exactly that — and
+    // before the snapshot, the migration, the compaction and the file step,
+    // so nothing writes to a database or an uploads folder that may be half
+    // restored and is about to be put back from the restore's own snapshot.
+    await assertNoUnfinishedRestore();
+    // The app's own snapshot: before the transaction opens, and only when there is
     // plaintext to encrypt. Throws (refuse to start) if an SQLite snapshot
     // cannot be written.
     await takePreEncryptionSnapshot(raw);
@@ -598,12 +607,12 @@ export async function runEncryptionStartup(): Promise<MigrationResult> {
     }
     // After the commit, before $disconnect, on the same connection.
     await compactIfPending(raw);
-    // Encrypted files at rest (spec 3b §2 "Startup"): after the database
+    // Encrypted files at rest (encrypted-files design §2 "Startup"): after the database
     // migration and compaction, on this same raw client (no second
     // connection under SQLite connection_limit=1), and before this resolves —
     // so before register() lets the app serve, and no request can read a
-    // file while it is rewritten (Review Focus 3). Throws to refuse start.
-    // ORDER IS LOAD-BEARING (final review FIX 8, T5 M1): runFileStartup must
+    // file while it is rewritten. Throws to refuse start.
+    // ORDER IS LOAD-BEARING: runFileStartup must
     // stay AFTER assertEncryptionKey above. It deletes each .rot file that
     // is not under the key it is given (when its original exists); started
     // with the wrong key, those would be a committed rotation's only copies
@@ -617,10 +626,10 @@ export async function runEncryptionStartup(): Promise<MigrationResult> {
 }
 
 /**
- * Final review F1: when AppSettings.encryptionCompactionPending says a
+ * When AppSettings.encryptionCompactionPending says a
  * committed migration or key rotation has not been compacted yet, erases the
  * old values from the database's free space (./compaction.mjs) and clears
- * the marker. NEVER throws (controller ruling): the data is already
+ * the marker. NEVER throws: the data is already
  * encrypted, so a failure is logged loudly, the marker stays, and the next
  * start tries again.
  */

@@ -73,7 +73,7 @@ import { createRawPrismaClient, prisma } from "@/lib/prisma";
 import { createBackupSealer, envelopeKeyId, fileKeyId, isEncryptedFile, SealError } from "@/lib/encryption/core.mjs";
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
 import { readDecryptedFile, writeEncryptedFile } from "@/lib/files/storage";
-import { runFileStartup } from "@/lib/files/startup";
+import { assertNoUnfinishedRestore, runFileStartup } from "@/lib/files/startup";
 import { BACKUP_MODELS } from "./models";
 import { buildManifest } from "./manifest";
 import { collectBackupRecords, buildBackupPayload, backupCounts } from "./records";
@@ -788,6 +788,24 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       expect(existsSync(path.join(rootB, `.restore-${STAMP}`))).toBe(false);
     });
 
+    it("the marker cannot be removed once everything is in place: the restore still succeeds, and its warning says BlackVault will not start until the marker is gone, and who removes it", async () => {
+      const { source } = await scenario();
+      const realRm = fsp.rm.bind(fsp);
+      vi.spyOn(fsp, "rm").mockImplementation((async (p: Parameters<typeof fsp.rm>[0], o?: Parameters<typeof fsp.rm>[1]) => {
+        if (String(p).endsWith(".db-started")) throw Object.assign(new Error("injected: EACCES"), { code: "EACCES" });
+        return realRm(p, o);
+      }) as never);
+      const result = await restore(source.archive);
+      const marker = path.join(rootB, MARKER);
+      expect(result.warnings).toEqual([
+        `The restore finished, but its marker ${marker} could not be removed (EACCES). BlackVault refuses to start while that marker exists. ` +
+          "restore.sh and restore.bat remove it before they start BlackVault; if you ran this program yourself, delete that folder before you start BlackVault.",
+      ]);
+      expect(markerExists()).toBe(true);
+      vi.restoreAllMocks();
+      await expect(assertNoUnfinishedRestore({ env: { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv })).rejects.toThrow(marker);
+    });
+
     it("a leftover marker for the same stamp refuses a new run before anything is staged; an OLDER run's marker is never removed by a later run", async () => {
       const { source, before } = await scenario();
       mkdirSync(path.join(rootB, MARKER));
@@ -799,6 +817,16 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
       await restore(source.archive);
       expect(existsSync(path.join(rootB, ".restore-20250101-000000.db-started"))).toBe(true);
       expect(existsSync(path.join(rootB, ".restore-20250101-000000"))).toBe(false);
+      // The restore program ran, and finished, with the older marker there; its
+      // own marker is gone. The APP still refuses to start until the older one
+      // is cleared, and names that one only.
+      const env = { ...process.env, IMAGE_UPLOAD_DIR: rootB } as NodeJS.ProcessEnv;
+      const refusal = await assertNoUnfinishedRestore({ env }).catch((e) => e);
+      expect(refusal.message).toContain(path.join(rootB, ".restore-20250101-000000.db-started"));
+      expect(refusal.message).toContain("backups/restore-20250101-000000-RECOVERY.txt");
+      expect(refusal.message).not.toContain(STAMP);
+      rmSync(path.join(rootB, ".restore-20250101-000000.db-started"), { recursive: true });
+      await expect(assertNoUnfinishedRestore({ env })).resolves.toBeUndefined();
     });
   });
 

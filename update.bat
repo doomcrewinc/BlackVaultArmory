@@ -70,13 +70,13 @@ echo Database provider: !DB_PROVIDER!
 if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
 
 :: ── Read DATA_DIR from .env ────────────────────────────────────
-set "ACTIVE_DATA_DIR="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="DATA_DIR" set "ACTIVE_DATA_DIR=%%B"
-  )
-)
-if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
+call :env_value DATA_DIR
+set "ACTIVE_DATA_DIR=!_EV!"
+if defined _EV_BAD goto :data_dir_unreadable
+if "!DB_PROVIDER!"=="unreadable" goto :provider_unreadable
+:: A line :env_value refuses stops this run:
+:: nothing pulled, built or moved.
+::
 
 :: ── Preflight: verify the database exists ─────────────────────
 :: The provider is read again here on purpose. cmd.exe re-reads a running
@@ -124,10 +124,10 @@ echo      from: !ACTIVE_DATA_DIR!
 echo      to:   !LEGACY_DATA_DIR!
 copy /Y ".env" ".env.bak" >nul
 if errorlevel 1 goto :env_update_failed
-:: Rewrite only the DATA_DIR= line; every other line is kept as-is.
-:: The new path is passed through the environment, never through quoting.
+:: Rewrite the DATA_DIR line, in any form :env_value reads.
+:: The new path goes through the environment, not quoting.
 set "BV_NEW_DATA_DIR=!LEGACY_DATA_DIR!"
-powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $p = Join-Path (Get-Location) '.env'; $l = [IO.File]::ReadAllLines($p) | ForEach-Object { if ($_ -match '^DATA_DIR=') { 'DATA_DIR=' + $env:BV_NEW_DATA_DIR } else { $_ } }; [IO.File]::WriteAllLines($p, [string[]]$l)"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $p = Join-Path (Get-Location) '.env'; $l = [IO.File]::ReadAllLines($p) | ForEach-Object { if ($_ -match '^\s*(export\s+)?DATA_DIR\s*=') { 'DATA_DIR=' + $env:BV_NEW_DATA_DIR } else { $_ } }; [IO.File]::WriteAllLines($p, [string[]]$l)"
 if errorlevel 1 goto :env_update_failed
 set "BV_NEW_DATA_DIR="
 set "ACTIVE_DATA_DIR=!LEGACY_DATA_DIR!"
@@ -150,8 +150,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-:: The second of the two "byte pad" lines above is a real command (fix round 1,
-:: I4: `call :clear_eol_only_change`, same length as the comment it replaced).
+:: The second of the two "byte pad" lines above is a real command
+:: (`call :clear_eol_only_change`), sized to keep the byte count.
 :: The two-line byte pad above `git pull` is for the e570bd8 update.bat
 :: (what develop shipped before this release). It runs `git pull` as a
 :: top-level line, so once the pull replaces this file cmd.exe resumes here
@@ -178,6 +178,11 @@ echo.
 :: exhausted. Three blank answers in a row abort instead: the same outcome
 :: for a closed stdin, and a clear exit for someone who keeps pressing Enter.
 if not exist ".env" goto :no_env_file
+:: A marker left by a restore: the new image refuses to start while one is in
+:: the uploads folder. Found here, before anything is asked, rebuilt or
+:: stopped, the version that is running keeps running. As update.sh.
+call :restore_markers
+if defined BV_MARKERS goto :restore_marker_left
 call :read_env
 if not defined ENV_PUBLIC_URL goto :upd_public_url_intro
 echo.
@@ -208,8 +213,8 @@ call :set_env_value BLACKVAULT_PUBLIC_URL PUBLIC_URL
 if errorlevel 1 goto :env_write_failed
 
 :upd_direct_access
-findstr /b /c:"BLACKVAULT_DIRECT_ACCESS_INITIAL=" ".env" >nul 2>&1
-if not errorlevel 1 goto :upd_trusted_proxies
+call :env_value BLACKVAULT_DIRECT_ACCESS_INITIAL
+if defined _EV_SET goto :upd_trusted_proxies
 echo.
 echo This release can refuse connections that bypass your reverse proxy.
 set "YN_Q=Keep allowing direct access by IP (http://<ip>:<port>)?"
@@ -220,8 +225,8 @@ call :set_env_value BLACKVAULT_DIRECT_ACCESS_INITIAL DA_VALUE
 if errorlevel 1 goto :env_write_failed
 
 :upd_trusted_proxies
-findstr /b /c:"BLACKVAULT_TRUSTED_PROXIES=" ".env" >nul 2>&1
-if not errorlevel 1 goto :public_settings_done
+call :env_value BLACKVAULT_TRUSTED_PROXIES
+if defined _EV_SET goto :public_settings_done
 call :prompt_trusted_proxies
 call :set_env_value BLACKVAULT_TRUSTED_PROXIES TRUSTED_PROXIES
 if errorlevel 1 goto :env_write_failed
@@ -258,12 +263,12 @@ echo Snapshotting the database...
 call scripts\db-snapshot.bat
 if errorlevel 1 goto :snapshot_failed
 
-:: Task 4: scripts\db-snapshot.bat also snapshotted the uploads folder
+:: scripts\db-snapshot.bat also snapshotted the uploads folder
 :: (unless it was empty or missing) and left its path in
 :: backups\.uploads-snapshot-marker. Read it once, then remove it - never
 :: write it to .env - and pass it to the ONE `up` below, so the app's own
 :: startup step does not take a second snapshot of the same files.
-:: Final review FIX 5: never let a value inherited from the caller reach `up`.
+:: Never let a value inherited from the caller reach `up`.
 set "BLACKVAULT_UPLOADS_SNAPSHOT="
 set "UPLOADS_SNAPSHOT_MARKER="
 if exist "backups\.uploads-snapshot-marker" (
@@ -288,25 +293,38 @@ echo Waiting for health check...
 :: every 30s, so right after `up -d` the status is "health: starting". The
 :: app logs the first-time setup token while it starts, so once it is
 :: healthy :show_setup_token below finds the token in the log.
-:: Pipes run each side in a new cmd without delayed expansion: use %VAR% here.
-set "STATUS=started, check logs if the app doesn't load"
+:: Only the status word "healthy" ends the wait: "unhealthy" and "starting"
+:: keep polling, and the last status seen decides what is reported.
 set "_HW=0"
+set "_HF=0"
 :upd_health_wait
-%COMPOSE% ps --format "{{.Status}}" blackvault 2>nul | findstr /i "healthy" >nul
-if not errorlevel 1 goto :upd_health_ok
+call :health_status
+if "!HEALTH!"=="healthy" goto :upd_health_done
+:: Seen restarting, exited or missing three times: the app refuses to start
+:: by exiting, and Docker starts it over and over. That is a failed start,
+:: not a slow one, and the wait ends.
+if "!HEALTH!"=="restarting" set /a _HF+=1
+if "!HEALTH!"=="exited" set /a _HF+=1
+if "!HEALTH!"=="missing" set /a _HF+=1
+if !_HF! GEQ 3 goto :upd_health_done
 set /a _HW+=1
 if !_HW! GEQ 60 goto :upd_health_done
 timeout /t 2 /nobreak >nul
 goto :upd_health_wait
-:upd_health_ok
-set "STATUS=running"
 :upd_health_done
+set "STATUS=did not become healthy within two minutes, check the logs"
+if "!HEALTH!"=="unhealthy" set "STATUS=UNHEALTHY - the container's health check is failing, check the logs"
+if "!HEALTH!"=="restarting" set "STATUS=NOT RUNNING - the container keeps restarting: the app stops during startup, and says why in its log: docker compose logs blackvault"
+if "!HEALTH!"=="exited" set "STATUS=NOT RUNNING - the container has exited: the app stopped during startup, and says why in its log: docker compose logs blackvault"
+if "!HEALTH!"=="missing" set "STATUS=NOT RUNNING - no running BlackVault container was found: docker compose logs blackvault"
+if "!HEALTH!"=="healthy" set "STATUS=running"
 
 :: ── Summary ───────────────────────────────────────────────────
 call :read_env
 echo.
 echo ╔══════════════════════════════════════╗
-echo ║   Update complete.                   ║
+if "!HEALTH!"=="healthy" echo ║   Update complete.                   ║
+if not "!HEALTH!"=="healthy" echo ║   Update applied - app NOT healthy.  ║
 echo ╚══════════════════════════════════════╝
 echo.
 echo   Status:   !STATUS!
@@ -318,7 +336,43 @@ echo.
 :: ── First-time setup token (only while no admin account exists) ──
 call :show_setup_token ENV_PUBLIC_URL
 pause
+:: A container that is unhealthy, keeps restarting, has exited or is not there
+:: is a failed start for whoever started this script. One that is still
+:: starting when the wait ran out is not: a slow first start can still come up.
+if "!HEALTH!"=="unhealthy" exit /b 1
+if "!HEALTH!"=="restarting" exit /b 1
+if "!HEALTH!"=="exited" exit /b 1
+if "!HEALTH!"=="missing" exit /b 1
 exit /b 0
+
+:restore_marker_left
+echo ERROR: the uploads folder holds a marker left by a restore: !BV_MARKERS!.
+echo        This version of BlackVault refuses to start while a marker exists: the
+echo        restore that left it may not have finished. If backups\ holds a
+echo        restore-[time]-RECOVERY.txt file, follow it. If BlackVault is running
+echo        and its records, photos and documents are what you expect, remove
+echo        every marker with:
+echo          !BV_MARKER_CMDS!
+echo        Then run update.bat again. Nothing was rebuilt or restarted.
+pause
+exit /b 1
+
+:provider_unreadable
+echo ERROR: .env holds a BLACKVAULT_DB_PROVIDER line this script does not read:
+echo        see the Note above. Correct it and run update.bat again.
+echo        Nothing was rebuilt or restarted.
+pause
+exit /b 1
+
+:: :env_value refused the DATA_DIR line (its Note is already on the screen).
+:: The folder Docker will use is not known, so nothing can be checked or
+:: snapshotted and no other folder is put in its place: stop before the pull.
+:data_dir_unreadable
+echo ERROR: .env holds a DATA_DIR line this script does not read: see the Note
+echo        above. Correct it and run update.bat again.
+echo        Nothing was rebuilt or restarted.
+pause
+exit /b 1
 
 :no_env_file
 echo ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not
@@ -415,18 +469,204 @@ if !_CMAJ! GTR 2 set "COMPOSE=docker compose"
 if !_CMAJ! EQU 2 if !_CMIN! GEQ 20 set "COMPOSE=docker compose"
 goto :eof
 
+:: :restore_markers - looks in the uploads folder of the DATA_DIR in .env for
+:: markers left by a restore: anything named .restore-[stamp].db-started with
+:: a stamp that is not empty, a folder (what the restore program creates) or a
+:: file. The rule of restore.bat, scripts\snapshot-restore.sh and the app's
+:: own start. Sets BV_MARKERS to their paths (left undefined when there is
+:: none) and BV_MARKER_CMDS to ONE command line that removes them all. A
+:: DATA_DIR line :env_value refuses gives no marker here (the snapshot step
+:: refuses that line), and neither does an uploads folder that is not there.
+:: update.bat and rotate-key.bat carry the same copy: change them together.
+:restore_markers
+set "BV_MARKERS="
+set "BV_MARKER_CMDS="
+call :env_value DATA_DIR
+if defined _EV_BAD goto :eof
+set "BV_UP=!_EV!"
+if not defined BV_UP set "BV_UP=.\data"
+:: .env may spell the folder with forward slashes; `if exist` and `for` need backslashes.
+set "BV_UP=!BV_UP:/=\!\uploads"
+if not exist "!BV_UP!\" goto :eof
+for /d %%M in ("!BV_UP!\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)
+for %%M in ("!BV_UP!\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :restore_marker_add)
+goto :eof
+
+:: :restore_marker_add - adds the marker named in BV_ONE to BV_MARKERS and its
+:: clear-marker command to BV_MARKER_CMDS, joined with ^&^& so that the whole
+:: is one command line. The stamp is quoted: a hand-made name may hold a space.
+:restore_marker_add
+:: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
+set "BV_ONE=!BV_ONE:~9,-11!"
+if not defined BV_ONE goto :eof
+if defined BV_MARKERS set "BV_MARKERS=!BV_MARKERS!, "
+set "BV_MARKERS=!BV_MARKERS!!BV_UP!\.restore-!BV_ONE!.db-started"
+if defined BV_MARKER_CMDS set "BV_MARKER_CMDS=!BV_MARKER_CMDS! && "
+set "BV_MARKER_CMDS=!BV_MARKER_CMDS!docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads "!BV_ONE!""
+goto :eof
+
+:: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
+:: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
+:: change them together. _EV is undefined when KEY is unset or empty, or there
+:: is no .env; _EV_SET is 1 when .env assigns KEY at all, even to nothing.
+:: Forms read:
+::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
+::   KEY="value"    KEY='value'           one pair of quotes removed
+::   KEY=value # comment                  cut at the first space before a #
+:: with leading whitespace and CRLF allowed, lines starting with # ignored,
+:: and the LAST assignment winning. A Windows path is best written unquoted.
+:: A line whose value Compose would change or reject, or that batch cannot
+:: split, is REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how
+:: to write the line. The caller must not go on as if the key were unset.
+:: Refused:
+::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+::   in double quotes, a \ before a b f n r t v 0 or another \ (Compose
+::   unescapes those: "C:\new" holds a newline) or before the closing quote;
+::   any other \ there is text, so "C:\BlackVault\Data" is read;
+::   in single quotes, an apostrophe inside the value or a \ before the
+::   closing quote; KEY: value when no KEY= line follows it; a quoted value
+::   followed by a comment or other text; a double quote anywhere except as
+::   the one pair around the whole value; a value that starts with =.
+::   a ! anywhere on a line assigning KEY, a comment on it included:
+::   delayed expansion would drop it from the value without a trace;
+::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
+::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
+:: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
+:: nothing); Compose takes the value from the environment for such a line.
+:: The backslash rules were probed against one version of Compose (compose-go
+:: v2.16.1); an older Docker Compose was not run.
+:env_value
+set "_EV="
+set "_EV_SET="
+set "_EV_BAD="
+set "_EV_CUT="
+if not exist ".env" goto :eof
+:: A .env saved with a byte order mark, whose FIRST line sets the key (KEY=,
+:: KEY:, with or without export), refuses the key. The mark is one or three
+:: characters to this script, depending on the code page, and `if` treats it
+:: as no character at all on a UTF-8 code page, so nothing below can be
+:: relied on to see the key behind it, or to miss it. Found here by what is
+:: NOT at the start of line 1: a letter, a digit, _, # or white space.
+findstr /n /r /c:"^[^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" ".env" 2>nul | findstr /b /c:"1:" >nul 2>&1
+if not errorlevel 1 goto :env_value_bom
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
+  if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+)
+:: for /f took every = after the key as one separator, so a value that
+:: starts with = has lost it: such a line, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
+if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A ! on a line assigning the key, anywhere in the file, refuses the key.
+:: The pattern holds a ! of its own, so it is searched for with delayed
+:: expansion off.
+setlocal DisableDelayedExpansion
+findstr /r /c:"^[ 	]*%~1[ 	]*=.*!" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=.*!" ".env" >nul 2>&1
+if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)
+endlocal
+:: A KEY: value line never reached the loop above as KEY. Compose uses the
+:: LAST assignment of a key, so such a line refuses the key only when no
+:: KEY= line comes after it (line numbers from findstr /n).
+set "_EVY=0"
+set "_EVA=0"
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" 2^>nul`) do set "_EVY=%%N"
+if "!_EVY!"=="0" goto :env_value_trim
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*=" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=" ".env" 2^>nul`) do set "_EVA=%%N"
+if !_EVY! GTR !_EVA! set "_EV_SET=1" & goto :env_value_bad
+:env_value_trim
+if not defined _EV goto :env_value_done
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if defined _EV_CUT goto :env_value_dollar
+set "_EVQ=!_EV:"=!"
+if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
+if "!_EV:~0,1!"=="'" goto :env_value_squote
+:: Unquoted: cut at the first space that is followed by #. A tab before the
+:: # does not start a comment, and neither does a # that opens the value.
+set "_EV_CUT=1"
+if "!_EV:#=!"=="!_EV!" goto :env_value_dollar
+set "_EVI=1"
+:env_value_scan
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_dollar
+if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+set /a _EVI+=1
+goto :env_value_scan
+:env_value_dollar
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
+:env_value_dquote
+:: Without its double quotes the value must equal the value without its
+:: first and last characters: exactly one pair, around the whole value.
+if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
+set "_EV=!_EVQ!"
+if not defined _EV goto :env_value_done
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+if "!_EV:\=!"=="!_EV!" goto :env_value_done
+:: Each \ and the character after it. IF compares with case, as Compose
+:: does: \r is a carriage return to Compose, \R is two characters.
+set "_EVI=0"
+:env_value_escape
+set "_EVC=!_EV:~%_EVI%,2!"
+if not defined _EVC goto :env_value_done
+set /a _EVI+=1
+if not "!_EVC:~0,1!"=="\" goto :env_value_escape
+if "!_EVC!"=="\" goto :env_value_bad
+if "!_EVC!"=="\\" goto :env_value_bad
+for %%E in (a b f n r t v 0) do if "!_EVC!"=="\%%E" goto :env_value_bad
+goto :env_value_escape
+:env_value_squote
+if "!_EV:~1,1!"=="" goto :env_value_bad
+if not "!_EV:~-1!"=="'" goto :env_value_bad
+set "_EV=!_EV:~1,-1!"
+if not defined _EV goto :env_value_done
+if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
+if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
+goto :env_value_done
+:env_value_bad
+set "_EV="
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       Docker Compose would change its value, or reject the line. Rewrite
+echo       that line, or delete it, as %~1=value with the final value spelled
+echo       out and no $ in it: best for a Windows path. In single quotes the
+echo       value must hold no apostrophe and not end in a backslash. In double
+echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
+echo       another backslash or the closing quote. Nothing may follow a
+echo       closing quote, and a %~1: value line must become %~1=value. The
+echo       line must hold no exclamation mark, and a folder must not start
+echo       with ~: write the full path.
+:env_value_done
+set "_EVK=%~1"
+if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad
+set "_EVK="
+set "_EVQ="
+set "_EVC="
+goto :eof
+
 :: Mirrors provider_from_env in scripts/compose-provider.sh. Sets DB_PROVIDER
 :: (a variable of this script only) from the last BLACKVAULT_DB_PROVIDER= line
 :: in .env, ignoring case, whitespace and quotes. Installs made before
 :: PostgreSQL support have no such line (or no .env at all) and were always
 :: SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml ignores it.
+:: A line :env_value refuses gives DB_PROVIDER=unreadable, never sqlite.
 :provider_from_env
-set "_PV="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
-  )
-)
+call :env_value BLACKVAULT_DB_PROVIDER
+set "DB_PROVIDER=unreadable"
+if defined _EV_BAD goto :eof
+set "_PV=!_EV!"
 if defined _PV set "_PV=!_PV: =!"
 if defined _PV set "_PV=!_PV:	=!"
 if defined _PV set "_PV=!_PV:"=!"
@@ -441,18 +681,21 @@ goto :eof
 
 :: Mirrors check_postgres_env in scripts/compose-provider.sh. Warns when .env
 :: says BLACKVAULT_DB_PROVIDER=postgres but lacks a key the single compose file needs to
-:: run PostgreSQL. Only warns; never stops the script.
+:: run PostgreSQL. Only warns; never stops the script. A key whose line
+:: :env_value refuses is there, so it is not called missing (its Note says so),
+:: and nothing is said at all when the provider line itself was refused.
 :check_postgres_env
-set "_CP="
-set "_PW="
-set "_DU="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="COMPOSE_PROFILES" set "_CP=%%B"
-    if "%%A"=="BLACKVAULT_POSTGRES_PASSWORD" set "_PW=%%B"
-    if "%%A"=="BLACKVAULT_DATABASE_URL" set "_DU=%%B"
-  )
-)
+if "!DB_PROVIDER!"=="unreadable" goto :eof
+call :env_value COMPOSE_PROFILES
+set "_CP=!_EV!"
+if defined _EV_BAD set "_CP=postgres"
+call :env_value BLACKVAULT_POSTGRES_PASSWORD
+set "_PW=!_EV!"
+if defined _EV_BAD set "_PW=unreadable"
+call :env_value BLACKVAULT_DATABASE_URL
+set "_DU=!_EV!"
+if defined _EV_BAD set "_DU=postgres://unreadable"
+set "_EV="
 if defined _CP set "_CP=!_CP: =!"
 if defined _CP set "_CP=!_CP:"=!"
 if defined _DU set "_DU=!_DU:"=!"
@@ -486,6 +729,35 @@ for %%I in ("%~1") do set "_ATTR=%%~aI"
 if defined _ATTR if /i "!_ATTR:~0,1!"=="d" set "IS_DIR=1"
 goto :eof
 
+:: :health_status - sets HEALTH from the Status column of `docker compose ps`:
+::   healthy     "Up 2 minutes (healthy)"
+::   unhealthy   "Up 2 minutes (unhealthy)"
+::   restarting  "Restarting (1) 4 seconds ago": the app stopped and Docker is
+::               starting it again
+::   exited      "Exited (1) 4 seconds ago"
+::   missing     the query worked and nothing is listed: no running container
+:: and leaves it undefined for anything else: still starting, no health
+:: reported, or the query itself failed. A failed query says nothing about
+:: the container and is never taken for "missing": Docker Compose 2.20, the
+:: oldest version supported, does not accept the --format template (2.21
+:: does). The line BV-PS-OK is printed only when the query worked.
+:: The parentheses are part of the match, so "(unhealthy)" is
+:: never taken for "(healthy)". Mirrors container_health in
+:: scripts/compose-provider.sh: change them together.
+:health_status
+set "HEALTH="
+set "_HS="
+set "_HQ="
+for /f "usebackq delims=" %%S in (`%COMPOSE% ps --format "{{.Status}}" blackvault 2^>nul ^&^& echo BV-PS-OK`) do if "%%S"=="BV-PS-OK" (set "_HQ=1") else set "_HS=%%S"
+if not defined _HQ goto :eof
+if not defined _HS set "HEALTH=missing"
+if not defined _HS goto :eof
+if not "!_HS:(healthy)=!"=="!_HS!" set "HEALTH=healthy"
+if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"
+if "!_HS:~0,10!"=="Restarting" set "HEALTH=restarting"
+if "!_HS:~0,6!"=="Exited" set "HEALTH=exited"
+goto :eof
+
 :: :valid_public_url VAR - errorlevel 0 when the value of VAR is
 :: http(s)://host[:port][/], else 1. Mirrors valid_public_url in
 :: scripts/public-url-prompts.sh (^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$,
@@ -515,6 +787,10 @@ if "!VPU_PORT!"=="!VPU_REST!" exit /b 0
 :: After the first colon: 1-5 digits and nothing else (a second colon fails).
 if not defined VPU_PORT exit /b 1
 if not "!VPU_PORT:~5!"=="" exit /b 1
+:: for /f skips a value whose first character is its eol character, ";" here,
+:: and such a value would pass the digit check unexamined: a ";" anywhere in
+:: the port is refused first.
+if not "!VPU_PORT:;=!"=="!VPU_PORT!" exit /b 1
 for /f "delims=0123456789" %%X in ("!VPU_PORT!") do exit /b 1
 exit /b 0
 
@@ -550,15 +826,11 @@ if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES: =!"
 if defined TRUSTED_PROXIES set "TRUSTED_PROXIES=!TRUSTED_PROXIES:	=!"
 goto :eof
 
-:: Sets ENV_PUBLIC_URL from .env (last BLACKVAULT_PUBLIC_URL= line wins),
-:: without spaces, tabs or quotes. Mirrors env_value in
-:: scripts/compose-provider.sh closely enough for a URL, which holds none.
+:: Sets ENV_PUBLIC_URL from .env, as :env_value reads it, then without any
+:: space, tab or quote left inside it (a URL holds none).
 :read_env
-set "ENV_PUBLIC_URL="
-if not exist ".env" goto :eof
-for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-  if "%%A"=="BLACKVAULT_PUBLIC_URL" set "ENV_PUBLIC_URL=%%B"
-)
+call :env_value BLACKVAULT_PUBLIC_URL
+set "ENV_PUBLIC_URL=!_EV!"
 if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL: =!"
 if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL:	=!"
 if defined ENV_PUBLIC_URL set "ENV_PUBLIC_URL=!ENV_PUBLIC_URL:"=!"
@@ -598,18 +870,24 @@ exit /b 0
 :: container log in a boxed block, with the public URL held in VAR; prints
 :: nothing when the log has no token line (an admin already exists). Mirrors
 :: show_setup_token in scripts/setup-token.sh: change them together. The app
-:: prints a new token at every start while no admin exists, so the LAST
-:: matching line wins. Only the XXXX-XXXX-XXXX-XXXX code is taken from it; the
+:: prints a new token at every start while no admin exists, and one
+:: "[auth] First admin created" line when that admin is created; the LAST
+:: line of either kind decides, so a token that was already used (the log
+:: outlives an update that changes nothing) is not shown again.
+:: Only the XXXX-XXXX-XXXX-XXXX code is taken from the line; the
 :: text around it is ASCII, because the log line's em dash garbles in the
 :: console code page. Takes a variable NAME, like :valid_public_url.
 :show_setup_token
 set "_ST_URL=!%~1!"
 set "_ST_LINE="
 set "_ST_CODE="
-for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:"`) do set "_ST_LINE=%%L"
+for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:" /c:"[auth] First admin created"`) do set "_ST_LINE=%%L"
 if not defined _ST_LINE goto :eof
-:: Everything after "Setup token", then the first word after ": ".
+:: Everything after "Setup token", then the first word after ": ". The
+:: admin-created line holds no "setup token" in any letter case (the search
+:: of !VAR:*text=! ignores case), so it comes back whole and ends here.
 set "_ST_REST=!_ST_LINE:*Setup token=!"
+if "!_ST_REST!"=="!_ST_LINE!" goto :eof
 for /f "tokens=1 delims=: " %%T in ("!_ST_REST!") do set "_ST_CODE=%%T"
 if not defined _ST_CODE goto :eof
 :: Exactly XXXX-XXXX-XXXX-XXXX: 19 characters, dashes at 5, 10 and 15, and
@@ -639,9 +917,14 @@ goto :eof
 :: key material is written (as rotate-key.bat does); a failed icacls aborts.
 :: errorlevel 0 when the key file exists afterwards, 1 with a message when it
 :: could not be created. Never echoes the key.
-:: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
+:: When the key is held in BLACKVAULT_ENCRYPTION_KEY (a
 :: non-empty line in .env, or set in this console) no key file is created -
 :: a second, different key would make the app refuse to start (KEY_CONFLICT).
+:: The .env line is read by :env_value; a line it cannot read, or a value
+:: that is not 64 hex characters (the app would refuse it), stops here with
+:: errorlevel 1 instead of being taken for "no key" or for a usable one.
+:: Spaces and tabs around the value (inside quotes) are dropped first, as the
+:: app trims it; a value of nothing else is no key.
 :ensure_encryption_key
 set "_EK=secrets\blackvault_encryption_key"
 if exist "!_EK!" (
@@ -653,9 +936,24 @@ if defined BLACKVAULT_ENCRYPTION_KEY (
   if not exist "secrets\" mkdir "secrets" 2>nul
   exit /b 0
 )
-if not exist ".env" goto :ensure_key_no_env_key
-findstr /r /c:"^BLACKVAULT_ENCRYPTION_KEY=." ".env" >nul 2>&1
-if errorlevel 1 goto :ensure_key_no_env_key
+call :env_value BLACKVAULT_ENCRYPTION_KEY
+set "_EK_ENV="
+:ensure_key_trim
+if not defined _EV goto :ensure_key_trimmed
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :ensure_key_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :ensure_key_trim
+if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :ensure_key_trim
+if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :ensure_key_trim
+:ensure_key_trimmed
+if defined _EV set "_EK_ENV=1"
+if defined _EV if "!_EV:~63,1!"=="" set "_EK_ENV=malformed"
+if defined _EV if not "!_EV:~64!"=="" set "_EK_ENV=malformed"
+if defined _EV if not "!_EV:;=!"=="!_EV!" set "_EK_ENV=malformed"
+if defined _EV for /f "delims=0123456789abcdefABCDEF" %%X in ("!_EV!") do set "_EK_ENV=malformed"
+set "_EV="
+if defined _EV_BAD goto :ensure_key_unreadable
+if "!_EK_ENV!"=="malformed" goto :ensure_key_malformed
+if not defined _EK_ENV goto :ensure_key_no_env_key
 echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
 :: docker-compose.yml mounts secrets\ with create_host_path: false.
 if not exist "secrets\" mkdir "secrets" 2>nul
@@ -692,6 +990,16 @@ echo   drive^). Anyone with this file AND your database can read those records.
 echo ==========================================================================
 echo.
 exit /b 0
+:ensure_key_unreadable
+echo ERROR: the BLACKVAULT_ENCRYPTION_KEY line in .env could not be read, so this script
+echo        cannot tell whether an encryption key is already set. No key file was
+echo        created: a second, different key would stop the app from starting.
+exit /b 1
+:ensure_key_malformed
+echo ERROR: BLACKVAULT_ENCRYPTION_KEY in .env is not 64 hex characters, so the app would
+echo        refuse to start. Correct the line, or remove it to have a key file
+echo        created. No key file was created.
+exit /b 1
 :ensure_key_acl_failed
 echo ERROR: could not restrict the key file to your user account with icacls.
 echo        Refusing to write key material to an unhardened file.
@@ -702,7 +1010,7 @@ echo ERROR: could not create the encryption key file secrets\blackvault_encrypti
 exit /b 1
 
 :: :clear_eol_only_change - mirrors clear_bat_eol_only_changes in update.sh
-:: (change them together). Runs right before `git pull` (fix rounds 1-2, I4).
+:: (change them together). Runs right before `git pull`.
 :: Releases before this one stored install.bat and update.bat with CRLF in
 :: the index while .gitattributes says `text eol=crlf`, so Git reports both
 :: as modified on every checkout and a pull that changes them aborts with

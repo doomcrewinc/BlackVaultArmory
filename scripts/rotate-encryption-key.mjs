@@ -15,7 +15,7 @@
 //   - replaces AppSettings.encryptionKeyCheck and sets
 //     AppSettings.encryptionCompactionPending;
 //   - writes one KEY_ROTATED audit event.
-// After the commit it compacts the database (final review F1: VACUUM on
+// After the commit it compacts the database (VACUUM on
 // SQLite, VACUUM FULL + ANALYZE on PostgreSQL, src/lib/encryption/compaction.mjs)
 // so the OLD-key ciphertext does not linger in free space, then clears the
 // marker. Best-effort: a failure is a warning (exit stays 0) and the app's
@@ -24,7 +24,7 @@
 // file changes. The script itself never touches the key files on disk —
 // that is rotate-key.sh/.bat's job (step 6 of the spec's rotation list).
 //
-// Uploaded files (spec 3b, docs/superpowers/specs/2026-10-01-encrypted-files-design.md
+// Uploaded files (docs/superpowers/specs/2026-10-01-encrypted-files-design.md
 // §3 "Rotation"). Every BVF1 file under the uploads root that is under the OLD
 // key is re-encrypted under the NEW key around that one transaction:
 //   1. Stage (before the transaction): each such file is decrypted and
@@ -37,7 +37,7 @@
 //   2. The database transaction, unchanged.
 //   3. Finalise (only after the commit): each `.rot` is renamed over its
 //      original, then each directory is fsynced. A failure here is a warning
-//      (exit stays 0, the C1 rule): src/lib/files/startup.ts renames any `.rot`
+//      (exit stays 0: the rotation has committed): src/lib/files/startup.ts renames any `.rot`
 //      under the current key into place on the app's next start.
 //   If the run fails BEFORE the commit, every `.rot` this run staged is
 //   deleted (its original is untouched, so it is never the only copy). A crash
@@ -49,23 +49,23 @@
 //
 // Usage: node scripts/rotate-encryption-key.mjs --old-key-file <path> --new-key-file <path>
 //   exit 0  success — one line naming the old/new key ids (never the keys) and row counts.
-//           Exits 0 IFF the transaction committed (fix round 1, C1): a failure AFTER that
+//           Exits 0 IFF the transaction committed: a failure AFTER that
 //           point (closing the DB connection, a broken stdout pipe) is printed as a
 //           warning, never turns a committed rotation into a non-zero exit — the wrapper's
 //           --probe mode, not this exit code, is what tells a caller "did it commit?" when
 //           something fails around the edges of a run.
 //   exit 1  a failure BEFORE commit — one line on stderr; nothing changed
 //   exit 2  usage error
-//   exit 3  refused UP FRONT, before any transaction opened (final review F5): the
+//   exit 3  refused UP FRONT, before any transaction opened: the
 //           database has no key check, or --old-key-file does not open it (it is not
-//           this database's key), or (spec 3b) an uploaded file is under neither key,
+//           this database's key), or an uploaded file is under neither key,
 //           has a damaged header, sits behind a symlinked folder, or a leftover .rot is
 //           under the old key. Nothing changed and nothing could have; the wrappers
 //           skip the probe and print the reason this script gave.
 //
 // Probe mode: node scripts/rotate-encryption-key.mjs --probe --old-key-file <path> --new-key-file <path>
 //   Read-only. Prints one of OLD, NEW or NEITHER (which key currently opens
-//   AppSettings.encryptionKeyCheck) as its FIRST line and exits 0. Spec 3b adds a
+//   AppSettings.encryptionKeyCheck) as its FIRST line and exits 0. It prints a
 //   SECOND line, `FILES old=<n> new=<n> rot=<n>`: uploaded files under the old key,
 //   under the new key, and staged `.rot` files. The first line is unchanged, and the
 //   wrappers read only the first line as the answer. If the files cannot be counted
@@ -87,7 +87,7 @@
 //   - the audit-event row shape: src/lib/audit/record.ts's writeAuditEvent
 //   - Prisma client selection: src/lib/prisma.ts (loadPrismaClient) via
 //     createRequire, same as scripts/admin-reset-link.mjs
-//   - spec 3b: the uploads root (uploadsRoot) and the atomic write
+//   - the uploads root (uploadsRoot) and the atomic write
 //     (writeAtomic) from src/lib/files/storage.ts — the root has an equality
 //     test in scripts/rotate-encryption-key.test.ts — and the folder walk
 //     plus `.rot` naming from src/lib/files/startup.ts, so this script and
@@ -189,7 +189,7 @@ function readKeyFile(label, filePath) {
 
 class RotationError extends Error {}
 
-/** A refusal raised before the rotation transaction opens: exit 3 (final review F5). */
+/** A refusal raised before the rotation transaction opens: exit 3. */
 class RotationRefusedError extends RotationError {}
 
 // Mirrors resolveProvider in src/lib/db/provider.ts exactly.
@@ -207,7 +207,7 @@ function loadPrismaClient() {
   return require("@prisma/client").PrismaClient;
 }
 
-/** A row this script could not rotate — names the model, id and field, so an admin can find it (fix round 1, M4). */
+/** A row this script could not rotate — names the model, id and field, so an admin can find it. */
 class RotationFieldError extends Error {
   constructor(model, id, field, cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);
@@ -226,7 +226,7 @@ class RotationFieldError extends Error {
  * wrapped as RotationFieldError (naming the row) and left to propagate, so
  * the whole transaction rolls back: a row rotation cannot partially succeed.
  *
- * `updatedAt` is written back unchanged (fix round 1, I4) — rotating a row's
+ * `updatedAt` is written back unchanged — rotating a row's
  * encryption is not an edit, the same rule src/lib/encryption/startup.ts's
  * encryption migration follows for the same reason ("recently updated"
  * lists must not all jump to the rotation time).
@@ -279,9 +279,9 @@ async function rotateModel(tx, model, delegate, fields, oldKeys, newKeys) {
 }
 
 /**
- * Final review F1: erases the OLD-key ciphertext the rotation left in the
+ * Erases the OLD-key ciphertext the rotation left in the
  * database's free space, then clears AppSettings.encryptionCompactionPending.
- * Runs only after the commit, and NEVER fails the run (C1 ruling): any error
+ * Runs only after the commit, and NEVER fails the run (a committed rotation exits 0): any error
  * is a warning, and the still-set marker makes the app's next start retry.
  */
 async function compactAfterRotation(raw) {
@@ -302,7 +302,7 @@ async function compactAfterRotation(raw) {
   }
 }
 
-// ─── Uploaded files (spec 3b) ──────────────────────────────────────
+// ─── Uploaded files ────────────────────────────────────────────────
 // fsp.* is always called through the imported namespace object (never
 // destructured), same rule as src/lib/files/storage.ts, so the test fixtures
 // (scripts/rotate-encryption-key.*.preload.cjs) can patch it.
@@ -347,7 +347,7 @@ async function syncDir(dir) {
  * Mirrors writeAtomic in src/lib/files/storage.ts exactly: `<absPath>.<8 random
  * hex>.tmp` opened "wx" mode 0600, chmod 0600, full write, fsync, rename, dir
  * fsync. The temp is removed on any failure up to the rename, so a full disk
- * leaves no partial file (Review Focus 5). For a `.rot` target the temp is
+ * leaves no partial file. For a `.rot` target the temp is
  * `<name>.rot.<8hex>.tmp`, which startup's sweep (/\.[0-9a-f]{8}\.tmp$/) removes.
  */
 async function writeAtomic(absPath, bytes) {
@@ -537,7 +537,7 @@ async function discardStaged(staged) {
 
 /**
  * After the commit: each `.rot` over its original, then each folder fsynced.
- * Never throws (the C1 rule: a committed rotation exits 0). Anything left is
+ * Never throws (a committed rotation exits 0). Anything left is
  * finished by src/lib/files/startup.ts on the app's next start with the new key.
  */
 async function finaliseStaged(staged) {
@@ -585,8 +585,8 @@ function opensKeyCheck(keys, check) {
 
 /**
  * Read-only: which key currently opens AppSettings.encryptionKeyCheck —
- * "OLD", "NEW" or "NEITHER" — or throws when it cannot tell (fix round 1,
- * C1). Opens and closes its own Prisma client; never writes.
+ * "OLD", "NEW" or "NEITHER" — or throws when it cannot tell.
+ * Opens and closes its own Prisma client; never writes.
  */
 async function runProbe(oldKeys, newKeys) {
   const PrismaClient = loadPrismaClient();
@@ -611,18 +611,18 @@ async function runProbe(oldKeys, newKeys) {
 }
 
 /**
- * Does the rotation. Exits 0 IFF `raw.$transaction` resolves (fix round 1,
- * C1): `committed` is set the instant that happens, and every statement
+ * Does the rotation. Exits 0 IFF `raw.$transaction` resolves:
+ * `committed` is set the instant that happens, and every statement
  * after it — printing the summary, `$disconnect` — is not allowed to flip
  * `process.exitCode` away from its 0 default; a failure there is logged as
- * a warning instead. This is what makes the reviewer's injection (making
- * $disconnect throw right after a real commit) exit 0 instead of 1.
+ * a warning instead. So a `$disconnect` that throws right after a real
+ * commit still exits 0, not 1.
  */
 async function rotate(oldKeys, newKeys) {
   const PrismaClient = loadPrismaClient();
   const raw = new PrismaClient();
   let committed = false;
-  /** `{ abs, rot }` for every `.rot` this run wrote (spec 3b). */
+  /** `{ abs, rot }` for every `.rot` this run wrote. */
   const staged = [];
   try {
     // Refuse before touching anything unless the OLD key opens this
@@ -645,7 +645,7 @@ async function rotate(oldKeys, newKeys) {
       );
     }
 
-    // Spec 3b step 1: classify every uploaded file, refuse up front on one
+    // Files, step 1: classify every uploaded file, refuse up front on one
     // under neither key, then stage the old-key files as `.rot` copies.
     const scan = await scanUploads(uploadsRoot(), oldKeys, newKeys);
     refuseOnFiles(scan, oldKeys, newKeys);
@@ -697,7 +697,7 @@ async function rotate(oldKeys, newKeys) {
     } catch (e) {
       console.error(`Warning: rotation committed, but printing the summary failed: ${describeFailure(e)}`);
     }
-    // Spec 3b step 3: only now are the staged copies put in place.
+    // Files, step 3: only now are the staged copies put in place.
     const finalised = await finaliseStaged(staged);
     if (staged.length) {
       try {
@@ -711,7 +711,7 @@ async function rotate(oldKeys, newKeys) {
     if (committed) {
       console.error(`Warning: rotation committed, but a post-commit step failed: ${describeFailure(e)}`);
     } else {
-      // Spec 3b step 4: the transaction did not commit, so the staged copies must go.
+      // The transaction did not commit, so the staged copies must go.
       await discardStaged(staged);
       console.error(describeFailure(e));
       process.exitCode = e instanceof RotationRefusedError ? 3 : 1;
@@ -758,7 +758,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    // Spec 3b: a second line with the file counts. Counted before anything is
+    // A second line with the file counts. Counted before anything is
     // printed, and any warning goes out only AFTER the answer line, so the
     // answer is always line 1 even when `compose run` merges stderr into a TTY.
     let filesLine = null;

@@ -38,10 +38,10 @@
 #   app running   docker compose exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs ...
 #   app stopped   docker compose run --rm -T blackvault node dist/scripts/full-backup.mjs ...
 # The first form names the group too (1001:1001, the app's own user and
-# group). With `-u 1001` alone Docker takes the group from the image's
-# /etc/passwd, where that user's primary group is nogroup (65533), and the
-# backup file came out 1001:65533 instead of 1001:1001 like every other file
-# the app writes.
+# group), so the backup file is owned 1001:1001 like every other file the app
+# writes whatever the image's /etc/passwd says: with `-u 1001` alone Docker
+# takes the group from there. In the current image that is nodejs (1001); in
+# an image built without that group it is nogroup (65533).
 # The second form deliberately has no `--user` and no `--no-deps`, the same
 # as rotate-key.sh's one-off containers:
 #   * the container must START as root, because the image's entrypoint is
@@ -154,7 +154,7 @@ if [ -z "$PASSFILE" ]; then
   if [ "$MODE" = "verify" ]; then
     ask_passphrase "Backup passphrase: "
   else
-    # Ruling R19: a typo here would seal a backup nobody can open. Ask twice.
+    # A typo here would seal a backup nobody can open. Ask twice.
     ask_passphrase "Backup passphrase: "
     FIRST=$PASSPHRASE
     ask_passphrase "Repeat the passphrase: "

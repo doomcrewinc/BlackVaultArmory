@@ -3,7 +3,7 @@ import { trustsForwardedHeaders } from "./request-gate";
 /**
  * The client's address as the trusted reverse proxy saw it: the LAST
  * X-Forwarded-For value (the one our proxy appended; earlier values are
- * client-controlled — same rule as the login throttle, ruling A8). Without
+ * client-controlled — same rule as the login throttle). Without
  * configured trusted proxies nothing in the headers can be trusted, so null.
  */
 export function getClientIp(request: Request, env: NodeJS.ProcessEnv = process.env): string | null {

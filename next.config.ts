@@ -24,7 +24,7 @@ const nextConfig: NextConfig = {
     // /api/backup/restore silently truncates the body and fails with a
     // misleading "Invalid JSON body" instead of restoring.
     //
-    // Review round 2 (critical): a 256 MB cap is itself a problem, because
+    // A 256 MB cap is itself a problem, because
     // it applies to every route, including unauthenticated ones — 4
     // concurrent 200 MB POSTs to /api/auth/login drove this process's RSS
     // to ~2.6 GB before any route handler, admin check, or body-size logic
@@ -32,7 +32,7 @@ const nextConfig: NextConfig = {
     // backup/restore case (measured ~37,000 firearms with notes at the
     // sealed-envelope size ratio above). It does NOT bound memory: measured,
     // Next buffers the WHOLE incoming body before it checks this cap (even
-    // with the old 10 MB default a 624 MB body was buffered, per the Task 5 review).
+    // with the old 10 MB default a 624 MB body was buffered).
     // The real control for oversized or hostile request bodies is the
     // reverse proxy's body limit (Caddy / Nginx Proxy Manager), which the
     // README tells users to set. A household with a larger inventory than

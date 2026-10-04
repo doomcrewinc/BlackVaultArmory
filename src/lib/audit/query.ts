@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
-import { containsInsensitive } from "../db/text-search";
+import { containsInsensitive, matchesLiteralInsensitive, needsLiteralCheck } from "../db/text-search";
 import { redactStoredChanges } from "./redact";
 import type { AuditAction } from "./actions";
 
@@ -196,11 +196,11 @@ export function parseAuditFilters(searchParams: URLSearchParams): AuditFilters {
   const type = searchParams.get("type")?.trim();
   if (type && !hasNulByte(type)) filters.type = type;
 
-  // Fix round 1: the browser now sends the VIEWER'S local day as a full ISO
+  // The browser sends the VIEWER'S local day as a full ISO
   // instant (local midnight for `from`, local 23:59:59.999 for `to` —
   // AuditFilters.tsx / page.tsx's toQueryString), because a bare UTC day
-  // silently used UTC's calendar boundary instead of the viewer's and
-  // dropped evening events. A bare `YYYY-MM-DD` is still accepted for
+  // uses UTC's calendar boundary instead of the viewer's and
+  // drops evening events. A bare `YYYY-MM-DD` is still accepted for
   // back-compat (a bookmarked link, or a caller that never had a browser
   // timezone to convert with) and keeps its old UTC-day meaning.
   const fromRaw = searchParams.get("from");
@@ -291,25 +291,87 @@ function buildWhere(filters: AuditFilters): Prisma.AuditEventWhereInput {
 }
 
 /**
+ * Most rows one `listAuditEvents` call reads from SQLite while re-checking a
+ * `q` that holds `%` or `_`. Ten 500-row queries is a few tens of
+ * milliseconds on SQLite and short enough not to hold its single connection
+ * against other requests; a log with rarer matches than that is walked over
+ * several calls, each continuing from the `nextCursor` it returns.
+ */
+export const MAX_LITERAL_SCAN_ROWS = 5000;
+const LITERAL_SCAN_BATCH = 500;
+
+/**
+ * Reads batches in the list order from `filters.cursor`, keeping the rows whose
+ * label contains `term` literally, until `wanted` are found, the log ends, or
+ * `MAX_LITERAL_SCAN_ROWS` rows were read. `boundary` is the cursor of the last
+ * row read when the cap ended the scan, else null.
+ */
+async function scanForLiteralMatches(
+  filters: AuditFilters,
+  term: string,
+  wanted: number,
+): Promise<{ matches: RawEvent[]; boundary: string | null }> {
+  const matches: RawEvent[] = [];
+  const batchSize = Math.max(wanted, LITERAL_SCAN_BATCH);
+  let cursor = filters.cursor;
+  let scanned = 0;
+  while (matches.length < wanted && scanned < MAX_LITERAL_SCAN_ROWS) {
+    const take = Math.min(batchSize, MAX_LITERAL_SCAN_ROWS - scanned);
+    // Each batch starts where the previous one ended, so the reads are sequential by nature.
+    const batch = (await prisma.auditEvent.findMany({
+      where: buildWhere({ ...filters, cursor }),
+      orderBy: [{ at: "desc" }, { id: "desc" }],
+      take,
+    })) as RawEvent[];
+    matches.push(...batch.filter((row) => matchesLiteralInsensitive(row.entityLabel, term)));
+    const last = batch.at(-1);
+    if (!last || batch.length < take) return { matches, boundary: null }; // the log is exhausted
+    scanned += batch.length;
+    cursor = encodeCursor(last.at, last.id);
+  }
+  return { matches, boundary: matches.length < wanted ? cursor ?? null : null };
+}
+
+/**
  * Newest first (`at desc, id desc` — `id` breaks ties among events sharing
  * the same `at`, which is what keeps the cursor free of duplicates/gaps when
  * several events share a timestamp). Fetches `limit + 1` rows to know
  * whether another page follows without a separate count query.
+ *
+ * SQLite cannot make `contains` literal, so for a `q` holding `%` or `_` the
+ * rows the database returns are re-checked here (ASCII-case-insensitive, as
+ * SQLite's LIKE is; PostgreSQL's ILIKE folds by locale, a difference that
+ * predates this check). That scan reads at most `MAX_LITERAL_SCAN_ROWS` rows
+ * per call: if it ends there before `limit + 1` matches are found, the page is
+ * SHORT (possibly empty) but `nextCursor` is non-null and marks where the scan
+ * stopped. So a short page does not mean the end of the log; only a null
+ * `nextCursor` does.
  */
 export async function listAuditEvents(
   filters: AuditFilters,
   limit = 50,
 ): Promise<{ events: AuditEventDto[]; nextCursor: string | null }> {
-  const rows = (await prisma.auditEvent.findMany({
-    where: buildWhere(filters),
-    orderBy: [{ at: "desc" }, { id: "desc" }],
-    take: limit + 1,
-  })) as RawEvent[];
+  const wanted = limit + 1;
+  const exactQ = filters.q !== undefined && needsLiteralCheck(filters.q) ? filters.q : undefined;
 
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
-  const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor(last.at, last.id) : null;
+  if (exactQ === undefined) {
+    const rows = (await prisma.auditEvent.findMany({
+      where: buildWhere(filters),
+      orderBy: [{ at: "desc" }, { id: "desc" }],
+      take: wanted,
+    })) as RawEvent[];
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page.at(-1);
+    return { events: page.map(toDto), nextCursor: hasMore && last ? encodeCursor(last.at, last.id) : null };
+  }
 
-  return { events: page.map(toDto), nextCursor };
+  const { matches, boundary } = await scanForLiteralMatches(filters, exactQ, wanted);
+
+  if (matches.length > limit) {
+    const page = matches.slice(0, limit);
+    const last = page.at(-1);
+    return { events: page.map(toDto), nextCursor: last ? encodeCursor(last.at, last.id) : null };
+  }
+  return { events: matches.map(toDto), nextCursor: boundary };
 }

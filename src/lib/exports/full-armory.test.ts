@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   hasNfaPaperwork,
+  mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
   selectVisualEvidence,
@@ -48,6 +49,7 @@ function itemRow(
     nfaTaxPaid: null,
     nfaRegisteredTo: "",
     nfaClass: "NONE",
+    mgRegistry: "",
     ...overrides,
   };
 }
@@ -203,5 +205,19 @@ describe("hasNfaPaperwork", () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("mgRegistryLabel", () => {
+  it("labels a registry the way the edit form does", () => {
+    expect(mgRegistryLabel("TRANSFERABLE")).toBe("Transferable");
+    expect(mgRegistryLabel("PRE_SAMPLE")).toBe("Pre-sample");
+    expect(mgRegistryLabel("POST_SAMPLE")).toBe("Post-sample");
+  });
+
+  it("is blank for a blank token and keeps an unknown token visible", () => {
+    expect(mgRegistryLabel("")).toBe("");
+    expect(mgRegistryLabel("  ")).toBe("");
+    expect(mgRegistryLabel("ODD")).toBe("ODD");
   });
 });

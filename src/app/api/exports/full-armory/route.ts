@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { csvCell, csvQuote } from "@/lib/csv";
 import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
@@ -8,6 +9,7 @@ import {
   parseExportOptionsFromSearchParams,
   hasNfaPaperwork,
   formatExpiryFootnote,
+  mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
   type FullArmoryAttachmentRow,
@@ -66,6 +68,7 @@ type FirearmExportRecord = NfaPaperworkRecord & {
   serialNumber: string | null;
   type: string | null;
   nfaClass: string | null;
+  mgRegistry: string | null;
   acquisitionDate: Date | null;
   purchasePrice: number | null;
   currentValue: number | null;
@@ -263,12 +266,14 @@ function toCsvCellValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * One CSV cell. A string in the row is text someone typed (a name, a note, a
+ * serial) and gets the formula guard; a number, a boolean, a date or a list
+ * is written as it is, so a negative amount stays a number.
+ */
 function csvEscape(value: unknown): string {
-  const text = toCsvCellValue(value);
-  if (/[",\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
+  if (typeof value === "string") return csvCell(value);
+  return csvQuote(toCsvCellValue(value));
 }
 
 function flattenRecord(input: Record<string, unknown>, prefix = ""): Record<string, unknown> {
@@ -509,9 +514,12 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     // the NFA line below: this is the renderer an adjuster reads, and the app's
     // own detail pages already show "Form 4 (transfer)".
     const classLabel = nfaClassLabel(item.nfaClass);
+    const registryLabel = mgRegistryLabel(item.mgRegistry);
+    const classPart = classLabel ? ` | Class: ${classLabel}` : "";
+    const registryPart = registryLabel ? ` | Registry: ${registryLabel}` : "";
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classPart}${registryPart} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
     // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
     // line under every Title I item would double the page count to say nothing.
@@ -637,6 +645,7 @@ export async function GET(request: NextRequest) {
         serialNumber: true,
         type: true,
         nfaClass: true,
+        mgRegistry: true,
         nfaTransferMethod: true,
         nfaControlNumber: true,
         nfaApprovalDate: true,
@@ -776,6 +785,7 @@ export async function GET(request: NextRequest) {
           entityType: "FIREARM" as const,
           category: firearm.type || "",
           nfaClass: firearmExportNfaClass(firearm),
+          mgRegistry: firearm.mgRegistry ?? "",
           manufacturer: firearm.manufacturer || "",
           model: firearm.model || firearm.name,
           caliber: firearm.caliber || "",
@@ -814,6 +824,7 @@ export async function GET(request: NextRequest) {
           // An accessory has no class column on its model. Blank, not NONE:
           // "not applicable", as against a firearm's "Title I".
           nfaClass: "",
+          mgRegistry: "",
           manufacturer: accessory.manufacturer || "",
           model: accessory.model || accessory.name,
           caliber: accessory.caliber || "",

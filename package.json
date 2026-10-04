@@ -12,6 +12,7 @@
     "build:scripts": "node scripts/build-scripts.mjs",
     "lint": "eslint",
     "test": "vitest run",
+    "test:pg-real-db": "node scripts/ci/pg-real-db-tests.mjs",
     "typecheck": "bash scripts/check-types.sh",
     "test:watch": "vitest",
     "reset-db": "npx ts-node --compiler-options '{\"module\":\"CommonJS\"}' scripts/reset-db.ts",

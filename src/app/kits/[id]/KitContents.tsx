@@ -151,9 +151,8 @@ export function KitContents({
   if (groups.length === 0) {
     // An empty kit is a real, common state — a kit is created before it is
     // packed — so it gets an empty state, never a blank region under a
-    // heading. The picker now exists (task 6) and the page mounts it directly
-    // above this block, so the copy points at it rather than describing a
-    // control that has not been built.
+    // heading. The page mounts the picker directly
+    // above this block, so the copy points at it.
     return (
       <div className="flex flex-col items-center justify-center rounded-lg border border-vault-border bg-vault-surface py-16 text-center">
         <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[#00C2FF]/20 bg-[#00C2FF]/10">

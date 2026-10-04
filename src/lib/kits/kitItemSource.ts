@@ -2,8 +2,8 @@
  * kitItemSource.ts — the exactly-one-source rule for a KitItem.
  *
  * Spec: "A KitItem sets one of the five foreign keys, or none of them plus a
- * label." This module is PURE (no Prisma, no clock) so the API (Task 3), the
- * kit page and the picker (Task 6) can share one implementation instead of
+ * label." This module is PURE (no Prisma, no clock) so the API, the
+ * kit page and the picker can share one implementation instead of
  * drifting into three re-derivations of "is this line valid".
  *
  * The five field names are never restated here — they are read from
@@ -43,8 +43,8 @@ function isSet(value: unknown): value is string {
 
 /**
  * Resolves a KitItem's source. Returns a discriminated union rather than
- * throwing: the API (Task 3) turns `ok: false` into a 400 with `reason` and
- * `fields`, and the picker (Task 6) uses `ok` to disable an invalid state
+ * throwing: the API turns `ok: false` into a 400 with `reason` and
+ * `fields`, and the picker uses `ok` to disable an invalid state
  * before the user can submit it. Nothing here rejects or clamps a quantity —
  * that is `allocation.ts`'s job, and it never throws either.
  */

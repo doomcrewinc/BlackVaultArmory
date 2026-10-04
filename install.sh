@@ -50,6 +50,10 @@ if [ -f ".env" ]; then
   echo "Existing .env found — BlackVault is already configured."
   echo "To reconfigure, delete .env and re-run this script."
   echo ""
+  # A line this script cannot read is not "no data here": going on to the
+  # wizard would write a new .env over it.
+  env_require_readable DATA_DIR "Nothing was changed." || exit 1
+  env_require_readable BLACKVAULT_DB_PROVIDER "Nothing was changed." || exit 1
   EXISTING_DATA_DIR=$(env_value DATA_DIR)
   EXISTING_PROVIDER=$(provider_from_env)
   if [ -n "$EXISTING_DATA_DIR" ] && {
@@ -76,6 +80,7 @@ if [ ! -f ".env" ] && [ -f ".blackvault.env" ]; then
   cp .blackvault.env .env
   echo "Migrated. Original .blackvault.env kept as backup."
   echo ""
+  env_require_readable DATA_DIR "Correct the line in .env and re-run this script." || exit 1
   EXISTING_DATA_DIR=$(env_value DATA_DIR)
   if [ -n "$EXISTING_DATA_DIR" ] && [ -f "$EXISTING_DATA_DIR/db/vault.db" ]; then
     # Legacy configs predate PostgreSQL support: they are always SQLite, and a
@@ -108,6 +113,15 @@ if [ -n "$LEGACY_DATA" ]; then
   if [[ "$KEEP" =~ ^[Yy] ]]; then
     DATA_DIR="$LEGACY_DATA"
     echo "   Using existing data at: $DATA_DIR"
+    if ! data_dir_round_trips "$DATA_DIR"; then
+      {
+        echo "ERROR: the path of that folder cannot be written to .env so that Docker Compose"
+        echo "       reads it back unchanged (it holds a \$, or \" #\"). Move the BlackVault"
+        echo "       folder to a path without those, and run this script again."
+        echo "       Nothing was changed."
+      } >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -117,9 +131,35 @@ if [ -z "$DATA_DIR" ]; then
   echo "Where should BlackVault store its data?"
   echo "  This folder will contain your database and uploaded images."
   echo "  Default: $DEFAULT_DATA"
-  read -rp "  Data directory [press Enter for default]: " DATA_DIR_INPUT
-  DATA_DIR="${DATA_DIR_INPUT:-$DEFAULT_DATA}"
-  DATA_DIR="${DATA_DIR%/}"   # strip trailing slash
+  # What is written to .env must be a line the .env reader reads back as this
+  # folder (see data_dir_round_trips). `read` does not expand anything, and
+  # Docker Compose would later put the home folder in place of a leading ~ and
+  # substitute a $VAR: a leading ~/ or $HOME/ is spelled out here, and any
+  # other answer that would not be read back as typed is asked for again.
+  while true; do
+    if ! read -rp "  Data directory [press Enter for default]: " DATA_DIR_INPUT; then
+      echo ""
+      echo "ERROR: no data directory was given. Nothing was changed." >&2
+      exit 1
+    fi
+    DATA_DIR="${DATA_DIR_INPUT:-$DEFAULT_DATA}"
+    DATA_DIR="${DATA_DIR%/}"   # strip trailing slash
+    # The patterns are the literal text ~ and $HOME, as typed.
+    case "$DATA_DIR" in
+      "~" | '$HOME') DATA_DIR="$HOME" ;;
+      "~/"*) DATA_DIR="$HOME/${DATA_DIR#"~/"}" ;;
+      '$HOME/'*) DATA_DIR="$HOME/${DATA_DIR#'$HOME/'}" ;;
+      *) ;;
+    esac
+    if data_dir_round_trips "$DATA_DIR"; then
+      break
+    fi
+    echo "  That folder cannot be used as typed: Docker Compose would read"
+    echo "  DATA_DIR=$DATA_DIR as another folder. Type the full path, with no \$"
+    echo "  in it and not starting with ~ (only a leading ~/ or \$HOME/ is spelled out"
+    echo "  for you)."
+    DATA_DIR=""
+  done
 fi
 
 # ── Port ─────────────────────────────────────────────────────
@@ -251,26 +291,25 @@ echo "Waiting for health check..."
 # Polled as in update.sh. The app logs the first-time setup token while it
 # starts, and a first start (migrations, and on PostgreSQL the database) takes
 # longer than a fixed few seconds: once healthy, the token is in the log.
-HEALTHY=""
-for _ in $(seq 1 60); do
-  if $COMPOSE ps --format '{{.Status}}' blackvault 2>/dev/null | grep -q "healthy"; then
-    HEALTHY=1
-    break
-  fi
-  sleep 2
-done
+# wait_for_health (scripts/compose-provider.sh) says what ends the wait; the
+# last state seen decides what is reported.
+wait_for_health
 
-if [ -n "$HEALTHY" ]; then
+if [[ "$HEALTH" == "healthy" ]]; then
   echo "BlackVault is running."
 else
-  echo "Container started — check logs with:"
-  echo "  $COMPOSE logs -f"
+  echo "WARNING: $(health_problem_text). Check the logs with:"
+  echo "  $COMPOSE logs blackvault"
 fi
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  BlackVault is ready!                                    ║"
+if [[ "$HEALTH" == "healthy" ]]; then
+  echo "║  BlackVault is ready!                                    ║"
+else
+  echo "║  BlackVault was started, but is NOT healthy.             ║"
+fi
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 echo "  URL:         $PUBLIC_URL"
@@ -287,3 +326,11 @@ echo ""
 # ── First-time setup token ────────────────────────────────────
 # Printed only while no admin account exists (see scripts/setup-token.sh).
 show_setup_token "$PUBLIC_URL"
+
+# A container that is unhealthy, keeps restarting, has exited or is not there
+# is a failed install for whoever started this script (another script, a
+# provisioning tool). One that is still starting when the wait ran out is not:
+# a slow first start can still come up.
+if start_failed; then
+  exit 1
+fi

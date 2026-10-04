@@ -25,6 +25,9 @@
 ::   3. Stops BlackVault and takes a snapshot of the database and the uploads
 ::      folder into backups\ (scripts\db-snapshot.bat). If that fails it
 ::      starts BlackVault again and stops: nothing was changed.
+::      Before the stop, a running BlackVault is asked whether a full backup
+::      is in progress. If one is, the script stops here instead: nothing was
+::      changed and BlackVault keeps running. Run it again afterwards.
 ::   4. Restores, in a one-off container (see restore.sh for the steps).
 ::   5. Starts BlackVault.
 :: IF STEP 4 FAILS, for any reason, the install is put back, BlackVault is
@@ -34,6 +37,13 @@
 :: <uploads>\.restore-<time>.db-started, just before that step. No marker
 :: means the database was never touched, and it is left alone. If the
 :: rollback itself fails, BlackVault is NOT started.
+::
+:: THE MARKER AND STARTING. BlackVault refuses to start while a marker is in
+:: the uploads folder. So this script removes its own marker before it starts
+:: BlackVault, after a restore that finished and after a rollback that worked;
+:: when the marker cannot be removed it does not start BlackVault, exits 1 and
+:: prints the command that removes it. A marker left by an EARLIER restore
+:: (one with no recovery file) stops this script before anything is checked.
 ::
 :: THE RECOVERY FILE. Before step 4 this script prints, and writes to
 :: backups\restore-<time>-RECOVERY.txt, where the snapshot is and the commands
@@ -48,7 +58,7 @@
 :: the dump is loaded into a NEW database, and only then swapped in.
 ::
 :: THE PASSPHRASE NEVER TOUCHES cmd.exe, exactly as in backup.bat, and it is
-:: asked for ONCE (ruling R27). The backup is opened twice (the check, then
+:: asked for ONCE. The backup is opened twice (the check, then
 :: the restore) and cmd.exe must not hold the passphrase in between. So ONE
 :: PowerShell process (:run_with_passphrase) reads --passphrase-file, or
 :: asks without echo, and then does three things itself, stopping at the
@@ -66,7 +76,9 @@
 :: file in the TEMP folder (BV_HANDOFF): two paths, no secret. The same file says how
 :: far things got: no file = the check did not pass; a file without its
 :: `ready` line = step 2 or 3 stopped, and said why; `ready` = the restore
-:: program was started, and the exit code is the restore program's.
+:: program was started, and the exit code is the restore program's. The
+:: child checks that its `ready` line really is in the file before it lets
+:: the restore start.
 :: With no --passphrase-file and no console this script stops at once.
 ::
 :: --yes: without a console there is nobody to type RESTORE, so --yes is
@@ -170,7 +182,7 @@ if defined BV_CONSOLE goto :passphrase_source_ok
 >&2 echo ERROR: no passphrase: standard input is not a console, so there is nobody to ask. Use --passphrase-file path. Nothing was done.
 exit /b 1
 :passphrase_source_ok
-:: Ruling R21: a restore replaces all data. Nobody at a console to confirm:
+:: A restore replaces all data. Nobody at a console to confirm:
 :: --yes, or stop now.
 if defined BV_YES goto :confirm_source_ok
 if defined BV_CONSOLE goto :confirm_source_ok
@@ -209,27 +221,82 @@ set "BV_LIMIT="
 :: and scripts\db-snapshot.bat read .env. If the two differ, the snapshot
 :: would be of one install and the restore of another.
 call :env_value DATA_DIR
+if defined _EV_BAD goto :env_unreadable
 set "BV_HOST_DATA=!_EV!"
 if not defined DATA_DIR goto :data_dir_ok
 if "!DATA_DIR!"=="!BV_HOST_DATA!" goto :data_dir_ok
->&2 echo ERROR: DATA_DIR is set in this console and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Run 'set DATA_DIR=' first. Nothing was done.
+>&2 echo ERROR: DATA_DIR is set in this console and is not the DATA_DIR in .env, so docker compose and the snapshot would use different folders. Make them agree: put the folder in .env as DATA_DIR=[absolute path] (preferred, and the fix when .env has no DATA_DIR line), or run 'set DATA_DIR=' if .env is right. Nothing was done.
 exit /b 1
 :data_dir_ok
 if not defined BV_HOST_DATA set "BV_HOST_DATA=.\data"
-:: Ruling R25: an earlier restore that did not end cleanly left its recovery
+:: .env may spell DATA_DIR with forward slashes (./data), which docker compose
+:: accepts. The folder is looked into below with `if exist` and `for`, whose
+:: wildcards need backslashes, so the host-side copy of the path gets them.
+set "BV_HOST_DATA=!BV_HOST_DATA:/=\!"
+:: An earlier restore that did not end cleanly left its recovery
 :: file. Never start a second restore on top of a possibly half-restored install.
 if not exist "backups\restore-*-RECOVERY.txt" goto :no_recovery_pending
->&2 echo ERROR: an earlier restore did not finish cleanly: a restore-[time]-RECOVERY.txt file is still in !CD!\backups. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead. Then run the restore again. Nothing was done.
+>&2 echo ERROR: an earlier restore did not finish cleanly: a restore-[time]-RECOVERY.txt file is still in !CD!\backups. Read it: it says how to put the install back as it was. If BlackVault is running and you have checked it, delete that file instead; or, if you mean to replace this install with a backup anyway, delete that file. Then run the restore again. Nothing was done.
 exit /b 1
 :no_recovery_pending
+:: BlackVault refuses to start while any restore marker is in the uploads
+:: folder, whichever restore left it. With a recovery file the check above
+:: has already stopped this run; a marker WITHOUT one was left by a restore
+:: nobody can put back from here any more. It is never removed silently, and
+:: a restore is never run on top of it: BlackVault could not be started
+:: afterwards, neither after a success nor after a rollback. Every marker is
+:: named, with ONE command line that removes them all.
+::
+:: WHAT COUNTS AS A MARKER, everywhere in this script: anything directly
+:: under the uploads folder named .restore-[stamp].db-started, a folder (what
+:: the restore program creates) or a file, whatever [stamp] is; the same rule
+:: as scripts\snapshot-restore.sh and the app's own start. (A dangling link,
+:: which they count too, cannot be seen by `if exist`; inside the container
+:: it still is one, and the app refuses on it.)
+::
+:: Looked for from the host when the uploads folder is there. When it is not
+:: (it is mounted from somewhere other than [DATA_DIR]\uploads), a container
+:: is asked. If that fails too, the restore does not start: "could not check"
+:: is never taken for "no marker". The command prints one stamp per line and
+:: then, only if it worked, the line BV-MARKERS-ASKED.
+set "BV_OLD_COUNT=0"
+set "BV_OLD_MARKERS="
+set "BV_OLD_CMDS="
+set "BV_OLD_WHERE=!BV_HOST_DATA!\uploads\"
+if not exist "!BV_HOST_DATA!\uploads\" goto :old_markers_ask
+for /d %%M in ("!BV_HOST_DATA!\uploads\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :old_marker_named)
+for %%M in ("!BV_HOST_DATA!\uploads\.restore-*.db-started") do (set "BV_ONE=%%~nxM"& call :old_marker_named)
+goto :old_markers_known
+:old_markers_ask
+set "BV_OLD_WHERE=/app/uploads/"
+set "BV_MARKERS_ASKED="
+:: What Docker writes to standard error is kept, and shown only when the
+:: question failed. A stamp is one whole line: eol=/ because a file name can
+:: never start with / (the default, ;, would drop a line that starts with it),
+:: and it reaches the subroutine in a variable, never as a `call` argument.
+set "BV_MARKERS_ERR=%TEMP%\blackvault-restore-markers-%RANDOM%%RANDOM%.log"
+for /f "usebackq eol=/ delims=" %%S in (`%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh markers /app/uploads 2^>"!BV_MARKERS_ERR!" ^&^& echo BV-MARKERS-ASKED`) do (set "BV_ONE=%%S"& call :old_marker_listed)
+if not defined BV_MARKERS_ASKED if exist "!BV_MARKERS_ERR!" type "!BV_MARKERS_ERR!" 1>&2
+del /f /q "!BV_MARKERS_ERR!" >nul 2>&1
+if defined BV_MARKERS_ASKED goto :old_markers_known
+>&2 echo ERROR: could not check the uploads folder for a marker left by an earlier restore: !BV_HOST_DATA!\uploads is not there to look into, and asking inside a container failed. BlackVault refuses to start while such a marker exists, so the restore did not start. Nothing was done. Check that Docker is running (docker compose ps), then run the restore again.
+exit /b 1
+:old_markers_known
+if "!BV_OLD_COUNT!"=="0" goto :no_old_marker
+if "!BV_OLD_WHERE!"=="/app/uploads/" set "BV_OLD_MARKERS=!BV_OLD_MARKERS! (inside the container)"
+>&2 echo ERROR: the uploads folder holds a marker left by an earlier restore: !BV_OLD_MARKERS!. No recovery file says how to put that restore back. BlackVault refuses to start while a marker exists, so it could not be started after this restore either. If you mean to replace what is in this install with the backup, remove every such marker first with:  !BV_OLD_CMDS!  Then run the restore again. Nothing was done.
+exit /b 1
+:no_old_marker
 
 :: -- 3. The file: a name in the backup folder, or a path into it ----
 :: The backup folder on the HOST: the same expression docker-compose.yml
 :: mounts at /app/backups. A relative path is relative to this folder.
 call :env_value BLACKVAULT_BACKUP_DIR
+if defined _EV_BAD goto :env_unreadable
 set "BV_HOST_DIR=!_EV!"
 if defined BV_HOST_DIR goto :host_dir_known
 call :env_value DATA_DIR
+if defined _EV_BAD goto :env_unreadable
 if not defined _EV set "_EV=.\data"
 set "BV_HOST_DIR=!_EV!\backups"
 :host_dir_known
@@ -256,6 +323,7 @@ exit /b 1
 :file_mapped
 
 call :provider_from_env
+if "!DB_PROVIDER!"=="unreadable" goto :env_unreadable
 
 :: This run's time stamp. It names the recovery file, the restore container,
 :: and the restore program's marker and .pre-restore folder. It is read here,
@@ -276,7 +344,7 @@ set "BV_HOST_UPLOADS=!BV_HOST_DATA!\uploads"
 set "BV_MARKER=!BV_HOST_UPLOADS!\.restore-!BV_STAMP!.db-started"
 
 :: -- 4. Check the backup; then steps 5 to 7; then restore ------------
-:: One call, one passphrase prompt (ruling R27). :run_with_passphrase runs
+:: One call, one passphrase prompt. :run_with_passphrase runs
 :: the check; if it passes, :prepare_phase (steps 5 to 7: confirm, stop,
 :: snapshot, recovery file) in a child cmd.exe; if that exits 0, the restore.
 >&2 echo Checking the backup !BV_FILE_NAME! (nothing is changed yet)...
@@ -342,6 +410,39 @@ goto :stamp_free
 exit /b 1
 :stamp_free
 
+:: A full backup that is running right now (the Settings button, backup.bat,
+:: a scheduled task) would be ended by the stop below, and the restore
+:: program, which takes the same lock, would say "already running" only
+:: after the snapshot. So the running app container is asked first, and the
+:: rule for "is that lock live" stays the engine's own (full-backup.mjs
+:: --lock-status: exit 0 free; exit 2 held, with a line naming the holder).
+:: Any other answer means the question failed, not that a backup runs (an
+:: image from before --lock-status answers 1), and never blocks a restore.
+:: With BlackVault stopped there is no container to ask and nothing the stop
+:: could end; the restore program's own lock still applies. As restore.sh.
+set "BV_RUNNING="
+for /f "usebackq delims=" %%I in (`%COMPOSE% ps --status running -q blackvault 2^>nul`) do set "BV_RUNNING=1"
+if not defined BV_RUNNING goto :lock_checked
+:: The answer goes to a file: a free lock (exit 0) is not worth a line on the
+:: screen, and anything else is shown. Held takes both the exit code 2 and a
+:: line that says state=held: an exit 2 from anything else (docker itself) is
+:: not a running backup.
+set "BV_LOCK_LOG=%TEMP%\blackvault-restore-lock-%RANDOM%%RANDOM%.log"
+%COMPOSE% exec -T -u 1001:1001 blackvault node dist/scripts/full-backup.mjs --lock-status >"!BV_LOCK_LOG!" 2>&1 <nul
+set "BV_LOCK_RC=!errorlevel!"
+set "BV_LOCK_HELD="
+if not "!BV_LOCK_RC!"=="0" if exist "!BV_LOCK_LOG!" type "!BV_LOCK_LOG!" 1>&2
+if "!BV_LOCK_RC!"=="2" findstr /c:"state=held" "!BV_LOCK_LOG!" >nul 2>&1 && set "BV_LOCK_HELD=1"
+del /f /q "!BV_LOCK_LOG!" >nul 2>&1
+if "!BV_LOCK_RC!"=="0" goto :lock_checked
+if defined BV_LOCK_HELD goto :lock_held
+>&2 echo WARNING: could not check whether a full backup is running (exit !BV_LOCK_RC!; an image from before this check answers like that). If one is running, stopping BlackVault ends it. Going on with the restore.
+goto :lock_checked
+:lock_held
+>&2 echo ERROR: a full backup is running (the line above names it), so the restore did not start. Nothing was changed; BlackVault was not stopped. Run the restore again when the backup has finished.
+exit /b 1
+:lock_checked
+
 :: -- 6. Stop the app, snapshot the database and the uploads ---------
 >&2 echo Stopping BlackVault...
 %COMPOSE% stop blackvault 1>&2
@@ -355,7 +456,7 @@ set "BV_SNAP_LOG=%TEMP%\blackvault-restore-snapshot-%RANDOM%%RANDOM%.log"
 call scripts\db-snapshot.bat > "!BV_SNAP_LOG!" 2>&1
 set "BV_SNAP_RC=!errorlevel!"
 type "!BV_SNAP_LOG!" 1>&2
-:: "Database snapshot saved: <path>" is db-snapshot.bat's contract (ruling R4).
+:: "Database snapshot saved: <path>" is db-snapshot.bat's contract.
 set "BV_DB_SNAPSHOT="
 for /f "usebackq tokens=1,* delims=:" %%A in (`findstr /b /c:"Database snapshot saved:" "!BV_SNAP_LOG!"`) do set "BV_DB_SNAPSHOT=%%B"
 del /f /q "!BV_SNAP_LOG!" >nul 2>&1
@@ -394,13 +495,32 @@ type "!BV_RECOVERY!" 1>&2
 >&2 echo ----------------------------------------------------------------------
 >&2 echo.
 
->&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...
 :: Hand the snapshot paths back, and say "ready": from here on the restore
 :: program counts as started.
 >>"!BV_HANDOFF!" echo db=!BV_DB_SNAPSHOT!
 >>"!BV_HANDOFF!" echo uploads=!BV_UPLOADS_SNAPSHOT!
 >>"!BV_HANDOFF!" echo ready=1
+:: The script the user started reads `ready` as "the restore program ran". An
+:: append that failed (a full TEMP disk, a file that can no longer be
+:: written) does not stop a batch file by itself, and exiting 0 without the
+:: line would run the restore and then throw its result away: no start, no
+:: rollback, no message. So the line is looked for in the file, and without
+:: it this phase stops here. Nothing was changed yet: the recovery file is
+:: removed again and BlackVault is started.
+findstr /x /c:"ready=1" "!BV_HANDOFF!" >nul 2>&1
+if errorlevel 1 goto :handoff_failed
+:: The snapshot's path is what a rollback is made from: its line must be
+:: there too, and not empty.
+findstr /b /r /c:"db=." "!BV_HANDOFF!" >nul 2>&1
+if errorlevel 1 goto :handoff_failed
+>&2 echo Restoring !BV_FILE_NAME!. A large backup can take a while...
 exit /b 0
+:handoff_failed
+del /f /q "!BV_RECOVERY!" >nul 2>&1
+if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.
+call :start_app_or_warn
+>&2 echo ERROR: could not write to !BV_HANDOFF! (its ready line or its db line is missing), so the restore did not start. Nothing was changed.
+exit /b 1
 
 :: ====================================================================
 :: Back in the script the user started. BV_RC is the PowerShell step's exit
@@ -422,9 +542,11 @@ exit /b 1
 set "BV_DB_SNAPSHOT=!BV_H_db!"
 set "BV_UPLOADS_SNAPSHOT=!BV_H_uploads!"
 call :snapshot_names
+:: The command that removes this run's marker, as the messages below print it.
+set "BV_CLEAR_CMD=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP!"
 if "!BV_RC!"=="0" goto :restore_done
 
-:: Ruling R24. What the restore program left behind:
+:: What the restore program left behind:
 ::   started    its marker exists: the database step was reached.
 ::   complete   no marker, but .pre-restore-<time> holds a previous folder:
 ::              the program removes its marker only after everything is in
@@ -438,21 +560,45 @@ if "!BV_RC!"=="0" goto :restore_done
 ::              BlackVault is not started and the recovery file, whose step
 ::              2 asks inside a container, says what to do (as restore.sh).
 :: scripts/snapshot-restore.sh applies the same rule again by itself, inside
-:: the container (ruling R28): its uploads mode changes nothing after a
+:: the container: its uploads mode changes nothing after a
 :: finished restore, and its sqlite mode nothing unless the marker exists.
 set "BV_STATE=untouched"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\images\" set "BV_STATE=complete"
 if exist "!BV_HOST_UPLOADS!\.pre-restore-!BV_STAMP!\documents\" set "BV_STATE=complete"
-if exist "!BV_MARKER!\" set "BV_STATE=started"
+if exist "!BV_MARKER!" set "BV_STATE=started"
 if not exist "!BV_HOST_UPLOADS!\" set "BV_STATE=unknown"
 if "!BV_STATE!"=="unknown" goto :state_unknown
 if not "!BV_STATE!"=="complete" goto :rollback
 >&2 echo WARNING: the restore program ended with exit !BV_RC!, but it had FINISHED: its marker is gone and the previous folders are in .pre-restore-!BV_STAMP!. Nothing is rolled back. Its BLACKVAULT_FULL_RESTORE_OK line and the RESTORE entry in the audit log may be missing.
 
 :restore_done
+:: The restore program removes its marker as its last step. If that failed
+:: (it says so in a warning and still exits 0), the marker is removed here,
+:: as root in a container, BEFORE BlackVault is started: BlackVault refuses
+:: to start while a marker exists. When the uploads folder is not there to
+:: look into, the marker is removed without being seen (removing one that is
+:: not there changes nothing). If it cannot be removed, BlackVault is not
+:: started; the recovery file is replaced by one that says what is left to do
+:: (the one written before the restore would put the old install back).
+set "BV_NOT_REMOVED=its marker !BV_MARKER! could not be removed"
+if exist "!BV_MARKER!" goto :restore_marker_seen
+if exist "!BV_HOST_UPLOADS!\" goto :restore_marker_gone
+>&2 echo The uploads folder !BV_HOST_UPLOADS! is not there to look into, so whether the restore left its marker is not known. Removing the marker if it is there...
+set "BV_NOT_REMOVED=its marker, if it is still there (the uploads folder !BV_HOST_UPLOADS! is not there to look into), could not be removed"
+goto :restore_clear_marker
+:restore_marker_seen
+>&2 echo The restore finished but left its marker !BV_MARKER!. Removing it...
+:restore_clear_marker
+%COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP! 1>&2
+if not errorlevel 1 goto :restore_marker_gone
+call :write_marker_left
+set "BV_WHERE_ELSE=The same is in !CD!\!BV_RECOVERY!."
+if not defined BV_LEFT_WRITTEN set "BV_WHERE_ELSE=!CD!\!BV_RECOVERY! could not be rewritten: it still holds the steps written before the restore. Do NOT follow them; delete that file once BlackVault is running."
+>&2 echo ERROR: the restore is complete and was NOT rolled back, but !BV_NOT_REMOVED!, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Do NOT run the recovery commands that were printed before the restore started: they would undo the restore. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  !BV_WHERE_ELSE!
+exit /b 1
+:restore_marker_gone
 del /f /q "!BV_RECOVERY!" >nul 2>&1
 if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.
-if exist "!BV_MARKER!\" >&2 echo WARNING: the restore finished but left its marker !BV_MARKER!. It can be deleted.
 >&2 echo Starting BlackVault...
 %COMPOSE% up -d 1>&2
 if not errorlevel 1 goto :restored
@@ -468,7 +614,7 @@ exit /b 0
 :: -- 8. The restore failed: put the install back ---------------------
 :: The uploads FIRST: that removes the restore's staging folder, which frees
 :: the space the database copy may need on a full disk. Then the database,
-:: only if the restore had reached it (ruling R24).
+:: only if the restore had reached it.
 :rollback
 >&2 echo.
 set "BV_ROLLED_BACK=1"
@@ -511,8 +657,13 @@ exit /b 1
 
 :rolled_back
 if not "!BV_STATE!"=="started" goto :marker_cleared
+:: BlackVault refuses to start while the marker exists, so it is started only
+:: once the marker is gone. The recovery file stays when it is not: its step 3
+:: changes nothing that is already back, and ends by removing the marker.
 %COMPOSE% run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads !BV_STAMP! 1>&2
-if errorlevel 1 >&2 echo WARNING: everything was put back, but the marker !BV_MARKER! could not be removed. Delete it by hand.
+if not errorlevel 1 goto :marker_cleared
+>&2 echo ERROR: the restore failed (the reason is above). The database and the uploads were put back from the snapshot taken before it (!BV_DB_SNAPSHOT!), but the marker !BV_MARKER! could not be removed, and BlackVault refuses to start while that marker exists. BlackVault was NOT started. Remove the marker with:  !BV_CLEAR_CMD!  Then start BlackVault: docker compose up -d  and delete !CD!\!BV_RECOVERY! (while it exists, a new restore refuses to start).
+exit /b 1
 :marker_cleared
 del /f /q "!BV_RECOVERY!" >nul 2>&1
 if exist "!BV_RECOVERY!" >&2 echo WARNING: could not delete !BV_RECOVERY!; delete it by hand, or the next restore will refuse to start.
@@ -552,13 +703,18 @@ for %%F in ("!BV_UPLOADS_SNAPSHOT!") do set "BV_UPLOADS_ARG=/bv-backups/%%~nxF"
 set "BV_UPLOADS_SHOWN=!BV_UPLOADS_SNAPSHOT!"
 goto :eof
 
-:: :write_recovery - ruling R25: writes !BV_RECOVERY!, the file that says
+:: :write_recovery - writes !BV_RECOVERY!, the file that says
 :: where the snapshot is and exactly what to run to put it back. The same
 :: steps as restore.sh's recovery_text. No exclamation mark may appear in
 :: the text (delayed expansion is on). Step 3 is ONE command line joined with
 :: ^&^& (restore.sh prints the same chain over several lines): clear-marker
 :: removes the only thing that says "the database step was reached", so it
-:: must never run after a part that failed.
+:: must never run after a part that failed. The PostgreSQL line starts with
+:: a state test (psql is guarded by no script): a `for /f` over the state
+:: command of step 2, then `if` its answer is started, with the whole chain
+:: as the body of that `if`. The loop variable is written here with two
+:: percent signs and reaches the file with one, which is what a Command
+:: Prompt takes: the line is for pasting there, not into a batch file.
 :write_recovery
 del /f /q "!BV_RECOVERY!" >nul 2>&1
 set "BV_RB=docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh"
@@ -603,7 +759,9 @@ if /i "!DB_PROVIDER!"=="sqlite" goto :write_recovery_sqlite
 >>"!BV_RECOVERY!" echo    only if every part before it worked, so the marker is cleared (the last
 >>"!BV_RECOVERY!" echo    part) only when everything is back. If it stops with an ERROR, fix what
 >>"!BV_RECOVERY!" echo    it says and run the whole line again; never run its last part by itself.
->>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& docker compose up -d --wait db ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
+>>"!BV_RECOVERY!" echo    The line asks for the state again first, and does nothing unless that
+>>"!BV_RECOVERY!" echo    prints started.
+>>"!BV_RECOVERY!" echo   for /f %%S in ('!BV_RB! state /app/uploads !BV_STAMP!') do if "%%S"=="started" !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG! ^&^& docker compose up -d --wait db ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault_rollback WITH (FORCE)" -c "CREATE DATABASE blackvault_rollback OWNER blackvault" ^&^& !BV_PSQL! -d blackvault_rollback --single-transaction -f - ^< "!BV_DB_SNAPSHOT!" ^&^& !BV_PSQL! -d postgres -c "DROP DATABASE IF EXISTS blackvault WITH (FORCE)" -c "ALTER DATABASE blackvault_rollback RENAME TO blackvault" ^&^& !BV_RB! clear-marker /app/uploads !BV_STAMP!
 >>"!BV_RECOVERY!" echo    If step 2 printed untouched or complete, this line and nothing else (it
 >>"!BV_RECOVERY!" echo    removes the work folder of the restore and checks the photos and documents):
 >>"!BV_RECOVERY!" echo   !BV_RB! uploads /app/uploads !BV_STAMP! !BV_UPLOADS_ARG!
@@ -621,6 +779,81 @@ goto :write_recovery_tail
 >>"!BV_RECOVERY!" echo 4. Start BlackVault, check it, then delete this file:
 >>"!BV_RECOVERY!" echo   docker compose up -d
 >>"!BV_RECOVERY!" echo   del "!BV_RECOVERY!"
+goto :eof
+
+:: :old_marker_named / :old_marker_listed - one leftover marker, in BV_ONE:
+:: its file name (from the host) or its stamp (a line the
+:: container printed; the line BV-MARKERS-ASKED says the question worked).
+:: Adds it to BV_OLD_MARKERS and its clear-marker command to BV_OLD_CMDS,
+:: joined with ^&^& so that the whole is one command line. The stamp is quoted
+:: in the command: a hand-made name may hold a space.
+:old_marker_named
+:: The stamp is the name without ".restore-" (9 characters) and ".db-started" (11).
+set "BV_ONE=!BV_ONE:~9,-11!"
+goto :old_marker_add
+:old_marker_listed
+if "!BV_ONE!"=="BV-MARKERS-ASKED" set "BV_MARKERS_ASKED=1"
+if "!BV_ONE!"=="BV-MARKERS-ASKED" goto :eof
+:old_marker_add
+if not defined BV_ONE goto :eof
+set /a BV_OLD_COUNT+=1
+if defined BV_OLD_MARKERS set "BV_OLD_MARKERS=!BV_OLD_MARKERS!, "
+set "BV_OLD_MARKERS=!BV_OLD_MARKERS!!BV_OLD_WHERE!.restore-!BV_ONE!.db-started"
+if defined BV_OLD_CMDS set "BV_OLD_CMDS=!BV_OLD_CMDS! && "
+set "BV_OLD_CMDS=!BV_OLD_CMDS!docker compose run --rm -T --no-deps --user 0:0 --entrypoint /bin/sh -v "!CD!\backups:/bv-backups:ro" -v "!CD!\scripts\snapshot-restore.sh:/bv-snapshot-restore.sh:ro" blackvault /bv-snapshot-restore.sh clear-marker /app/uploads "!BV_ONE!""
+goto :eof
+
+:: :write_marker_left - replaces !BV_RECOVERY! when the restore FINISHED and
+:: only its marker could not be removed: the same text as restore.sh's
+:: marker_left_text. No exclamation mark may appear in the text. It is
+:: written to a file beside the recovery file (its first line with a single
+:: redirection, which empties whatever was there), read back, and moved over
+:: it, so the
+:: recovery file is always one whole text: the new one, or - when this fails,
+:: and then BV_LEFT_WRITTEN stays undefined - the one written before the
+:: restore.
+:write_marker_left
+set "BV_LEFT_WRITTEN="
+set "BV_LEFT_NEW=!BV_RECOVERY!.new"
+>"!BV_LEFT_NEW!" echo BlackVault restore !BV_STAMP!: ONE STEP LEFT
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo restore.bat restored !BV_FILE_NAME! completely: the records and the files are the
+>>"!BV_LEFT_NEW!" echo backup's, and nothing has to be put back. Only the marker of the restore,
+>>"!BV_LEFT_NEW!" echo   !BV_MARKER!
+>>"!BV_LEFT_NEW!" echo could not be removed. BlackVault refuses to start while that marker exists,
+>>"!BV_LEFT_NEW!" echo so restore.bat did not start it.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo Do NOT run the recovery commands that restore.bat printed before the restore
+>>"!BV_LEFT_NEW!" echo started (they may still be on your screen): they would put the old install
+>>"!BV_LEFT_NEW!" echo back and undo the restore.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo Run these in a Command Prompt, from "!CD!", in this order.
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo 1. Remove the marker:
+>>"!BV_LEFT_NEW!" echo   !BV_CLEAR_CMD!
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo 2. Start BlackVault, check it, then delete this file (while it exists, a new
+>>"!BV_LEFT_NEW!" echo    restore refuses to start):
+>>"!BV_LEFT_NEW!" echo   docker compose up -d
+>>"!BV_LEFT_NEW!" echo   del "!BV_RECOVERY!"
+>>"!BV_LEFT_NEW!" echo.
+>>"!BV_LEFT_NEW!" echo The install as it was before the restore is still in this snapshot:
+>>"!BV_LEFT_NEW!" echo   database: !BV_DB_SNAPSHOT!
+>>"!BV_LEFT_NEW!" echo   uploads:  !BV_UPLOADS_SHOWN!
+>>"!BV_LEFT_NEW!" echo The photos and documents that were here before are also in
+>>"!BV_LEFT_NEW!" echo [uploads folder]\.pre-restore-!BV_STAMP!\.
+:: A batch file does not stop on a failed redirection, so the work file is
+:: read back: its last line must be there before it replaces the recovery
+:: file, and afterwards the recovery file must start with the new heading.
+findstr /c:".pre-restore-!BV_STAMP!" "!BV_LEFT_NEW!" >nul 2>&1
+if errorlevel 1 goto :marker_left_not_written
+move /y "!BV_LEFT_NEW!" "!BV_RECOVERY!" >nul 2>&1
+findstr /b /c:"BlackVault restore !BV_STAMP!: ONE STEP LEFT" "!BV_RECOVERY!" >nul 2>&1
+if errorlevel 1 goto :marker_left_not_written
+set "BV_LEFT_WRITTEN=1"
+goto :eof
+:marker_left_not_written
+del /f /q "!BV_LEFT_NEW!" >nul 2>&1
 goto :eof
 
 :: :run_with_passphrase - reads the passphrase ONCE, then: starts
@@ -642,12 +875,10 @@ goto :eof
 :: Mirrors :provider_from_env in scripts\db-snapshot.bat and update.bat (and
 :: provider_from_env in scripts/compose-provider.sh): change them together.
 :provider_from_env
-set "_PV="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
-  )
-)
+call :env_value BLACKVAULT_DB_PROVIDER
+set "DB_PROVIDER=unreadable"
+if defined _EV_BAD goto :eof
+set "_PV=!_EV!"
 if defined _PV set "_PV=!_PV: =!"
 if defined _PV set "_PV=!_PV:	=!"
 if defined _PV set "_PV=!_PV:"=!"
@@ -660,21 +891,161 @@ if /i "!_PV!"=="postgres" set "DB_PROVIDER=postgres"
 if /i "!_PV!"=="postgresql" set "DB_PROVIDER=postgres"
 goto :eof
 
-:: :env_value KEY - the value of KEY in .\.env (last line wins) in _EV, with
-:: quotes and surrounding spaces and tabs removed, as env_value in
-:: scripts/compose-provider.sh does; undefined when unset or no .env.
+:: A caller jumps here when :env_value refused the line it asked for (the
+:: Note saying how to write it is already printed): no default is used.
+:env_unreadable
+>&2 echo ERROR: .env holds a line this script does not read: see the Note above. Nothing was done.
+exit /b 1
+
+:: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
+:: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
+:: change them together. _EV is undefined when KEY is unset or empty, or there
+:: is no .env; _EV_SET is 1 when .env assigns KEY at all, even to nothing.
+:: Forms read:
+::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
+::   KEY="value"    KEY='value'           one pair of quotes removed
+::   KEY=value # comment                  cut at the first space before a #
+:: with leading whitespace and CRLF allowed, lines starting with # ignored,
+:: and the LAST assignment winning. A Windows path is best written unquoted.
+:: A line whose value Compose would change or reject, or that batch cannot
+:: split, is REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how
+:: to write the line. The caller must not go on as if the key were unset.
+:: Refused:
+::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+::   in double quotes, a \ before a b f n r t v 0 or another \ (Compose
+::   unescapes those: "C:\new" holds a newline) or before the closing quote;
+::   any other \ there is text, so "C:\BlackVault\Data" is read;
+::   in single quotes, an apostrophe inside the value or a \ before the
+::   closing quote; KEY: value when no KEY= line follows it; a quoted value
+::   followed by a comment or other text; a double quote anywhere except as
+::   the one pair around the whole value; a value that starts with =.
+::   a ! anywhere on a line assigning KEY, a comment on it included:
+::   delayed expansion would drop it from the value without a trace;
+::   a leading ~ in a folder key (one whose name ends in _DIR: DATA_DIR,
+::   BLACKVAULT_BACKUP_DIR): Compose puts the home folder in its place.
+::   a KEY line that is the first line of a .env starting with a byte order
+::   mark (a mark before a comment line or before another key is harmless).
+:: Not told apart: a bare KEY line (no = at all) reads here as KEY= (set to
+:: nothing); Compose takes the value from the environment for such a line.
+:: The backslash rules were probed against one version of Compose (compose-go
+:: v2.16.1); an older Docker Compose was not run.
 :env_value
 set "_EV="
+set "_EV_SET="
+set "_EV_BAD="
+set "_EV_CUT="
 if not exist ".env" goto :eof
-for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-  if "%%A"=="%~1" set "_EV=%%B"
+:: A .env saved with a byte order mark, whose FIRST line sets the key (KEY=,
+:: KEY:, with or without export), refuses the key. The mark is one or three
+:: characters to this script, depending on the code page, and `if` treats it
+:: as no character at all on a UTF-8 code page, so nothing below can be
+:: relied on to see the key behind it, or to miss it. Found here by what is
+:: NOT at the start of line 1: a letter, a digit, _, # or white space.
+findstr /n /r /c:"^[^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" /c:"^[^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][^a-zA-Z0-9_# 	][ 	]*export[ 	][ 	]*%~1[ 	]*[=:]" ".env" 2>nul | findstr /b /c:"1:" >nul 2>&1
+if not errorlevel 1 goto :env_value_bom
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
+  if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
 )
-if defined _EV set "_EV=!_EV:"=!"
-if defined _EV for /f "tokens=* delims=	 " %%V in ("!_EV!") do set "_EV=%%V"
+:: for /f took every = after the key as one separator, so a value that
+:: starts with = has lost it: such a line, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
+if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:: A ! on a line assigning the key, anywhere in the file, refuses the key.
+:: The pattern holds a ! of its own, so it is searched for with delayed
+:: expansion off.
+setlocal DisableDelayedExpansion
+findstr /r /c:"^[ 	]*%~1[ 	]*=.*!" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=.*!" ".env" >nul 2>&1
+if not errorlevel 1 (endlocal & set "_EV_SET=1" & goto :env_value_bad)
+endlocal
+:: A KEY: value line never reached the loop above as KEY. Compose uses the
+:: LAST assignment of a key, so such a line refuses the key only when no
+:: KEY= line comes after it (line numbers from findstr /n).
+set "_EVY=0"
+set "_EVA=0"
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" 2^>nul`) do set "_EVY=%%N"
+if "!_EVY!"=="0" goto :env_value_trim
+for /f "usebackq delims=:" %%N in (`findstr /n /r /c:"^[ 	]*%~1[ 	]*=" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*=" ".env" 2^>nul`) do set "_EVA=%%N"
+if !_EVY! GTR !_EVA! set "_EV_SET=1" & goto :env_value_bad
 :env_value_trim
-if not defined _EV goto :eof
+if not defined _EV goto :env_value_done
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
 if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
 if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if defined _EV_CUT goto :env_value_dollar
+set "_EVQ=!_EV:"=!"
+if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
+if "!_EV:~0,1!"=="'" goto :env_value_squote
+:: Unquoted: cut at the first space that is followed by #. A tab before the
+:: # does not start a comment, and neither does a # that opens the value.
+set "_EV_CUT=1"
+if "!_EV:#=!"=="!_EV!" goto :env_value_dollar
+set "_EVI=1"
+:env_value_scan
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_dollar
+if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+set /a _EVI+=1
+goto :env_value_scan
+:env_value_dollar
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
+:env_value_dquote
+:: Without its double quotes the value must equal the value without its
+:: first and last characters: exactly one pair, around the whole value.
+if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
+set "_EV=!_EVQ!"
+if not defined _EV goto :env_value_done
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+if "!_EV:\=!"=="!_EV!" goto :env_value_done
+:: Each \ and the character after it. IF compares with case, as Compose
+:: does: \r is a carriage return to Compose, \R is two characters.
+set "_EVI=0"
+:env_value_escape
+set "_EVC=!_EV:~%_EVI%,2!"
+if not defined _EVC goto :env_value_done
+set /a _EVI+=1
+if not "!_EVC:~0,1!"=="\" goto :env_value_escape
+if "!_EVC!"=="\" goto :env_value_bad
+if "!_EVC!"=="\\" goto :env_value_bad
+for %%E in (a b f n r t v 0) do if "!_EVC!"=="\%%E" goto :env_value_bad
+goto :env_value_escape
+:env_value_squote
+if "!_EV:~1,1!"=="" goto :env_value_bad
+if not "!_EV:~-1!"=="'" goto :env_value_bad
+set "_EV=!_EV:~1,-1!"
+if not defined _EV goto :env_value_done
+if not "!_EV:'=!"=="!_EV!" goto :env_value_bad
+if "!_EV:~-1!"=="\" goto :env_value_bad
+goto :env_value_done
+:env_value_bom
+set "_EV="
+set "_EV_SET=1"
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       .env starts with a byte order mark, and that line is its first.
+echo       Save .env without a byte order mark (in Notepad: Save As, encoding
+echo       UTF-8, not UTF-8 with BOM), or put a comment line first.
+goto :env_value_done
+:env_value_bad
+set "_EV="
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read:
+echo       Docker Compose would change its value, or reject the line. Rewrite
+echo       that line, or delete it, as %~1=value with the final value spelled
+echo       out and no $ in it: best for a Windows path. In single quotes the
+echo       value must hold no apostrophe and not end in a backslash. In double
+echo       quotes it must hold no $ and no backslash before a b f n r t v 0,
+echo       another backslash or the closing quote. Nothing may follow a
+echo       closing quote, and a %~1: value line must become %~1=value. The
+echo       line must hold no exclamation mark, and a folder must not start
+echo       with ~: write the full path.
+:env_value_done
+set "_EVK=%~1"
+if defined _EV if "!_EVK:~-4!"=="_DIR" if "!_EV:~0,1!"=="~" goto :env_value_bad
+set "_EVK="
+set "_EVQ="
+set "_EVC="
 goto :eof
 
 :: Mirrors require_compose / compose_version_ok in scripts/compose-provider.sh

@@ -92,8 +92,8 @@ export async function changeRoleOrStatus(
               changes: { from: previousRole, to: change.role },
             });
           }
-          // Only a real transition is logged (Review Focus #3's rule, applied to security
-          // events too) — re-disabling an already-disabled user is a no-op.
+          // Only a real transition is logged
+          // — re-disabling an already-disabled user is a no-op.
           if (change.disabled === true && previousDisabledAt === null) {
             await recordEvent(tx, { action: "USER_DISABLED", entityType: "User", entityId: targetId, entityLabel: label });
           } else if (change.disabled === false && previousDisabledAt !== null) {
@@ -101,7 +101,7 @@ export async function changeRoleOrStatus(
           }
 
           if ((await tx.user.count({ where: ACTIVE_ADMIN })) === 0) throw new ChangeRefused(409, LAST_ADMIN_ERROR);
-          // Links outlive neither the issuer's account nor their admin rights (ruling A13): a
+          // Links outlive neither the issuer's account nor their admin rights: a
           // disabled or demoted admin's unused invite/reset links are burned in this same
           // transaction, so they commit or roll back together with the change itself.
           if (change.disabled === true || change.role === "USER") {

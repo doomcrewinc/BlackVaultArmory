@@ -10,8 +10,8 @@
 # copy as 1001 with su-exec, so everything in the snapshot belongs to the app
 # user; it then renames the folder to NAME. Root reads this script and hands
 # its TEXT to `sh -c` for the 1001 stage, so uid 1001 never has to open the
-# file: the host checkout may have made it 0600 or 0640 (umask 077/027, final
-# review FIX 3). As any other user (the POSIX tests run it on the host) it
+# file: the host checkout may have made it 0600 or 0640 (umask 077/027).
+# As any other user (the POSIX tests run it on the host) it
 # does the copy itself.
 #
 # Copied: regular files only. Never followed or copied: symbolic links

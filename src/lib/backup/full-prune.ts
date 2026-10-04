@@ -2,7 +2,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 
 /**
- * `--keep N` (spec 3c §2, ruling R18): after a full backup has been made,
+ * `--keep N` (full-backups design §2): after a full backup has been made,
  * deletes the oldest published full backups beyond the newest N.
  *
  * It runs INSIDE the container, in the same invocation as the backup

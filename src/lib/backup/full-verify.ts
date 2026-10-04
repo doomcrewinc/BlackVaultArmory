@@ -8,7 +8,7 @@ import { MAX_MANIFEST_BYTES, parseManifest, type Manifest } from "./manifest";
 import { readTar } from "./tar";
 
 /**
- * `--verify` (spec 3c §2): stream-decrypts a whole `.bvb` archive and checks
+ * `--verify` (full-backups design §2): stream-decrypts a whole `.bvb` archive and checks
  * its contents against its own manifest. Nothing is written to disk.
  *
  * The BVB1 layer (core.mjs's opener) already proves every byte came from
@@ -16,10 +16,10 @@ import { readTar } from "./tar";
  * order. This module proves the archive is internally CONSISTENT — that what
  * a restore would unpack is exactly what the manifest promises:
  * - only `db.json`, `manifest.json` and `files/...` entries exist, and every
- *   file name is one a restore accepts (./entry-names.ts, ruling R26);
+ *   file name is one a restore accepts (./entry-names.ts);
  * - `manifest.json` is present, within MAX_MANIFEST_BYTES, valid, and the
  *   LAST entry (the engine writes it last so it can hash files while
- *   streaming them — controller ruling, see ./manifest.ts);
+ *   streaming them — see ./manifest.ts);
  * - the set of `files/...` entries equals `manifest.files` exactly (none
  *   extra, none missing), and each one's size and sha256 match;
  * - `db.json` parses and holds exactly `manifest.counts` rows per model.
@@ -166,7 +166,7 @@ export async function verifyFullBackup(file: string, passphrase: string, opts: V
       return;
     }
     if (!entryPath.startsWith(FILES_PREFIX)) fail(`unexpected entry "${printableName(entryPath)}" in the archive.`);
-    // Ruling R26: the restore refuses these names, so an archive holding one must not verify.
+    // The restore refuses these names, so an archive holding one must not verify.
     const refusal = names.add(entryPath);
     if (refusal) fail(`"${printableName(entryPath)}" cannot be restored: ${refusal}.`);
     const hashed = await hashBody(body);
