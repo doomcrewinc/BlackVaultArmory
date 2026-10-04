@@ -59,9 +59,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ARG APP_VERSION=dev
 ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 
-# Create a non-root user
+# Create a non-root user whose primary group is nodejs (gid 1001), so that
+# `docker compose exec -u nextjs` runs as 1001:1001, like the app itself
+# (the entrypoint drops to nextjs:nodejs).
 RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
+    adduser --system --uid 1001 --ingroup nodejs nextjs
 
 # Copy standalone output
 COPY --from=builder /app/.next/standalone ./

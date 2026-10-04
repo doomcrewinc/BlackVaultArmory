@@ -4,6 +4,7 @@
 # restore.bat run it when a full restore fails (full-backups spec §3 step 5).
 #
 #   snapshot-restore.sh state   UPLOADS STAMP
+#   snapshot-restore.sh markers UPLOADS
 #   snapshot-restore.sh uploads UPLOADS STAMP [SNAPSHOT_DIR]
 #   snapshot-restore.sh sqlite  SNAPSHOT_DB LIVE_DB [UPLOADS STAMP]
 #   snapshot-restore.sh clear-marker UPLOADS STAMP
@@ -62,6 +63,15 @@
 #          The folders db-snapshot.sh leaves out are left out here too:
 #          .pre-encryption-*, .restore-*, .pre-restore-*, *.tmp, *.rot.
 #
+# markers  prints the stamp of every marker UPLOADS/.restore-<ts>.db-started,
+#          one per line; nothing when there is none, or when UPLOADS is not
+#          there. Changes nothing.
+#
+# WHAT COUNTS AS A MARKER, in every mode: anything directly under UPLOADS
+# with that name, whatever it is (a folder, which is what the restore program
+# creates; a file; a link, dangling or not). The app's start refuses on the
+# same rule (assertNoUnfinishedRestore in src/lib/files/startup.ts).
+#
 # clear-marker  removes UPLOADS/.restore-<ts>.db-started, the marker the
 #          restore program leaves just before its database step (ruling R24).
 #          The wrapper calls this once its rollback has worked. `uploads`
@@ -102,10 +112,12 @@ check_stamp() {
 
 # restore_state UPLOADS STAMP: prints started, complete or untouched (see the top of this file).
 restore_state() {
-  if [ -e "$1/.restore-$2.db-started" ]; then
+  state_marker="$1/.restore-$2.db-started"
+  state_pre="$1/.pre-restore-$2"
+  if [ -e "$state_marker" ] || [ -L "$state_marker" ]; then
     echo started
-  elif { [ -d "$1/.pre-restore-$2/images" ] && [ ! -L "$1/.pre-restore-$2/images" ]; } ||
-    { [ -d "$1/.pre-restore-$2/documents" ] && [ ! -L "$1/.pre-restore-$2/documents" ]; }; then
+  elif { [ -d "$state_pre/images" ] && [ ! -L "$state_pre/images" ]; } ||
+    { [ -d "$state_pre/documents" ] && [ ! -L "$state_pre/documents" ]; }; then
     echo complete
   else
     echo untouched
@@ -161,6 +173,16 @@ case "$MODE" in
     exit 0
     ;;
   uploads) ;;
+  markers)
+    UP=${2:?usage: snapshot-restore.sh markers UPLOADS}
+    for m in "$UP"/.restore-*.db-started; do
+      if [ -e "$m" ] || [ -L "$m" ]; then
+        m=${m##*/.restore-}
+        echo "${m%.db-started}"
+      fi
+    done
+    exit 0
+    ;;
   clear-marker)
     UP=${2:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
     STAMP=${3:?usage: snapshot-restore.sh clear-marker UPLOADS STAMP}
@@ -196,7 +218,7 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "usage: snapshot-restore.sh state UPLOADS STAMP | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
+    echo "usage: snapshot-restore.sh state UPLOADS STAMP | markers UPLOADS | uploads UPLOADS STAMP [SNAPSHOT_DIR] | sqlite SNAPSHOT_DB LIVE_DB [UPLOADS STAMP] | clear-marker UPLOADS STAMP" >&2
     exit 2
     ;;
 esac

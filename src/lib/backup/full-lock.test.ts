@@ -9,6 +9,7 @@ import {
   FULL_BACKUP_LOCK_NAME,
   FULL_BACKUP_LOCK_STALE_MS,
   FullBackupAlreadyRunningError,
+  fullBackupLockStatus,
   type FullBackupLock,
 } from "./full-lock";
 
@@ -484,5 +485,111 @@ describe("acquireFullBackupLock", () => {
     const err = await acquireFullBackupLock(path.join(dir, "nope")).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(FullBackupAlreadyRunningError);
+  });
+});
+
+describe("fullBackupLockStatus (read-only: the liveness rule without taking the lock)", () => {
+  /** Everything in the folder: name, content and mtime. A status call must leave all of it as it was. */
+  const snapshot = () => readdirSync(dir).sort().map((n) => [n, readFileSync(path.join(dir, n), "utf8"), statSync(path.join(dir, n)).mtimeMs]);
+  const HELD = (pid: number, hostname: string, startedAt: string) => ({ held: true, pid, hostname, startedAt });
+
+  it("no lock file, or no backup folder at all: free", async () => {
+    expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+    expect(readdirSync(dir)).toEqual([]);
+    expect(await fullBackupLockStatus(path.join(dir, "no-such-folder"))).toEqual({ held: false });
+  });
+
+  describe("same hostname: the pid must be alive AND the heartbeat fresh", () => {
+    it("a live pid with a fresh heartbeat: held, and the holder is named", async () => {
+      plant({ pid: process.ppid, startedAt: "2026-10-03T03:15:00.000Z", hostname: HOST, token: "other" }, FULL_BACKUP_LOCK_STALE_MS - 30_000);
+      const before = snapshot();
+      expect(await fullBackupLockStatus(dir)).toEqual(HELD(process.ppid, HOST, "2026-10-03T03:15:00.000Z"));
+      expect(snapshot()).toEqual(before);
+    });
+
+    it("a live pid with a stale heartbeat: free (the lock is left where it is)", async () => {
+      plant({ pid: process.ppid, startedAt: "x", hostname: HOST, token: "crashed-run" }, FULL_BACKUP_LOCK_STALE_MS + 30_000);
+      const before = snapshot();
+      expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+      expect(snapshot()).toEqual(before);
+    });
+
+    it("a dead pid, however fresh the heartbeat: free", async () => {
+      plant({ pid: deadPid(), startedAt: "x", hostname: HOST, token: "stale" });
+      expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+      expect(body().token).toBe("stale");
+    });
+
+    it("a lock this process really holds: held; a lock that only carries this pid: free", async () => {
+      const lock = await acquire(dir);
+      expect(await fullBackupLockStatus(dir)).toMatchObject({ held: true, pid: process.pid, hostname: HOST });
+      await lock.release();
+      plant({ pid: process.pid, startedAt: "x", hostname: HOST, token: "previous-run" });
+      expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+    });
+  });
+
+  describe("another hostname: only the heartbeat decides", () => {
+    it("fresh: held, even though that pid is dead here", async () => {
+      plant({ pid: deadPid(), startedAt: "2026-10-03T03:15:00.000Z", hostname: OTHER_HOST, token: "other" }, FULL_BACKUP_LOCK_STALE_MS - 30_000);
+      expect(await fullBackupLockStatus(dir)).toMatchObject({ held: true, hostname: OTHER_HOST, startedAt: "2026-10-03T03:15:00.000Z" });
+    });
+
+    it("stale: free, even though the pid is alive here", async () => {
+      plant({ pid: process.ppid, startedAt: "x", hostname: OTHER_HOST, token: "other" }, FULL_BACKUP_LOCK_STALE_MS + 30_000);
+      expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+    });
+
+    it("the hostname and the threshold are injectable, as for the acquire", async () => {
+      plant({ pid: deadPid(), startedAt: "x", hostname: "box-a", token: "t" }, 2_000);
+      expect(await fullBackupLockStatus(dir, { hostname: "box-b" })).toMatchObject({ held: true, hostname: "box-a" });
+      expect(await fullBackupLockStatus(dir, { hostname: "box-b", staleMs: 1_000 })).toEqual({ held: false });
+      expect(await fullBackupLockStatus(dir, { hostname: "box-a" })).toEqual({ held: false }); // ours, and that pid is dead
+    });
+  });
+
+  it.each([
+    ["garbage", "not json"],
+    ["empty (a holder caught between create and write)", ""],
+    ["no hostname", JSON.stringify({ pid: 1, startedAt: "x", token: "t" })],
+  ])("no usable owner (%s): fresh → held by an unknown holder; stale → free", async (_name, content) => {
+    plant(content);
+    const fresh = await fullBackupLockStatus(dir);
+    expect(fresh.held).toBe(true);
+    if (fresh.held) expect(fresh.hostname).toBe("unknown");
+    plant(content, FULL_BACKUP_LOCK_STALE_MS + 30_000);
+    expect(await fullBackupLockStatus(dir)).toEqual({ held: false });
+  });
+
+  it("agrees with the acquire on every one of these files: held ⇔ the acquire answers 'already running'", async () => {
+    const cases: Array<[unknown, number]> = [
+      [{ pid: process.ppid, startedAt: "x", hostname: HOST, token: "a" }, 0],
+      [{ pid: process.ppid, startedAt: "x", hostname: HOST, token: "a" }, FULL_BACKUP_LOCK_STALE_MS + 30_000],
+      [{ pid: deadPid(), startedAt: "x", hostname: HOST, token: "a" }, 0],
+      [{ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "a" }, 0],
+      [{ pid: 1, startedAt: "x", hostname: OTHER_HOST, token: "a" }, FULL_BACKUP_LOCK_STALE_MS + 30_000],
+      ["not json", 0],
+      ["not json", FULL_BACKUP_LOCK_STALE_MS + 30_000],
+    ];
+    for (const [content, age] of cases) {
+      plant(content, age);
+      const status = await fullBackupLockStatus(dir);
+      const taken = await acquireFullBackupLock(dir).then(
+        async (lock) => {
+          await lock.release();
+          return true;
+        },
+        (e) => {
+          if (e instanceof FullBackupAlreadyRunningError) return false;
+          throw e;
+        },
+      );
+      expect(status.held, JSON.stringify([content, age])).toBe(!taken);
+    }
+  });
+
+  it("an unreadable lock is an error, not 'free'", async () => {
+    await fsp.mkdir(lockPath()); // a folder where the lock file should be: the read fails with EISDIR
+    await expect(fullBackupLockStatus(dir)).rejects.toMatchObject({ code: "EISDIR" });
   });
 });

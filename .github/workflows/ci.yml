@@ -139,6 +139,24 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # PostgreSQL for the real-database test step below. Only that step gets
+    # the URL, so the rest of `npm test` stays on SQLite.
+    services:
+      postgres:
+        # Matches docker-compose.yml's db service.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          # A throwaway server that exists only for this job: no credential.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: blackvault_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d blackvault_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     strategy:
       # Both sides of UTC must report. Without this, the first zone to fail
       # hides the other one's result, which is the whole point of the matrix.
@@ -148,6 +166,7 @@ jobs:
           # The historical pin. UTC-6/-7.
           - label: America/Denver (UTC-, the pin)
             tz_override: ""
+            pg_real_db: true
           # UTC+12/+13. A real bug — toDateOnlyUTC("2026-9-20") resolving to
           # the 19th — was INVISIBLE under a UTC-negative zone and only
           # surfaced here. That is why this leg exists.
@@ -199,6 +218,18 @@ jobs:
         env:
           TZ_OVERRIDE: ${{ matrix.tz_override }}
         run: npm test
+
+      # The real-database PostgreSQL tests. They run one file at a time, each
+      # against its own freshly created database: they migrate and wipe the
+      # database they are given and encrypt rows under their own keys, so they
+      # must never share one. Includes the backup-records test, which fails if
+      # the records are read under READ COMMITTED.
+      - name: Real-database PostgreSQL tests
+        if: matrix.pg_real_db
+        env:
+          PG_REAL_DB_ADMIN_URL: postgresql://postgres@localhost:5432/postgres
+          TZ_OVERRIDE: ${{ matrix.tz_override }}
+        run: npm run test:pg-real-db
 
   # ---------------------------------------------------------------------------
   migration-drift:

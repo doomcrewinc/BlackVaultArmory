@@ -13,7 +13,7 @@ import { isValidTimeZone, normalizeInstant } from "../date-migration";
 import { takePreEncryptionSnapshot } from "./pre-encryption-snapshot";
 import { clearCompactionPending, compactDatabase, compactionPending } from "./compaction.mjs";
 import { resolveProvider, type DbProvider } from "../db/provider";
-import { runFileStartup } from "../files/startup";
+import { assertNoUnfinishedRestore, runFileStartup } from "../files/startup";
 
 /**
  * Startup steps for field encryption at rest
@@ -21,6 +21,8 @@ import { runFileStartup } from "../files/startup";
  * sequence"), run by src/instrumentation.ts before the app serves:
  *
  * 1. assertEncryptionKey: load the key and verify it (read-only).
+ *    Then assertNoUnfinishedRestore (../files/startup.ts, read-only): refuse
+ *    while a full restore's marker says the install may be half restored.
  * 2. runEncryptionMigration: encrypt every pre-encryption value, once, in one
  *    transaction.
  * 3. compactIfPending: after a committed migration (or key rotation), erase
@@ -584,6 +586,13 @@ export async function runEncryptionStartup(): Promise<MigrationResult> {
   const raw = createRawPrismaClient();
   try {
     await assertEncryptionKey(raw);
+    // A full restore that did not finish (its marker is still in the uploads
+    // folder) refuses to start HERE: after the key check, which only reads —
+    // so a missing or wrong key is still reported as exactly that — and
+    // before the snapshot, the migration, the compaction and the file step,
+    // so nothing writes to a database or an uploads folder that may be half
+    // restored and is about to be put back from the restore's own snapshot.
+    await assertNoUnfinishedRestore();
     // Task 7 (carry N4): before the transaction opens, and only when there is
     // plaintext to encrypt. Throws (refuse to start) if an SQLite snapshot
     // cannot be written.

@@ -23,7 +23,10 @@ export function AuditList({
   onLoadMore?: () => void;
   emptyMessage?: string;
 }) {
-  if (events.length === 0 && !loading) {
+  const canLoadMore = hasMore && onLoadMore !== undefined;
+  // A page can be empty while more of the log remains to be searched (a short
+  // page with a cursor): that is not "no matches", so Load more stays.
+  if (events.length === 0 && !loading && !canLoadMore) {
     return <p className="px-4 py-6 text-sm text-vault-text-muted">{emptyMessage}</p>;
   }
 
@@ -42,7 +45,11 @@ export function AuditList({
         </div>
       )}
 
-      {!loading && hasMore && onLoadMore && (
+      {!loading && events.length === 0 && (
+        <p className="px-4 py-6 text-sm text-vault-text-muted">No matches yet in the entries searched so far.</p>
+      )}
+
+      {!loading && canLoadMore && (
         <div className="flex justify-center border-t border-vault-border py-3">
           <StandardButton type="button" variant="secondary" onClick={onLoadMore}>
             Load more

@@ -8,6 +8,7 @@ import { SNAPSHOT_REUSE_MS, snapshotStamp } from "../encryption/pre-encryption-s
 import { SYSTEM_ACTOR } from "../audit/context";
 import { writeAuditEvent } from "../audit/record";
 import { isSafeDocumentUrl } from "../upload-security";
+import { dbStepMarkerName, markerStamp, RESTORE_STAMP } from "../backup/restore-marker";
 import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
 
 /**
@@ -522,6 +523,84 @@ async function findMissingDocuments(raw: RawClient, docsDir: string, warn: (l: s
   return missing;
 }
 
+// ─── An unfinished restore ──────────────────────────────────────
+
+/** The uploads root the startup steps work on: IMAGE_UPLOAD_DIR, else `<cwd>/uploads`. */
+const startupUploadsRoot = (env: NodeJS.ProcessEnv, cwd: string): string =>
+  env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
+
+/**
+ * Refuses to start while a full restore's database-step marker is directly
+ * under the uploads root. The restore program creates the marker just before
+ * it replaces the database and removes it only when the whole restore has
+ * succeeded; the wrapper (restore.sh / restore.bat) removes it once its
+ * rollback has worked. One that is still there means the database and the
+ * uploads may be half restored — the backup's records with the previous
+ * files, or the other way round — and nothing may serve, migrate or encrypt
+ * that.
+ *
+ * Read-only: one readdir of the uploads root. WHAT COUNTS AS A MARKER is
+ * the name alone (markerStamp in ../backup/restore-marker.ts): any entry
+ * directly under the root called `.restore-<anything>.db-started`, whatever
+ * its type — a folder (what the restore program creates), a file, a link,
+ * a dangling link. scripts/snapshot-restore.sh (`state`, `markers`) and the
+ * wrappers use the same rule, so nothing the app refuses on is invisible to
+ * the commands that clear it. A missing uploads root has no marker.
+ *
+ * Only the app's start calls this (runEncryptionStartup in
+ * ../encryption/startup.ts). The restore, rollback, backup and key-rotation
+ * commands never do: they are what clears the marker.
+ */
+export async function assertNoUnfinishedRestore(opts: Pick<FileStartupOptions, "cwd" | "env"> = {}): Promise<void> {
+  const env = opts.env ?? process.env;
+  const root = startupUploadsRoot(env, opts.cwd ?? process.cwd());
+  let names: string[];
+  try {
+    names = await fsp.readdir(root);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw new FileStartupError(`Could not read the folder ${root} (${codeOf(e)}). Fix its permissions and start again.`, e);
+  }
+  // Code-unit order, which for the restore program's stamps is oldest first.
+  const stamps = names
+    .map(markerStamp)
+    .filter((s): s is string => s !== null)
+    .sort(byCodeUnit);
+  if (stamps.length === 0) return;
+  const one = stamps.length === 1;
+  const markers = stamps.map((s) => restoreMarkerLocation(path.join(root, dbStepMarkerName(s)), env)).join(", ");
+  // A recovery file is named after a stamp the restore program accepts; a marker with any other name has none.
+  const recovery = stamps.filter((s) => RESTORE_STAMP.test(s)).map((s) => `backups/restore-${s}-RECOVERY.txt`);
+  const whatToDo = recovery.length
+    ? `If ${recovery.join(" or ")} exists (in the folder that holds docker-compose.yml), follow it: it ends by removing ` +
+      "the marker. If no such file is there, the marker alone cannot say whether the install is whole: "
+    : "No recovery file belongs to a marker with that name, so the marker alone cannot say whether the install is whole: ";
+  const which = one ? "A restore did not finish cleanly: its marker" : `${stamps.length} restores did not finish cleanly: their markers`;
+  throw new FileStartupError(
+    `${which} ${markers} ${one ? "is" : "are"} still in the uploads folder. The database and the uploaded files may be half restored, so ` +
+      `BlackVault will not start. ${whatToDo}delete the marker folder (on Linux it belongs to uid 1001: use sudo) only if ` +
+      "the restore script had reported the restore as complete or as put back, and then start BlackVault again; otherwise " +
+      "do not start on this install: restore a full backup with restore.sh or restore.bat, which says how to remove the " +
+      'marker first. See the README, "Restoring a full backup".',
+  );
+}
+
+/** Orders strings by UTF-16 code unit (never by locale), like `<` on strings. */
+function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * Where a marker is, for the refusal's message: the path as this process sees
+ * it and, in a container, where that is on the host (uploadsHostPath).
+ */
+export function restoreMarkerLocation(abs: string, env: NodeJS.ProcessEnv = process.env): string {
+  const host = uploadsHostPath(abs, env);
+  return host === abs || host.startsWith(abs) ? host : `${abs} (on the host: ${host})`;
+}
+
 // ─── The step ───────────────────────────────────────────────────
 
 export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = {}): Promise<FileStartupResult> {
@@ -532,7 +611,7 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
   const warn = (line: string) => console.error(line);
   const keys = getFieldKeys();
 
-  const root = env.IMAGE_UPLOAD_DIR ? uploadsRoot(env) : path.join(cwd, "uploads");
+  const root = startupUploadsRoot(env, cwd);
   const docsDir = path.join(root, "documents");
   const legacyDir = legacyDocumentsRoot(cwd);
   const isDocument = (e: Entry) => e.rel.startsWith("documents/");

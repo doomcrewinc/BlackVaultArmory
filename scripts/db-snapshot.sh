@@ -146,8 +146,9 @@ rm -f "$UPLOADS_MARKER_FILE"
 # mounted from this checkout, not taken from the image, so an older image
 # still runs the current copy rules. Only root reads the mounted file (it
 # passes the text on to the 1001 stage), so a checkout made under umask 027
-# or 077, where the file is 0640/0600 and owned by the host user, still works. The snapshot belongs to uid 1001: delete
-# it with sudo. It skips .pre-encryption-* folders and *.tmp / *.rot files,
+# or 077, where the file is 0640/0600 and owned by the host user, still works. The snapshot belongs to uid 1001: on
+# Linux the host user needs sudo to delete it (elsewhere Docker Desktop and
+# OrbStack show it as the host user's own). It skips .pre-encryption-* folders and *.tmp / *.rot files,
 # and never follows a symbolic link. Exit 3 from it means "nothing to copy".
 UPLOADS_SRC="$DATA_DIR/uploads"
 if [ ! -d "$UPLOADS_SRC" ]; then
@@ -173,7 +174,12 @@ case "$rc" in
     (umask 077 && : > "$UPLOADS_MARKER_FILE" && chmod 600 "$UPLOADS_MARKER_FILE" && printf '%s' "$UPLOADS_OUT" > "$UPLOADS_MARKER_FILE") ||
       echo "WARNING: could not write $UPLOADS_MARKER_FILE; the app may take its own snapshot of the uploads folder on its next start."
     echo ""
-    echo "Uploads snapshot saved: $UPLOADS_OUT (owned by the app user, uid 1001; delete it with sudo)"
+    if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
+      DELETE_ADVICE="delete it with sudo"
+    else
+      DELETE_ADVICE="delete it once BlackVault is confirmed working"
+    fi
+    echo "Uploads snapshot saved: $UPLOADS_OUT (owned by the app user, uid 1001; $DELETE_ADVICE)"
     ;;
   3)
     echo "No files in $UPLOADS_SRC to snapshot; skipping the uploads snapshot."

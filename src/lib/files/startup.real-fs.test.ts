@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
@@ -25,7 +25,9 @@ import type { PrismaClient } from "@prisma/client";
 import { createRawPrismaClient } from "@/lib/prisma";
 import { decryptFile, deriveKeys, encryptFile, fileKeyId, isEncryptedFile } from "@/lib/encryption/core.mjs";
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
-import { FileStartupError, runFileStartup, uploadsHostPath } from "./startup";
+import { dbStepMarkerName } from "@/lib/backup/full-restore";
+import { markerStamp, RESTORE_STAMP } from "@/lib/backup/restore-marker";
+import { assertNoUnfinishedRestore, FileStartupError, restoreMarkerLocation, runFileStartup, uploadsHostPath } from "./startup";
 
 const OTHER_KEYS = deriveKeys(Buffer.from("11".repeat(32), "hex"));
 const NOW = new Date("2026-10-01T12:34:56.000Z");
@@ -578,4 +580,170 @@ describe("runFileStartup — fix round 1", () => {
     expect(uploadsHostPath("/app/uploads/.pre-encryption-x", {} as unknown as NodeJS.ProcessEnv)).toMatch(/in the container.*uploads\/ folder/);
     expect(uploadsHostPath("/home/me/bv/uploads/.pre-encryption-x", env)).toBe("/home/me/bv/uploads/.pre-encryption-x");
   });
+});
+
+describe("assertNoUnfinishedRestore", () => {
+  const OLD = "20260930-101112";
+  // The name the restore program itself gives its marker.
+  const markerName = dbStepMarkerName;
+  /** The marker as the restore program leaves it: a folder holding one file. */
+  const leaveMarker = (stamp: string) => put(`${markerName(stamp)}/started`, "");
+  const check = () => assertNoUnfinishedRestore({ cwd, env });
+  const snapshotRestore = (...args: string[]) =>
+    spawnSync("sh", [path.resolve("scripts/snapshot-restore.sh"), ...args], { encoding: "utf8", timeout: 30_000 });
+
+  it("a restore's database-step marker in the uploads root refuses to start, naming the marker, its stamp, the recovery file and the README section", async () => {
+    leaveMarker(STAMP);
+    const err = await check().catch((e) => e);
+    expect(err).toBeInstanceOf(FileStartupError);
+    expect(err.message).toContain("A restore did not finish cleanly");
+    expect(err.message).toContain(path.join(root, markerName(STAMP)));
+    expect(err.message).toContain(`If backups/restore-${STAMP}-RECOVERY.txt exists`);
+    expect(err.message).toContain('"Restoring a full backup"');
+    expect(err.message).toMatch(/follow it: it ends by removing the marker/);
+    // What the recovery file does is not promised here: it may put the old install back, or only remove the marker.
+    expect(err.message).not.toMatch(/puts the install back/);
+    // Without the file the marker proves nothing: deleting it is right only after a restore known to have ended; never "just start".
+    expect(err.message).toMatch(/If no such file is there, the marker alone cannot say whether the install is whole/);
+    expect(err.message).toMatch(/delete the marker folder .* only if the restore script had reported the restore as complete or as put back/);
+    expect(err.message).toMatch(/otherwise do not start on this install: restore a full backup with restore\.sh or restore\.bat/);
+    expect(err.message).not.toMatch(/only the marker is left/);
+    // Nothing was changed by looking.
+    expect(existsSync(path.join(root, markerName(STAMP), "started"))).toBe(true);
+  });
+
+  it("two markers: both are named, each with its own recovery file", async () => {
+    leaveMarker(STAMP);
+    leaveMarker(OLD);
+    const err = await check().catch((e) => e);
+    expect(err).toBeInstanceOf(FileStartupError);
+    for (const stamp of [OLD, STAMP]) {
+      expect(err.message).toContain(path.join(root, markerName(stamp)));
+      expect(err.message).toContain(`backups/restore-${stamp}-RECOVERY.txt`);
+    }
+    expect(err.message).toContain("2 restores did not finish cleanly");
+    // Oldest first, whatever order the folder lists them in.
+    expect(err.message.indexOf(markerName(OLD))).toBeLessThan(err.message.indexOf(markerName(STAMP)));
+    expect(err.message.indexOf(`restore-${OLD}-RECOVERY`)).toBeLessThan(err.message.indexOf(`restore-${STAMP}-RECOVERY`));
+  });
+
+  it("stamps are ordered by code unit, not by locale: an upper-case name sorts before every lower-case one", async () => {
+    put(".restore-b.db-started/started", "");
+    put(".restore-Z.db-started/started", "");
+    put(".restore-a.db-started/started", "");
+    const err = await check().catch((e) => e);
+    const at = (n: string) => err.message.indexOf(`.restore-${n}.db-started`);
+    expect([at("Z"), at("a"), at("b")].every((i) => i > 0)).toBe(true);
+    expect(at("Z")).toBeLessThan(at("a"));
+    expect(at("a")).toBeLessThan(at("b"));
+  });
+
+  it("a marker whose stamp is not one the restore program creates still refuses; no recovery file is named for it", async () => {
+    put(".restore-my old one.db-started/started", "");
+    const err = await check().catch((e) => e);
+    expect(err).toBeInstanceOf(FileStartupError);
+    expect(err.message).toContain(path.join(root, ".restore-my old one.db-started"));
+    expect(err.message).not.toContain("RECOVERY.txt");
+    expect(err.message).toMatch(/No recovery file belongs to a marker with that name, so the marker alone cannot say whether the install is whole/);
+  });
+
+  it("where the marker is: the path as the app sees it, and the host path when BLACKVAULT_HOST_UPLOADS_DIR says where that is", () => {
+    const inContainer = "/app/uploads/.restore-20261001-123456.db-started";
+    expect(restoreMarkerLocation(inContainer, { BLACKVAULT_HOST_UPLOADS_DIR: "/srv/bv/data/uploads" } as unknown as NodeJS.ProcessEnv)).toBe(
+      `${inContainer} (on the host: /srv/bv/data/uploads/.restore-20261001-123456.db-started)`,
+    );
+    expect(restoreMarkerLocation(inContainer, {} as unknown as NodeJS.ProcessEnv)).toBe(uploadsHostPath(inContainer, {} as unknown as NodeJS.ProcessEnv));
+    expect(restoreMarkerLocation(inContainer, {} as unknown as NodeJS.ProcessEnv)).toMatch(/^\/app\/uploads\/\.restore-20261001-123456\.db-started \(in the container; on the host/);
+    expect(restoreMarkerLocation("/home/me/bv/uploads/.restore-x.db-started", {} as unknown as NodeJS.ProcessEnv)).toBe("/home/me/bv/uploads/.restore-x.db-started");
+  });
+
+  it("the stamp shape is the restore program's own: one definition, used by both", () => {
+    expect(RESTORE_STAMP.test(STAMP)).toBe(true);
+    expect(RESTORE_STAMP.test(`${STAMP}-1234`)).toBe(true);
+    expect(RESTORE_STAMP.test("my old one")).toBe(false);
+    expect(markerStamp(dbStepMarkerName(STAMP))).toBe(STAMP);
+    expect(markerStamp(`.restore-${STAMP}`)).toBeNull();
+    expect(markerStamp(`.pre-restore-${STAMP}`)).toBeNull();
+  });
+
+  it.skipIf(process.platform === "win32")("a dangling symbolic link with the marker's name refuses too, and the rollback script calls that state 'started' as well", async () => {
+    mkdirSync(root, { recursive: true });
+    symlinkSync("/nonexistent/bv-nowhere", path.join(root, markerName(STAMP)));
+    await expect(check()).rejects.toThrow(FileStartupError);
+    const state = snapshotRestore("state", root, STAMP);
+    expect([state.status, state.stdout]).toEqual([0, "started\n"]);
+    const listed = snapshotRestore("markers", root);
+    expect([listed.status, listed.stdout]).toEqual([0, `${STAMP}\n`]);
+    expect(snapshotRestore("clear-marker", root, STAMP).status).toBe(0);
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("a marker that is a plain file refuses too (the rollback script only asks whether the name exists)", async () => {
+    put(markerName(STAMP), "");
+    await expect(check()).rejects.toThrow(FileStartupError);
+  });
+
+  it("no marker: proceeds, with or without an uploads folder", async () => {
+    await expect(check()).resolves.toBeUndefined(); // no uploads folder at all
+    put("images/a.jpg", "jpeg");
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("a .restore-<stamp> staging folder without a marker does not refuse", async () => {
+    put(`.restore-${STAMP}/images/a.jpg`, "staged");
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("a .pre-restore-<stamp> folder does not refuse", async () => {
+    put(`.pre-restore-${STAMP}/images/a.jpg`, "previous");
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("a marker-like name anywhere but directly under the uploads root does not refuse", async () => {
+    put(`images/${markerName(STAMP)}/started`, "");
+    put(`.pre-restore-${STAMP}/${markerName(STAMP)}/started`, "");
+    put(`.restore-${STAMP}/${markerName(OLD)}`, "");
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("without IMAGE_UPLOAD_DIR the uploads root is <cwd>/uploads, as for the file step", async () => {
+    put(`${markerName(STAMP)}/started`, "", path.join(cwd, "uploads"));
+    await expect(assertNoUnfinishedRestore({ cwd, env: {} as unknown as NodeJS.ProcessEnv })).rejects.toThrow(
+      path.join(cwd, "uploads", markerName(STAMP)),
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "the rollback commands of the recovery file run with the marker present, and clear-marker is what lets BlackVault start again",
+    async () => {
+      const liveDb = put("vault.db", "half-restored database", work);
+      const snapDb = put("blackvault-snapshot.db", "database as it was", work);
+      const snapDir = path.join(work, "uploads-snapshot");
+      put("images/a.jpg", "photo as it was", snapDir);
+      put(`.pre-restore-${STAMP}/images/a.jpg`, "photo as it was"); // moved aside by the restore
+      put("images/b.jpg", "from the archive");
+      put(`.restore-${STAMP}/documents/c.pdf`, "staged");
+      leaveMarker(STAMP);
+      await expect(check()).rejects.toThrow(FileStartupError);
+
+      const state = snapshotRestore("state", root, STAMP);
+      expect([state.status, state.stdout]).toEqual([0, "started\n"]);
+      const uploads = snapshotRestore("uploads", root, STAMP, snapDir);
+      expect(uploads.stderr).toBe("");
+      expect(uploads.status).toBe(0);
+      expect(readFileSync(path.join(root, "images/a.jpg"), "utf8")).toBe("photo as it was");
+      expect(existsSync(path.join(root, "images/b.jpg"))).toBe(false);
+      expect(existsSync(path.join(root, `.restore-${STAMP}`))).toBe(false);
+      const sqlite = snapshotRestore("sqlite", snapDb, liveDb, root, STAMP);
+      expect(sqlite.stderr).toBe("");
+      expect(sqlite.status).toBe(0);
+      expect(readFileSync(liveDb, "utf8")).toBe("database as it was");
+
+      // Everything is back, and the marker still says so until the last command.
+      await expect(check()).rejects.toThrow(FileStartupError);
+      const cleared = snapshotRestore("clear-marker", root, STAMP);
+      expect([cleared.status, cleared.stderr]).toEqual([0, ""]);
+      await expect(check()).resolves.toBeUndefined();
+    },
+  );
 });

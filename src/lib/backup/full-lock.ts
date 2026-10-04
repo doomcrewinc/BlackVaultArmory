@@ -227,6 +227,27 @@ function alreadyRunning(body: LockBody | null): FullBackupAlreadyRunningError {
   });
 }
 
+/** What `fullBackupLockStatus` found. The holder is as written in the lock file: `pid` 0 / `"unknown"` when the file names none. */
+export type FullBackupLockStatus = { held: false } | { held: true; pid: number; startedAt: string; hostname: string };
+
+/**
+ * Whether a live backup or restore holds the lock in `dir`, by the same rule
+ * `acquireFullBackupLock` applies (`judge`) — without taking, reclaiming or
+ * touching anything. No lock file (or no folder), or a stale one: not held.
+ * Rejects with the underlying fs error when the lock cannot be read.
+ *
+ * It is a look, not a reservation: a backup can start right after it. A
+ * reclaim that is under way at this moment (a stale lock beside a fresh
+ * `.reclaim` guard) reads as not held.
+ */
+export async function fullBackupLockStatus(dir: string, opts: Pick<FullBackupLockOptions, "staleMs" | "hostname"> = {}): Promise<FullBackupLockStatus> {
+  const lockPath = path.join(path.resolve(dir), FULL_BACKUP_LOCK_NAME);
+  const verdict = await judge(lockPath, opts.hostname ?? os.hostname(), opts.staleMs ?? FULL_BACKUP_LOCK_STALE_MS);
+  if (verdict.state !== "live") return { held: false };
+  const holder = alreadyRunning(verdict.body);
+  return { held: true, pid: holder.pid, startedAt: holder.startedAt, hostname: holder.hostname };
+}
+
 /**
  * `fchmod` answers that mean "this filesystem does not let the app user set a
  * mode here": a FAT/exFAT disk or a share mounted for another uid (EPERM: the

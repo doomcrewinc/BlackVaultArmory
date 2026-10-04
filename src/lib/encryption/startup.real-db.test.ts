@@ -1051,6 +1051,75 @@ describe(`encryption startup against real ${ctx.pg ? "PostgreSQL" : "SQLite (con
       expect(await raw.auditEvent.count({ where: { action: "ENCRYPTION_ENABLED" } })).toBe(1);
     }, 90_000);
 
+    // ── An unfinished restore ──
+    const RESTORE_MARKER = ".restore-20261002-030405.db-started";
+    const leaveRestoreMarker = () => mkdirSync(join(ctx.uploads, RESTORE_MARKER), { recursive: true });
+    const removeUploads = () => rmSync(ctx.uploads, { recursive: true, force: true });
+
+    it("a leftover restore marker: refuses to start (exit 1) on one line that names it, before anything is migrated, encrypted or scanned", async () => {
+      await seedPlaintext();
+      const before = await rawSnapshot();
+      const fileStepsBefore = fileStep.calls;
+      const dbSnapshots = () => readdirSync(ctx.dir).filter((n) => n.startsWith("pre-encryption-")).sort();
+      const dbSnapshotsBefore = dbSnapshots();
+      leaveRestoreMarker();
+      mkdirSync(join(ctx.uploads, "images"), { recursive: true });
+      writeFileSync(join(ctx.uploads, "images", "plain.jpg"), "jpeg-plain");
+      try {
+        const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+        await within(30_000, register());
+        expect(exit).toHaveBeenCalledWith(1);
+        const line = String(vi.mocked(console.error).mock.calls[0][0]);
+        expect(line).toMatch(/^\[encryption\] Startup failed, refusing to start: A restore did not finish cleanly: its marker /);
+        expect(line).toContain(join(ctx.uploads, RESTORE_MARKER));
+        expect(line).toContain("backups/restore-20261002-030405-RECOVERY.txt");
+        expect(line).toContain('See the README, "Restoring a full backup".');
+        expect(line).not.toContain("\n");
+        // Nothing was changed: no row, no snapshot of the database, no file.
+        expect(await rawSnapshot()).toBe(before);
+        expect(dbSnapshots()).toEqual(dbSnapshotsBefore);
+        expect(fileStep.calls).toBe(fileStepsBefore);
+        expect(readFileSync(join(ctx.uploads, "images", "plain.jpg"), "utf8")).toBe("jpeg-plain");
+        expect(readdirSync(ctx.uploads).sort()).toEqual([RESTORE_MARKER, "images"]);
+      } finally {
+        removeUploads();
+      }
+    });
+
+    it("no key AND a leftover restore marker: the missing key is what is reported", async () => {
+      leaveRestoreMarker();
+      try {
+        const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+        await withKey(null, () => within(30_000, register()));
+        expect(exit).toHaveBeenCalledWith(1);
+        const lines = vi.mocked(console.error).mock.calls.flat().join("\n");
+        expect(lines).toMatch(/^\[encryption\] No encryption key\./);
+        expect(lines).not.toContain("restore");
+      } finally {
+        removeUploads();
+      }
+    });
+
+    it("a wrong key AND a leftover restore marker: the wrong key is what is reported", async () => {
+      await seedPlaintext();
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      await within(60_000, register()); // encrypts, and creates the key check
+      expect(exit).not.toHaveBeenCalled();
+      const before = await rawSnapshot();
+      leaveRestoreMarker();
+      try {
+        vi.mocked(console.error).mockClear();
+        await withKey(OTHER_KEY, () => within(30_000, register()));
+        expect(exit).toHaveBeenCalledWith(1);
+        const lines = vi.mocked(console.error).mock.calls.flat().join("\n");
+        expect(lines).toMatch(/^\[encryption\] Wrong encryption key: this database was encrypted with key /);
+        expect(lines).not.toContain("restore");
+        expect(await rawSnapshot()).toBe(before);
+      } finally {
+        removeUploads();
+      }
+    }, 90_000);
+
     // ── 10 (Task 7, carry N4) ── the first start that encrypts takes its own snapshot ──
     const snapshotsInDbDir = () =>
       readdirSync(ctx.dir).filter((n) => /^pre-encryption-\d{8}-\d{6}(-\d+)?\.db$/.test(n));

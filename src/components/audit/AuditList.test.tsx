@@ -52,4 +52,18 @@ describe("AuditList", () => {
     expect(screen.getByText("Glock 19")).toBeTruthy();
     expect(screen.getByText(/loading/i)).toBeTruthy();
   });
+
+  it("keeps Load more on an empty page that still has a cursor, instead of saying there are no matches", () => {
+    const onLoadMore = vi.fn();
+    render(<AuditList events={[]} hasMore onLoadMore={onLoadMore} emptyMessage="Nothing here." />);
+    expect(screen.queryByText("Nothing here.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("says there are no matches only when an empty page has no cursor", () => {
+    render(<AuditList events={[]} emptyMessage="Nothing here." />);
+    expect(screen.getByText("Nothing here.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
 });

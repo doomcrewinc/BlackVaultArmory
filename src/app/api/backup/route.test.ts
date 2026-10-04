@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   inFlight: 0,
   maxInFlight: 0,
   settingsFindUnique: vi.fn(),
+  transaction: vi.fn(),
   recordEvent: vi.fn(async (_client: unknown, _e: { action: string }) => {}),
 }));
 
@@ -48,6 +49,8 @@ vi.mock("@/lib/prisma", async () => {
       }),
     };
   }
+  // The records are read in one transaction; the mock's transaction client is the mock itself.
+  prisma.$transaction = mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
   return { prisma };
 });
 
@@ -77,6 +80,7 @@ describe("POST /api/backup", () => {
     mocks.settingsFindUnique.mockResolvedValue({ includeUploadsInBackup: true, backupDestinationPath: null });
     auth.validateSession.mockResolvedValue(ADMIN_SESSION);
     mocks.recordEvent.mockClear();
+    mocks.transaction.mockClear();
   });
 
   it("401 when signed out, nothing exported", async () => {
@@ -179,6 +183,7 @@ describe("POST /api/backup", () => {
     await POST(backupRequest());
 
     expect(mocks.findManyCalls).toHaveLength(BACKUP_MODELS.length);
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
     expect(mocks.maxInFlight).toBe(1);
   });
 

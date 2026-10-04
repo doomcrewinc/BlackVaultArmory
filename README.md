@@ -524,6 +524,15 @@ SQLite on Windows works the way it always has. Please report what you see in a
 
 ---
 
+### Known limitation: searching for `%` or `_` on SQLite
+
+On the SQLite database, a search term containing `%` or `_` in the global search and in the kit
+item picker may show a few extra near-matches (for example `AB_12` also finds `AB-12`), and a term
+made only of those characters matches everything. The audit log search is exact on both databases.
+PostgreSQL matches `%` and `_` literally everywhere.
+
+---
+
 ## Users and sign-in
 
 BlackVault requires an account. The first time you open it — a fresh install, or right after
@@ -1485,7 +1494,10 @@ does, in this order:
    to ask, so `--yes` is then required; without it the script stops before anything is checked.
 3. **Stops BlackVault and takes a snapshot** of the database and the uploads folder into
    `backups/` (next to `docker-compose.yml`). If the snapshot fails, BlackVault is started again
-   and nothing was changed.
+   and nothing was changed. If a full backup is running when the restore gets here (the
+   **Settings** button, `backup.sh`, a scheduled backup), the restore stops instead, before
+   BlackVault is stopped: `ERROR: a full backup is running`. Nothing was changed; run the restore
+   again when the backup has finished.
 4. **Restores**, in a one-off container. The backup's files are written, encrypted with **this**
    install's key, into `uploads/.restore-<time>/`. The database records are replaced in one
    transaction. Then the current `images/` and `documents/` folders are moved into
@@ -1512,6 +1524,21 @@ closed, the machine restarted) or the automatic rollback failed, which the scrip
 exits. Either way BlackVault is stopped and the install may be half restored. Read the file and
 follow it. **While one exists, a new restore refuses to start.**
 
+**BlackVault does not start on a half-restored install.** A restore that reached its database
+step leaves a marker, `uploads/.restore-<time>.db-started`, until it has finished or been put
+back. While a marker exists BlackVault exits at startup with a message that names it. If
+`backups/restore-<time>-RECOVERY.txt` exists, follow it: it ends by removing the marker, either
+after putting the install back or, when the restore itself had finished and only the marker could
+not be removed, as its one step. If no such file is there, the marker alone does not say whether
+the install is whole: delete the marker folder (on Linux with `sudo`) only if the restore script
+had reported the restore as complete or as put back. Otherwise do not start on that install:
+restore a full backup; the restore script prints the command that removes the marker first.
+
+The restore script follows the same rule. It removes its own marker before it starts BlackVault,
+and if it cannot, it does not start BlackVault, exits 1 and prints the command that removes the
+marker. Markers left by earlier restores stop a new restore before anything is checked, with one
+command that removes them; so does an uploads folder it cannot check for them.
+
 **`uploads/.pre-restore-<time>/`** holds the photos and documents that were there before the
 restore, every file, including ones the backup does not have. BlackVault never deletes it, and it
 uses as much disk as those files did. Once you have checked the restored install, delete it, and
@@ -1520,7 +1547,7 @@ the snapshot in `backups/` (on Linux with `sudo`).
 | Exit code | Meaning |
 |---|---|
 | 0 | Restored. |
-| 1 | Failed. The last lines say which of four it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
+| 1 | Failed. The last lines say which of five it was: nothing was changed; or the install was put back and BlackVault was started again; or the install was put back (or nothing was changed, or the restore itself had finished) but BlackVault **could not be started** — the output says so: look at `docker compose logs blackvault` and start it by hand with `docker compose up -d`; or the restore had finished (or the install was put back) but the restore's marker could not be removed — then BlackVault was **not started**: run the command the last line prints, then `docker compose up -d`; or the rollback failed, or how far the restore got could not be found out, or the script was interrupted during the restore — then BlackVault is **stopped** and the install may be half restored: follow the RECOVERY file. |
 
 ---
 

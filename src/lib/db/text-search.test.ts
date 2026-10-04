@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { containsInsensitive } from "./text-search";
+import { containsInsensitive, matchesLiteralInsensitive, needsLiteralCheck } from "./text-search";
 
 describe("containsInsensitive", () => {
   it("adds mode: insensitive on postgres, where LIKE is case-sensitive", () => {
@@ -15,5 +15,39 @@ describe("containsInsensitive", () => {
   it("preserves the query's casing", () => {
     expect(containsInsensitive("GLock", "postgres").contains).toBe("GLock");
     expect(containsInsensitive("GLock", "sqlite").contains).toBe("GLock");
+  });
+
+  it("escapes backslash, percent and underscore on postgres", () => {
+    expect(containsInsensitive("50%_a\\b", "postgres").contains).toBe("50\\%\\_a\\\\b");
+  });
+
+  it("passes a sqlite term holding wildcards through: the LIKE pattern is already the tightest superset", () => {
+    expect(containsInsensitive("AB_12", "sqlite")).toEqual({ contains: "AB_12" });
+    expect(containsInsensitive("100%", "sqlite")).toEqual({ contains: "100%" });
+    expect(containsInsensitive("_", "sqlite")).toEqual({ contains: "_" });
+  });
+
+  it("leaves an ordinary sqlite term, and one with a backslash, unchanged", () => {
+    expect(containsInsensitive("glock 19", "sqlite")).toEqual({ contains: "glock 19" });
+    expect(containsInsensitive("a\\b", "sqlite")).toEqual({ contains: "a\\b" });
+  });
+
+  it("is a plain field filter, so callers can embed it in OR lists", () => {
+    expect(Object.keys(containsInsensitive("AB_12", "sqlite"))).toEqual(["contains"]);
+  });
+});
+
+describe("needsLiteralCheck / matchesLiteralInsensitive", () => {
+  it("is needed only on sqlite and only when a wildcard is present", () => {
+    expect(needsLiteralCheck("a_b", "sqlite")).toBe(true);
+    expect(needsLiteralCheck("100%", "sqlite")).toBe(true);
+    expect(needsLiteralCheck("plain", "sqlite")).toBe(false);
+    expect(needsLiteralCheck("a_b", "postgres")).toBe(false);
+  });
+
+  it("matches a literal substring, ASCII-case-insensitively", () => {
+    expect(matchesLiteralInsensitive("Pre_FIX", "e_f")).toBe(true);
+    expect(matchesLiteralInsensitive("axb", "a_b")).toBe(false);
+    expect(matchesLiteralInsensitive(null, "a")).toBe(false);
   });
 });
