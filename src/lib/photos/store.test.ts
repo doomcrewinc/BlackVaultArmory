@@ -167,9 +167,12 @@ describe("removePhotoFiles", () => {
 
   it("logs and does not throw on any other error", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    mocks.unlink.mockRejectedValue(Object.assign(new Error("nope"), { code: "EACCES" }));
+    mocks.unlink.mockRejectedValue(Object.assign(new Error("MARKER-secret"), { code: "EACCES" }));
     await expect(removePhotoFiles(photos)).resolves.toBeUndefined();
-    expect(warn).toHaveBeenCalled();
+    const logged = warn.mock.calls.flat().join(" ");
+    expect(logged).toContain("p1");
+    expect(logged).toContain("EACCES");
+    expect(logged).not.toContain("MARKER-secret");
   });
 });
 

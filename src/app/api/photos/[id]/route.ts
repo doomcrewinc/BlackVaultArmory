@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { describeError } from "@/lib/photos/errors";
 import { requireAuth } from "@/lib/server/auth";
 import { ownerOf } from "@/lib/photos/owner";
 import { itemDelegate, normaliseLabel, photoUrl, removePhotoFiles, toPhotoDto } from "@/lib/photos/store";
@@ -20,11 +21,16 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
     const existing = await prisma.photo.findUnique({ where: { id } });
     if (!existing) return bad("Photo not found", 404);
 
-    const body = await request.json().catch(() => ({}));
+    const body: unknown = await request.json().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return bad("Invalid request body.");
+    }
+    const { label: rawLabel, main } = body as { label?: unknown; main?: unknown };
     let label: string | null | undefined;
     if ("label" in body) {
+      if (rawLabel !== null && typeof rawLabel !== "string") return bad("Label must be text or null.");
       try {
-        label = normaliseLabel(body.label);
+        label = normaliseLabel(rawLabel);
       } catch {
         return bad("Label is too long (80 characters at most).");
       }
@@ -34,7 +40,7 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
     const url = photoUrl(existing.fileName);
     const photo = await prisma.$transaction(async (tx) => {
       const updated = label === undefined ? existing : await tx.photo.update({ where: { id }, data: { label } });
-      if (body.main === true) {
+      if (main === true) {
         await itemDelegate(tx, type).update({ where: { id: entityId }, data: { imageUrl: url } });
       }
       return updated;
@@ -42,8 +48,8 @@ export async function PATCH(request: NextRequest, { params }: Ctx) {
 
     const item = await itemDelegate(prisma, type).findUnique({ where: { id: entityId }, select: { imageUrl: true } });
     return NextResponse.json({ photo: toPhotoDto(photo, item?.imageUrl ?? null) });
-  } catch {
-    console.error("PATCH /api/photos/[id] failed");
+  } catch (e) {
+    console.error("PATCH /api/photos/[id] failed:", describeError(e));
     return bad("Failed to update photo", 500);
   }
 }
@@ -72,8 +78,8 @@ export async function DELETE(_request: NextRequest, { params }: Ctx) {
     await removePhotoFiles([{ id: existing.id, fileName: existing.fileName }]);
 
     return NextResponse.json({ success: true });
-  } catch {
-    console.error("DELETE /api/photos/[id] failed");
+  } catch (e) {
+    console.error("DELETE /api/photos/[id] failed:", describeError(e));
     return bad("Failed to delete photo", 500);
   }
 }

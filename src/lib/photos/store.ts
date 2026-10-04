@@ -3,6 +3,7 @@ import { mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { Photo, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { describeError } from "./errors";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
 import { processPicture } from "@/lib/images/process";
 import { OWNER_COLUMN, OWNER_DELEGATE, type PhotoEntityType } from "./owner";
@@ -129,19 +130,19 @@ export async function addPhoto(input: {
   }
 }
 
-async function unlinkQuietly(file: string): Promise<void> {
+async function unlinkQuietly(file: string, photoId: string): Promise<void> {
   try {
     await unlink(file);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-    console.warn("Could not remove a photo file");
+    console.warn(`Could not remove a file of photo ${photoId}; it was left behind:`, describeError(e));
   }
 }
 
 /** Removes the original and preview of each photo. Never throws; logs failures. */
 export async function removePhotoFiles(photos: Array<{ id: string; fileName: string }>): Promise<void> {
   await Promise.all(
-    photos.flatMap((p) => [unlinkQuietly(originalPath(p.fileName)), unlinkQuietly(previewPath(p.id))]),
+    photos.flatMap((p) => [unlinkQuietly(originalPath(p.fileName), p.id), unlinkQuietly(previewPath(p.id), p.id)]),
   );
 }
 

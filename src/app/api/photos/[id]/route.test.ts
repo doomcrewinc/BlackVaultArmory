@@ -44,6 +44,7 @@ const row = {
   ammoStockId: null,
   supplyId: null,
 };
+const boom = Object.assign(new Error("MARKER-secret"), { code: "ENOSPC" });
 const ctx = { params: Promise.resolve({ id: "p1" }) };
 
 function patch(body: unknown) {
@@ -80,6 +81,40 @@ describe.each([
   it("404s when the photo does not exist", async () => {
     mocks.photoFindUnique.mockResolvedValue(null);
     expect((await call()).status).toBe(404);
+  });
+});
+
+describe("failure logging", () => {
+  it.each([
+    ["PATCH", () => patch({ label: "x" }), () => mocks.photoUpdate.mockRejectedValueOnce(boom)],
+    ["DELETE", del, () => mocks.photoDelete.mockRejectedValueOnce(boom)],
+  ])("%s logs the error name and code, not its message", async (_n, call, fail) => {
+    fail();
+
+    expect((await call()).status).toBe(500);
+
+    const logged = vi.mocked(console.error).mock.calls.flat().join(" ");
+    expect(logged).toContain("Error ENOSPC");
+    expect(logged).not.toContain("MARKER-secret");
+  });
+});
+
+describe("PATCH /api/photos/[id] input handling", () => {
+  it.each([[null], [5], ["x"], [[]]])("400s on the body %j", async (body) => {
+    const res = await patch(body);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Invalid request body.");
+    expect(mocks.photoUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each([[5], [true], [{}], [["a"]]])("400s on the label %j without updating", async (label) => {
+    expect((await patch({ label })).status).toBe(400);
+    expect(mocks.photoUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each([[null], [""]])("still clears the label with %j", async (label) => {
+    expect((await patch({ label })).status).toBe(200);
+    expect(mocks.photoUpdate.mock.calls[0][0].data).toEqual({ label: null });
   });
 });
 

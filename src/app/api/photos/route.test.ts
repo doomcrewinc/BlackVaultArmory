@@ -100,6 +100,23 @@ describe("GET /api/photos", () => {
   });
 });
 
+describe("failure logging", () => {
+  const boom = Object.assign(new Error("MARKER-secret"), { code: "ENOSPC" });
+
+  it.each([
+    ["GET", () => GET(getReq("?entityType=gear&entityId=g1")), () => mocks.photoFindMany.mockRejectedValueOnce(boom)],
+    ["POST", () => POST(postReq(valid)), () => mocks.addPhoto.mockRejectedValueOnce(boom)],
+  ])("%s logs the error name and code, not its message", async (_n, call, fail) => {
+    fail();
+
+    expect((await call()).status).toBe(500);
+
+    const logged = vi.mocked(console.error).mock.calls.flat().join(" ");
+    expect(logged).toContain("Error ENOSPC");
+    expect(logged).not.toContain("MARKER-secret");
+  });
+});
+
 describe("POST /api/photos", () => {
   it("is refused without a session", async () => {
     mocks.requireAuth.mockResolvedValue(NextResponse.json({ error: "no" }, { status: 401 }));
@@ -184,6 +201,6 @@ describe("POST /api/photos", () => {
     mocks.addPhoto.mockRejectedValue(new Error("secret internals"));
     const res = await POST(postReq(valid));
     expect(res.status).toBe(500);
-    expect(console.error).toHaveBeenCalledWith("POST /api/photos failed");
+    expect(console.error).toHaveBeenCalledWith("POST /api/photos failed:", "Error");
   });
 });

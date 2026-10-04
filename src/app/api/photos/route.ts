@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { describeError } from "@/lib/photos/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { getCurrentUser, requireAuth } from "@/lib/server/auth";
 import { MAX_PHOTO_BYTES, PictureRejected } from "@/lib/images/process";
@@ -43,8 +44,8 @@ export async function GET(request: NextRequest) {
     ]);
     const main = item?.imageUrl ?? null;
     return NextResponse.json({ photos: photos.map((p) => toPhotoDto(p, main)) });
-  } catch {
-    console.error("GET /api/photos failed");
+  } catch (e) {
+    console.error("GET /api/photos failed:", describeError(e));
     return bad("Failed to list photos", 500);
   }
 }
@@ -97,8 +98,8 @@ export async function POST(request: NextRequest) {
       if (e instanceof PictureRejected) return bad(e.message);
       throw e;
     }
-  } catch {
-    console.error("POST /api/photos failed");
+  } catch (e) {
+    console.error("POST /api/photos failed:", describeError(e));
     return bad("Failed to upload photo", 500);
   }
 }
