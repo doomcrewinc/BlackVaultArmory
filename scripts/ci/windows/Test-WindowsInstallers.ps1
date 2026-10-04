@@ -1130,6 +1130,11 @@ $EnvCases = @(
   @("a dollar sign inside single quotes is literal", "K='a`$HOME b'`r`n", "[a`$HOME b][1][]"),
   @("a dollar sign only in the comment", "K=v # costs `$5`r`n", "[v][1][]"),
   @("an ampersand and a pipe in the value", "K=a&b|c`r`n", "[a&b|c][1][]"),
+  @("a double-quoted Windows path with no escape letter", "K=`"C:\BlackVault\Data`"`r`n", "[C:\BlackVault\Data][1][]"),
+  @("a double-quoted path, upper-case after the backslashes", "K=`"C:\Users\Rob Smith\BlackVault`"`r`n", "[C:\Users\Rob Smith\BlackVault][1][]"),
+  @("\c and \( inside double quotes are text", "K=`"x\cy\(w`"`r`n", "[x\cy\(w][1][]"),
+  @("KEY: value, then KEY=value (the last assignment wins)", "K: v`r`nA=1`r`nK=w`r`n", "[w][1][]"),
+  @("export KEY: value, then export KEY=value", "export K: v`r`nexport K=w`r`n", "[w][1][]"),
   @("a UTF-8 byte-order mark before the first line", "$([char]0xFEFF)K=v`r`n", "[v][1][]"),
   @("a byte-order mark before an export line", "$([char]0xFEFF)export K=v`r`n", "[v][1][]"),
   @("inner spaces are kept", "K=C:\my vault\data`r`n", "[C:\my vault\data][1][]"),
@@ -1158,7 +1163,16 @@ $EnvCases = @(
   @("REFUSED: a value starting with =", "K==b`r`n", "[][1][1]"),
   @("REFUSED: a dollar sign in an unquoted value", "K=`$HOME\x`r`n", "[][1][1]"),
   @("REFUSED: a dollar sign in a double-quoted value", "export K = `"`${HOME}/x`"`r`n", "[][1][1]"),
-  @("REFUSED: a double-quoted Windows path", "K=`"C:\Users\rob\new data`"`r`n", "[][1][1]"),
+  @("REFUSED: a double-quoted Windows path with \r and \n in it", "K=`"C:\Users\rob\new data`"`r`n", "[][1][1]"),
+  @("REFUSED: a double-quoted Windows path with \t and \v in it", "K=`"D:\temp\v`"`r`n", "[][1][1]"),
+  @("REFUSED: \a inside double quotes", "K=`"x\ay`"`r`n", "[][1][1]"),
+  @("REFUSED: \0 inside double quotes", "K=`"x\0y`"`r`n", "[][1][1]"),
+  @("REFUSED: a doubled backslash inside double quotes", "K=`"a\\b`"`r`n", "[][1][1]"),
+  @("REFUSED: a double-quoted path ending in a backslash", "K=`"C:\BV\`"`r`n", "[][1][1]"),
+  @("REFUSED: an escaped apostrophe inside single quotes", "K='a\'b'`r`n", "[][1][1]"),
+  @("REFUSED: an apostrophe inside single quotes", "K='D:\Rob's Vault'`r`n", "[][1][1]"),
+  @("REFUSED: a single-quoted path ending in a backslash", "K='C:\BV\'`r`n", "[][1][1]"),
+  @("REFUSED: KEY=value, then KEY: value (the last assignment is the unreadable one)", "K=w`r`nK: v`r`n", "[][1][1]"),
   @("REFUSED: KEY: value", "K: v`r`n", "[][1][1]"),
   @("REFUSED: export KEY: value", "export K: v`r`n", "[][1][1]"),
   @("REFUSED: text after the closing single quote", "K='a'b`r`n", "[][1][1]")
@@ -1224,7 +1238,7 @@ Add-Content -Path (Join-Path $work ".env") -Encoding Ascii -Value @(
   "export BLACKVAULT_PUBLIC_URL='https://vault.example.com'",
   "export BLACKVAULT_DIRECT_ACCESS_INITIAL=on # keep direct access",
   "  export BLACKVAULT_TRUSTED_PROXIES=",
-  "export BLACKVAULT_ENCRYPTION_KEY = `"$envKey`""
+  "export BLACKVAULT_ENCRYPTION_KEY = `"  $envKey `""
 )
 $before = Get-FileBase64 (Join-Path $work ".env")
 $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
@@ -1233,7 +1247,7 @@ Assert ($r.Output -match "Public URL is: https://vault\.example\.com\r?\n") "rea
 Assert ($r.Output -notmatch "Public URL: the address people open BlackVault at") "did not ask for the public URL again"
 Assert ($r.Output -notmatch "Keep allowing direct access") "did not ask about direct access again"
 Assert ($r.Output -notmatch "Trusted proxies:") "did not ask for trusted proxies again"
-Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "found the key in .env through export, spaces and double quotes"
+Assert ($r.Output -match "Encryption key: BLACKVAULT_ENCRYPTION_KEY \(from \.env\) - no key file created") "found the key in .env through export, spaces, double quotes and spaces inside them (the app trims the value)"
 Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "created NO key file (a second key would be a conflict)"
 Assert ($r.Output -notmatch $envKey) "the key is never echoed"
 Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) ".env left byte-for-byte unchanged"
@@ -1313,27 +1327,43 @@ foreach ($line in @("DATA_DIR=<VAULT> # where the data lives", "DATA_DIR='<VAULT
 }
 
 # ---------------------------------------------------------------- scenario UR2
-Write-Scenario "update.bat - a DATA_DIR line Compose would change (double-quoted Windows path, a dollar sign, DATA_DIR: value) is refused: no relocation, .env untouched, and the update stops at the snapshot"
+Write-Scenario "update.bat - a DATA_DIR line Compose would change or reject stops the update at the preflight, BEFORE the pull: nothing pulled, built, relocated or snapshotted, .env untouched"
 $form = 0
-foreach ($line in @("DATA_DIR=`"<VAULT>`"", "export DATA_DIR=`$USERPROFILE\vault", "DATA_DIR: <VAULT>")) {
+foreach ($line in @("DATA_DIR=`"C:\Users\rob\new data`"", "export DATA_DIR=`$USERPROFILE\vault", "DATA_DIR: <VAULT>", "DATA_DIR='<VAULT>\Rob's data'", "DATA_DIR='<VAULT>\'")) {
   $form++
   $work = New-UpdateInstall "update-datadir-refused$form" $line
   $before = Get-FileBase64 (Join-Path $work ".env")
   $r = Invoke-Bat -Dir $work -Script "update.bat" -Answers @("")
   Assert ($r.ExitCode -eq 1) "[$line] exits 1 (got $($r.ExitCode))"
   Assert ($r.Output -match "Note: the DATA_DIR line in \.env is written in a form this script does not read") "[$line] says which line it does not read"
-  Assert ($r.Output -match "A Windows path\s+goes unquoted or in single quotes") "[$line] says how to write a Windows path"
-  Assert ($r.Output -match "WARNING: DATA_DIR in \.env could not be read, so the database check is skipped") "[$line] says the check is skipped"
+  Assert ($r.Output -match "as DATA_DIR=value with the final value spelled\s+out and no \$ in it: best for a Windows path") "[$line] says how to write a Windows path"
+  Assert ($r.Output -match "ERROR: \.env holds a DATA_DIR line this script does not read") "[$line] says why it stopped"
+  Assert ($r.Output -match "Nothing was pulled, rebuilt or restarted") "[$line] says nothing was done"
+  Assert ($r.Output -notmatch "Pulling latest updates") "[$line] did NOT pull"
   Assert ($r.Output -notmatch "Auto-updating DATA_DIR") "[$line] did not relocate DATA_DIR to the legacy folder"
   Assert ($r.Output -notmatch "Database verified at") "[$line] verified nothing"
+  Assert ($r.Output -notmatch "Public URL is:") "[$line] asked nothing"
   Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) "[$line] .env left byte-for-byte unchanged"
   Assert (-not (Test-Path (Join-Path $work ".env.bak"))) "[$line] no .env.bak: .env was never rewritten"
-  Assert ($r.Output -match "database snapshot failed: DATA_DIR in \.env could not be read") "[$line] scripts\db-snapshot.bat refuses too, instead of assuming .\data"
-  Assert ($r.Output -match "The new version was NOT started") "[$line] the update stopped"
-  Assert ($r.StubLog -notmatch "compose up -d") "[$line] did NOT start the new version"
-  Assert (@(Get-ChildItem (Join-Path $work "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "[$line] no snapshot of the legacy database was taken"
+  Assert (-not (Test-Path (Join-Path $work "secrets\blackvault_encryption_key"))) "[$line] created NO key file"
+  Assert ($r.StubLog -notmatch "compose (build|up|stop)") "[$line] did NOT build, start or stop anything"
+  Assert (-not (Test-Path (Join-Path $work "backups"))) "[$line] took no snapshot"
   Show-EvidenceIfFailed $r
 }
+
+# ---------------------------------------------------------------- scenario UR2b
+Write-Scenario "scripts\db-snapshot.bat on its own - the backstop for an OLDER update.bat, which resumes after the pull and never runs the new preflight: a refused DATA_DIR line fails the snapshot before the app is stopped; .\data is not assumed"
+$d = New-Sandbox "db-snapshot-datadir-refused"
+Set-SqliteInstall $d "7053"
+@("DATA_DIR=`"C:\Users\rob\new data`"", "PORT=7053", "BLACKVAULT_DB_PROVIDER=sqlite") | Set-Content -Path (Join-Path $d ".env") -Encoding Ascii
+@("@echo off", "setlocal EnableDelayedExpansion", "call scripts\db-snapshot.bat", "echo RC=!errorlevel!") |
+  Set-Content -Path (Join-Path $d "caller.bat") -Encoding Ascii
+$r = Invoke-Bat -Dir $d -Script "caller.bat" -NoPad
+Assert ($r.Output -match "RC=1") "errorlevel 1"
+Assert ($r.Output -match "database snapshot failed: DATA_DIR in \.env could not be read") "says why"
+Assert ($r.StubLog -notmatch "(?m)^compose stop") "did not stop the app"
+Assert (@(Get-ChildItem (Join-Path $d "backups") -Filter "blackvault-*.db" -ErrorAction SilentlyContinue).Count -eq 0) "wrote no snapshot of the database in .\data"
+Show-EvidenceIfFailed $r
 
 # ---------------------------------------------------------------- scenario UR3
 Write-Scenario "update.bat - a database that really is in the legacy folder: an 'export DATA_DIR' line is rewritten, not left beside a new one"
@@ -1356,6 +1386,7 @@ Assert ($r.ExitCode -eq 1) "exits 1 (got $($r.ExitCode))"
 Assert ($r.Output -match "ERROR: \.env holds a BLACKVAULT_DB_PROVIDER line this script does not read") "says why it stopped"
 Assert ($r.Output -match "Nothing was pulled, rebuilt or restarted") "says nothing was done"
 Assert ($r.Output -notmatch "Pulling latest updates") "did NOT pull"
+Assert ($r.Output -notmatch "is missing") "no warning about PostgreSQL keys derived from the line that was refused"
 Assert ($r.StubLog -notmatch "compose build") "did NOT rebuild"
 Assert ((Get-FileBase64 (Join-Path $work ".env")) -eq $before) ".env left byte-for-byte unchanged"
 Show-EvidenceIfFailed $r
