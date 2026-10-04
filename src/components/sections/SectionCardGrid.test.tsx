@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { sectionHref, sectionsForGroup } from "@/lib/categories";
-import GearPage from "./page";
+import GearPage from "@/app/gear/page";
+import PrepPage from "@/app/prep/page";
 
 const fetchCategoryCounts = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/category-counts", () => ({ fetchCategoryCounts }));
@@ -25,8 +26,11 @@ async function flush() {
   await act(async () => {});
 }
 
-describe("Gear page counts", () => {
-  const sections = sectionsForGroup("gear");
+describe.each([
+  ["prep", PrepPage],
+  ["gear", GearPage],
+] as const)("%s page counts", (group, Page) => {
+  const sections = sectionsForGroup(group);
   const [first, second] = sections;
 
   function expectNoNumbers() {
@@ -37,7 +41,7 @@ describe("Gear page counts", () => {
 
   it("is busy and shows no number while the counts are loading", async () => {
     fetchCategoryCounts.mockReturnValue(new Promise(() => {}));
-    const { container } = render(<GearPage />);
+    const { container } = render(<Page />);
     await flush();
 
     expect(gridOf(container)).toHaveAttribute("data-counts-status", "loading");
@@ -51,7 +55,7 @@ describe("Gear page counts", () => {
       counts: { [first.slug]: 0, [second.slug]: 7 },
       legacySmgCount: 0,
     });
-    const { container } = render(<GearPage />);
+    const { container } = render(<Page />);
     await flush();
 
     expect(gridOf(container)).toHaveAttribute("data-counts-status", "ready");
@@ -65,7 +69,7 @@ describe("Gear page counts", () => {
     ["the body has no counts", { legacySmgCount: 0 }],
   ])("is not busy, shows no numbers and keeps every link when %s", async (_name, result) => {
     fetchCategoryCounts.mockResolvedValue(result);
-    const { container } = render(<GearPage />);
+    const { container } = render(<Page />);
     await flush();
 
     expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
@@ -76,7 +80,7 @@ describe("Gear page counts", () => {
 
   it("is failed, not stuck loading, when the loader rejects", async () => {
     fetchCategoryCounts.mockRejectedValue(new Error("boom"));
-    const { container } = render(<GearPage />);
+    const { container } = render(<Page />);
     await flush();
 
     expect(gridOf(container)).toHaveAttribute("data-counts-status", "failed");
