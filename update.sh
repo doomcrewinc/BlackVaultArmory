@@ -138,13 +138,11 @@ echo "Database provider: $DB_PROVIDER"
 
 # ── Read DATA_DIR from .env ────────────────────────────────────
 # Only surrounding whitespace and quotes are stripped: paths may contain spaces.
-# An unreadable DATA_DIR (see scripts/compose-provider.sh) leaves this empty,
-# which skips the check below and its relocation: the folder Compose will use
-# is not known, so no other folder is put in its place.
+# An unreadable DATA_DIR (see scripts/compose-provider.sh) stops here, before
+# the pull: the folder Compose will use is not known, so nothing below can be
+# checked or snapshotted, and no other folder is put in its place.
+env_require_readable DATA_DIR "Nothing was pulled, rebuilt or restarted." || exit 1
 ACTIVE_DATA_DIR=$(env_value DATA_DIR)
-if env_unreadable DATA_DIR; then
-  echo "⚠  DATA_DIR in .env could not be read, so the database check is skipped and DATA_DIR is left as it is."
-fi
 
 # ── Preflight: verify the database exists ─────────────────────
 if [ "$DB_PROVIDER" != "sqlite" ]; then

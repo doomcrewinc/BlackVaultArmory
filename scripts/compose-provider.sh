@@ -26,18 +26,25 @@
 # line of that kind is UNREADABLE: no value is returned for it (never the text
 # as written, which is not what Compose will use), and env_unreadable is true:
 #   - a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
-#   - a \ in a double-quoted value (Compose unescapes \n, \r, \t, \" ...);
-#   - KEY: value (the YAML form);
+#   - in a double-quoted value, a \ before a b f n r t v 0 \ " or $, which
+#     Compose unescapes ("C:\new" holds a newline); any other \ is text there,
+#     so "C:\BlackVault\Data" is read;
+#   - in a single-quoted value, an apostrophe (\' included) or a \ before the
+#     closing quote: Compose unescapes the first and refuses the file for the
+#     others;
+#   - KEY: value (the YAML form), when it is the last assignment of the key;
 #   - a quote that is not closed on its line (Compose reads on to the next).
-# Single-quoted values are literal in Compose, $ and \ included, and so are
-# backslashes in an unquoted value: a Windows path is read in both forms.
+# Otherwise single-quoted values are literal in Compose, $ and \ included, and
+# so are backslashes in an unquoted value: a Windows path is best unquoted.
 
 # env_read KEY: parses ./.env and sets ENV_STATE to unset, set or unreadable
 # for the last assignment of KEY, and ENV_VALUE to its value (empty unless
 # set). Use env_value / env_has_key / env_unreadable; a `$( )` runs in a
 # subshell, so these two variables do not come back out of one.
 env_read() {
-  local key="$1" line name rest quote first=1
+  local key="$1" line name rest quote after first=1
+  # Inside double quotes: a backslash and a character Compose unescapes.
+  local escaped='\\[abfnrtv0\\"$]'
   ENV_STATE="unset"
   ENV_VALUE=""
   if [[ ! -f .env ]]; then
@@ -82,8 +89,15 @@ env_read() {
         ENV_STATE="unreadable"
         continue
       fi
+      after=${rest#*"$quote"}
       rest=${rest%%"$quote"*}
-      if [[ "$quote" == '"' && ( "$rest" == *'$'* || "$rest" == *\\* ) ]]; then
+      # A backslash before the closing quote escapes it, and a second quote
+      # of the same kind after it means the value did not end there.
+      if [[ "$rest" == *\\ || "$after" == *"$quote"* ]]; then
+        ENV_STATE="unreadable"
+        continue
+      fi
+      if [[ "$quote" == '"' && ( "$rest" == *'$'* || "$rest" =~ $escaped ) ]]; then
         ENV_STATE="unreadable"
         continue
       fi
@@ -127,7 +141,7 @@ env_unreadable() {
 # One line (no newline at its end) saying that KEY is unreadable, why a line
 # is, and how to write it so that it is read.
 env_unreadable_text() {
-  printf '%s' "$1 in .env could not be read: the line holds a \$, a \\ inside double quotes, '$1: value', or a quote that is not closed. Write it as $1=value or $1='value', with the final value spelled out."
+  printf '%s' "$1 in .env could not be read: Docker Compose would change the value of that line, or reject it. Write it as $1=value with the final value spelled out and no \$ in it (best for a Windows path). In single quotes the value must hold no apostrophe and not end in a backslash; in double quotes it must hold no \$ and no backslash before a b f n r t v 0, another backslash or the closing quote. A '$1: value' line must become $1=value."
 }
 
 # env_require_readable KEY [WHAT WAS NOT DONE]: returns 1, after an ERROR

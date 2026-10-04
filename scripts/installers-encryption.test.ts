@@ -391,6 +391,9 @@ describe("update.sh (no git checkout)", () => {
     ["spaces around = and single quotes", (k: string) => `BLACKVAULT_ENCRYPTION_KEY = '${k}'`],
     ["CRLF", (k: string) => `BLACKVAULT_ENCRYPTION_KEY=${k}\r`],
     ["a commented-out empty line above it", (k: string) => `#BLACKVAULT_ENCRYPTION_KEY=\nexport BLACKVAULT_ENCRYPTION_KEY=${k}`],
+    // The app trims the value, so spaces inside the quotes are still that key.
+    ["spaces inside the quotes", (k: string) => `BLACKVAULT_ENCRYPTION_KEY="  ${k}\t "`],
+    ["upper-case hex", (k: string) => `BLACKVAULT_ENCRYPTION_KEY=${k.toUpperCase()}`],
   ])("BLACKVAULT_ENCRYPTION_KEY written in .env as: %s → install.sh and update.sh create no key file", (_name, line) => {
     for (const script of ["install.sh", "update.sh"]) {
       const dir = path.join(tmp, `app-${script}`);
@@ -482,26 +485,48 @@ describe("update.sh (no git checkout)", () => {
   it.each([
     ["$HOME in an export line", (d: string) => `export DATA_DIR=$HOME/${path.basename(d)}/real`],
     ["${VAR} in double quotes", (_d: string) => 'DATA_DIR = "${BV_DATA}/real"'],
-    ["a double-quoted path with backslashes", (_d: string) => 'DATA_DIR="C:\\Users\\rob\\new data"'],
     ["DATA_DIR: value", (d: string) => `DATA_DIR: ${d}/real`],
-  ])("update.sh: an unreadable DATA_DIR (%s) is never replaced by a legacy database; .env is untouched and the update stops at the snapshot", (_name, line) => {
+    ["a double-quoted path with \\r and \\n in it", (_d: string) => 'DATA_DIR="C:\\Users\\rob\\new data"'],
+    ["a single-quoted path with an apostrophe", (d: string) => `DATA_DIR='${d}/Rob's Vault'`],
+    ["a single-quoted path ending in a backslash", (_d: string) => "DATA_DIR='C:\\BV\\'"],
+  ])("update.sh: an unreadable DATA_DIR (%s) stops the update at the preflight: nothing pulled, built or relocated, .env untouched", (_name, line) => {
     const dir = path.join(tmp, "app");
     copyTree(dir);
     sqliteInstall(dir); // a database in <dir>/data: a legacy location update.sh knows
     const env = `${line(dir)}\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`;
     fs.writeFileSync(path.join(dir, ".env"), env);
     const r = run(dir, "update.sh", "\n");
-    expect(r.out).toContain("DATA_DIR in .env could not be read, so the database check is skipped and DATA_DIR is left as it is.");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: DATA_DIR in .env could not be read");
+    expect(r.out).toContain("Nothing was pulled, rebuilt or restarted.");
     expect(r.out).not.toContain("Auto-updating DATA_DIR");
     expect(r.out).not.toContain("Database verified at");
     expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
     expect(fs.existsSync(path.join(dir, ".env.bak"))).toBe(false);
-    // scripts/db-snapshot.sh cannot tell which folder to snapshot either.
-    expect(r.code, r.out).toBe(1);
-    expect(r.out).toContain("ERROR: database snapshot failed: DATA_DIR in .env could not be read");
-    expect(r.out).toContain("The new version was NOT started.");
-    expect(callLines(r.calls)).not.toContain("compose up -d");
+    // Stopped before the prompts, the key file, the build and the snapshot.
+    expect(r.out).not.toContain("Public URL is:");
+    expect(r.out).not.toContain("Rebuilding BlackVault image");
+    expect(r.out).not.toContain("Snapshotting the database");
+    expect(fs.existsSync(path.join(dir, KEY_FILE))).toBe(false);
+    expect(callLines(r.calls).filter((l) => !l.startsWith("compose version"))).toEqual([]);
     expect(backups(dir)).toEqual([]);
+  });
+
+  it("update.sh: a double-quoted Windows-style path with no escape letter in it is read as written (Compose reads it literally)", () => {
+    const dir = path.join(tmp, "app");
+    copyTree(dir);
+    sqliteInstall(dir);
+    const real = path.join(dir, "Data\\Vault"); // a folder name holding a backslash: \V is no escape
+    fs.mkdirSync(path.join(real, "db"), { recursive: true });
+    fs.mkdirSync(path.join(real, "uploads"), { recursive: true });
+    fs.writeFileSync(path.join(real, "db/vault.db"), "SQLite format 3\0 the real database");
+    const env = `DATA_DIR="${real}"\nBLACKVAULT_DB_PROVIDER=sqlite\nBLACKVAULT_PUBLIC_URL=https://vault.example.com\nBLACKVAULT_TRUSTED_PROXIES=\nBLACKVAULT_DIRECT_ACCESS_INITIAL=on\n`;
+    fs.writeFileSync(path.join(dir, ".env"), env);
+    const r = run(dir, "update.sh", "\n");
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`Database verified at: ${real}/db/vault.db`);
+    expect(r.out).not.toContain("Auto-updating DATA_DIR");
+    expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
   });
 
   it("install.sh: an existing .env whose DATA_DIR is unreadable stops the installer; the wizard never overwrites .env", () => {
@@ -513,7 +538,7 @@ describe("update.sh (no git checkout)", () => {
     const r = run(dir, "install.sh", INSTALL_ANSWERS);
     expect(r.code, r.out).toBe(1);
     expect(r.out).toContain("ERROR: DATA_DIR in .env could not be read");
-    expect(r.out).toContain("DATA_DIR='value'");
+    expect(r.out).toContain("Write it as DATA_DIR=value");
     expect(r.out).not.toContain("Where should BlackVault store its data?");
     expect(fs.readFileSync(path.join(dir, ".env"), "utf8")).toBe(env);
     expect(r.calls).not.toContain("compose up");
@@ -540,6 +565,7 @@ describe("update.sh (no git checkout)", () => {
     // Compose passes "# note" to the app, which refuses it: not "no key".
     ["only a comment after the =", "BLACKVAULT_ENCRYPTION_KEY= # note", "is not 64 hex characters"],
     ["too short", "BLACKVAULT_ENCRYPTION_KEY=abc123", "is not 64 hex characters"],
+    ["a non-hex character", `BLACKVAULT_ENCRYPTION_KEY="${"cd".repeat(31)}cg"`, "is not 64 hex characters"],
   ])("BLACKVAULT_ENCRYPTION_KEY in .env with %s: install.sh and update.sh stop, and create NO second key", (_name, line, message) => {
     for (const script of ["install.sh", "update.sh"]) {
       const dir = path.join(tmp, `app-${script}`);
@@ -971,6 +997,35 @@ describe("rotate-key.sh, with the rotation CLI stubbed", () => {
     expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
     expect(r.calls).toBe(""); // docker never invoked
     expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
+  // A key line the .env reader cannot read (Compose would substitute or
+  // unescape it) is still a key held in the environment: Compose passes its
+  // value to the app, and after a rotation it would conflict with the new file.
+  it.each([
+    ["a $ in an unquoted value", "BLACKVAULT_ENCRYPTION_KEY=$MYKEY"],
+    ["${VAR} in double quotes", 'export BLACKVAULT_ENCRYPTION_KEY="${MYKEY}"'],
+    ["KEY: value", `BLACKVAULT_ENCRYPTION_KEY: ${"cd".repeat(32)}`],
+    ["quotes, spaces and a comment", `BLACKVAULT_ENCRYPTION_KEY = "  ${"cd".repeat(32)}  " # the key`],
+  ])("rotate-key.sh: a BLACKVAULT_ENCRYPTION_KEY line in .env written as %s is refused up front, like any env key", (_l, line) => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), `${line}\n`);
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("ERROR: Key rotation works on secrets/blackvault_encryption_key. Your key is in");
+    expect(r.out).toContain("BLACKVAULT_ENCRYPTION_KEY (from .env): move it into that file");
+    expect(r.out).toContain("Nothing was changed; BlackVault was not stopped.");
+    expect(r.calls).toBe(""); // docker never invoked
+    expect(secrets(dir)).toEqual(["blackvault_encryption_key"]);
+  });
+
+  it("rotate-key.sh: a BLACKVAULT_ENCRYPTION_KEY line holding only whitespace is no key (the app trims it): rotation is not refused for it", () => {
+    const dir = path.join(tmp, "app");
+    rotateInstall(dir);
+    fs.appendFileSync(path.join(dir, ".env"), 'BLACKVAULT_ENCRYPTION_KEY="   "\n');
+    const r = run(dir, "rotate-key.sh", "");
+    expect(r.out).not.toContain("Key rotation works on");
   });
 
   // Spec 3b Task 5: the probe prints a SECOND line, `FILES old=<n> new=<n> rot=<n>`. The wrapper must

@@ -107,11 +107,27 @@ describe("env_value reads .env the way Docker Compose does", () => {
     ["${VAR} in an unquoted value", "export K = ${HOME}/x\n", UNREADABLE],
     ["${VAR} in a double-quoted value", 'K="${HOME}/x"\n', UNREADABLE],
     ["$$ in an unquoted value", "K=pa$$w\n", UNREADABLE],
-    ["a double-quoted Windows path (\\r and \\n would be unescaped)", 'K="C:\\Users\\rob\\new data"\n', UNREADABLE],
+    // Inside double quotes Compose unescapes a backslash before a b f n r t v
+    // 0 \ " and $ only (probed letter by letter); any other backslash is text.
+    ["a double-quoted Windows path with no escape letter", 'K="C:\\BlackVault\\Data"\n', "C:\\BlackVault\\Data"],
+    ["a double-quoted path, upper-case after the backslashes", 'K="C:\\Users\\Rob Smith\\BlackVault"\n', "C:\\Users\\Rob Smith\\BlackVault"],
+    ["\\c, \\' and \\( inside double quotes are text", `K="x\\cy\\'z\\(w"\n`, "x\\cy\\'z\\(w"],
+    ["a double-quoted Windows path with \\r in it", 'K="C:\\Users\\rob\\x"\n', UNREADABLE],
+    ["a double-quoted Windows path with \\t and \\v in it", 'K="D:\\temp\\v"\n', UNREADABLE],
+    ["a double-quoted Windows path with \\n in it", 'K="C:\\new"\n', UNREADABLE],
+    ["\\a, \\b, \\f, \\0 inside double quotes", 'K="x\\ay"\nK="x\\by"\nK="x\\fy"\nK="x\\0y"\n', UNREADABLE],
+    ["a doubled backslash inside double quotes", 'K="a\\\\b"\n', UNREADABLE],
     ["an escaped quote inside double quotes", 'K="a\\"b"\n', UNREADABLE],
+    ["a double-quoted path ending in a backslash (it escapes the quote)", 'K="C:\\BV\\"\n', UNREADABLE],
+    // Single quotes: Compose turns \' into ' and refuses the file for an
+    // apostrophe or a backslash before the closing quote.
+    ["an escaped apostrophe inside single quotes", "K='a\\'b'\n", UNREADABLE],
+    ["an apostrophe inside single quotes", "K='D:\\Rob's Vault'\n", UNREADABLE],
+    ["a single-quoted path ending in a backslash", "K='C:\\BV\\'\n", UNREADABLE],
+    ["a doubled apostrophe inside single quotes", "K='it''s'\n", UNREADABLE],
     ["KEY: value", "K: v\n", UNREADABLE],
     ["export KEY: value", "export K: v\n", UNREADABLE],
-    ["KEY=value, then KEY: value", "K=w\nK: v\n", UNREADABLE],
+    ["KEY=value, then KEY: value (the last assignment wins, and it is the unreadable one)", "K=w\nK: v\n", UNREADABLE],
     ["a double quote that is not closed on the line", 'K="abc\nX=1\n', UNREADABLE],
     ["a single quote that is not closed on the line", "K='abc\nX=1\n", UNREADABLE],
     ["a longer key with the same suffix", "XK=v\n", ""],
@@ -199,7 +215,9 @@ describe("env_value reads .env the way Docker Compose does", () => {
   it("env_unreadable_text names the key and the two ways to write a line that is read", () => {
     const r = inDir("K=$X\n", "env_unreadable_text K");
     expect(r.out).toContain("K in .env could not be read");
-    expect(r.out).toContain("K=value or K='value'");
+    expect(r.out).toContain("Write it as K=value");
+    expect(r.out).toContain("single quotes");
+    expect(r.out).toContain("double quotes");
     expect(r.out.endsWith("\n")).toBe(false);
   });
 });
