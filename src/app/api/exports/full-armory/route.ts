@@ -512,9 +512,11 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     // own detail pages already show "Form 4 (transfer)".
     const classLabel = nfaClassLabel(item.nfaClass);
     const registryLabel = mgRegistryLabel(item.mgRegistry);
+    const classPart = classLabel ? ` | Class: ${classLabel}` : "";
+    const registryPart = registryLabel ? ` | Registry: ${registryLabel}` : "";
     pushWrapped(
       lines,
-      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classLabel ? ` | Class: ${classLabel}` : ""}${registryLabel ? ` | Registry: ${registryLabel}` : ""} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
+      `${index + 1}. ${item.entityType} ${item.manufacturer} ${item.model} | Type: ${item.category || "N/A"}${classPart}${registryPart} | Serial: ${item.serialNumber || "N/A"} | Purchase: ${item.purchasePrice ?? "N/A"} | Value: ${item.replacementValue ?? "N/A"}`
     );
     // Only for a record that has paperwork: an "NFA: N/A | Control: N/A | ..."
     // line under every Title I item would double the page count to say nothing.
