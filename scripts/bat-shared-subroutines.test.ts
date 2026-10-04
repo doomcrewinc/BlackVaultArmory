@@ -118,10 +118,20 @@ describe("install.bat and update.bat share their public-URL subroutines byte for
  * or come right after a line refusing ";" anywhere in the same variable.
  * Values the script generated itself (hex from the CSPRNG) or read from
  * `docker compose version` are exempt: nobody types them.
+ *
+ * For the port of the typed public URL this test is the ONLY proof of the
+ * guard: the host-and-port check above it in :valid_public_url already
+ * refuses a ";", so no run of the script can tell the guard from its absence
+ * (the Windows harness scenarios PS1/PS2 pass either way).
  */
-describe("character checks with for /f cannot be skipped by a leading ;", () => {
+describe("static proof: a for /f character check on a typed or .env value comes right after a line refusing ;", () => {
   const GENERATED = new Set(["POSTGRES_PASSWORD", "_KEY", "_CMAJ!!_CMIN"]);
-  const CHECK = /^for \/f "delims=[^"]+" %%X in \("!(.+)!"\) do /;
+  const CHECK = /(?:^|\s)for \/f "delims=[^"]+" %%X in \("!(.+)!"\) do /;
+  // The line that must sit directly above the check, per variable.
+  const GUARD: Record<string, string> = {
+    VPU_PORT: 'if not "!VPU_PORT:;=!"=="!VPU_PORT!" exit /b 1',
+    _EV: 'if defined _EV if not "!_EV:;=!"=="!_EV!" set "_EK_ENV=malformed"',
+  };
 
   it.each(["install", "update"] as const)("%s.bat", (fileName) => {
     const lines = linesOf(FILES[fileName]).map(bare);
@@ -130,13 +140,12 @@ describe("character checks with for /f cannot be skipped by a leading ;", () => 
     for (const { m, i } of checks) {
       const name = m![1];
       if (GENERATED.has(name)) continue;
-      expect(lines[i - 1], `${fileName}.bat line ${i + 1}: !${name}! is checked without refusing ";" first`).toBe(
-        `if not "!${name}:;=!"=="!${name}!" exit /b 1`,
-      );
+      expect(GUARD[name], `${fileName}.bat line ${i + 1}: no guard is known for !${name}!`).toBeDefined();
+      expect(lines[i - 1], `${fileName}.bat line ${i + 1}: !${name}! is checked without refusing ";" first`).toBe(GUARD[name]);
       guarded.push(name);
     }
-    // The port of the typed public URL is the one typed value checked this way.
-    expect(guarded).toEqual(["VPU_PORT"]);
+    // The port of the typed public URL, and the encryption key read from .env.
+    expect(guarded.sort()).toEqual(["VPU_PORT", "_EV"]);
   });
 });
 
@@ -154,5 +163,82 @@ describe("the health wait matches the status word with its parentheses", () => {
       'if not "!_HS:(unhealthy)=!"=="!_HS!" set "HEALTH=unhealthy"',
     ]);
     expect(lines.filter((l) => /findstr[^|]*healthy/i.test(l))).toEqual([]);
+  });
+});
+
+/**
+ * One .env reader for every batch script. :env_value reads a line the way
+ * Docker Compose does and refuses the forms it cannot (see the comment above
+ * it in install.bat). A second, simpler reader elsewhere is how
+ * `DATA_DIR=C:\x # note` came to be read with its comment and
+ * `DATA_DIR='C:\x'` with its quotes, and the wrong folder then fed the
+ * relocation of DATA_DIR in update.bat.
+ */
+describe("every batch script reads .env through the one shared :env_value", () => {
+  const BAT = {
+    "install.bat": FILES.install,
+    "update.bat": FILES.update,
+    "backup.bat": readFileSync(path.join(ROOT, "backup.bat")).toString("latin1"),
+    "restore.bat": readFileSync(path.join(ROOT, "restore.bat")).toString("latin1"),
+    "scripts/db-snapshot.bat": readFileSync(path.join(ROOT, "scripts", "db-snapshot.bat")).toString("latin1"),
+  } as const;
+  const BOM = "\u00ef\u00bb\u00bf"; // the three UTF-8 bytes, as latin1
+
+  /** The :env_value block of a file: its comment lines through the line before the next blank line. */
+  function envValueBlock(text: string): string[] {
+    const lines = linesOf(text);
+    const at = lines.findIndex((l) => bare(l) === ":env_value");
+    if (at === -1) throw new Error("no :env_value");
+    let start = at;
+    while (start > 0 && bare(lines[start - 1]).startsWith("::")) start--;
+    let end = at;
+    while (end + 1 < lines.length && bare(lines[end + 1]).trim() !== "") end++;
+    expect(bare(lines[end])).toBe("goto :eof");
+    return lines.slice(start, end + 1);
+  }
+
+  it.each(Object.keys(BAT) as (keyof typeof BAT)[])("%s: no other line reads .env with for /f or findstr", (name) => {
+    const lines = linesOf(BAT[name]).map(bare);
+    const block = new Set(envValueBlock(BAT[name]).map(bare));
+    const readers = lines.filter((l) => !l.startsWith("::") && (/for \/f [^(]*\("\.env"\)/.test(l) || /findstr .*"\.env"/.test(l)));
+    expect(readers.length).toBeGreaterThan(0);
+    for (const l of readers) expect(block.has(l), `${name} reads .env outside :env_value: ${l}`).toBe(true);
+  });
+
+  it("update.bat reads DATA_DIR with :env_value BEFORE `git pull`, and skips the check when the line is refused", () => {
+    const lines = linesOf(FILES.update).map(bare);
+    const pull = lines.indexOf("git pull");
+    const at = lines.indexOf("call :env_value DATA_DIR");
+    expect(at).toBeGreaterThan(0);
+    expect(at).toBeLessThan(pull);
+    expect(lines.slice(at, at + 3)).toEqual([
+      "call :env_value DATA_DIR",
+      'set "ACTIVE_DATA_DIR=!_EV!"',
+      "if defined _EV_BAD call :data_dir_unreadable",
+    ]);
+    // Nothing between there and the check re-assigns it.
+    const check = lines.indexOf("if not defined ACTIVE_DATA_DIR goto :preflight_done");
+    expect(check).toBeGreaterThan(at);
+    expect(lines.slice(at + 2, check).filter((l) => l.includes('set "ACTIVE_DATA_DIR='))).toEqual([]);
+  });
+
+  it("the reader is the same everywhere: install.bat's block, minus its two byte-order-mark lines in the ASCII-only scripts", () => {
+    const install = envValueBlock(BAT["install.bat"]);
+    const withoutBom = install.filter((l) => !l.includes(BOM));
+    expect(install.length - withoutBom.length).toBe(2);
+    expect(envValueBlock(BAT["update.bat"]).join("")).toBe(install.join(""));
+    for (const name of ["backup.bat", "restore.bat", "scripts/db-snapshot.bat"] as const) {
+      expect(envValueBlock(BAT[name]).join(""), `${name} :env_value differs`).toBe(withoutBom.join(""));
+    }
+  });
+
+  it("refuses a $ in an unquoted or double-quoted value and a backslash in a double-quoted one", () => {
+    const block = envValueBlock(BAT["install.bat"]).map(bare);
+    expect(block.filter((l) => l === 'if not "!_EV:$=!"=="!_EV!" goto :env_value_bad')).toHaveLength(2);
+    const dq = block.indexOf(":env_value_dquote");
+    const sq = block.indexOf(":env_value_squote");
+    expect(block.slice(dq, sq)).toContain('if not "!_EV:\\=!"=="!_EV!" goto :env_value_bad');
+    // Single-quoted values are literal in Compose: neither rule applies there.
+    expect(block.slice(sq, block.indexOf(":env_value_bad")).filter((l) => l.includes("$") || l.includes("\\"))).toEqual([]);
   });
 });

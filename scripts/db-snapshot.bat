@@ -46,6 +46,10 @@ set "BLACKVAULT_POSTGRES_PASSWORD="
 if not defined COMPOSE set "COMPOSE=docker compose"
 
 call :provider_from_env
+if "!DB_PROVIDER!"=="unreadable" (
+  set "FAIL_MSG=BLACKVAULT_DB_PROVIDER in .env could not be read: see the Note above."
+  goto :fail
+)
 set "TS="
 for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')" 2^>nul`) do set "TS=%%T"
 if not defined TS (
@@ -68,20 +72,13 @@ if errorlevel 1 goto :acl_failed
 
 :: DATA_DIR is read here, before the provider branch, because the uploads
 :: snapshot below needs it on BOTH providers (:snapshot_uploads uses it too).
-set "DATA_DIR="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="DATA_DIR" set "DATA_DIR=%%B"
-  )
+:: A line :env_value refuses is not a missing one: .\data is not assumed.
+call :env_value DATA_DIR
+if defined _EV_BAD (
+  set "FAIL_MSG=DATA_DIR in .env could not be read: see the Note above."
+  goto :fail
 )
-if defined DATA_DIR set "DATA_DIR=!DATA_DIR:"=!"
-:: Trim surrounding spaces and tabs, as env_value in compose-provider.sh does.
-if defined DATA_DIR for /f "tokens=* delims=	 " %%V in ("!DATA_DIR!") do set "DATA_DIR=%%V"
-:trim_data_dir
-if not defined DATA_DIR goto :trim_data_dir_done
-if "!DATA_DIR:~-1!"==" " set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
-if "!DATA_DIR:~-1!"=="	" set "DATA_DIR=!DATA_DIR:~0,-1!" & goto :trim_data_dir
-:trim_data_dir_done
+set "DATA_DIR=!_EV!"
 if not defined DATA_DIR set "DATA_DIR=.\data"
 
 if /i not "!DB_PROVIDER!"=="sqlite" goto :postgres
@@ -261,12 +258,10 @@ exit /b 1
 :: Mirrors :provider_from_env in update.bat (and provider_from_env in
 :: scripts/compose-provider.sh): change them together.
 :provider_from_env
-set "_PV="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="BLACKVAULT_DB_PROVIDER" set "_PV=%%B"
-  )
-)
+call :env_value BLACKVAULT_DB_PROVIDER
+set "DB_PROVIDER=unreadable"
+if defined _EV_BAD goto :eof
+set "_PV=!_EV!"
 if defined _PV set "_PV=!_PV: =!"
 if defined _PV set "_PV=!_PV:	=!"
 if defined _PV set "_PV=!_PV:"=!"
@@ -277,4 +272,87 @@ if /i "!_PV!"=="sqlite" goto :eof
 set "DB_PROVIDER=!_PV!"
 if /i "!_PV!"=="postgres" set "DB_PROVIDER=postgres"
 if /i "!_PV!"=="postgresql" set "DB_PROVIDER=postgres"
+goto :eof
+
+:: :env_value KEY - the value of KEY in .\.env in _EV, read the way Docker
+:: Compose reads the file. Mirrors env_value in scripts/compose-provider.sh:
+:: change them together. _EV is undefined when KEY is unset or empty, or there
+:: is no .env; _EV_SET is 1 when .env assigns KEY at all, even to nothing.
+:: Forms read:
+::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
+::   KEY="value"    KEY='value'           one pair of quotes removed
+::   KEY=value # comment                  cut at the first space before a #
+:: with leading whitespace and CRLF allowed, lines starting with # ignored,
+:: and the LAST assignment winning. A Windows path is read unquoted or in
+:: single quotes, as Compose takes it literally in both.
+:: A line whose value Compose would change, or that batch cannot split, is
+:: REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how to write
+:: the line. The caller must not go on as if the key were unset. Refused:
+::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+::   a \ in a double-quoted value (Compose unescapes \r, \n, \t ...);
+::   KEY: value; a quoted value followed by a comment or other text; a
+::   double quote anywhere except as the one pair around the whole value; a
+::   value opened by ' and not closed by one; a value that starts with =.
+:: A ! in a value is dropped by delayed expansion and is not detected.
+:env_value
+set "_EV="
+set "_EV_SET="
+set "_EV_BAD="
+set "_EV_CUT="
+if not exist ".env" goto :eof
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
+  if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+)
+:: for /f took every = after the key as one separator, so a value that
+:: starts with = has lost it; and a KEY: value line never reached the loop
+:: as KEY. Either, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" >nul 2>&1
+if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
+:env_value_trim
+if not defined _EV goto :env_value_done
+if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
+if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
+if defined _EV_CUT goto :env_value_dollar
+set "_EVQ=!_EV:"=!"
+if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
+if "!_EV:~0,1!"=="'" goto :env_value_squote
+:: Unquoted: cut at the first space that is followed by #. A tab before the
+:: # does not start a comment, and neither does a # that opens the value.
+set "_EV_CUT=1"
+if "!_EV:#=!"=="!_EV!" goto :env_value_dollar
+set "_EVI=1"
+:env_value_scan
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_dollar
+if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
+set /a _EVI+=1
+goto :env_value_scan
+:env_value_dollar
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
+:env_value_dquote
+:: Without its double quotes the value must equal the value without its
+:: first and last characters: exactly one pair, around the whole value.
+if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
+set "_EV=!_EVQ!"
+if not defined _EV goto :env_value_done
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+if not "!_EV:\=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
+:env_value_squote
+if "!_EV:~1,1!"=="" goto :env_value_bad
+if not "!_EV:~-1!"=="'" goto :env_value_bad
+set "_EV=!_EV:~1,-1!"
+goto :env_value_done
+:env_value_bad
+set "_EV="
+set "_EV_BAD=1"
+echo Note: the %~1 line in .env is written in a form this script does not read.
+echo       Write it as %~1=value or %~1='value', the final value spelled out: no $,
+echo       no double quotes, no comment after a quoted value. A Windows path
+echo       goes unquoted or in single quotes.
+:env_value_done
+set "_EVQ="
 goto :eof

@@ -70,13 +70,13 @@ echo Database provider: !DB_PROVIDER!
 if /i not "!DB_PROVIDER!"=="sqlite" call :check_postgres_env
 
 :: ── Read DATA_DIR from .env ────────────────────────────────────
-set "ACTIVE_DATA_DIR="
-if exist ".env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if "%%A"=="DATA_DIR" set "ACTIVE_DATA_DIR=%%B"
-  )
-)
-if defined ACTIVE_DATA_DIR set "ACTIVE_DATA_DIR=!ACTIVE_DATA_DIR:"=!"
+call :env_value DATA_DIR
+set "ACTIVE_DATA_DIR=!_EV!"
+if defined _EV_BAD call :data_dir_unreadable
+if "!DB_PROVIDER!"=="unreadable" goto :provider_unreadable
+:: A line :env_value refuses leaves it empty:
+:: no check below, no relocation.
+::
 
 :: ── Preflight: verify the database exists ─────────────────────
 :: The provider is read again here on purpose. cmd.exe re-reads a running
@@ -124,10 +124,10 @@ echo      from: !ACTIVE_DATA_DIR!
 echo      to:   !LEGACY_DATA_DIR!
 copy /Y ".env" ".env.bak" >nul
 if errorlevel 1 goto :env_update_failed
-:: Rewrite only the DATA_DIR= line; every other line is kept as-is.
-:: The new path is passed through the environment, never through quoting.
+:: Rewrite the DATA_DIR line, in any form :env_value reads.
+:: The new path goes through the environment, not quoting.
 set "BV_NEW_DATA_DIR=!LEGACY_DATA_DIR!"
-powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $p = Join-Path (Get-Location) '.env'; $l = [IO.File]::ReadAllLines($p) | ForEach-Object { if ($_ -match '^DATA_DIR=') { 'DATA_DIR=' + $env:BV_NEW_DATA_DIR } else { $_ } }; [IO.File]::WriteAllLines($p, [string[]]$l)"
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $p = Join-Path (Get-Location) '.env'; $l = [IO.File]::ReadAllLines($p) | ForEach-Object { if ($_ -match '^\s*(export\s+)?DATA_DIR\s*=') { 'DATA_DIR=' + $env:BV_NEW_DATA_DIR } else { $_ } }; [IO.File]::WriteAllLines($p, [string[]]$l)"
 if errorlevel 1 goto :env_update_failed
 set "BV_NEW_DATA_DIR="
 set "ACTIVE_DATA_DIR=!LEGACY_DATA_DIR!"
@@ -322,6 +322,13 @@ call :show_setup_token ENV_PUBLIC_URL
 pause
 exit /b 0
 
+:provider_unreadable
+echo ERROR: .env holds a BLACKVAULT_DB_PROVIDER line this script does not read:
+echo        see the Note above. Correct it and run update.bat again.
+echo        Nothing was pulled, rebuilt or restarted.
+pause
+exit /b 1
+
 :no_env_file
 echo ERROR: No .env file, so no BLACKVAULT_PUBLIC_URL. BlackVault will not
 echo        start without it. Run install.bat, or create .env with a line
@@ -424,15 +431,19 @@ goto :eof
 :: Forms read:
 ::   KEY=value      export KEY=value      KEY = value   (spaces or tabs)
 ::   KEY="value"    KEY='value'           one pair of quotes removed
-::   KEY=value # comment                  cut at a space or tab before a #
+::   KEY=value # comment                  cut at the first space before a #
 :: with leading whitespace and CRLF allowed, lines starting with # ignored,
-:: and the LAST assignment winning. Forms batch cannot read correctly leave
-:: _EV undefined, set _EV_BAD and print a note, rather than give a wrong value:
-::   a quoted value followed by a comment; a double quote anywhere except as
-::   the one pair around the whole value; a value opened by ' and not closed
-::   by one; a value that itself starts with =.
-:: A ! in a value is dropped by delayed expansion and is not detected; none of
-:: the keys read here holds one unless DATA_DIR is a path with a ! in it.
+:: and the LAST assignment winning. A Windows path is read unquoted or in
+:: single quotes, as Compose takes it literally in both.
+:: A line whose value Compose would change, or that batch cannot split, is
+:: REFUSED: _EV stays undefined, _EV_BAD is set and a Note says how to write
+:: the line. The caller must not go on as if the key were unset. Refused:
+::   a $ in an unquoted or double-quoted value (Compose substitutes $VAR);
+::   a \ in a double-quoted value (Compose unescapes \r, \n, \t ...);
+::   KEY: value; a quoted value followed by a comment or other text; a
+::   double quote anywhere except as the one pair around the whole value; a
+::   value opened by ' and not closed by one; a value that starts with =.
+:: A ! in a value is dropped by delayed expansion and is not detected.
 :env_value
 set "_EV="
 set "_EV_SET="
@@ -442,40 +453,45 @@ if not exist ".env" goto :eof
 for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do for /f "tokens=1,2,3" %%K in ("%%A") do (
   if "%%L"=="" if "%%K"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
   if "%%M"=="" if "%%K"=="export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%L"=="" if "%%K"=="﻿%~1" (set "_EV=%%B"& set "_EV_SET=1")
+  if "%%M"=="" if "%%K"=="﻿export" if "%%L"=="%~1" (set "_EV=%%B"& set "_EV_SET=1")
 )
-if not defined _EV goto :eof
-:: for /f took every = after the key as one separator: a value that starts
-:: with = has lost it by now, so such a line is refused.
-findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" ".env" >nul 2>&1
-if not errorlevel 1 goto :env_value_bad
-set "_EVRAW=!_EV!"
+:: for /f took every = after the key as one separator, so a value that
+:: starts with = has lost it; and a KEY: value line never reached the loop
+:: as KEY. Either, anywhere in the file, refuses the key.
+findstr /r /c:"^[ 	]*%~1[ 	]*==" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*==" /c:"^[ 	]*%~1[ 	]*:" /c:"^[ 	]*export[ 	][ 	]*%~1[ 	]*:" ".env" >nul 2>&1
+if not errorlevel 1 set "_EV_SET=1" & goto :env_value_bad
 :env_value_trim
 if not defined _EV goto :env_value_done
 if "!_EV:~0,1!"==" " set "_EV=!_EV:~1!" & goto :env_value_trim
 if "!_EV:~0,1!"=="	" set "_EV=!_EV:~1!" & goto :env_value_trim
 if "!_EV:~-1!"==" " set "_EV=!_EV:~0,-1!" & goto :env_value_trim
 if "!_EV:~-1!"=="	" set "_EV=!_EV:~0,-1!" & goto :env_value_trim
-if defined _EV_CUT goto :env_value_done
-:: "KEY= # note": the value is only a comment.
-if "!_EV:~0,1!"=="#" if not "!_EVRAW:~0,1!"=="#" set "_EV=" & goto :env_value_done
+if defined _EV_CUT goto :env_value_dollar
 set "_EVQ=!_EV:"=!"
 if not "!_EVQ!"=="!_EV!" goto :env_value_dquote
 if "!_EV:~0,1!"=="'" goto :env_value_squote
-:: Unquoted: cut at the first space or tab that is followed by #.
+:: Unquoted: cut at the first space that is followed by #. A tab before the
+:: # does not start a comment, and neither does a # that opens the value.
 set "_EV_CUT=1"
-if "!_EV:#=!"=="!_EV!" goto :env_value_done
+if "!_EV:#=!"=="!_EV!" goto :env_value_dollar
 set "_EVI=1"
 :env_value_scan
-if "!_EV:~%_EVI%,1!"=="" goto :env_value_done
+if "!_EV:~%_EVI%,1!"=="" goto :env_value_dollar
 if "!_EV:~%_EVI%,2!"==" #" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
-if "!_EV:~%_EVI%,2!"=="	#" set "_EV=!_EV:~0,%_EVI%!" & goto :env_value_trim
 set /a _EVI+=1
 goto :env_value_scan
+:env_value_dollar
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+goto :env_value_done
 :env_value_dquote
 :: Without its double quotes the value must equal the value without its
 :: first and last characters: exactly one pair, around the whole value.
 if not "!_EV:~1,-1!"=="!_EVQ!" goto :env_value_bad
 set "_EV=!_EVQ!"
+if not defined _EV goto :env_value_done
+if not "!_EV:$=!"=="!_EV!" goto :env_value_bad
+if not "!_EV:\=!"=="!_EV!" goto :env_value_bad
 goto :env_value_done
 :env_value_squote
 if "!_EV:~1,1!"=="" goto :env_value_bad
@@ -485,11 +501,11 @@ goto :env_value_done
 :env_value_bad
 set "_EV="
 set "_EV_BAD=1"
-echo Note: the %~1 line in .env is written in a form this script cannot read,
-echo       so it is treated as not set. Write it as %~1=value, with no comment
-echo       after a quoted value.
+echo Note: the %~1 line in .env is written in a form this script does not read.
+echo       Write it as %~1=value or %~1='value', the final value spelled out: no $,
+echo       no double quotes, no comment after a quoted value. A Windows path
+echo       goes unquoted or in single quotes.
 :env_value_done
-set "_EVRAW="
 set "_EVQ="
 goto :eof
 
@@ -498,8 +514,11 @@ goto :eof
 :: in .env, ignoring case, whitespace and quotes. Installs made before
 :: PostgreSQL support have no such line (or no .env at all) and were always
 :: SQLite. A plain DB_PROVIDER line is ignored, as docker-compose.yml ignores it.
+:: A line :env_value refuses gives DB_PROVIDER=unreadable, never sqlite.
 :provider_from_env
 call :env_value BLACKVAULT_DB_PROVIDER
+set "DB_PROVIDER=unreadable"
+if defined _EV_BAD goto :eof
 set "_PV=!_EV!"
 if defined _PV set "_PV=!_PV: =!"
 if defined _PV set "_PV=!_PV:	=!"
@@ -515,14 +534,18 @@ goto :eof
 
 :: Mirrors check_postgres_env in scripts/compose-provider.sh. Warns when .env
 :: says BLACKVAULT_DB_PROVIDER=postgres but lacks a key the single compose file needs to
-:: run PostgreSQL. Only warns; never stops the script.
+:: run PostgreSQL. Only warns; never stops the script. A key whose line
+:: :env_value refuses is there, so it is not called missing (its Note says so).
 :check_postgres_env
 call :env_value COMPOSE_PROFILES
 set "_CP=!_EV!"
+if defined _EV_BAD set "_CP=postgres"
 call :env_value BLACKVAULT_POSTGRES_PASSWORD
 set "_PW=!_EV!"
+if defined _EV_BAD set "_PW=unreadable"
 call :env_value BLACKVAULT_DATABASE_URL
 set "_DU=!_EV!"
+if defined _EV_BAD set "_DU=postgres://unreadable"
 set "_EV="
 if defined _CP set "_CP=!_CP: =!"
 if defined _CP set "_CP=!_CP:"=!"
@@ -547,6 +570,13 @@ echo      BLACKVAULT_DB_PROVIDER=postgres
 echo      BLACKVAULT_POSTGRES_PASSWORD=^<48 hex characters^>
 echo      BLACKVAULT_DATABASE_URL=postgresql://blackvault:^<same password^>@db:5432/blackvault
 echo    See .env.example. If this is a SQLite install, set BLACKVAULT_DB_PROVIDER=sqlite instead.
+goto :eof
+
+:: Says what update.bat does when :env_value refused the DATA_DIR line (its
+:: Note is already on the screen): nothing is checked and nothing is moved.
+:data_dir_unreadable
+echo WARNING: DATA_DIR in .env could not be read, so the database check is skipped
+echo          and DATA_DIR is left as it is.
 goto :eof
 
 :: Sets IS_DIR=1 when %1 is an existing directory, else clears it.
@@ -697,8 +727,9 @@ set "_ST_LINE="
 set "_ST_CODE="
 for /f "usebackq delims=" %%L in (`%COMPOSE% logs blackvault 2^>nul ^| findstr /l /c:"[auth] Setup token:" /c:"[auth] First admin created"`) do set "_ST_LINE=%%L"
 if not defined _ST_LINE goto :eof
-:: Everything after "Setup token", then the first word after ": ". A line
-:: without "Setup token" (the admin-created line) is left whole by this.
+:: Everything after "Setup token", then the first word after ": ". The
+:: admin-created line holds no "setup token" in any letter case (the search
+:: of !VAR:*text=! ignores case), so it comes back whole and ends here.
 set "_ST_REST=!_ST_LINE:*Setup token=!"
 if "!_ST_REST!"=="!_ST_LINE!" goto :eof
 for /f "tokens=1 delims=: " %%T in ("!_ST_REST!") do set "_ST_CODE=%%T"
@@ -733,8 +764,9 @@ goto :eof
 :: Final review N1: when the key is held in BLACKVAULT_ENCRYPTION_KEY (a
 :: non-empty line in .env, or set in this console) no key file is created -
 :: a second, different key would make the app refuse to start (KEY_CONFLICT).
-:: The .env line is read by :env_value; a line it cannot read stops here with
-:: errorlevel 1 instead of being taken for "no key".
+:: The .env line is read by :env_value; a line it cannot read, or a value
+:: that is not 64 hex characters (the app would refuse it), stops here with
+:: errorlevel 1 instead of being taken for "no key" or for a usable one.
 :ensure_encryption_key
 set "_EK=secrets\blackvault_encryption_key"
 if exist "!_EK!" (
@@ -749,8 +781,13 @@ if defined BLACKVAULT_ENCRYPTION_KEY (
 call :env_value BLACKVAULT_ENCRYPTION_KEY
 set "_EK_ENV="
 if defined _EV set "_EK_ENV=1"
+if defined _EV if "!_EV:~63,1!"=="" set "_EK_ENV=malformed"
+if defined _EV if not "!_EV:~64!"=="" set "_EK_ENV=malformed"
+if defined _EV if not "!_EV:;=!"=="!_EV!" set "_EK_ENV=malformed"
+if defined _EV for /f "delims=0123456789abcdefABCDEF" %%X in ("!_EV!") do set "_EK_ENV=malformed"
 set "_EV="
 if defined _EV_BAD goto :ensure_key_unreadable
+if "!_EK_ENV!"=="malformed" goto :ensure_key_malformed
 if not defined _EK_ENV goto :ensure_key_no_env_key
 echo Encryption key: BLACKVAULT_ENCRYPTION_KEY ^(from .env^) - no key file created
 :: docker-compose.yml mounts secrets\ with create_host_path: false.
@@ -792,6 +829,11 @@ exit /b 0
 echo ERROR: the BLACKVAULT_ENCRYPTION_KEY line in .env could not be read, so this script
 echo        cannot tell whether an encryption key is already set. No key file was
 echo        created: a second, different key would stop the app from starting.
+exit /b 1
+:ensure_key_malformed
+echo ERROR: BLACKVAULT_ENCRYPTION_KEY in .env is not 64 hex characters, so the app would
+echo        refuse to start. Correct the line, or remove it to have a key file
+echo        created. No key file was created.
 exit /b 1
 :ensure_key_acl_failed
 echo ERROR: could not restrict the key file to your user account with icacls.
