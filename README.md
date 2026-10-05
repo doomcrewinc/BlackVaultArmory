@@ -368,12 +368,18 @@ docker compose up -d
 
 - **Windows only:** Open Docker Desktop → **Settings → Resources → File Sharing** → make sure the drive your project is on (usually `C:`) is checked → click **Apply & Restart**, then try again.
 
-- **Linux only:** Run this to fix folder permissions:
+- **Linux only:** Nothing to do for a normal install. Each time it starts, BlackVault gives
+  `./data/db` and `./data/uploads` to the user the app runs as (uid 1001), so the folders
+  `install.sh` made for you work as they are. If you are on a network share (NAS, NFS, SMB) or a
+  read-only mount that refuses that change, `docker compose logs blackvault` shows a line starting
+  `[entrypoint] WARNING: the folder /app/uploads is not writable`, and uploads fail with *The
+  server cannot write to its uploads folder*. Then run this on the host:
   ```bash
   sudo chown -R 1001:1001 ./data/db ./data/uploads
   ```
   Do **not** run it on the whole `./data` folder: `data/postgres` belongs to the PostgreSQL
-  container, and PostgreSQL refuses to start if it is re-owned.
+  container, and PostgreSQL refuses to start if it is re-owned. (If your data folder is not
+  `./data`, use the path in `DATA_DIR` in `.env`.)
 
 ---
 
@@ -1085,8 +1091,8 @@ sudo docker exec blackvault ls -la /app/storage/uploads/documents
 ```
 
 If it says `No such file or directory`, or lists no files, there is nothing to rescue — skip
-to the update. If it lists files, copy them onto the volume and give the uploads folder to the
-app's user (uid 1001):
+to the update. If it lists files, copy them onto the volume and give them to the app's user
+(uid 1001):
 
 ```bash
 sudo docker cp blackvault:/app/storage/uploads/documents <DATA_DIR>/uploads/
@@ -1094,8 +1100,10 @@ sudo chown -R 1001:1001 <DATA_DIR>/uploads
 ```
 
 `docker cp` gives the copies to the user who ran it; the app runs as uid 1001 and must own the
-documents to encrypt them, and the uploads folder itself to write its snapshot there. This
-rescue is proven on Linux in CI.
+documents to encrypt them. Keep the `chown`: a restart does not do it for you. BlackVault fixes
+the owner of `<DATA_DIR>/uploads` and everything in it only when the uploads folder itself has
+the wrong owner; the new `documents` folder inside a folder that is already right is left as
+`docker cp` made it. This rescue is proven on Linux in CI.
 
 **Mac (Docker Desktop or OrbStack).** The same steps, with no `sudo` and **no `chown`**:
 
@@ -1975,7 +1983,9 @@ exactly as you left it, but anything added while on PostgreSQL is not in it. Del
 **Step 1 —** Stop BlackVault on the old machine (see *Stopping and Starting* above), then copy
 your `data` folder **and `.env`** to the new machine (USB drive, network share, etc.). On Linux
 with PostgreSQL, use `sudo cp -a` (see *Backing up your data*): `data/postgres` is owned by the
-database container. Alternatively, save an in-app backup (**Settings → Backup**) and restore it
+database container. A copy made as another user needs no `chown` for `data/uploads` and
+`data/db`: BlackVault gives each folder, and what is in it, to the app's user at the next start
+when the folder itself has another owner. Alternatively, save an in-app backup (**Settings → Backup**) and restore it
 on the new machine after installing, copying `data/uploads` across for your images and
 documents. Copy `secrets/blackvault_encryption_key` across too, into the new folder's
 `secrets/` before running the installer (an existing key file is kept as it is):

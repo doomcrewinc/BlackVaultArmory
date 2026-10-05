@@ -106,6 +106,10 @@ services:
       # /app/data holds vault.db on SQLite, server-side backups on both, and the
       # .migrated record the migration tool writes. Without this mount, backups
       # saved under /app/data/backups vanish when the container is recreated.
+      # Both folders are made by install.sh as the installing user; the image's
+      # entrypoint gives them to the app user (uid 1001) at every start when
+      # their owner is another, so no chown is needed. Where that is refused (a
+      # network share) it warns and carries on if the app can write anyway.
       - ${DATA_DIR:-./data}/db:/app/data
       - ${DATA_DIR:-./data}/uploads:/app/uploads
       # Full backups (Settings > Backup, ./backup.sh): one passphrase-sealed

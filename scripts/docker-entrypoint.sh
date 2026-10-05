@@ -151,4 +151,43 @@ if [ "$backups_ok" = 1 ]; then
   fi
 fi
 
+# The uploads folder (/app/uploads) and the data folder (/app/data, where the
+# SQLite database lives; empty on a PostgreSQL install). docker-compose.yml
+# mounts <DATA_DIR>/uploads and <DATA_DIR>/db there. On native Linux a bind
+# mount keeps the host owner, and install.sh creates both folders as the user
+# who ran it (typically uid 1000), so the app user (uid 1001) could not write
+# in them: every upload failed. They are given to the app user here.
+#
+# Only a folder that does not already belong to nextjs:nodejs is touched, and
+# only then is what is inside it given over too (files copied in by hand as
+# another user, an older install's files): a normal start never walks a large
+# uploads folder. A single foreign file inside a folder that is already right
+# is left alone. Modes are never changed. chown -h so a symbolic link inside
+# is itself given over and never followed out of the folder.
+#
+# Nothing here may stop the container from starting. On a share that refuses
+# chown (NFS with root squash, SMB, a read-only mount) the app user is tested
+# for write access, as for the backup folder above, and one warning is printed
+# only when it cannot write.
+own_app_folder() {
+  folder=$1
+  what=$2
+  host_folder=$3
+  [ -d "$folder" ] || return 0
+  if [ "$(stat -c '%U:%G' "$folder" 2>/dev/null)" = "nextjs:nodejs" ]; then
+    return 0
+  fi
+  why=""
+  if ! chown -hR nextjs:nodejs "$folder" 2>/dev/null; then
+    why=" Its owner could not be changed (a network share usually refuses this)."
+  fi
+  probe="$folder/.blackvault-write-test.$$"
+  if ! su-exec nextjs:nodejs sh -c ': > "$1" && rm -f "$1"' sh "$probe" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    echo "[entrypoint] WARNING: the folder $folder is not writable by the app (uid 1001).$why $what will fail until it is. The host folder mounted there is $host_folder (DATA_DIR is set in .env, default ./data); on the host run: sudo chown -R 1001:1001 $host_folder. BlackVault starts anyway." >&2
+  fi
+}
+own_app_folder /app/uploads "Uploading photos and documents" "<DATA_DIR>/uploads"
+own_app_folder /app/data "Saving to the SQLite database" "<DATA_DIR>/db"
+
 exec su-exec nextjs:nodejs "$@"

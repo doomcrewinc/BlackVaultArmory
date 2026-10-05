@@ -295,7 +295,7 @@ If it fails, find what now buffers; do not raise the cap.
 image it builds, on real containers:
 
 ```bash
-./scripts/ci/encryption-key-linux.sh                          # install A; key handling (3a, 3b); sharp and the capture routes
+./scripts/ci/encryption-key-linux.sh                          # install A; key handling (3a, 3b); upload folder ownership; sharp and the capture routes
 ./scripts/ci/full-backup-entrypoint-linux.sh app-blackvault   # a backup folder that refuses chown
 ./scripts/ci/full-backup-linux.sh                             # backup, restore, rollback, re-encrypt
 ```
@@ -303,7 +303,9 @@ image it builds, on real containers:
 The first and the third need a real Linux Docker host and **passwordless sudo**, and they are
 not gentle: they create the users `bvtest` (uid 1234) and `bvother`, install under
 `/home/bvtest/`, use port 3000 and the container names `blackvault` and `blackvault-db`,
-bind-mount a folder onto itself and loop-mount FAT images under `/mnt`. Run them from the repository root in a throwaway VM, never on
+bind-mount a folder onto itself and loop-mount FAT images under `/mnt`. They create `data/db` and
+`data/uploads` as the host user (as `install.sh` does) and never chown them: the container's
+entrypoint must make them writable for uid 1001, and the scripts assert it. Run them from the repository root in a throwaway VM, never on
 a machine that runs BlackVault. The third takes over the install the first one leaves, so it
 cannot run alone. The second needs only Docker and an image name, changes nothing on the host,
 and runs on Docker Desktop and OrbStack too:
