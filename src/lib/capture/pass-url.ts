@@ -31,7 +31,7 @@ export function isLoopbackOrigin(origin: string): boolean {
  * The address a phone should open. An origin the laptop reached by a real name
  * or address is used as it is. From a loopback origin the phone needs another
  * address: the public URL when direct access is off (the app redirects every
- * other host there), otherwise the detected network address.
+ * other host there) and it is not itself loopback, otherwise the detected network address.
  */
 export function passUrl(
   origin: string,
@@ -41,7 +41,7 @@ export function passUrl(
   const own = trimSlash(origin) + path;
   if (!isLoopbackOrigin(origin)) return { url: own, reachable: true };
 
-  if (net && !net.directAccess && net.publicUrl) {
+  if (net && !net.directAccess && net.publicUrl && !isLoopbackOrigin(net.publicUrl)) {
     return { url: trimSlash(net.publicUrl) + path, reachable: true };
   }
   if (net?.lanUrl) return { url: trimSlash(net.lanUrl) + path, reachable: true };

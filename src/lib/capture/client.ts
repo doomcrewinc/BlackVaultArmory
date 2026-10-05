@@ -52,7 +52,7 @@ export type UploadFields =
   | { kind: "paperwork"; docType: DocTypeValue };
 
 export type UploadResult =
-  | { ok: true; remaining: number }
+  | { ok: true; remaining: number | null }
   | { ok: false; message: string; ended: boolean };
 
 export async function sendUpload(token: string, file: File, fields: UploadFields): Promise<UploadResult> {
@@ -70,7 +70,7 @@ export async function sendUpload(token: string, file: File, fields: UploadFields
   }
   if (res.status === 201) {
     const data = await res.json().catch(() => null);
-    return { ok: true, remaining: typeof data?.remaining === "number" ? data.remaining : 0 };
+    return { ok: true, remaining: Number.isFinite(data?.remaining) ? data.remaining : null };
   }
   if (res.status === 429) return { ok: false, message: RATE_LIMIT_MESSAGE, ended: false };
   const ended = res.status === 410 || res.status === 404;

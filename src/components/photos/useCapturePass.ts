@@ -89,13 +89,18 @@ export function useCapturePass(entityType: PhotoEntityType, entityId: string): C
         return;
       }
       const data = await res.json().catch(() => null);
-      if (!res.ok || typeof data?.path !== "string") {
+      const expiresAt = new Date(data?.expiresAt).getTime();
+      if (res.ok && (typeof data?.path !== "string" || typeof data?.id !== "string" || !data.id || !Number.isFinite(expiresAt))) {
+        setError("Could not create a pass.");
+        return;
+      }
+      if (!res.ok) {
         setError(typeof data?.error === "string" ? data.error : "Could not create a pass.");
         return;
       }
       setLink(passUrl(origin, data.path, net));
       setNow(Date.now());
-      setPass({ id: data.id, path: data.path, expiresAt: new Date(data.expiresAt).getTime() });
+      setPass({ id: data.id, path: data.path, expiresAt });
     } catch {
       if (alive.current) setError("Could not create a pass.");
     } finally {

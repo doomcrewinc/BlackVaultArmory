@@ -69,7 +69,10 @@ export async function proxy(request: NextRequest) {
   if (isCapturePagePath(pathname)) requestHeaders.set(CAPTURE_PAGE_HEADER, "1");
   const response =
     auth.kind === "rewrite"
-      ? NextResponse.rewrite(new URL(auth.pathname, request.url), { status: 403 })
+      ? NextResponse.rewrite(new URL(auth.pathname, request.url), {
+          status: 403,
+          request: { headers: requestHeaders },
+        })
       : NextResponse.next({ request: { headers: requestHeaders } });
   if (session?.slidTo && rawSession) response.cookies.set(sessionCookie(rawSession, session.slidTo, request));
   return response;

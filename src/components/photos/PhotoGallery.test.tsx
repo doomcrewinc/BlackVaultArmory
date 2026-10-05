@@ -115,6 +115,18 @@ describe("PhotoGallery listing", () => {
     fireEvent.click(screen.getByRole("button", { name: "close-dialog" }));
     expect(screen.queryByTestId("pass-dialog")).toBeNull();
     await waitFor(() => expect(loads()).toBe(2));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onMainChange instead of refreshing when given, on closing the pass dialog", async () => {
+    stubFetch([]);
+    const onMainChange = vi.fn();
+    render(<PhotoGallery entityType="ammo" entityId="a1" onMainChange={onMainChange} />);
+    await screen.findByText("No photos yet.");
+    fireEvent.click(screen.getByRole("button", { name: "Continue on phone" }));
+    fireEvent.click(screen.getByRole("button", { name: "close-dialog" }));
+    expect(onMainChange).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
   });
 });
 

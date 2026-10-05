@@ -64,6 +64,18 @@ describe("passUrl, origin is loopback", () => {
     });
   });
 
+  it.each(["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"])(
+    "skips a loopback public URL (%s) when direct access is off",
+    (publicUrl) => {
+      const off = { directAccess: false, publicUrl };
+      expect(passUrl("http://localhost:3000", PATH, net(off)).url).toBe(LAN + PATH);
+      expect(passUrl("http://localhost:3000", PATH, net({ ...off, lanUrl: null }))).toEqual({
+        url: "http://localhost:3000" + PATH,
+        reachable: false,
+      });
+    },
+  );
+
   it("falls back to the LAN URL when direct access is off but there is no public URL", () => {
     expect(passUrl("http://localhost:3000", PATH, net({ directAccess: false, publicUrl: null })).url).toBe(LAN + PATH);
   });

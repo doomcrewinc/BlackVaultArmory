@@ -39,6 +39,7 @@ export function CaptureScreen({ token }: { token: string }) {
   const [label, setLabel] = useState("");
   const [docType, setDocType] = useState<DocTypeValue>("RECEIPT");
   const [formError, setFormError] = useState<string | null>(null);
+  const [ended, setEnded] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
 
   const applyLoad = useCallback((result: Awaited<ReturnType<typeof loadPassInfo>>) => {
@@ -73,10 +74,13 @@ export function CaptureScreen({ token }: { token: string }) {
     patchJob(id, { status: "sending", message: undefined });
     const result = await sendUpload(token, file, fields);
     if (result.ok) {
-      setRemaining(result.remaining);
+      setRemaining((prev) =>
+        Math.max(0, result.remaining === null ? prev - 1 : Math.min(prev, result.remaining)),
+      );
       patchJob(id, { status: "sent" });
     } else if (result.ended) {
-      setLoad({ state: "blocked", message: result.message, retryable: false });
+      setEnded(result.message);
+      patchJob(id, { status: "failed", message: result.message });
     } else {
       patchJob(id, { status: "failed", message: result.message });
     }
@@ -164,9 +168,9 @@ export function CaptureScreen({ token }: { token: string }) {
         }}
       />
 
-      {remaining <= 0 ? (
+      {ended !== null || remaining <= 0 ? (
         <p role="alert" className="rounded-lg border border-vault-border bg-vault-surface p-4 text-base text-vault-text">
-          This pass is full. Make a new one on the computer.
+          {ended ?? "This pass is full. Make a new one on the computer."}
         </p>
       ) : (
         <div className="space-y-3">
@@ -181,13 +185,13 @@ export function CaptureScreen({ token }: { token: string }) {
         </div>
       )}
 
-      {formError && (
+      {formError && ended === null && (
         <p role="alert" className="rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 p-3 text-sm text-[#E53935]">
           {formError}
         </p>
       )}
 
-      {chosen && (
+      {chosen && ended === null && (
         <div className="space-y-3 rounded-xl border border-vault-border bg-vault-surface p-4">
           <p className="truncate text-sm text-vault-text">
             {kind === "photo" ? "Photo" : "Paperwork"}: {chosen.name}

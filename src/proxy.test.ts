@@ -243,4 +243,19 @@ describe("proxy — capture page marker", () => {
     expect(res.headers.get(MARKER)).toBeNull();
     expect(res.headers.get("x-middleware-override-headers") ?? "").not.toContain("x-bv-capture-page");
   });
+
+  it("drops a client-sent marker on the rewrite branch too", async () => {
+    auth.validateSession.mockResolvedValue({ user: { id: "u2", username: "jeff", displayName: "Jeff", role: "USER" }, sessionId: "s2" });
+    const res = await proxy(
+      req("https://vault.example.com/admin/x", {
+        headers: { host: "vault.example.com", "x-bv-capture-page": "1" },
+      }),
+    );
+    expect(res.headers.get("x-middleware-rewrite")).toBe("https://vault.example.com/admins-only");
+    expect(res.headers.get(MARKER)).toBeNull();
+    // Without an explicit header set Next forwards the original request, marker included.
+    const forwarded = res.headers.get("x-middleware-override-headers");
+    expect(forwarded).toContain("host");
+    expect(forwarded).not.toContain("x-bv-capture-page");
+  });
 });

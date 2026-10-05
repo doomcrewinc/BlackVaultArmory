@@ -187,15 +187,39 @@ describe("CaptureScreen, sending", () => {
     expect(screen.getByText("9 uploads left")).toBeInTheDocument();
   });
 
-  it("replaces the buttons with the server's message when the pass ends during the visit", async () => {
-    stubFetch(INFO, [{ status: 410, body: { error: "This pass has expired. Make a new one on the computer.", reason: "expired" } }]);
+  it("keeps the item name and the sent rows when the pass ends, replacing only the buttons", async () => {
+    stubFetch(INFO, [SENT(11), { status: 410, body: { error: "This pass has expired. Make a new one on the computer.", reason: "expired" } }]);
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "Photo" }));
-    pick();
+    pick("one.jpg");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("This pass has expired. Make a new one on the computer.");
+    await screen.findByText("Sent");
+    fireEvent.click(screen.getByRole("button", { name: "Photo" }));
+    pick("two.jpg");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(screen.getAllByRole("alert")[0]).toHaveTextContent("This pass has expired. Make a new one on the computer."));
     expect(screen.queryByRole("button", { name: "Photo" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Paperwork" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Glock 19" })).toBeInTheDocument();
+    expect(screen.getByText("one.jpg")).toBeInTheDocument();
+    expect(screen.getByText("Sent")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["never goes up when responses arrive out of order", [SENT(5), SENT(8)], "5 uploads left", 12],
+    ["counts down by one when the response has no remaining", [{ status: 201, body: { kind: "photo", id: "x" } } as Reply], "11 uploads left", 12],
+    ["never goes below zero without a remaining", [{ status: 201, body: {} } as Reply], "0 uploads left", 1],
+  ] as [string, Reply[], string, number][])("remaining %s", async (_name, replies, expected, initial) => {
+    stubFetch({ status: 200, body: { itemName: "Glock 19", remaining: initial } }, replies);
+    await ready();
+    for (let i = 0; i < replies.length; i++) {
+      fireEvent.click(screen.getByRole("button", { name: "Photo" }));
+      pick(`s${i}.jpg`);
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(screen.getAllByText("Sent")).toHaveLength(i + 1));
+    }
+    expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
   it("rejects a file over 25MB before sending", async () => {

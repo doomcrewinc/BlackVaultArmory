@@ -134,6 +134,31 @@ describe("CapturePassDialog, creating the pass and its address", () => {
     expect(qr.toDataURL).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["no id", { token: "t", path: TOKEN_PATH, expiresAt: "2026-10-04T12:15:00.000Z" }],
+    ["an empty id", { id: "", path: TOKEN_PATH, expiresAt: "2026-10-04T12:15:00.000Z" }],
+    ["a garbage expiresAt", { id: "pass1", path: TOKEN_PATH, expiresAt: "not a date" }],
+    ["no expiresAt", { id: "pass1", path: TOKEN_PATH }],
+  ])("shows an error and never polls or counts down with %s in the create response", async (_name, body) => {
+    const fetchMock = stubFetch({ create: () => ({ status: 201, body }) });
+    await open();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not create a pass.");
+    expect(screen.queryByRole("timer")).toBeNull();
+    expect(screen.queryByAltText(/qr code/i)).toBeNull();
+    await advance(10_000);
+    expect(polls(fetchMock)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still shows the link and Copy when the QR code cannot be made", async () => {
+    qr.toDataURL.mockRejectedValueOnce(new Error("boom"));
+    stubFetch({});
+    await open();
+    expect(screen.queryByAltText(/qr code/i)).toBeNull();
+    expect(screen.getByText(LAN + TOKEN_PATH)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+  });
+
   it("explains a 429 when creating", async () => {
     stubFetch({ create: () => ({ status: 429, body: { error: "slow down" } }) });
     await open();

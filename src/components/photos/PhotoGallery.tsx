@@ -80,7 +80,9 @@ export function PhotoGallery({
   const closePhoneDialog = useCallback(() => {
     setPhoneOpen(false);
     loadPhotos();
-  }, [loadPhotos]);
+    // A phone upload can make the item's first photo its main picture.
+    mainChanged();
+  }, [loadPhotos, mainChanged]);
 
   function chooseFile(file: File | undefined) {
     if (!file) return;

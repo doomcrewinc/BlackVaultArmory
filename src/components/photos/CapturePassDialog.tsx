@@ -39,13 +39,14 @@ export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
       return;
     }
     let cancelled = false;
-    import("qrcode").then((QRCode) => {
-      QRCode.toDataURL(url, { width: 200, margin: 2 })
-        .then((data) => {
-          if (!cancelled) setQr(data);
-        })
-        .catch(() => {});
-    });
+    import("qrcode")
+      .then((QRCode) => QRCode.toDataURL(url, { width: 200, margin: 2 }))
+      .then((data) => {
+        if (!cancelled) setQr(data);
+      })
+      .catch(() => {
+        // No image: the link and Copy still work.
+      });
     return () => {
       cancelled = true;
     };
