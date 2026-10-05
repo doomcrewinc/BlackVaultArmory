@@ -22,17 +22,13 @@ export type StoreDocumentInput = {
   type: string;
   notes: string | null;
   owners: DocumentOwners;
-  /**
-   * Create the row inside `prisma.$transaction`, so an enclosing
-   * `auditStorage.run({ actor })` is the actor the audit log records. A row
-   * written outside a transaction takes its actor from the request.
-   */
-  inTransaction?: boolean;
 };
 
 /**
  * Writes the encrypted file under `documentsRoot()` and creates the Document
- * row. When the row cannot be created the file is removed again.
+ * row in a transaction on the app client. The audit log records the actor of
+ * an enclosing `auditStorage.run({ actor })`, else the request's. When the row
+ * cannot be created the file is removed again.
  */
 export async function storeDocument(input: StoreDocumentInput) {
   const fileName = `${randomUUID().replace(/-/g, "")}.${input.extension}`;
@@ -58,12 +54,9 @@ export async function storeDocument(input: StoreDocumentInput) {
   };
 
   try {
-    if (input.inTransaction) {
-      return await prisma.$transaction(
-        async (tx) => await tx.document.create({ data, include: DOCUMENT_OWNER_INCLUDE }),
-      );
-    }
-    return await prisma.document.create({ data, include: DOCUMENT_OWNER_INCLUDE });
+    return await prisma.$transaction(
+      async (tx) => await tx.document.create({ data, include: DOCUMENT_OWNER_INCLUDE }),
+    );
   } catch (e) {
     await fs.unlink(filePath).catch(() => undefined);
     throw e;

@@ -33,16 +33,17 @@ vi.mock("@/lib/rate-limit", () => ({
   enforceRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-vi.mock("@/lib/prisma", () => ({
-  prisma: {
-    document: {
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
-        id: "doc-1",
-        ...data,
-      })),
-    },
-  },
-}));
+vi.mock("@/lib/prisma", () => {
+  const document = {
+    create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "doc-1",
+      ...data,
+    })),
+  };
+  return {
+    prisma: { document, $transaction: async (fn: (tx: unknown) => Promise<unknown>) => await fn({ document }) },
+  };
+});
 
 // Imported statically: both routes resolve the uploads root at call time
 // (via uploadsRoot()/documentsRoot(), which read IMAGE_UPLOAD_DIR from

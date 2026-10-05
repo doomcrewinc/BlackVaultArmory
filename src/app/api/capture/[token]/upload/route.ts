@@ -12,6 +12,6 @@ export async function POST(request: Request, { params }: Ctx) {
     return await handleCaptureUpload(request, token);
   } catch (e) {
     console.error("POST /api/capture/[token]/upload failed:", describeError(e));
-    return NextResponse.json({ error: "Failed to upload" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to upload" }, { status: 500, headers: { "Cache-Control": "no-store" } });
   }
 }

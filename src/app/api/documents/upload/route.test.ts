@@ -24,7 +24,10 @@ vi.mock("@/lib/rate-limit", () => ({
 }));
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { document: { create: mocks.create } },
+  prisma: {
+    document: { create: mocks.create },
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => await fn({ document: { create: mocks.create } }),
+  },
 }));
 
 // The upload directory and the write itself are mocked out so the route

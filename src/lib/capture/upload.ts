@@ -6,7 +6,7 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { getClientIp } from "@/lib/server/client-ip";
 import { detectFileSignature } from "@/lib/server/file-signatures";
 import { describeError } from "@/lib/photos/errors";
-import { OWNER_COLUMN } from "@/lib/photos/owner";
+import { OWNER_COLUMN, findOwnerName } from "@/lib/photos/owner";
 import { addPhoto, normaliseLabel } from "@/lib/photos/store";
 import { PASS_MAX_UPLOADS, findPass, returnSlot, takeSlot, uploadCountOf, type OpenPass, type PassEndReason } from "./pass";
 import { captureThrottle } from "./throttle";
@@ -40,8 +40,10 @@ export async function resolvePass(
   request: Request,
   rawToken: string,
 ): Promise<{ ok: true; pass: OpenPass } | PassFailure> {
-  const key = `ip:${getClientIp(request) ?? "unknown"}`;
-  const gate = captureThrottle.check(key);
+  // Without a trusted address every caller would share one bucket, so no address throttle then.
+  const ip = getClientIp(request);
+  const key = ip === null ? null : `ip:${ip}`;
+  const gate = key === null ? ({ allowed: true } as const) : captureThrottle.check(key);
   if (!gate.allowed) {
     return {
       ok: false,
@@ -53,7 +55,7 @@ export async function resolvePass(
 
   const found = TOKEN_SHAPE.test(rawToken) ? await findPass(rawToken) : null;
   if (!found) {
-    captureThrottle.fail(key);
+    if (key !== null) captureThrottle.fail(key);
     return { ok: false, status: 404, body: { error: "This link is not valid." } };
   }
   if (!found.ok) return endedFailure(found.reason);
@@ -120,7 +122,6 @@ async function storePaperwork(pass: OpenPass, bytes: Buffer, parsed: Extract<Par
     type: parsed.docType,
     notes: "Added from a phone capture pass",
     owners: { [OWNER_COLUMN[pass.entityType]]: pass.entityId },
-    inTransaction: true,
   });
   return doc.id;
 }
@@ -152,9 +153,14 @@ export async function handleCaptureUpload(request: Request, rawToken: string): P
     return bad("Paperwork from the phone must be a picture.");
   }
 
+  if ((await findOwnerName(pass.entityType, pass.entityId)) === null) return failureResponse(endedFailure("closed"));
+
   if (!(await takeSlot(pass.id))) {
     const again = await findPass(rawToken);
-    return failureResponse(endedFailure(again && !again.ok ? again.reason : "full"));
+    if (again === null) {
+      return failureResponse({ ok: false, status: 404, body: { error: "This link is not valid." } });
+    }
+    return failureResponse(endedFailure(again.ok ? "full" : again.reason));
   }
 
   const actor: AuditActor = {
@@ -163,6 +169,7 @@ export async function handleCaptureUpload(request: Request, rawToken: string): P
     actorName: pass.creatorName,
     actorIp: getClientIp(request),
   };
+  let stored: { id: string };
   try {
     // `async () => await`: a Prisma promise is lazy, so returning it
     // un-awaited would run it after `run` left the store.
@@ -180,12 +187,16 @@ export async function handleCaptureUpload(request: Request, rawToken: string): P
           ).id
         : await storePaperwork(pass, bytes, parsed),
     );
-    const remaining = Math.max(0, PASS_MAX_UPLOADS - (await uploadCountOf(pass.id)));
-    return NextResponse.json({ kind: parsed.kind, id, remaining }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    stored = { id };
   } catch (e) {
     await giveSlotBack(pass.id);
     if (e instanceof PictureRejected) return bad(e.code === "HEIC" ? HEIC_MESSAGE : e.message);
     console.error("Capture pass upload failed:", describeError(e));
     return bad("Failed to upload", 500);
   }
+
+  // The upload is stored: from here nothing may give the slot back.
+  const count = await uploadCountOf(pass.id).catch(() => pass.uploadCount + 1);
+  const remaining = Math.max(0, PASS_MAX_UPLOADS - count);
+  return NextResponse.json({ kind: parsed.kind, id: stored.id, remaining }, { status: 201, headers: { "Cache-Control": "no-store" } });
 }

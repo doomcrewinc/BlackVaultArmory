@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   returnSlot: vi.fn(),
   uploadCountOf: vi.fn(),
   addPhoto: vi.fn(),
+  findOwnerName: vi.fn(),
   storeDocument: vi.fn(),
   processPicture: vi.fn(),
   enforceRateLimit: vi.fn(),
@@ -24,6 +25,10 @@ vi.mock("@/lib/capture/pass", async (importOriginal) => ({
 vi.mock("@/lib/photos/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/photos/store")>()),
   addPhoto: mocks.addPhoto,
+}));
+vi.mock("@/lib/photos/owner", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/photos/owner")>()),
+  findOwnerName: mocks.findOwnerName,
 }));
 vi.mock("@/lib/documents/store", () => ({ storeDocument: mocks.storeDocument }));
 vi.mock("@/lib/rate-limit", () => ({ enforceRateLimit: mocks.enforceRateLimit }));
@@ -69,6 +74,7 @@ beforeEach(() => {
   mocks.takeSlot.mockResolvedValue(true);
   mocks.returnSlot.mockResolvedValue(undefined);
   mocks.uploadCountOf.mockResolvedValue(5);
+  mocks.findOwnerName.mockResolvedValue("9mm Acme");
   mocks.enforceRateLimit.mockResolvedValue({ allowed: true });
   mocks.addPhoto.mockImplementation(async () => {
     mocks.actorSeen(auditStorage.getStore()?.actor);
@@ -124,7 +130,6 @@ describe("POST /api/capture/[token]/upload", () => {
         type: "NFA_TAX_STAMP",
         notes: "Added from a phone capture pass",
         owners: { ammoStockId: "ammo-A" },
-        inTransaction: true,
       }),
     );
   });
@@ -199,6 +204,30 @@ describe("POST /api/capture/[token]/upload", () => {
     expect((await res.json()).reason).toBe("closed");
   });
 
+  it("answers 410 closed for a deleted item and takes no slot", async () => {
+    mocks.findOwnerName.mockResolvedValue(null);
+    const res = await post({ kind: "photo" });
+    expect(res.status).toBe(410);
+    expect(await res.json()).toEqual({ error: "This pass was closed. Make a new one on the computer.", reason: "closed" });
+    expect(mocks.takeSlot).not.toHaveBeenCalled();
+  });
+
+  it("answers 404, not full, when no slot is left and the pass row is gone", async () => {
+    mocks.takeSlot.mockResolvedValue(false);
+    mocks.findPass.mockResolvedValueOnce({ ok: true, pass }).mockResolvedValueOnce(null);
+    const res = await post({ kind: "photo" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "This link is not valid." });
+  });
+
+  it("answers 201 and keeps the slot when the count read fails after the upload was stored", async () => {
+    mocks.uploadCountOf.mockRejectedValue(new Error("db down"));
+    const res = await post({ kind: "photo" });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ kind: "photo", id: "photo-1", remaining: 45 });
+    expect(mocks.returnSlot).not.toHaveBeenCalled();
+  });
+
   it("answers 404 for an unknown token", async () => {
     mocks.findPass.mockResolvedValue(null);
     const res = await post({ kind: "photo" });
@@ -238,6 +267,24 @@ describe("POST /api/capture/[token]/upload", () => {
     expect(logged.length).toBeGreaterThan(0);
     expect(JSON.stringify(logged)).not.toContain(TOKEN);
     expect(JSON.stringify(logged)).not.toContain("secret-detail");
+  });
+
+  it("an unexpected failure outside the upload is a no-store 500", async () => {
+    mocks.findPass.mockRejectedValue(new Error("db down"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const res = await post({ kind: "photo" });
+    expect(res.status).toBe(500);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("with no known client address, wrong tokens are not throttled and a valid token still works", async () => {
+    delete process.env.TRUSTED_PROXIES;
+    const wrong = await Promise.all(
+      Array.from({ length: 6 }, () => post({ kind: "photo" }, { token: "short" })),
+    );
+    expect(wrong.map((r) => r.status)).toEqual(Array(6).fill(404));
+    const ok = await post({ kind: "photo" });
+    expect(ok.status).toBe(201);
   });
 
   it("exports only POST", () => {

@@ -116,6 +116,13 @@ describe("GET /api/capture/[token]", () => {
     expect(results.map((r) => r.status)).toEqual(Array(8).fill(410));
   });
 
+  it("with no known client address, wrong tokens are not throttled and a valid token still works", async () => {
+    delete process.env.TRUSTED_PROXIES;
+    const wrong = await Promise.all(Array.from({ length: 6 }, () => get("short")));
+    expect(wrong.map((r) => r.status)).toEqual(Array(6).fill(404));
+    expect((await get()).status).toBe(200);
+  });
+
   it("exports only GET", () => {
     expect(Object.keys(route)).toEqual(["GET"]);
   });
