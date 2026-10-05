@@ -167,4 +167,49 @@ describe("processPicture", () => {
     const e = await rejection(processPicture(input, { maxPixels: 100 }));
     expect(e.code).toBe("TOO_MANY_PIXELS");
   });
+
+  describe("free-text comments", () => {
+    const MARKER = "SECRET-COMMENT-MARKER-4711";
+
+    function crc32(data: Buffer): number {
+      let crc = 0xffffffff;
+      for (const byte of data) {
+        crc ^= byte;
+        for (let k = 0; k < 8; k++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    // A tEXt chunk (keyword, NUL, text) with a correct CRC, placed before IEND.
+    function pngWithText(png: Buffer): Buffer {
+      const body = Buffer.concat([Buffer.from("tEXt"), Buffer.from(`Comment\0${MARKER}`)]);
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(body.length - 4);
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(crc32(body));
+      const chunk = Buffer.concat([length, body, crc]);
+      const iend = png.length - 12;
+      return Buffer.concat([png.subarray(0, iend), chunk, png.subarray(iend)]);
+    }
+
+    // A COM segment (FF FE, length, text) right after the SOI marker.
+    function jpegWithComment(jpeg: Buffer): Buffer {
+      const text = Buffer.from(MARKER);
+      const segment = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, text.length + 2]), text]);
+      return Buffer.concat([jpeg.subarray(0, 2), segment, jpeg.subarray(2)]);
+    }
+
+    it.each([
+      ["a PNG tEXt chunk", async () => pngWithText(await blank(30, 10).png().toBuffer())],
+      ["a JPEG COM segment", async () => jpegWithComment(await blank(30, 10).jpeg().toBuffer())],
+    ])("drops %s", async (_name, make) => {
+      const input = await make();
+      expect(input.includes(MARKER)).toBe(true);
+
+      const out = await processPicture(input);
+
+      expect(out.bytes.includes(MARKER)).toBe(false);
+      expect(out.bytes.includes(Buffer.from(MARKER, "utf16le"))).toBe(false);
+    });
+  });
 });

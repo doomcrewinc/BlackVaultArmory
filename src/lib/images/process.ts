@@ -1,7 +1,9 @@
 import sharp from "sharp";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 
-// One large upload must not take all of the container's memory.
+// concurrency(1) limits the threads libvips uses inside one picture. It does
+// not limit how many pictures are processed at once; processPicture does that
+// with a queue that runs one picture at a time.
 sharp.concurrency(1);
 
 export const MAX_PHOTO_BYTES = 25 * 1024 * 1024;
@@ -59,15 +61,25 @@ function mapSharpError(e: unknown, maxPixels: number): PictureRejected {
   return new PictureRejected("NOT_A_PICTURE", NOT_READABLE);
 }
 
+type ProcessOptions = { preview?: boolean; maxBytes?: number; maxPixels?: number };
+
+// The tail of the queue. It never rejects, so a failed picture does not stop
+// the ones behind it.
+let queueTail: Promise<unknown> = Promise.resolve();
+
 /**
  * Validates a JPEG, PNG or WebP, applies its orientation to the pixels and
  * re-saves it at the same pixel size without location or other hidden
- * metadata. Throws PictureRejected; any other error is a server fault.
+ * metadata. One picture is processed at a time; others wait their turn.
+ * Throws PictureRejected; any other error is a server fault.
  */
-export async function processPicture(
-  input: Buffer,
-  opts: { preview?: boolean; maxBytes?: number; maxPixels?: number } = {},
-): Promise<ProcessedPicture> {
+export function processPicture(input: Buffer, opts: ProcessOptions = {}): Promise<ProcessedPicture> {
+  const job = queueTail.then(() => processNow(input, opts));
+  queueTail = job.catch(() => undefined);
+  return job;
+}
+
+async function processNow(input: Buffer, opts: ProcessOptions): Promise<ProcessedPicture> {
   const maxBytes = opts.maxBytes ?? MAX_PHOTO_BYTES;
   const maxPixels = opts.maxPixels ?? MAX_PHOTO_PIXELS;
 
