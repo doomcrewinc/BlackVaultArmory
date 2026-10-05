@@ -48,6 +48,18 @@ if [ -z "$errors" ]; then
   exit 0
 fi
 
+# With an empty baseline every error is new. Answered here because bash 3.2
+# (macOS /bin/bash) treats expanding an empty array under `set -u` as an
+# unbound variable, which the loops below would hit.
+if [ "${#BASELINE_FILES[@]}" -eq 0 ]; then
+  echo "" >&2
+  echo "    NEW TYPE ERRORS outside the baseline:" >&2
+  printf '%s\n' "$errors" >&2
+  echo "" >&2
+  echo "    Fix them. Do not add the file to BASELINE_FILES to make this pass." >&2
+  exit 1
+fi
+
 status=0
 unexpected=""
 total=0
