@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   enforceRateLimit: vi.fn(),
   findOwnerName: vi.fn(),
   record: vi.fn(),
+  findMany: vi.fn(),
   updateMany: vi.fn(),
   create: vi.fn(),
   transaction: vi.fn(),
@@ -16,7 +17,7 @@ vi.mock("@/lib/rate-limit", () => ({ enforceRateLimit: mocks.enforceRateLimit })
 vi.mock("@/lib/audit/events", () => ({ recordEventBestEffort: mocks.record }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    capturePass: { updateMany: mocks.updateMany, create: mocks.create },
+    capturePass: { findMany: mocks.findMany, updateMany: mocks.updateMany, create: mocks.create },
     $transaction: mocks.transaction,
   },
 }));
@@ -44,9 +45,10 @@ beforeEach(() => {
   mocks.getCurrentUser.mockResolvedValue({ id: "u1", username: "ann", displayName: "Ann", role: "USER", sessionId: "s1" });
   mocks.enforceRateLimit.mockResolvedValue({ allowed: true });
   mocks.findOwnerName.mockResolvedValue("9mm Federal");
+  mocks.findMany.mockResolvedValue([]);
   mocks.updateMany.mockResolvedValue({ count: 0 });
   mocks.create.mockResolvedValue({ id: "pass1" });
-  const tx = { capturePass: { updateMany: mocks.updateMany, create: mocks.create } };
+  const tx = { capturePass: { findMany: mocks.findMany, updateMany: mocks.updateMany, create: mocks.create } };
   mocks.transaction.mockImplementation(async (fn: (t: typeof tx) => Promise<unknown>) => await fn(tx));
 });
 
@@ -108,6 +110,38 @@ describe("POST /api/capture-passes", () => {
     });
     expect(JSON.stringify(event)).not.toContain(body.token);
     expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("records one closed event per pass it replaced, with no token", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "old1" }, { id: "old2" }]);
+
+    const res = await POST(req(valid));
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    const closed = mocks.record.mock.calls.map(([, e]) => e).filter((e) => e.action === "CAPTURE_PASS_CLOSED");
+    expect(closed).toEqual([
+      {
+        action: "CAPTURE_PASS_CLOSED",
+        entityType: "AmmoStock",
+        entityId: "a1",
+        entityLabel: "9mm Federal",
+        changes: { passId: "old1", note: "Replaced by a new pass" },
+      },
+      {
+        action: "CAPTURE_PASS_CLOSED",
+        entityType: "AmmoStock",
+        entityId: "a1",
+        entityLabel: "9mm Federal",
+        changes: { passId: "old2", note: "Replaced by a new pass" },
+      },
+    ]);
+    expect(JSON.stringify(mocks.record.mock.calls)).not.toContain(body.token);
+  });
+
+  it("records no closed event when no pass was open", async () => {
+    await POST(req(valid));
+    expect(mocks.record.mock.calls.map(([, e]) => e.action)).toEqual(["CAPTURE_PASS_CREATED"]);
   });
 
   it("logs only the error class when the database fails, never the token or the message", async () => {

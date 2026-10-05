@@ -17,24 +17,23 @@ export type OpenPass = {
   uploadCount: number;
 };
 
-/** Closes any open pass for the item, creates a new one. Returns the raw token once. */
+/** Closes any open pass for the item, creates a new one. Returns the raw token once and the ids of the passes it closed. */
 export async function createPass(opts: {
   entityType: PhotoEntityType;
   entityId: string;
   createdById: string;
   sessionId: string;
   now?: Date;
-}): Promise<{ id: string; token: string; expiresAt: Date }> {
+}): Promise<{ id: string; token: string; expiresAt: Date; closedPassIds: string[] }> {
   const now = opts.now ?? new Date();
   const token = generateToken();
   const expiresAt = new Date(now.getTime() + PASS_TTL_MS);
   // Interactive form: queries built outside a transaction would not run on its connection.
-  const pass = await prisma.$transaction(async (tx) => {
-    await tx.capturePass.updateMany({
-      where: { entityType: opts.entityType, entityId: opts.entityId, closedAt: null },
-      data: { closedAt: now },
-    });
-    return await tx.capturePass.create({
+  const { pass, closedPassIds } = await prisma.$transaction(async (tx) => {
+    const where = { entityType: opts.entityType, entityId: opts.entityId, closedAt: null };
+    const closed = await tx.capturePass.findMany({ where, select: { id: true } });
+    await tx.capturePass.updateMany({ where, data: { closedAt: now } });
+    const created = await tx.capturePass.create({
       data: {
         tokenHash: hashToken(token),
         entityType: opts.entityType,
@@ -45,8 +44,9 @@ export async function createPass(opts: {
         expiresAt,
       },
     });
+    return { pass: created, closedPassIds: closed.map((row) => row.id) };
   });
-  return { id: pass.id, token, expiresAt };
+  return { id: pass.id, token, expiresAt, closedPassIds };
 }
 
 /** Why a pass no longer takes uploads, or null while it is open. `closed` outranks `expired`, which outranks `full`. */

@@ -64,6 +64,7 @@ function suite(getClient: () => PrismaClient) {
   it("a second pass for one item closes the first", async () => {
     const first = await open();
     const second = await createPass({ entityType: "gear", entityId: "item-1", createdById: first.userId, sessionId: first.sessionId, now: NOW });
+    expect(second.closedPassIds).toEqual([first.id]);
     expect((await row(first.id)).closedAt).not.toBeNull();
     expect((await row(second.id)).closedAt).toBeNull();
     expect(await findPass(first.token, NOW)).toEqual({ ok: false, reason: "closed" });

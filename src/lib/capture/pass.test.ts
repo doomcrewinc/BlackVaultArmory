@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
+  findMany: vi.fn(),
   updateMany: vi.fn(),
   create: vi.fn(),
   transaction: vi.fn(),
@@ -9,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    capturePass: { findUnique: mocks.findUnique, updateMany: mocks.updateMany, create: mocks.create },
+    capturePass: { findUnique: mocks.findUnique, findMany: mocks.findMany, updateMany: mocks.updateMany, create: mocks.create },
     $transaction: mocks.transaction,
   },
 }));
@@ -76,14 +77,17 @@ describe("findPass", () => {
 
 describe("createPass", () => {
   it("stores the hash, never the token, and expires 15 minutes out", async () => {
-    mocks.updateMany.mockResolvedValue({ count: 0 });
+    mocks.findMany.mockResolvedValue([{ id: "old1" }, { id: "old2" }]);
+    mocks.updateMany.mockResolvedValue({ count: 2 });
     mocks.create.mockResolvedValue({ id: "p9" });
-    const tx = { capturePass: { updateMany: mocks.updateMany, create: mocks.create } };
+    const tx = { capturePass: { findMany: mocks.findMany, updateMany: mocks.updateMany, create: mocks.create } };
     mocks.transaction.mockImplementation(async (fn: (t: typeof tx) => Promise<unknown>) => await fn(tx));
 
     const out = await createPass({ entityType: "kit", entityId: "k1", createdById: "u1", sessionId: "s1", now: NOW });
 
     expect(out.id).toBe("p9");
+    expect(out.closedPassIds).toEqual(["old1", "old2"]);
+    expect(mocks.findMany.mock.calls[0][0].where).toEqual({ entityType: "kit", entityId: "k1", closedAt: null });
     expect(out.expiresAt).toEqual(new Date(NOW.getTime() + PASS_TTL_MS));
     const data = mocks.create.mock.calls[0][0].data;
     expect(data.tokenHash).toBe(hashToken(out.token));
