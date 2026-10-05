@@ -194,7 +194,8 @@ upload_pdf() {
 }
 # make_png FILE BYTES: a real RGB PNG of random pixels, about BYTES of raw pixel data (pictures are decoded and re-saved on upload).
 make_png() {
-  python3 - "$1" "$2" <<'PYEOF'
+  local file="$1" bytes="$2"
+  python3 - "$file" "$bytes" <<'PYEOF'
 import os, struct, sys, zlib
 
 
