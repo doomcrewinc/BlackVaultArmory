@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   kitFindMany: vi.fn(),
   buildFindMany: vi.fn(),
   documentFindMany: vi.fn(),
+  photoFindMany: vi.fn(),
   ammoStockFindMany: vi.fn(),
   rangeSessionFindMany: vi.fn(),
   requireAuth: vi.fn(),
@@ -36,6 +37,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     document: {
       findMany: mocks.documentFindMany,
+    },
+    photo: {
+      findMany: mocks.photoFindMany,
     },
     ammoStock: {
       findMany: mocks.ammoStockFindMany,
@@ -70,6 +74,7 @@ describe("/api/exports/data serial number handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireAuth.mockResolvedValue(null);
+    mocks.photoFindMany.mockResolvedValue([]);
     mocks.appSettingsFindUnique.mockResolvedValue({
       id: "singleton",
       includeUploadsInBackup: false,

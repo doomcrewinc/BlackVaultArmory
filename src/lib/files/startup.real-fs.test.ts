@@ -91,6 +91,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await within(10_000, raw.auditEvent.deleteMany());
   await within(10_000, raw.document.deleteMany());
+  await within(10_000, raw.photo.deleteMany());
   resetFieldKeysForTests();
   work = path.join(ctx.dir, `w-${Math.random().toString(16).slice(2)}`);
   root = path.join(work, "uploads");
@@ -378,6 +379,28 @@ describe("runFileStartup", () => {
     expect(changesOf(event).missingTotal).toBe(2);
   });
 
+  it("reports gallery photos whose original or preview is absent (a JSON-only restore) like missing documents, and still starts", async () => {
+    put("images/photos/whole.jpg", "orig");
+    put("images/photos/thumbs/ph-whole.webp", "prev");
+    put("images/photos/no-preview.jpg", "orig");
+    await raw.photo.createMany({
+      data: [
+        { id: "ph-whole", fileName: "whole.jpg" },
+        { id: "ph-gone-both", fileName: "gone.jpg" },
+        { id: "ph-gone-preview", fileName: "no-preview.jpg" },
+      ].map((p) => ({ ...p, mimeType: "image/jpeg", fileSize: 4, width: 1, height: 1 })),
+    });
+    const result = await run();
+    expect(result.missing).toEqual([
+      { id: "ph-gone-both", name: "gone.jpg" },
+      { id: "ph-gone-preview", name: "no-preview.jpg" },
+    ]);
+    expect(logged() + warned()).toMatch(/Missing photo file: id=ph-gone-both/);
+    const [event] = await events();
+    expect(changesOf(event).missing).toEqual(result.missing);
+    expect(changesOf(event).missingTotal).toBe(2);
+  });
+
   it("missing documents alone (nothing to encrypt) are audited once, not on every start", async () => {
     await raw.document.create({ data: { id: "doc-m1", name: "Form 4 scan", type: "NFA", fileUrl: "/api/files/documents/gone.pdf" } });
     const first = await run();
@@ -461,6 +484,7 @@ describe("runFileStartup — fix round 1", () => {
     put("l.pdf", "%PDF-l", legacy());
     const failing = {
       document: raw.document,
+      photo: raw.photo,
       auditEvent: {
         count: (a: never) => raw.auditEvent.count(a),
         create: async () => {

@@ -21,7 +21,7 @@ vi.mock("@/lib/server/auth", () => ({
 import { GET } from "./route";
 
 const QUERY =
-  "format=csv&firearms=true&accessories=false&gear=false&kits=false&supplies=false&builds=false&ammo=false&rangeSessions=false&documents=false&settings=false";
+  "format=csv&firearms=true&accessories=false&gear=false&kits=false&supplies=false&builds=false&ammo=false&rangeSessions=false&documents=false&photos=false&settings=false";
 
 /** The cells of the one `firearms` row, by header name. No value in these tests holds a comma or a line feed. */
 async function firearmCells(): Promise<Record<string, string>> {
