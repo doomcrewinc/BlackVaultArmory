@@ -175,6 +175,16 @@ describe("DELETE /api/photos/[id]", () => {
     expect(mocks.removePhotoFiles).toHaveBeenCalled();
   });
 
+  it("answers 404 and removes no files when a concurrent delete took the row first", async () => {
+    mocks.photoDelete.mockRejectedValue(Object.assign(new Error("gone"), { code: "P2025" }));
+
+    const res = await del();
+
+    expect(res.status).toBe(404);
+    expect(mocks.removePhotoFiles).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
   it("keeps the files when the delete fails", async () => {
     mocks.photoDelete.mockRejectedValue(new Error("db"));
     expect((await del()).status).toBe(500);

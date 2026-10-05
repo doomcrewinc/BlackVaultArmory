@@ -79,6 +79,8 @@ export async function DELETE(_request: NextRequest, { params }: Ctx) {
 
     return NextResponse.json({ success: true });
   } catch (e) {
+    // A concurrent delete removed the row between the read and the delete.
+    if ((e as { code?: unknown } | null)?.code === "P2025") return bad("Photo not found", 404);
     console.error("DELETE /api/photos/[id] failed:", describeError(e));
     return bad("Failed to delete photo", 500);
   }
