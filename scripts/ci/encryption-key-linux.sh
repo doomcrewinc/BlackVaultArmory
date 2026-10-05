@@ -39,6 +39,8 @@ step() { echo; echo "::group::$*"; }
 endstep() { echo "::endgroup::"; }
 fail() { echo "::error::$*"; exit 1; }
 as_user() { sudo -u "$TEST_USER" -H bash -c "cd '$APP' && $*"; }
+compose_stop() { as_user "docker compose stop"; }
+compose_up() { as_user "docker compose up -d"; }
 # has TEXT PATTERN: grep -q on a here-string. Never `cmd | grep -q`: under
 # pipefail an early grep exit can SIGPIPE the writer and fail the pipeline.
 has() { grep -q -- "$2" <<<"$1"; }
@@ -171,7 +173,7 @@ sudo rm -rf "$APP/secrets/blackvault_encryption_key"* "$APP/backups" "$APP/data"
 # user who ran it, not to the container user (uid 1001). The entrypoint must fix that.
 as_user "mkdir -p data/db data/uploads"
 for d in data data/db data/uploads; do
-  [ "$(sudo stat -c '%u' "$APP/$d")" = "$TEST_UID" ] || fail "$d should belong to uid $TEST_UID before the first start"
+  [[ "$(sudo stat -c '%u' "$APP/$d")" = "$TEST_UID" ]] || fail "$d should belong to uid $TEST_UID before the first start"
 done
 as_user "umask 077 && cat > .env" <<EOF
 DATA_DIR=$APP/data
@@ -209,15 +211,15 @@ done
 echo "$LOGS" | grep "\[encryption\]" || true
 has "$LOGS" "Looked for the file /run/secrets/blackvault_encryption_key" || fail "no KEY_MISSING line naming /run/secrets/blackvault_encryption_key"
 has "$LOGS" "secrets/blackvault_encryption_key next to docker-compose.yml" || fail "KEY_MISSING does not say where the key goes on the host"
-as_user "docker compose stop"
+compose_stop
 # The entrypoint gave the folders the host user made to the app user (uid 1001): seen on the
 # host (a bind mount keeps the owner on Linux) and from inside a container.
 for d in db uploads; do
-  [ "$(sudo stat -c '%u:%g' "$APP/data/$d")" = "1001:1001" ] || fail "data/$d is $(sudo stat -c '%u:%g' "$APP/data/$d") after the first start, want 1001:1001"
-  [ "$(docker run --rm -v "$APP/data/$d:/m:ro" alpine:3 stat -c '%u:%g' /m)" = "1001:1001" ] || fail "inside a container data/$d is not 1001:1001"
+  [[ "$(sudo stat -c '%u:%g' "$APP/data/$d")" = "1001:1001" ]] || fail "data/$d is $(sudo stat -c '%u:%g' "$APP/data/$d") after the first start, want 1001:1001"
+  [[ "$(docker run --rm -v "$APP/data/$d:/m:ro" alpine:3 stat -c '%u:%g' /m)" = "1001:1001" ]] || fail "inside a container data/$d is not 1001:1001"
 done
-[ "$(sudo stat -c '%u' "$APP/data")" = "$TEST_UID" ] || fail "data/ itself should still belong to uid $TEST_UID"
-has "$(as_user "docker compose logs --no-color blackvault" 2>&1)" "is not writable by the app" && fail "the entrypoint warned about a folder it could fix"
+[[ "$(sudo stat -c '%u' "$APP/data")" = "$TEST_UID" ]] || fail "data/ itself should still belong to uid $TEST_UID"
+has "$(as_user "docker compose logs --no-color --tail 500 blackvault" 2>&1)" "is not writable by the app" && fail "the entrypoint warned about a folder it could fix"
 echo "first start: data/db and data/uploads were made uid 1001 by the entrypoint; no warning"
 endstep
 
@@ -383,13 +385,13 @@ endstep
 step "2d2. upgrade: an install whose folders belong to the host user (README chown step skipped), and one foreign file in a folder that is right"
 # An older install whose person never ran the README chown: uploads never worked. The next
 # start must give the folders and everything in them to uid 1001, and uploads must then work.
-as_user "docker compose stop"
+compose_stop
 sudo chown -R "$TEST_USER:$TEST_USER" "$UPLOADS" "$APP/data/db"
-[ "$(sudo find "$UPLOADS" "$APP/data/db" ! -user "$TEST_USER" | wc -l | tr -d ' ')" = "0" ] || fail "setup: not everything belongs to $TEST_USER"
-as_user "docker compose up -d"
+[[ "$(sudo find "$UPLOADS" "$APP/data/db" ! -user "$TEST_USER" | wc -l | tr -d ' ')" = "0" ]] || fail "setup: not everything belongs to $TEST_USER"
+compose_up
 wait_healthy
 for d in "$UPLOADS" "$APP/data/db"; do
-  [ "$(sudo find "$d" ! -user 1001 | wc -l | tr -d ' ')" = "0" ] || fail "$d still holds files not owned by uid 1001: $(sudo find "$d" ! -user 1001 | head -5 | tr '\n' ' ')"
+  [[ "$(sudo find "$d" ! -user 1001 | wc -l | tr -d ' ')" = "0" ]] || fail "$d still holds files not owned by uid 1001: $(sudo find "$d" ! -user 1001 | head -5 | tr '\n' ' ')"
 done
 docker exec -u nextjs blackvault sh -c ': > /app/uploads/.ci-probe && rm /app/uploads/.ci-probe' || fail "the app user cannot write to /app/uploads after the fix"
 LOGS=$(as_user "docker compose logs --no-color --since 3m blackvault")
@@ -397,13 +399,13 @@ has "$LOGS" "is not writable by the app" && fail "the entrypoint warned about a 
 # A folder that already belongs to uid 1001 is not walked: a foreign file in it stays foreign.
 # The foreign file is a copy of an upload that is already encrypted under the current key, so the
 # app's own startup pass has no reason to rewrite it (and so give it to uid 1001 itself).
-as_user "docker compose stop"
+compose_stop
 FOREIGN="$UPLOADS/images/firearms/ci-foreign.png"
 # Mode 644: the app can read it, as it can anything a person copied in.
 sudo install -o "$TEST_UID" -g "$TEST_UID" -m 644 "$UP_IMG_FILE" "$FOREIGN"
-as_user "docker compose up -d"
+compose_up
 wait_healthy
-[ "$(sudo stat -c '%u' "$FOREIGN")" = "$TEST_UID" ] || fail "a start walked a folder that already belonged to uid 1001"
+[[ "$(sudo stat -c '%u' "$FOREIGN")" = "$TEST_UID" ]] || fail "a start walked a folder that already belonged to uid 1001"
 sudo rm -f "$FOREIGN"
 echo "upgrade: host-owned folders given to uid 1001 with their contents, writable; a foreign file in a right folder left alone"
 endstep
