@@ -51,7 +51,7 @@ fi
 # With an empty baseline every error is new. Answered here because bash 3.2
 # (macOS /bin/bash) treats expanding an empty array under `set -u` as an
 # unbound variable, which the loops below would hit.
-if [ "${#BASELINE_FILES[@]}" -eq 0 ]; then
+if [[ "${#BASELINE_FILES[@]}" -eq 0 ]]; then
   echo "" >&2
   echo "    NEW TYPE ERRORS outside the baseline:" >&2
   printf '%s\n' "$errors" >&2
