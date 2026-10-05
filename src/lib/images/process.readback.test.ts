@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 // bytes; its metadata() is made to report a leftover XMP block, which is the
 // only way to reach the METADATA_REMAINS guard with real pictures.
 vi.mock("sharp", async (importOriginal) => {
-  const real = (await importOriginal<{ default: typeof import("sharp") }>()).default;
+  const real = (await importOriginal<typeof import("sharp")>()).default;
   const wrapped = ((input: unknown, options?: unknown) => {
     const instance = real(input as never, options as never);
     if (options === undefined && Buffer.isBuffer(input)) {

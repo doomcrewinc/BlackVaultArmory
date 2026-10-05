@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp, { type Sharp } from "sharp";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 
 // concurrency(1) limits the threads libvips uses inside one picture. It does
@@ -42,9 +42,9 @@ export class PictureRejected extends Error {
 }
 
 const FORMATS = {
-  jpg: { mimeType: "image/jpeg", save: (p: sharp.Sharp) => p.jpeg({ quality: 92 }) },
-  png: { mimeType: "image/png", save: (p: sharp.Sharp) => p.png() },
-  webp: { mimeType: "image/webp", save: (p: sharp.Sharp) => p.webp({ quality: 92 }) },
+  jpg: { mimeType: "image/jpeg", save: (p: Sharp) => p.jpeg({ quality: 92 }) },
+  png: { mimeType: "image/png", save: (p: Sharp) => p.png() },
+  webp: { mimeType: "image/webp", save: (p: Sharp) => p.webp({ quality: 92 }) },
 } as const;
 
 const NOT_READABLE = "This file could not be read as a picture.";
