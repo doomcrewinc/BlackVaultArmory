@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Camera, Loader2, Smartphone, Upload, X } from "lucide-react";
 import type { PhotoDto } from "@/lib/photos/store";
 import {
+  announceItemAttachmentsChanged,
   MAX_PHOTO_LABEL_LENGTH,
   photoFileError,
   type PhotoEntityType,
@@ -82,7 +83,9 @@ export function PhotoGallery({
     loadPhotos();
     // A phone upload can make the item's first photo its main picture.
     mainChanged();
-  }, [loadPhotos, mainChanged]);
+    // Paperwork sent from the phone shows in the item's documents panel.
+    announceItemAttachmentsChanged({ entityType, entityId });
+  }, [loadPhotos, mainChanged, entityType, entityId]);
 
   function chooseFile(file: File | undefined) {
     if (!file) return;

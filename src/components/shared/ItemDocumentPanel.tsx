@@ -5,6 +5,8 @@ import { ExternalLink, FileText, Trash2, Upload, X } from "lucide-react";
 import {
   DOCUMENT_FIELD,
   ENTITY_NOUN,
+  ITEM_ATTACHMENTS_CHANGED,
+  type ItemAttachmentsChange,
   type PhotoEntityType,
 } from "@/lib/photos/client-constants";
 import {
@@ -68,14 +70,31 @@ export function ItemDocumentPanel({
 
   useEffect(() => {
     const query = `${DOCUMENT_FIELD[entityType]}=${entityId}`;
-    fetch(`/api/documents?${query}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setDocuments(data);
-        }
-      })
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    const load = () =>
+      fetch(`/api/documents?${query}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled && Array.isArray(data)) {
+            setDocuments(data);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    void load();
+
+    // The phone dialog on this item's gallery announces when it closes.
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ItemAttachmentsChange>).detail;
+      if (detail?.entityType === entityType && detail.entityId === entityId) void load();
+    };
+    window.addEventListener(ITEM_ATTACHMENTS_CHANGED, onChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(ITEM_ATTACHMENTS_CHANGED, onChanged);
+    };
   }, [entityId, entityType]);
 
   async function handleDelete(id: string) {

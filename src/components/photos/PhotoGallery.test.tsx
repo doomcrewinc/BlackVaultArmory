@@ -118,6 +118,22 @@ describe("PhotoGallery listing", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
+  it("announces the item's attachments changed when the pass dialog closes", async () => {
+    stubFetch([]);
+    const heard = vi.fn();
+    window.addEventListener("bv:item-attachments-changed", heard);
+    render(<PhotoGallery entityType="ammo" entityId="a1" />);
+    await screen.findByText("No photos yet.");
+    fireEvent.click(screen.getByRole("button", { name: "Continue on phone" }));
+    expect(heard).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "close-dialog" }));
+
+    window.removeEventListener("bv:item-attachments-changed", heard);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect((heard.mock.calls[0][0] as CustomEvent).detail).toEqual({ entityType: "ammo", entityId: "a1" });
+  });
+
   it("calls onMainChange instead of refreshing when given, on closing the pass dialog", async () => {
     stubFetch([]);
     const onMainChange = vi.fn();

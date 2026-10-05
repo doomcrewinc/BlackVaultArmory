@@ -35,6 +35,15 @@ export const ENTITY_NOUN = {
   supply: "supply item",
 } as const satisfies Record<PhotoEntityType, string>;
 
+/** Fired on `window` when pictures or documents may have arrived from a phone. */
+export const ITEM_ATTACHMENTS_CHANGED = "bv:item-attachments-changed";
+
+export type ItemAttachmentsChange = { entityType: PhotoEntityType; entityId: string };
+
+export function announceItemAttachmentsChanged(detail: ItemAttachmentsChange): void {
+  window.dispatchEvent(new CustomEvent<ItemAttachmentsChange>(ITEM_ATTACHMENTS_CHANGED, { detail }));
+}
+
 /** Returns an error message for a file that cannot be a photo, else null. */
 export function photoFileError(file: { type: string; size: number }): string | null {
   if (!file.type.startsWith("image/")) {
