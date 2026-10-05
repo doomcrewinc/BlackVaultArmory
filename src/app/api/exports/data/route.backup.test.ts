@@ -44,6 +44,15 @@ vi.mock("@/lib/server/auth", () => ({
 
 import { GET } from "./route";
 
+// The route's GET is typed as possibly returning undefined (it falls off the end
+// for a format that parseFormat already rejected), so narrow it once here rather
+// than at every call site.
+async function callExport(request: NextRequest): Promise<Response> {
+  const response = await GET(request);
+  if (!response) throw new Error("export route returned no response");
+  return response;
+}
+
 const BASE_QUERY =
   "format=csv&firearms=true&accessories=true&builds=false&ammo=false&rangeSessions=false&documents=true&settings=false";
 
@@ -91,7 +100,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: true,
     });
 
-    const response = await GET(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
+    const response = await callExport(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
     const csv = await response.text();
 
     expect(response.status).toBe(200);
@@ -110,7 +119,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: false,
     });
 
-    const response = await GET(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
+    const response = await callExport(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
     const csv = await response.text();
 
     expect(response.status).toBe(200);
@@ -126,7 +135,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: true,
     });
 
-    const enabledCsv = await GET(
+    const enabledCsv = await callExport(
       new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`)
     );
 
@@ -139,7 +148,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: false,
     });
 
-    const disabledCsv = await GET(
+    const disabledCsv = await callExport(
       new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`)
     );
 
@@ -154,7 +163,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: true,
     });
 
-    const response = await GET(
+    const response = await callExport(
       new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY.replace("format=csv", "format=json")}`)
     );
     const json = await response.json();
@@ -188,7 +197,7 @@ describe("/api/exports/data backup metadata", () => {
       },
     ]);
 
-    const response = await GET(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
+    const response = await callExport(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
     const csv = await response.text();
 
     expect(response.status).toBe(200);
@@ -208,7 +217,7 @@ describe("/api/exports/data backup metadata", () => {
       includeUploadsInBackup: "nope",
     });
 
-    const response = await GET(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
+    const response = await callExport(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
     const csv = await response.text();
 
     expect(response.status).toBe(200);
@@ -222,7 +231,7 @@ describe("/api/exports/data backup metadata", () => {
       new Response(JSON.stringify({ error: "Vault is locked. Unlock the vault and retry.", code: "VAULT_LOCKED" }), { status: 401 })
     );
 
-    const response = await GET(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
+    const response = await callExport(new NextRequest(`http://localhost/api/exports/data?${BASE_QUERY}`));
     const json = await response.json();
 
     expect(response.status).toBe(401);

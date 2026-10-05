@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 const counter = vi.hoisted(() => ({ active: 0, max: 0 }));
 
 vi.mock("sharp", async (importOriginal) => {
-  const real = (await importOriginal<{ default: typeof import("sharp") }>()).default;
+  const real = (await importOriginal<typeof import("sharp")>()).default;
   const track = <T extends (...args: never[]) => Promise<unknown>>(fn: T) =>
     (async (...args: Parameters<T>) => {
       counter.active += 1;

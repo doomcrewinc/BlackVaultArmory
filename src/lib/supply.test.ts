@@ -224,8 +224,8 @@ describe("todayForExpiry", () => {
     const real = Intl.DateTimeFormat;
     const spy = vi
       .spyOn(Intl, "DateTimeFormat")
-      .mockImplementation(((...args: unknown[]) =>
-        args.length === 0
+      .mockImplementation((function (...args: unknown[]) {
+        return args.length === 0
           ? {
               resolvedOptions: () => {
                 throw new Error("no Intl data");
@@ -233,7 +233,8 @@ describe("todayForExpiry", () => {
             }
           : new (real as unknown as new (
               ...a: unknown[]
-            ) => Intl.DateTimeFormat)(...args)) as never);
+            ) => Intl.DateTimeFormat)(...args);
+      }) as never);
     try {
       expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
     } finally {
@@ -245,12 +246,13 @@ describe("todayForExpiry", () => {
     const real = Intl.DateTimeFormat;
     const spy = vi
       .spyOn(Intl, "DateTimeFormat")
-      .mockImplementation(((...args: unknown[]) =>
-        args.length === 0
+      .mockImplementation((function (...args: unknown[]) {
+        return args.length === 0
           ? { resolvedOptions: () => ({ timeZone: "Not/AZone" }) }
           : new (real as unknown as new (
               ...a: unknown[]
-            ) => Intl.DateTimeFormat)(...args)) as never);
+            ) => Intl.DateTimeFormat)(...args);
+      }) as never);
     try {
       expect(todayForExpiry(null, eveningInDenver)).toEqual(day("2026-06-16"));
     } finally {

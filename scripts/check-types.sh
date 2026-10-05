@@ -4,24 +4,13 @@
 #
 #   npm run typecheck
 #
-# WHY A BASELINE AND NOT A CLEAN GATE
+# THE BASELINE
 #
-# The tree does not typecheck clean: as of 2026-09-25 it has 16 errors, all of
-# them in two TEST files and none in shipped code:
-#
-#   src/app/api/exports/data/route.backup.test.ts  14  (TS18048 possibly-undefined)
-#   scripts/check-migration-drift.test.ts            2  (TS2741/TS2345 ProcessEnv)
-#
-# The options were: don't run tsc in CI at all (throws away a real gate on
-# every future change), fail CI on day one (nobody can merge), or delete the
-# errors by loosening tsconfig (hides them everywhere, including in src/).
-# None of those is honest.
-#
-# So tsc runs for real, and the gate is: NO ERROR MAY APPEAR IN A FILE THAT IS
-# NOT ON THE BASELINE LIST. A new type error anywhere else fails CI
-# immediately. The baseline buys exactly two files a pass, and nothing more —
-# it is not a count threshold, so adding a 15th error to route.backup.test.ts
-# is still allowed but adding the first one to src/lib/date.ts is not.
+# The tree typechecks clean, and BASELINE_FILES below is empty. tsc runs for
+# real, and the gate is: NO ERROR MAY APPEAR IN A FILE THAT IS NOT ON THE
+# BASELINE LIST. Should a type error ever have to be tolerated for a while, the
+# file goes on the list; the baseline is not a count threshold, so a listed
+# file may gain errors, and an unlisted one may not have any.
 #
 # The baseline is also checked for ROT: if a baselined file stops producing
 # errors, this fails and tells you to delete its line. That is what stops a
@@ -33,10 +22,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 # Files allowed to still have type errors. Delete a line the moment its file
 # is fixed — this script will tell you when that happens.
-BASELINE_FILES=(
-  "src/app/api/exports/data/route.backup.test.ts"
-  "scripts/check-migration-drift.test.ts"
-)
+BASELINE_FILES=()
 
 echo "==> tsc --noEmit -p ."
 raw="$(npx tsc --noEmit -p . 2>&1)"
@@ -60,6 +46,18 @@ if [ -z "$errors" ]; then
     exit 1
   fi
   exit 0
+fi
+
+# With an empty baseline every error is new. Answered here because bash 3.2
+# (macOS /bin/bash) treats expanding an empty array under `set -u` as an
+# unbound variable, which the loops below would hit.
+if [[ "${#BASELINE_FILES[@]}" -eq 0 ]]; then
+  echo "" >&2
+  echo "    NEW TYPE ERRORS outside the baseline:" >&2
+  printf '%s\n' "$errors" >&2
+  echo "" >&2
+  echo "    Fix them. Do not add the file to BASELINE_FILES to make this pass." >&2
+  exit 1
 fi
 
 status=0

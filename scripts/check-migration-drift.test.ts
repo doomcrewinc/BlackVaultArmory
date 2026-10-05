@@ -9,10 +9,12 @@ import { describe, expect, it } from "vitest";
 
 const SCRIPT = path.join(__dirname, "check-migration-drift.sh");
 
-function guard(url: string, env: NodeJS.ProcessEnv = {}) {
+function guard(url: string, env: Record<string, string> = {}) {
   const r = spawnSync("bash", ["-c", `. "${SCRIPT}"; guard_shadow "$1" && echo ACCEPTED`, "bash", url], {
     encoding: "utf8",
-    env: { PATH: process.env.PATH, ...env },
+    // Next's types make NODE_ENV a required key of ProcessEnv; the guard runs
+    // with only PATH and the variables a test passes, so the cast is deliberate.
+    env: { PATH: process.env.PATH, ...env } as unknown as NodeJS.ProcessEnv,
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
