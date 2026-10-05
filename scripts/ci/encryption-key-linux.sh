@@ -72,6 +72,7 @@ wait_healthy() {
     [ "$status" = "healthy" ] && return 0
     sleep 3
   done
+  dump_logs
   fail "blackvault never became healthy (last status: ${status:-none})"
 }
 
@@ -398,7 +399,8 @@ has "$LOGS" "is not writable by the app" && fail "the entrypoint warned about a 
 # app's own startup pass has no reason to rewrite it (and so give it to uid 1001 itself).
 as_user "docker compose stop"
 FOREIGN="$UPLOADS/images/firearms/ci-foreign.png"
-sudo install -o "$TEST_UID" -g "$TEST_UID" -m 600 "$UP_IMG_FILE" "$FOREIGN"
+# Mode 644: the app can read it, as it can anything a person copied in.
+sudo install -o "$TEST_UID" -g "$TEST_UID" -m 644 "$UP_IMG_FILE" "$FOREIGN"
 as_user "docker compose up -d"
 wait_healthy
 [ "$(sudo stat -c '%u' "$FOREIGN")" = "$TEST_UID" ] || fail "a start walked a folder that already belonged to uid 1001"
