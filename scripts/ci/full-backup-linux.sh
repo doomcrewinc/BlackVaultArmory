@@ -477,6 +477,7 @@ failing_restore() {
   extra_url=$(upload_image "$WORK/extra.png" ammo ci-ammo-1)
   # The app re-saves a picture, so the reference is what it serves right after the upload.
   extra_sha=$(served_by_app <<<"$extra_url" | cut -d' ' -f2)
+  [[ "$extra_sha" =~ ^[0-9a-f]{64}$ ]] || fail "$CUR: the picture just uploaded is not served: '$extra_sha'"
   expect "before: 139 AmmoStock rows (the backup holds 150)" eq "$(sql "$dir" "SELECT count(*) FROM \"AmmoStock\";")" 139
   before_fp=$(fingerprint_of "$dir")
   before_tree=$(tree_of "$dir")
@@ -573,6 +574,9 @@ for f in a1.png a2.png a3.png a4.png a5.pdf a6.pdf; do
     expect "$f is served back as uploaded ($url)" hasf "$A_SERVED" "$url $(sha256sum <"$WORK/$f" | cut -d' ' -f1) "
   else
     expect "$f is served ($url)" hasf "$A_SERVED" "$url "
+    curl -sS -b "$JAR" -o "$WORK/served.png" "$BASE$url" || fail "$f: $url could not be fetched"
+    expect "$f is served as a PNG" eq "$(head -c8 "$WORK/served.png" | xxd -p)" "89504e470d0a1a0a"
+    expect "$f keeps its width and height" eq "$(dd if="$WORK/served.png" bs=1 skip=16 count=8 status=none | xxd -p)" "$(dd if="$WORK/$f" bs=1 skip=16 count=8 status=none | xxd -p)"
   fi
 done
 A_COUNTS=$(counts_of "$A")

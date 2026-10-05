@@ -79,6 +79,22 @@ describe("capture wrong-token throttle", () => {
     expect(codes).toContain(429);
   });
 
+  it("throttles an address with a port under the same key as the bare address", async () => {
+    mocks.valid = OPEN;
+    mocks.getClientIp.mockReturnValue("203.0.113.9:5678");
+    for (let i = 0; i < 7; i++) await status(BAD);
+    mocks.getClientIp.mockReturnValue("203.0.113.9");
+    expect(await status(BAD)).toBe(429);
+  });
+
+  it("does no throttling when the address is not an IP address", async () => {
+    mocks.valid = OPEN;
+    mocks.getClientIp.mockReturnValue("../x");
+    const codes = [];
+    for (let i = 0; i < 12; i++) codes.push(await status(BAD));
+    expect(new Set(codes)).toEqual(new Set([404]));
+  });
+
   it("does no throttling when the address is not known", async () => {
     mocks.valid = OPEN;
     mocks.getClientIp.mockReturnValue(null);

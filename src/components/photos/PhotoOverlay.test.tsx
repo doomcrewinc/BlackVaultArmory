@@ -44,6 +44,13 @@ describe("PhotoOverlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("lets a click on the dark area reach the backdrop: the dialog ignores the pointer, its content does not", () => {
+    render(<PhotoOverlay photo={photo} onClose={vi.fn()} />);
+    expect(screen.getByRole("dialog").classList.contains("pointer-events-none")).toBe(true);
+    expect(screen.getByRole("img", { name: "left side" }).classList.contains("pointer-events-auto")).toBe(true);
+    expect(screen.getByRole("button", { name: "Close picture" }).classList.contains("pointer-events-auto")).toBe(true);
+  });
+
   it("does not close when the picture is clicked", () => {
     const onClose = vi.fn();
     render(<PhotoOverlay photo={photo} onClose={onClose} />);

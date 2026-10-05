@@ -1,4 +1,3 @@
-import { isIP } from "node:net";
 import { NextResponse } from "next/server";
 import { auditStorage, type AuditActor } from "@/lib/audit/context";
 import { storeDocument } from "@/lib/documents/store";
@@ -9,6 +8,7 @@ import { detectFileSignature } from "@/lib/server/file-signatures";
 import { describeError } from "@/lib/photos/errors";
 import { OWNER_COLUMN, findOwnerName } from "@/lib/photos/owner";
 import { addPhoto, normaliseLabel } from "@/lib/photos/store";
+import { normaliseAddress } from "./client-address";
 import { PASS_MAX_UPLOADS, findPass, returnSlot, takeSlot, uploadCountOf, type OpenPass, type PassEndReason } from "./pass";
 import { captureThrottle } from "./throttle";
 
@@ -36,10 +36,10 @@ export type PassFailure = {
   retryAfter?: number;
 };
 
-/** The trusted client address when it is a literal IP address; anything else is unknown. */
+/** The trusted client address as a bare IP address; anything else is unknown. */
 function clientAddress(request: Request): string | null {
   const ip = getClientIp(request);
-  return ip !== null && isIP(ip) !== 0 ? ip : null;
+  return ip === null ? null : normaliseAddress(ip);
 }
 
 /** Throttles wrong tokens by client address, then resolves the pass. */

@@ -110,6 +110,15 @@ describe("POST /api/capture/[token]/upload", () => {
     });
   });
 
+  it.each([
+    ["1.2.3.4:5678", "1.2.3.4"],
+    ["[2001:db8::1]:443", "2001:db8::1"],
+    ["not-an-address", null],
+  ])("records the address %j as %j", async (ip, want) => {
+    await post({ kind: "photo" }, { ip });
+    expect(mocks.actorSeen).toHaveBeenCalledWith(expect.objectContaining({ actorIp: want }));
+  });
+
   it("ignores entityType and entityId in the form", async () => {
     const res = await post({ kind: "photo", entityId: "ammo-B", entityType: "firearm", firearmId: "f-1" });
     expect(res.status).toBe(201);
