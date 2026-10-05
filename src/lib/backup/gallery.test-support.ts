@@ -68,13 +68,18 @@ export async function seedGallery(
   }));
   const documentBytes = Buffer.from("%PDF-1.4 receipt for the ammunition");
   const documentPath = "documents/gallery-receipt.pdf";
-  for (const p of photos) {
-    await put(p.original, p.originalBytes);
-    await put(p.preview, p.previewBytes);
-    await db.photo.create({
-      data: { id: p.id, fileName: `${p.id}.jpg`, label: `label ${p.id}`, [p.ownerColumn]: p.ownerId, ...DB_ROW },
-    });
-  }
+  // One photo after the other: SQLite takes one connection.
+  await photos.reduce(
+    (previous, p) =>
+      previous.then(async () => {
+        await put(p.original, p.originalBytes);
+        await put(p.preview, p.previewBytes);
+        await db.photo.create({
+          data: { id: p.id, fileName: `${p.id}.jpg`, label: `label ${p.id}`, [p.ownerColumn]: p.ownerId, ...DB_ROW },
+        });
+      }),
+    Promise.resolve(),
+  );
   await put(documentPath, documentBytes);
   const doc = await db.document.create({
     data: {

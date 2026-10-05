@@ -12,7 +12,9 @@ export const UNREACHABLE_MESSAGE =
   'Your phone cannot reach "localhost". Open BlackVault on this computer by its network address, then try again.';
 
 function trimSlash(value: string): string {
-  return value.replace(/\/+$/, "");
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
 }
 
 function hostnameOf(origin: string): string {

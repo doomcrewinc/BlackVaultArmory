@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Check, Copy, FileText, Loader2, X } from "lucide-react";
 import { UNREACHABLE_MESSAGE } from "@/lib/capture/pass-url";
 import type { PhotoEntityType } from "@/lib/photos/client-constants";
 import { useCapturePass } from "./useCapturePass";
 
-type Props = { entityType: PhotoEntityType; entityId: string; onClose: () => void };
+type Props = Readonly<{ entityType: PhotoEntityType; entityId: string; onClose: () => void }>;
 
 const BUTTON =
   "flex items-center justify-center gap-1.5 text-xs border px-3 py-1.5 rounded transition-colors disabled:opacity-50";
@@ -65,14 +65,44 @@ export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
 
   const arrived = pass.photos.length + pass.documents.length;
 
+  let linkPanel: ReactNode = null;
+  if (pass.link) {
+    if (pass.ended) {
+      linkPanel = <p className="text-sm font-medium text-vault-text">Pass ended.</p>;
+    } else if (pass.link.reachable) {
+      linkPanel = (
+        <>
+          {qr && (
+            <div className="flex justify-center">
+              {/* eslint-disable-next-line @next/next/no-img-element -- a data: URI, not a servable asset */}
+              <img src={qr} alt="QR code for the capture link" width={200} height={200} className="rounded-md border border-vault-border" />
+            </div>
+          )}
+          <p className="text-center text-xs text-vault-text-faint">Scan to add photos and paperwork from your phone</p>
+          <div className="break-all rounded-md border border-vault-border bg-vault-surface-2 px-3 py-2 text-xs text-vault-text">
+            {pass.link.url}
+          </div>
+        </>
+      );
+    } else {
+      linkPanel = <p role="alert" className="text-sm text-[#E53935]">{UNREACHABLE_MESSAGE}</p>;
+    }
+  }
+
   return (
-    <div className="fixed inset-0 z-[500] flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-sm max-h-[90svh] overflow-y-auto space-y-4 rounded-lg border border-vault-border bg-vault-surface p-5"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
+    <div className="fixed inset-0 z-[500] flex items-center justify-center p-4">
+      <button
+        type="button"
+        aria-label="Close"
+        tabIndex={-1}
+        onClick={onClose}
+        className="absolute inset-0 h-full w-full cursor-default bg-black/60"
+      />
+      <dialog
+        open
         aria-modal="true"
         aria-label="Continue on phone"
+        className="relative inset-auto m-0 block h-auto w-full max-w-sm max-h-[90svh] overflow-y-auto space-y-4 rounded-lg border border-vault-border bg-vault-surface p-5 text-inherit"
       >
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-vault-text">Continue on phone</h2>
@@ -92,24 +122,7 @@ export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
 
         {pass.link && !pass.creating && (
           <div className="space-y-3">
-            {pass.ended ? (
-              <p className="text-sm font-medium text-vault-text">Pass ended.</p>
-            ) : pass.link.reachable ? (
-              <>
-                {qr && (
-                  <div className="flex justify-center">
-                    {/* eslint-disable-next-line @next/next/no-img-element -- a data: URI, not a servable asset */}
-                    <img src={qr} alt="QR code for the capture link" width={200} height={200} className="rounded-md border border-vault-border" />
-                  </div>
-                )}
-                <p className="text-center text-xs text-vault-text-faint">Scan to add photos and paperwork from your phone</p>
-                <div className="break-all rounded-md border border-vault-border bg-vault-surface-2 px-3 py-2 text-xs text-vault-text">
-                  {pass.link.url}
-                </div>
-              </>
-            ) : (
-              <p role="alert" className="text-sm text-[#E53935]">{UNREACHABLE_MESSAGE}</p>
-            )}
+            {linkPanel}
 
             {!pass.ended && (
               <div className="flex items-center justify-between gap-2">
@@ -176,7 +189,7 @@ export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
             Try again
           </button>
         )}
-      </div>
+      </dialog>
     </div>
   );
 }

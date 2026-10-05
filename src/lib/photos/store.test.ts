@@ -50,6 +50,7 @@ vi.mock("@/lib/images/process", async (importOriginal) => {
   };
 });
 
+import { processPicture } from "@/lib/images/process";
 import { addPhoto, normaliseLabel, photoFilesFor, removePhotoFiles, toPhotoDto } from "./store";
 
 const input = {
@@ -91,6 +92,21 @@ describe("addPhoto", () => {
       height: 30,
       fileSize: 4,
     });
+  });
+
+  it("refuses an extension outside jpg, png and webp and writes nothing", async () => {
+    vi.mocked(processPicture).mockResolvedValueOnce({
+      bytes: Buffer.from("orig"),
+      preview: Buffer.from("thumb"),
+      extension: "../../x" as "jpg",
+      mimeType: "image/jpeg",
+      width: 40,
+      height: 30,
+    });
+    await expect(addPhoto(input)).rejects.toThrow("Unsupported picture extension");
+    expect(mocks.mkdir).not.toHaveBeenCalled();
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
+    expect(mocks.photoCreate).not.toHaveBeenCalled();
   });
 
   it("removes both files and rethrows when the row cannot be created", async () => {

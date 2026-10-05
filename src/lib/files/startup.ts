@@ -530,13 +530,28 @@ async function findMissingDocuments(raw: RawClient, docsDir: string, warn: (l: s
 async function findMissingPhotos(raw: RawClient, photosDir: string, warn: (l: string) => void): Promise<{ id: string; name: string }[]> {
   const rows = await raw.photo.findMany({ select: { id: true, fileName: true }, orderBy: { id: "asc" } });
   const missing: { id: string; name: string }[] = [];
-  for (const p of rows) {
-    const original = path.join(photosDir, p.fileName);
-    const preview = path.join(photosDir, "thumbs", `${p.id}.webp`);
-    if ((await lexists(original)) && (await lexists(preview))) continue;
-    missing.push({ id: p.id, name: p.fileName });
-    warn(`[files] Missing photo file: id=${p.id} file=${original}`);
-  }
+  // Bounded batches, so a large gallery never opens thousands of files at once.
+  const BATCH = 50;
+  const batches = Array.from({ length: Math.ceil(rows.length / BATCH) }, (_, i) => rows.slice(i * BATCH, (i + 1) * BATCH));
+  await batches.reduce(
+    (previous, batch) =>
+      previous.then(async () => {
+        const present = await Promise.all(
+          batch.map(async (p) => {
+            const original = path.join(photosDir, p.fileName);
+            const preview = path.join(photosDir, "thumbs", `${p.id}.webp`);
+            const [hasOriginal, hasPreview] = await Promise.all([lexists(original), lexists(preview)]);
+            return hasOriginal && hasPreview;
+          }),
+        );
+        batch.forEach((p, i) => {
+          if (present[i]) return;
+          missing.push({ id: p.id, name: p.fileName });
+          warn(`[files] Missing photo file: id=${p.id} file=${path.join(photosDir, p.fileName)}`);
+        });
+      }),
+    Promise.resolve(),
+  );
   return missing;
 }
 

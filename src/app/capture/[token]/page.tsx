@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 };
 
 /** The phone page. It renders the screen and nothing else; no session is read. */
-export default async function CapturePage({ params }: { params: Promise<{ token: string }> }) {
+export default async function CapturePage({ params }: Readonly<{ params: Promise<{ token: string }> }>) {
   const { token } = await params;
   return <CaptureScreen token={token} />;
 }

@@ -28,6 +28,9 @@
 #      as specified for a signed-out caller.
 set -Eeuo pipefail
 
+# curl's write-out format for the response status.
+CURL_CODE='%{http_code}'
+
 TEST_USER=bvtest
 TEST_UID=1234
 APP=/home/$TEST_USER/app
@@ -112,11 +115,36 @@ assert_uploads_encrypted() {
   echo "$n files under the uploads volume, all BVF1${key:+ under key $key}"
 }
 
+# make_png FILE BYTES: a real RGB PNG of random pixels, about BYTES of raw pixel data (pictures are decoded and re-saved on upload).
+make_png() {
+  python3 - "$1" "$2" <<'PYEOF'
+import os, struct, sys, zlib
+
+
+def chunk(kind, data):
+    body = kind + data
+    return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+width = 64
+height = max(1, int(sys.argv[2]) // (width * 3))
+rows = b"".join(b"\0" + os.urandom(width * 3) for _ in range(height))
+png = (
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(rows, 1))
+    + chunk(b"IEND", b"")
+)
+with open(sys.argv[1], "wb") as out:
+    out.write(png)
+PYEOF
+}
+
 # serve_check URL SHA256: an authenticated GET returns 200, the original bytes
 # and Cache-Control: private, no-store.
 serve_check() {
   local url="$1" want="$2" code cc
-  code=$(curl -sS -b "$JAR" -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' "$BASE$url")
+  code=$(curl -sS -b "$JAR" -o "$WORK/body" -D "$WORK/headers" -w "$CURL_CODE" "$BASE$url")
   [ "$code" = "200" ] || fail "GET $url: HTTP $code"
   [ "$(sha256sum <"$WORK/body" | cut -d' ' -f1)" = "$want" ] || fail "GET $url: the bytes differ from the original"
   cc=$(grep -i '^cache-control:' "$WORK/headers" | tr -d '\r' | cut -d' ' -f2- || true)
@@ -251,24 +279,29 @@ TOKEN=$(grep -o 'Setup token: [A-Z0-9-]*' <<<"$LOGS" | tail -1 | cut -d' ' -f3 |
 [ -n "$TOKEN" ] || fail "no setup token in the log"
 CODE=$(curl -sS -c "$JAR" -b "$JAR" -H 'Content-Type: application/json' -H "Origin: $BASE" \
   -d "$(jq -n --arg c "$TOKEN" '{setupCode: $c, username: "ciadmin", displayName: "CI Admin", password: "ci-admin-password-1234"}')" \
-  -o "$WORK/setup.json" -w '%{http_code}' "$BASE/api/auth/setup")
+  -o "$WORK/setup.json" -w "$CURL_CODE" "$BASE/api/auth/setup")
 [ "$CODE" = "201" ] || fail "setup: HTTP $CODE $(cat "$WORK/setup.json")"
 [ "$(jq -r .user.role "$WORK/setup.json")" = "ADMIN" ] || fail "setup did not create an admin: $(cat "$WORK/setup.json")"
 echo "signed in as ciadmin (ADMIN)"
 endstep
 
 step "2c. a photo and a PDF uploaded through the API are encrypted at rest"
-# The routes check only the leading magic bytes (src/lib/upload-security.ts).
-{ printf '\x89PNG\r\n\x1a\n'; head -c 4000 /dev/urandom; } >"$WORK/upload.png"
+# Pictures are decoded and re-saved on upload (src/lib/images/process.ts), so the picture must be a real
+# PNG, and its reference checksum is that of the bytes the app stored (what it serves right after).
+# PDFs are stored as uploaded: the route checks only the leading magic bytes.
+make_png "$WORK/upload.png" 4000
 { printf '%%PDF-1.4\n'; head -c 4000 /dev/urandom; } >"$WORK/upload.pdf"
-UP_IMG_SHA=$(sha256sum <"$WORK/upload.png" | cut -d' ' -f1)
 UP_PDF_SHA=$(sha256sum <"$WORK/upload.pdf" | cut -d' ' -f1)
 CODE=$(curl -sS -b "$JAR" -H "Origin: $BASE" -F "file=@$WORK/upload.png;type=image/png" \
-  -F entityType=firearm -F entityId=ci-f1 -o "$WORK/img.json" -w '%{http_code}' "$BASE/api/images/upload")
+  -F entityType=firearm -F entityId=ci-f1 -o "$WORK/img.json" -w "$CURL_CODE" "$BASE/api/images/upload")
 [ "$CODE" = "201" ] || fail "image upload: HTTP $CODE $(cat "$WORK/img.json")"
 UP_IMG_URL=$(jq -r .url "$WORK/img.json")
+CODE=$(curl -sS -b "$JAR" -o "$WORK/stored.png" -w "$CURL_CODE" "$BASE$UP_IMG_URL")
+[[ "$CODE" = "200" ]] || fail "GET $UP_IMG_URL right after the upload: HTTP $CODE"
+[[ "$(head -c8 "$WORK/stored.png" | xxd -p)" = "89504e470d0a1a0a" ]] || fail "the stored picture is not a PNG"
+UP_IMG_SHA=$(sha256sum <"$WORK/stored.png" | cut -d' ' -f1)
 CODE=$(curl -sS -b "$JAR" -H "Origin: $BASE" -F "file=@$WORK/upload.pdf;type=application/pdf" \
-  -F "name=CI Upload PDF" -F firearmId=ci-f1 -o "$WORK/doc.json" -w '%{http_code}' "$BASE/api/documents/upload")
+  -F "name=CI Upload PDF" -F firearmId=ci-f1 -o "$WORK/doc.json" -w "$CURL_CODE" "$BASE/api/documents/upload")
 [ "$CODE" = "201" ] || fail "document upload: HTTP $CODE $(cat "$WORK/doc.json")"
 UP_PDF_URL=$(jq -r .fileUrl "$WORK/doc.json")
 echo "uploaded $UP_IMG_URL and $UP_PDF_URL"
@@ -338,14 +371,14 @@ step "2e. photo ingest: sharp in the image, the capture routes on a real server"
 # It encodes a generated JPEG, then decodes it again and writes a WebP, the paths the app takes.
 SHARP_JS="const s=require('sharp');s({create:{width:8,height:8,channels:3,background:'#fff'}}).jpeg().toBuffer().then(b=>{if(b.length<100)process.exit(1);return s(b).rotate().webp().toBuffer()}).then(w=>{if(w.length<10||w.subarray(8,12).toString()!=='WEBP')process.exit(1);console.log('sharp ok')})"
 SHARP_OUT=$(timeout 120 docker exec blackvault node -e "$SHARP_JS" 2>&1) || fail "sharp does not run inside the image: $SHARP_OUT"
-[ "$SHARP_OUT" = "sharp ok" ] || fail "sharp printed '$SHARP_OUT', want 'sharp ok'"
+[[ "$SHARP_OUT" = "sharp ok" ]] || fail "sharp printed '$SHARP_OUT', want 'sharp ok'"
 echo "$SHARP_OUT"
 # A well-formed token that belongs to no pass: the page itself is public and bare.
 CAP_TOKEN=$(printf 'A%.0s' $(seq 1 43))
-CODE=$(curl -sS -o "$WORK/capture.html" -D "$WORK/capture.headers" -w '%{http_code}' "$BASE/capture/$CAP_TOKEN")
-[ "$CODE" = "200" ] || fail "signed-out GET /capture/<token>: HTTP $CODE"
+CODE=$(curl -sS -o "$WORK/capture.html" -D "$WORK/capture.headers" -w "$CURL_CODE" "$BASE/capture/$CAP_TOKEN")
+[[ "$CODE" = "200" ]] || fail "signed-out GET /capture/<token>: HTTP $CODE"
 RP=$(grep -i '^referrer-policy:' "$WORK/capture.headers" | tr -d '\r' | cut -d' ' -f2- || true)
-[ "$RP" = "no-referrer" ] || fail "/capture/<token>: Referrer-Policy is '$RP', want 'no-referrer'"
+[[ "$RP" = "no-referrer" ]] || fail "/capture/<token>: Referrer-Policy is '$RP', want 'no-referrer'"
 CC=$(grep -i '^cache-control:' "$WORK/capture.headers" | tr -d '\r' | cut -d' ' -f2- || true)
 case "$CC" in *no-store*) ;; *) fail "/capture/<token>: Cache-Control is '$CC', want it to contain no-store" ;; esac
 # The signed-in layout always renders the mobile navigation drawer; the bare capture layout must not.
@@ -355,10 +388,10 @@ curl -sS -b "$JAR" -o "$WORK/home.html" "$BASE/"
 grep -q -- "$CHROME_MARK" "$WORK/home.html" || fail "the signed-in page lacks $CHROME_MARK: the chrome check below would prove nothing"
 grep -q -- "$CHROME_MARK" "$WORK/capture.html" && fail "/capture/<token> renders the app chrome ($CHROME_MARK)"
 echo "GET /capture/<token>: 200, Referrer-Policy: $RP, Cache-Control: $CC, no app chrome"
-CODE=$(curl -sS -o "$WORK/passes.json" -w '%{http_code}' "$BASE/api/capture-passes/x")
-[ "$CODE" = "401" ] || fail "signed-out GET /api/capture-passes/x: HTTP $CODE, want 401"
-CODE=$(curl -sS -o "$WORK/capture.json" -D "$WORK/capture-api.headers" -w '%{http_code}' "$BASE/api/capture/$CAP_TOKEN")
-[ "$CODE" = "404" ] || fail "GET /api/capture/<token>: HTTP $CODE, want 404"
+CODE=$(curl -sS -o "$WORK/passes.json" -w "$CURL_CODE" "$BASE/api/capture-passes/x")
+[[ "$CODE" = "401" ]] || fail "signed-out GET /api/capture-passes/x: HTTP $CODE, want 401"
+CODE=$(curl -sS -o "$WORK/capture.json" -D "$WORK/capture-api.headers" -w "$CURL_CODE" "$BASE/api/capture/$CAP_TOKEN")
+[[ "$CODE" = "404" ]] || fail "GET /api/capture/<token>: HTTP $CODE, want 404"
 jq -e . "$WORK/capture.json" >/dev/null || fail "GET /api/capture/<token>: the 404 body is not JSON: $(cat "$WORK/capture.json")"
 has "$(grep -i '^content-type:' "$WORK/capture-api.headers")" "application/json" || fail "GET /api/capture/<token>: Content-Type is not JSON"
 echo "signed-out: /api/capture-passes/x 401, /api/capture/<token> 404 JSON"

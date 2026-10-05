@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { NextResponse } from "next/server";
 import { auditStorage, type AuditActor } from "@/lib/audit/context";
 import { storeDocument } from "@/lib/documents/store";
@@ -35,13 +36,19 @@ export type PassFailure = {
   retryAfter?: number;
 };
 
+/** The trusted client address when it is a literal IP address; anything else is unknown. */
+function clientAddress(request: Request): string | null {
+  const ip = getClientIp(request);
+  return ip !== null && isIP(ip) !== 0 ? ip : null;
+}
+
 /** Throttles wrong tokens by client address, then resolves the pass. */
 export async function resolvePass(
   request: Request,
   rawToken: string,
 ): Promise<{ ok: true; pass: OpenPass } | PassFailure> {
   // Without a trusted address every caller would share one bucket, so no address throttle then.
-  const ip = getClientIp(request);
+  const ip = clientAddress(request);
   const key = ip === null ? null : `ip:${ip}`;
   const gate = key === null ? ({ allowed: true } as const) : captureThrottle.check(key);
   if (!gate.allowed) {
@@ -136,12 +143,25 @@ async function giveSlotBack(passId: string): Promise<void> {
   }
 }
 
-/** The whole public upload: resolve, validate, take a slot, store, answer. */
-export async function handleCaptureUpload(request: Request, rawToken: string): Promise<NextResponse> {
-  const resolved = await resolvePass(request, rawToken);
-  if (!resolved.ok) return failureResponse(resolved);
-  const { pass } = resolved;
+/** The bytes-to-disk work: knows the pass, the picture and the form, never the request or the actor. */
+async function writeUpload(pass: OpenPass, bytes: Buffer, parsed: Parsed): Promise<string> {
+  if (parsed.kind === "paperwork") return storePaperwork(pass, bytes, parsed);
+  const photo = await addPhoto({
+    bytes,
+    type: pass.entityType,
+    entityId: pass.entityId,
+    label: parsed.label,
+    createdById: pass.createdById,
+    viaPass: true,
+  });
+  return photo.id;
+}
 
+/** Everything up to the form's bytes: rate limit, parse, signature and owner checks. */
+async function readUpload(
+  request: Request,
+  pass: OpenPass,
+): Promise<{ parsed: Parsed; bytes: Buffer } | NextResponse> {
   const rate = await enforceRateLimit({ key: `capture-upload:${pass.id}`, windowMs: 60_000, maxAttempts: 20 });
   if (!rate.allowed) return bad("Too many uploads. Please wait a minute.", 429);
 
@@ -156,46 +176,60 @@ export async function handleCaptureUpload(request: Request, rawToken: string): P
   }
 
   if ((await findOwnerName(pass.entityType, pass.entityId)) === null) return failureResponse(endedFailure("closed"));
+  return { parsed, bytes };
+}
 
-  if (!(await takeSlot(pass.id))) {
-    const again = await findPass(rawToken);
-    if (again === null) {
-      return failureResponse({ ok: false, status: 404, body: { error: "This link is not valid." } });
-    }
-    return failureResponse(endedFailure(again.ok ? "full" : again.reason));
+/** Takes an upload slot; the response to send when none is left, else null. */
+async function slotRefusal(pass: OpenPass, rawToken: string): Promise<NextResponse | null> {
+  if (await takeSlot(pass.id)) return null;
+  const again = await findPass(rawToken);
+  if (again === null) {
+    return failureResponse({ ok: false, status: 404, body: { error: "This link is not valid." } });
   }
+  return failureResponse(endedFailure(again.ok ? "full" : again.reason));
+}
 
-  const actor: AuditActor = {
-    kind: "user",
-    actorId: pass.createdById,
-    actorName: pass.creatorName,
-    actorIp: getClientIp(request),
-  };
-  let stored: { id: string };
+/** Stores the upload under the audit actor; gives the slot back and answers on failure. */
+async function storeUpload(
+  pass: OpenPass,
+  actor: AuditActor,
+  bytes: Buffer,
+  parsed: Parsed,
+): Promise<{ id: string } | NextResponse> {
   try {
     // `async () => await`: a Prisma promise is lazy, so returning it
     // un-awaited would run it after `run` left the store.
-    const id = await auditStorage.run({ actor }, async () =>
-      parsed.kind === "photo"
-        ? (
-            await addPhoto({
-              bytes,
-              type: pass.entityType,
-              entityId: pass.entityId,
-              label: parsed.label,
-              createdById: pass.createdById,
-              viaPass: true,
-            })
-          ).id
-        : await storePaperwork(pass, bytes, parsed),
-    );
-    stored = { id };
+    const id = await auditStorage.run({ actor }, async () => await writeUpload(pass, bytes, parsed));
+    return { id };
   } catch (e) {
     await giveSlotBack(pass.id);
     if (e instanceof PictureRejected) return bad(e.code === "HEIC" ? HEIC_MESSAGE : e.message);
     console.error("Capture pass upload failed:", describeError(e));
     return bad("Failed to upload", 500);
   }
+}
+
+/** The whole public upload: resolve, validate, take a slot, store, answer. */
+export async function handleCaptureUpload(request: Request, rawToken: string): Promise<NextResponse> {
+  const resolved = await resolvePass(request, rawToken);
+  if (!resolved.ok) return failureResponse(resolved);
+  const { pass } = resolved;
+
+  const read = await readUpload(request, pass);
+  if (read instanceof NextResponse) return read;
+  const { parsed, bytes } = read;
+
+  const refusal = await slotRefusal(pass, rawToken);
+  if (refusal) return refusal;
+
+  const actor: AuditActor = {
+    kind: "user",
+    actorId: pass.createdById,
+    actorName: pass.creatorName,
+    actorIp: clientAddress(request),
+  };
+  const stored = await storeUpload(pass, actor, bytes, parsed);
+  if (stored instanceof NextResponse) return stored;
 
   // The upload is stored: from here nothing may give the slot back.
   const count = await uploadCountOf(pass.id).catch(() => pass.uploadCount + 1);

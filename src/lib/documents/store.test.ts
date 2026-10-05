@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
 }));
 
-vi.mock("fs", () => ({ promises: { mkdir: mocks.mkdir, unlink: mocks.unlink } }));
+vi.mock("node:fs", () => ({ promises: { mkdir: mocks.mkdir, unlink: mocks.unlink } }));
 vi.mock("@/lib/files/storage", () => ({
   documentsRoot: () => "/tmp/bv-docs-test",
   writeEncryptedFile: mocks.writeEncryptedFile,
@@ -60,6 +60,19 @@ describe("storeDocument", () => {
     mocks.create.mockRejectedValue(boom);
     mocks.unlink.mockRejectedValue(new Error("gone"));
     await expect(storeDocument(input)).rejects.toBe(boom);
+  });
+
+  it.each(["exe", "../x", "jpg/../../x", ""])("refuses the extension %j and writes nothing", async (extension) => {
+    await expect(storeDocument({ ...input, extension })).rejects.toThrow("Unsupported document extension");
+    expect(mocks.mkdir).not.toHaveBeenCalled();
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["jpg", "png", "webp", "pdf"])("accepts the extension %s", async (extension) => {
+    mocks.create.mockResolvedValue({ id: "d1" });
+    await storeDocument({ ...input, extension });
+    expect(mocks.writeEncryptedFile.mock.calls[0][0]).toMatch(new RegExp(`/tmp/bv-docs-test/[0-9a-f]{32}\\.${extension}$`));
   });
 
   it("creates no row when the write fails", async () => {

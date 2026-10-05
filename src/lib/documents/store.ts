@@ -1,8 +1,8 @@
-import { promises as fs } from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
+import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { DOCUMENT_OWNER_INCLUDE } from "@/lib/documents/owner-include";
+import { resolveInside } from "@/lib/files/inside-root";
 import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
 
 export type DocumentOwners = {
@@ -24,6 +24,8 @@ export type StoreDocumentInput = {
   owners: DocumentOwners;
 };
 
+const DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set(["jpg", "png", "webp", "pdf"]);
+
 /**
  * Writes the encrypted file under `documentsRoot()` and creates the Document
  * row in a transaction on the app client. The audit log records the actor of
@@ -31,9 +33,10 @@ export type StoreDocumentInput = {
  * cannot be created the file is removed again.
  */
 export async function storeDocument(input: StoreDocumentInput) {
+  if (!DOCUMENT_EXTENSIONS.has(input.extension)) throw new Error("Unsupported document extension");
   const fileName = `${randomUUID().replace(/-/g, "")}.${input.extension}`;
   const uploadDir = documentsRoot();
-  const filePath = path.join(uploadDir, fileName);
+  const filePath = resolveInside(uploadDir, fileName);
 
   await fs.mkdir(uploadDir, { recursive: true });
   await writeEncryptedFile(filePath, input.bytes);

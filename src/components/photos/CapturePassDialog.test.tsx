@@ -311,6 +311,17 @@ describe("CapturePassDialog, ending and leaving", () => {
     expect(calls(fetchMock, (_u, m) => m === "DELETE")).toBe(0);
   });
 
+  it("closes the dialog but not the pass when the backdrop is clicked", async () => {
+    const fetchMock = stubFetch({});
+    const onClose = await open();
+    const backdrop = screen.getByRole("button", { name: "Close", hidden: true });
+    expect(backdrop.tagName).toBe("BUTTON");
+    expect(backdrop).toHaveAttribute("type", "button");
+    fireEvent.click(backdrop);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(calls(fetchMock, (_u, m) => m === "DELETE")).toBe(0);
+  });
+
   it("stops every timer when it unmounts", async () => {
     const fetchMock = stubFetch({});
     await open();

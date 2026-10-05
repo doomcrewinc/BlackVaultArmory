@@ -291,7 +291,7 @@ describe("PhotoGallery full picture", () => {
     const dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByRole("img"));
     expect(screen.getByRole("dialog")).toBeTruthy();
-    fireEvent.click(dialog);
+    fireEvent.click(screen.getByRole("button", { name: "Close", hidden: true }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

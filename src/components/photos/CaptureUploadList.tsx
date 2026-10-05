@@ -10,10 +10,10 @@ export type CaptureEntry = {
 export function CaptureUploadList({
   entries,
   onRetry,
-}: {
+}: Readonly<{
   entries: CaptureEntry[];
   onRetry: (id: number) => void;
-}) {
+}>) {
   if (entries.length === 0) return null;
   return (
     <section aria-label="Sent from this phone" className="space-y-2">
@@ -26,10 +26,10 @@ export function CaptureUploadList({
           >
             <p className="truncate text-vault-text">{entry.name}</p>
             {entry.status === "sending" && (
-              <p role="status" className="mt-1 flex items-center gap-2 text-vault-text-muted">
+              <output className="mt-1 flex items-center gap-2 text-vault-text-muted">
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                 Sending…
-              </p>
+              </output>
             )}
             {entry.status === "sent" && (
               <p className="mt-1 flex items-center gap-2 text-[#00C853]">

@@ -5,7 +5,7 @@
  * capture page does not render inside. This one only offers a retry, and
  * logs nothing (the failing URL contains the pass token).
  */
-export default function CaptureError({ reset }: { error: Error; reset: () => void }) {
+export default function CaptureError({ reset }: Readonly<{ reset: () => void }>) {
   return (
     <div className="mx-auto max-w-md space-y-4 p-4 pt-10">
       <p role="alert" className="rounded-lg border border-[#E53935]/30 bg-[#E53935]/10 p-4 text-base text-[#E53935]">

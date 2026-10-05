@@ -14,8 +14,8 @@ const nextConfig: NextConfig = {
   },
   // The capture token is in the page URL by design: keep it out of the Referer
   // header and out of every cache.
-  async headers() {
-    return [
+  headers() {
+    return Promise.resolve([
       {
         source: "/capture/:path*",
         headers: [
@@ -23,7 +23,7 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "no-store" },
         ],
       },
-    ];
+    ]);
   },
   serverExternalPackages: ["@prisma/client", "sharp"],
   experimental: {

@@ -1,18 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Pencil, Star, Trash2 } from "lucide-react";
 import type { PhotoDto } from "@/lib/photos/store";
 import { MAX_PHOTO_LABEL_LENGTH } from "@/lib/photos/client-constants";
 
-interface PhotoCardProps {
+type PhotoCardProps = Readonly<{
   photo: PhotoDto;
   busy: boolean;
   onOpen: (photo: PhotoDto, trigger: HTMLElement) => void;
   onMakeMain: (photo: PhotoDto) => void;
   onDelete: (photo: PhotoDto) => void;
   onSaveLabel: (photo: PhotoDto, label: string) => Promise<boolean>;
-}
+}>;
 
 const ACTION_BUTTON =
   "flex items-center gap-1 px-2 py-1 rounded border border-vault-border text-xs text-vault-text-muted hover:text-[#00C2FF] hover:border-[#00C2FF]/30 transition-colors disabled:opacity-50";
@@ -27,6 +27,13 @@ export function PhotoCard({
 }: PhotoCardProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const labelInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) labelInputRef.current?.focus();
+  }, [editing]);
+
+  const openLabel = photo.label ? `Open picture: ${photo.label}` : "Open picture";
 
   async function save() {
     if (await onSaveLabel(photo, draft.trim())) setEditing(false);
@@ -37,7 +44,7 @@ export function PhotoCard({
       <button
         type="button"
         onClick={(e) => onOpen(photo, e.currentTarget)}
-        aria-label={`Open picture${photo.label ? `: ${photo.label}` : ""}`}
+        aria-label={openLabel}
         className="relative block w-full aspect-square bg-vault-surface"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -66,7 +73,7 @@ export function PhotoCard({
                 if (e.key === "Escape") setEditing(false);
               }}
               aria-label="Photo label"
-              autoFocus
+              ref={labelInputRef}
               className="min-w-0 flex-1 bg-vault-bg border border-vault-border text-vault-text rounded px-2 py-1 text-xs focus:outline-none focus:border-[#00C2FF]"
             />
             <button

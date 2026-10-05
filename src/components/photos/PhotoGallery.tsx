@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Camera, Loader2, Smartphone, Upload, X } from "lucide-react";
 import type { PhotoDto } from "@/lib/photos/store";
@@ -15,14 +15,14 @@ import { PhotoCard } from "./PhotoCard";
 import { PhotoOverlay } from "./PhotoOverlay";
 import { CapturePassDialog } from "./CapturePassDialog";
 
-interface PhotoGalleryProps {
+type PhotoGalleryProps = Readonly<{
   entityType: PhotoEntityType;
   entityId: string;
   /** Shows "Continue on phone" and its dialog. On by default. */
   withPhonePass?: boolean;
   /** Called after a change that alters the item's main picture. */
   onMainChange?: () => void;
-}
+}>;
 
 const HEADER_BUTTON =
   "flex items-center gap-1.5 text-xs bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-2.5 py-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
@@ -189,6 +189,41 @@ export function PhotoGallery({
     openerRef.current?.focus();
   }, []);
 
+  let content: ReactNode;
+  if (loading) {
+    content = (
+      <div className="py-8 flex justify-center">
+        <div className="w-5 h-5 border-2 border-[#00C2FF]/30 border-t-[#00C2FF] rounded-full animate-spin" />
+      </div>
+    );
+  } else if (photos.length === 0) {
+    content = (
+      <div className="p-6 text-center">
+        <Camera className="w-8 h-8 text-vault-border mx-auto mb-2" />
+        <p className="text-xs text-vault-text-faint">No photos yet.</p>
+      </div>
+    );
+  } else {
+    content = (
+      <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+        {photos.map((photo) => (
+          <PhotoCard
+            key={photo.id}
+            photo={photo}
+            busy={busyId === photo.id}
+            onOpen={(p, trigger) => {
+              openerRef.current = trigger;
+              setViewing(p);
+            }}
+            onMakeMain={(p) => void makeMain(p)}
+            onDelete={setDeleting}
+            onSaveLabel={saveLabel}
+          />
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-xl border border-vault-border bg-vault-surface overflow-hidden">
       <div className="px-4 py-3 border-b border-vault-border flex flex-wrap items-center justify-between gap-3">
@@ -279,33 +314,7 @@ export function PhotoGallery({
         </div>
       )}
 
-      {loading ? (
-        <div className="py-8 flex justify-center">
-          <div className="w-5 h-5 border-2 border-[#00C2FF]/30 border-t-[#00C2FF] rounded-full animate-spin" />
-        </div>
-      ) : photos.length === 0 ? (
-        <div className="p-6 text-center">
-          <Camera className="w-8 h-8 text-vault-border mx-auto mb-2" />
-          <p className="text-xs text-vault-text-faint">No photos yet.</p>
-        </div>
-      ) : (
-        <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {photos.map((photo) => (
-            <PhotoCard
-              key={photo.id}
-              photo={photo}
-              busy={busyId === photo.id}
-              onOpen={(p, trigger) => {
-                openerRef.current = trigger;
-                setViewing(p);
-              }}
-              onMakeMain={(p) => void makeMain(p)}
-              onDelete={setDeleting}
-              onSaveLabel={saveLabel}
-            />
-          ))}
-        </div>
-      )}
+      {content}
 
       {phoneOpen && (
         <CapturePassDialog entityType={entityType} entityId={entityId} onClose={closePhoneDialog} />

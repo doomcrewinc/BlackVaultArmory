@@ -30,7 +30,7 @@ function usesLeft(n: number): string {
   return `${n} ${n === 1 ? "upload" : "uploads"} left`;
 }
 
-export function CaptureScreen({ token }: { token: string }) {
+export function CaptureScreen({ token }: Readonly<{ token: string }>) {
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
   const sending = useRef(new Set<number>());
@@ -132,9 +132,9 @@ export function CaptureScreen({ token }: { token: string }) {
 
   if (load.state === "loading") {
     return (
-      <div className="flex min-h-svh items-center justify-center" role="status" aria-label="Loading">
+      <output className="flex min-h-svh items-center justify-center" aria-label="Loading">
         <Loader2 className="h-8 w-8 animate-spin text-[#00C2FF]" />
-      </div>
+      </output>
     );
   }
 

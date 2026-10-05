@@ -596,7 +596,7 @@ describe("end-to-end: upload then serve, real filesystem", () => {
     expect(serveRes.headers.get("Cache-Control")).toBe("private, no-store");
     expect(serveRes.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const served = Buffer.from(await serveRes.arrayBuffer());
-    expect(served.length).toBe(body.size);
+    expect(served).toHaveLength(body.size);
     const servedMeta = await sharp(served).metadata();
     expect(servedMeta.format).toBe("png");
     expect(servedMeta.width).toBe(1);

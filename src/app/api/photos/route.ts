@@ -57,8 +57,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const user = await getCurrentUser();
+    const rateOwner = user ? `u:${user.id}` : "unknown";
     const rate = await enforceRateLimit({
-      key: `upload:photos:${user ? `u:${user.id}` : "unknown"}`,
+      key: `upload:photos:${rateOwner}`,
       windowMs: 60_000,
       maxAttempts: 20,
     });

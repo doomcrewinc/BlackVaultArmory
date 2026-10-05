@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Photo, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { describeError } from "./errors";
+import { resolveInside } from "@/lib/files/inside-root";
 import { uploadsRoot, writeEncryptedFile } from "@/lib/files/storage";
 import { processPicture } from "@/lib/images/process";
 import { OWNER_COLUMN, OWNER_DELEGATE, type PhotoEntityType } from "./owner";
@@ -60,12 +61,20 @@ function photosDir(): string {
   return path.join(uploadsRoot(), "images", "photos");
 }
 
+const PHOTO_EXTENSIONS: ReadonlySet<string> = new Set(["jpg", "png", "webp"]);
+
+/** The stored name of an original: `<id>.<extension>`, the extension from the fixed list only. */
+function photoFileName(id: string, extension: string): string {
+  if (!PHOTO_EXTENSIONS.has(extension)) throw new Error("Unsupported picture extension");
+  return `${id}.${extension}`;
+}
+
 function originalPath(fileName: string): string {
-  return path.join(photosDir(), fileName);
+  return resolveInside(photosDir(), fileName);
 }
 
 function previewPath(id: string): string {
-  return path.join(photosDir(), "thumbs", `${id}.webp`);
+  return resolveInside(photosDir(), "thumbs", `${id}.webp`);
 }
 
 type ItemDelegate = {
@@ -94,7 +103,7 @@ export async function addPhoto(input: {
 }): Promise<Photo> {
   const processed = await processPicture(input.bytes, { preview: true });
   const id = randomUUID().replace(/-/g, "");
-  const fileName = `${id}.${processed.extension}`;
+  const fileName = photoFileName(id, processed.extension);
   const files = [{ id, fileName }];
 
   try {
@@ -130,9 +139,9 @@ export async function addPhoto(input: {
   }
 }
 
-async function unlinkQuietly(file: string, photoId: string): Promise<void> {
+async function unlinkQuietly(locate: () => string, photoId: string): Promise<void> {
   try {
-    await unlink(file);
+    await unlink(locate());
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
     console.warn(`Could not remove a file of photo ${photoId}; it was left behind:`, describeError(e));
@@ -142,11 +151,11 @@ async function unlinkQuietly(file: string, photoId: string): Promise<void> {
 /** Removes the original and preview of each photo. Never throws; logs failures. */
 export async function removePhotoFiles(photos: Array<{ id: string; fileName: string }>): Promise<void> {
   await Promise.all(
-    photos.flatMap((p) => [unlinkQuietly(originalPath(p.fileName), p.id), unlinkQuietly(previewPath(p.id), p.id)]),
+    photos.flatMap((p) => [unlinkQuietly(() => originalPath(p.fileName), p.id), unlinkQuietly(() => previewPath(p.id), p.id)]),
   );
 }
 
-export async function photoFilesFor(
+export function photoFilesFor(
   where: Prisma.PhotoWhereInput,
 ): Promise<Array<{ id: string; fileName: string }>> {
   return prisma.photo.findMany({ where, select: { id: true, fileName: true } });

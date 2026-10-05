@@ -29,15 +29,20 @@ export async function POST(request: NextRequest) {
     if (!rate.allowed) return bad("Too many capture passes. Please wait a minute.", 429);
 
     const pass = await createPass({ entityType, entityId, createdById: user.id, sessionId: user.sessionId });
-    for (const closedId of pass.closedPassIds) {
-      await recordEventBestEffort(null, {
-        action: "CAPTURE_PASS_CLOSED",
-        entityType: OWNER_MODEL[entityType],
-        entityId,
-        entityLabel: name,
-        changes: { passId: closedId, note: "Replaced by a new pass" },
-      });
-    }
+    // One after the other: each audit event chains on the one before it.
+    await pass.closedPassIds.reduce(
+      (previous, closedId) =>
+        previous.then(() =>
+          recordEventBestEffort(null, {
+            action: "CAPTURE_PASS_CLOSED",
+            entityType: OWNER_MODEL[entityType],
+            entityId,
+            entityLabel: name,
+            changes: { passId: closedId, note: "Replaced by a new pass" },
+          }),
+        ),
+      Promise.resolve(),
+    );
     await recordEventBestEffort(null, {
       action: "CAPTURE_PASS_CREATED",
       entityType: OWNER_MODEL[entityType],
