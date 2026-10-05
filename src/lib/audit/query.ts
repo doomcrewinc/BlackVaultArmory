@@ -37,6 +37,8 @@ const SECURITY_ACTIONS: readonly AuditAction[] = [
   "ENCRYPTION_ENABLED",
   "KEY_ROTATED",
   "FILES_ENCRYPTED",
+  "CAPTURE_PASS_CREATED",
+  "CAPTURE_PASS_CLOSED",
 ];
 
 export const ACTION_GROUPS: Readonly<Record<AuditActionGroup, readonly AuditAction[]>> = {

@@ -59,6 +59,10 @@ runs the one test that needs a built app; `npm test` skips it.
   the app and by every script; never a second one.
 - **Routes do uploads I/O only through `src/lib/files/storage.ts`.** It is the one place that
   knows where files live and that they are encrypted at rest.
+- **Pictures are processed only in `src/lib/images/process.ts`.** It strips the metadata and
+  enforces the limits; no route or component calls `sharp` itself.
+- **A photo's owner column is chosen only in `src/lib/photos/owner.ts`.** The public capture routes
+  take the item from the pass, never from the request.
 - **A schema change lands in both providers in the same PR**, following "Changing the schema"
   in `CONTRIBUTING.md`. A one-provider change ships a client that queries missing columns.
 - **Env keys in `.env` and compose files use the `BLACKVAULT_` prefix.** Compose lets a shell

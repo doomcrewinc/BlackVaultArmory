@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   gearFindMany: vi.fn(),
   kitFindMany: vi.fn(),
   documentFindMany: vi.fn(),
+  photoFindMany: vi.fn(),
   requireAuth: vi.fn(),
 }));
 
@@ -31,6 +32,9 @@ vi.mock("@/lib/prisma", () => ({
     document: {
       findMany: mocks.documentFindMany,
     },
+    photo: {
+      findMany: mocks.photoFindMany,
+    },
   },
 }));
 
@@ -47,6 +51,7 @@ describe("/api/exports/data backup metadata", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireAuth.mockResolvedValue(null);
+    mocks.photoFindMany.mockResolvedValue([]);
     // The kits section defaults ON; nothing here asserts about it.
     mocks.kitFindMany.mockResolvedValue([]);
 

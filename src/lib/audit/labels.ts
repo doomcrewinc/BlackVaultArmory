@@ -54,6 +54,10 @@ export function labelFor(model: string, row: Record<string, unknown>): string {
       const name = asString(row.name);
       return name ?? fallback(model, row);
     }
+    case "Photo": {
+      const label = asString(row.label);
+      return label ? `Photo "${label}"` : "Photo";
+    }
     case "MaintenanceLog": {
       const date = asDateOnly(row.date);
       return date ? `Maintenance ${date}` : fallback(model, row);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { DOCUMENT_OWNER_INCLUDE } from "@/lib/documents/owner-include";
 import { requireAuth } from "@/lib/server/auth";
 
 export async function GET(req: NextRequest) {
@@ -11,6 +12,9 @@ export async function GET(req: NextRequest) {
     const firearmId = searchParams.get("firearmId");
     const accessoryId = searchParams.get("accessoryId");
     const gearId = searchParams.get("gearId");
+    const ammoStockId = searchParams.get("ammoStockId");
+    const supplyId = searchParams.get("supplyId");
+    const kitId = searchParams.get("kitId");
     const type = searchParams.get("type");
 
     const docs = await prisma.document.findMany({
@@ -18,13 +22,12 @@ export async function GET(req: NextRequest) {
         ...(firearmId ? { firearmId } : {}),
         ...(accessoryId ? { accessoryId } : {}),
         ...(gearId ? { gearId } : {}),
+        ...(ammoStockId ? { ammoStockId } : {}),
+        ...(supplyId ? { supplyId } : {}),
+        ...(kitId ? { kitId } : {}),
         ...(type ? { type } : {}),
       },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-        gear: { select: { id: true, name: true } },
-      },
+      include: DOCUMENT_OWNER_INCLUDE,
       orderBy: { createdAt: "desc" },
     });
 
@@ -54,6 +57,9 @@ export async function POST(req: NextRequest) {
       firearmId,
       accessoryId,
       gearId,
+      ammoStockId,
+      supplyId,
+      kitId,
     } = body;
 
     if (!name || !fileUrl) {
@@ -74,12 +80,11 @@ export async function POST(req: NextRequest) {
         firearmId: firearmId || null,
         accessoryId: accessoryId || null,
         gearId: gearId || null,
+        ammoStockId: ammoStockId || null,
+        supplyId: supplyId || null,
+        kitId: kitId || null,
       },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-        gear: { select: { id: true, name: true } },
-      },
+      include: DOCUMENT_OWNER_INCLUDE,
     });
 
     return NextResponse.json(doc, { status: 201 });

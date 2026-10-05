@@ -12,6 +12,19 @@ const nextConfig: NextConfig = {
       { protocol: "http", hostname: "**" },
     ],
   },
+  // The capture token is in the page URL by design: keep it out of the Referer
+  // header and out of every cache.
+  headers() {
+    return Promise.resolve([
+      {
+        source: "/capture/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+    ]);
+  },
   serverExternalPackages: ["@prisma/client", "sharp"],
   experimental: {
     // Next 16's proxy (src/proxy.ts has no matcher, so it runs on every

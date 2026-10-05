@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi, Mock } from "vitest";
 import { NextRequest } from "next/server";
+import sharp from "sharp";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
@@ -23,7 +24,10 @@ vi.mock("@/lib/rate-limit", () => ({
 }));
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { document: { create: mocks.create } },
+  prisma: {
+    document: { create: mocks.create },
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => await fn({ document: { create: mocks.create } }),
+  },
 }));
 
 // The upload directory and the write itself are mocked out so the route
@@ -39,14 +43,19 @@ vi.mock("fs", () => ({
 }));
 
 import { POST } from "./route";
+import { HEIC_MESSAGE } from "@/lib/images/process";
 
 // Real bytes (ASCII, so the string encodes byte-for-byte), which means
 // detectFileSignature is exercised rather than mocked.
 const PDF_BYTES = "%PDF-1.4\n%EOF\n";
 
-function uploadRequest(fields: Record<string, string>, bytes = PDF_BYTES) {
+function uploadRequest(
+  fields: Record<string, string>,
+  bytes: string | Uint8Array = PDF_BYTES,
+  fileName = "receipt.pdf",
+) {
   const form = new FormData();
-  form.set("file", new File([bytes], "receipt.pdf"));
+  form.set("file", new File([bytes as BlobPart], fileName));
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
 
   return new NextRequest("http://localhost/api/documents/upload", {
@@ -93,6 +102,29 @@ describe("POST /api/documents/upload", () => {
     expect(include.gear).toEqual({ select: { id: true, name: true } });
   });
 
+  it("stores the ammunition, supply and kit owners", async () => {
+    const response = await POST(
+      uploadRequest({ name: "Lot sheet", ammoStockId: "a1", supplyId: "s1", kitId: "k1" }),
+    );
+
+    expect(response.status).toBe(201);
+    const { data, include } = mocks.create.mock.calls[0][0];
+    expect(data).toMatchObject({ ammoStockId: "a1", supplyId: "s1", kitId: "k1" });
+    expect(include.ammoStock).toEqual({ select: { id: true, caliber: true, brand: true } });
+    expect(include.supply).toEqual({ select: { id: true, name: true } });
+    expect(include.kit).toEqual({ select: { id: true, name: true } });
+  });
+
+  it("answers a HEIC file with the HEIC message", async () => {
+    const heic = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0]);
+
+    const response = await POST(uploadRequest({ name: "Phone" }, heic, "IMG_1.heic"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe(HEIC_MESSAGE);
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
+  });
+
   it("writes through writeEncryptedFile under documentsRoot(), never fs.writeFile, and fileUrl keeps its shape", async () => {
     await POST(uploadRequest({ name: "Receipt" }));
 
@@ -103,6 +135,44 @@ describe("POST /api/documents/upload", () => {
 
     const { data } = mocks.create.mock.calls[0][0];
     expect(data.fileUrl).toMatch(/^\/api\/files\/documents\/[a-f0-9]+\.pdf$/);
+  });
+
+  it("stores an image document without its GPS EXIF", async () => {
+    const jpeg = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .jpeg()
+      .withMetadata({ exif: { IFD3: { GPSLatitudeRef: "N", GPSLatitude: "40/1 26/1 46/1" } } })
+      .toBuffer();
+    expect((await sharp(jpeg).metadata()).exif).toBeDefined();
+
+    const response = await POST(uploadRequest({ name: "Photo", type: "PHOTO" }, jpeg, "photo.jpg"));
+
+    expect(response.status).toBe(201);
+    const written = mocks.writeEncryptedFile.mock.calls[0][1] as Buffer;
+    expect((await sharp(written).metadata()).exif).toBeUndefined();
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fileSize).toBe(written.length);
+    expect(data.mimeType).toBe("image/jpeg");
+    expect(data.fileUrl).toMatch(/\.jpg$/);
+  });
+
+  it("rejects an undecodable image and writes nothing", async () => {
+    const fakePng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const response = await POST(uploadRequest({ name: "Broken" }, fakePng, "broken.png"));
+
+    expect(response.status).toBe(400);
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.writeEncryptedFile).not.toHaveBeenCalled();
+  });
+
+  it("stores a PDF byte for byte", async () => {
+    await POST(uploadRequest({ name: "Receipt" }));
+
+    const written = mocks.writeEncryptedFile.mock.calls[0][1] as Buffer;
+    expect(written.equals(Buffer.from(PDF_BYTES))).toBe(true);
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fileSize).toBe(PDF_BYTES.length);
   });
 
   it("stores all three entity ids as null when none is sent", async () => {

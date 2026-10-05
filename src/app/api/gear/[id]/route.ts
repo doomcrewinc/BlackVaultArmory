@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ownerWhere } from "@/lib/photos/owner";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeGearArmorFields, normalizeGearCategory } from "@/lib/gear";
 import { normalizeMoney } from "@/lib/money";
@@ -154,7 +156,9 @@ export async function DELETE(
       return NextResponse.json({ error: "Gear not found" }, { status: 404 });
     }
 
+    const files = await photoFilesFor(ownerWhere("gear", id));
     await prisma.gear.delete({ where: { id } });
+    await removePhotoFiles(files);
 
     return NextResponse.json({ success: true, id });
   } catch (error) {

@@ -674,6 +674,7 @@ describe("POST /api/backup/restore", () => {
         "dateNormalizationAudits",
         "kits",
         "kitItems",
+        "photos",
       ].sort(),
     );
   });

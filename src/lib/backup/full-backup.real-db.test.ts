@@ -91,6 +91,7 @@ import { createRawPrismaClient, prisma } from "@/lib/prisma";
 import { createBackupOpener, SealError } from "@/lib/encryption/core.mjs";
 import { getFieldKeys } from "@/lib/encryption/keys";
 import { writeEncryptedFile } from "@/lib/files/storage";
+import { clearGallery, galleryFiles, seedGallery, seedPass } from "./gallery.test-support";
 import { BACKUP_MODELS } from "./models";
 import { parseManifest, type Manifest } from "./manifest";
 import { readTar } from "./tar";
@@ -287,6 +288,34 @@ describe(`runFullBackup against real ${ctx.pg ? "PostgreSQL" : "SQLite (connecti
     expect(opened.manifest.createdAt).toBe(NOW.toISOString());
     expect(opened.manifest.keyIdAtBackup).toBe(getFieldKeys().id);
     expect(opened.manifest.skipped).toEqual([]);
+  });
+
+  it("lists both files of every gallery photo, carries the photo rows with their owner columns, and leaves capture passes out", async () => {
+    const gallery = await seedGallery(prisma, (rel, bytes) => upload(rel, bytes));
+    try {
+      await seedPass(raw, gallery.ammoStockId);
+      const result = await run();
+      const opened = await open(result.path);
+
+      const expected = new Map(galleryFiles(gallery).map(([rel, bytes]) => [`files/${rel}`, bytes]));
+      expect(new Set(opened.manifest.files.map((f) => f.path))).toEqual(new Set(expected.keys()));
+      for (const [entry, bytes] of expected) expect(opened.entries.get(entry)!.equals(bytes), entry).toBe(true);
+
+      const rows = opened.db.photos as Array<Record<string, unknown>>;
+      expect(rows.map((r) => r.id).sort()).toEqual(gallery.photos.map((p) => p.id).sort());
+      for (const photo of gallery.photos) {
+        expect(rows.find((r) => r.id === photo.id)).toMatchObject({ [photo.ownerColumn]: photo.ownerId, fileName: `${photo.id}.jpg` });
+      }
+      expect(opened.manifest.counts.photos).toBe(2);
+
+      // A pass is a short-lived credential: neither its rows nor its key are in the archive.
+      expect(await within(10_000, raw.capturePass.count())).toBe(1);
+      expect(Object.keys(opened.db).filter((k) => /pass/i.test(k))).toEqual([]);
+      expect(Object.keys(opened.manifest.counts).filter((k) => /pass/i.test(k))).toEqual([]);
+      expect(opened.entries.get("db.json")!.includes(Buffer.from(`pass-${gallery.ammoStockId}`))).toBe(false);
+    } finally {
+      await clearGallery(raw, gallery);
+    }
   });
 
   it("the archive bytes contain no plaintext needle (records, file contents and file names are all sealed)", async () => {

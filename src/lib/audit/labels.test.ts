@@ -32,6 +32,11 @@ describe("labelFor", () => {
     expect(labelFor("Document", { id: "d1", name: "Form 4473.pdf" })).toBe("Form 4473.pdf");
   });
 
+  it("labels a Photo by its label, or plainly when it has none", () => {
+    expect(labelFor("Photo", { id: "p1", label: "left side" })).toBe('Photo "left side"');
+    expect(labelFor("Photo", { id: "p1", label: null })).toBe("Photo");
+  });
+
   it("labels a RangeSession as date and location", () => {
     expect(
       labelFor("RangeSession", {

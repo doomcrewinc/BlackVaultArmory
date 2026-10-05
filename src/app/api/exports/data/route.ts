@@ -15,6 +15,7 @@ type SectionFlags = {
   kits: boolean;
   rangeSessions: boolean;
   documents: boolean;
+  photos: boolean;
   settings: boolean;
 };
 
@@ -39,6 +40,7 @@ function parseFlags(searchParams: URLSearchParams): SectionFlags {
     kits: parseBool(searchParams.get("kits"), true),
     rangeSessions: parseBool(searchParams.get("rangeSessions"), true),
     documents: parseBool(searchParams.get("documents"), true),
+    photos: parseBool(searchParams.get("photos"), true),
     settings: parseBool(searchParams.get("settings"), false),
   };
 }
@@ -290,6 +292,7 @@ function buildPdfLines(
     { title: "Kits", enabled: flags.kits, rows: asRows(payload.kits) },
     { title: "Range Sessions", enabled: flags.rangeSessions, rows: asRows(payload.rangeSessions) },
     { title: "Documents", enabled: flags.documents, rows: asRows(payload.documents) },
+    { title: "Photos", enabled: flags.photos, rows: asRows(payload.photos) },
     { title: "Settings", enabled: flags.settings, rows: asRows(payload.settings) },
   ];
 
@@ -558,6 +561,30 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // The gallery rows only: the pictures themselves travel in full backups, and
+    // the stored file name is left out.
+    if (flags.photos) {
+      payload.photos = await prisma.photo.findMany({
+        select: {
+          id: true,
+          firearmId: true,
+          accessoryId: true,
+          gearId: true,
+          kitId: true,
+          ammoStockId: true,
+          supplyId: true,
+          label: true,
+          width: true,
+          height: true,
+          fileSize: true,
+          mimeType: true,
+          viaPass: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      });
+    }
+
     if (flags.settings) {
       if (!appSettings) {
         payload.settings = null;
@@ -678,6 +705,7 @@ export async function GET(request: NextRequest) {
       if (flags.kits) csvSections.push({ section: "kits", rows: payload.kits ?? [] });
       if (flags.rangeSessions) csvSections.push({ section: "rangeSessions", rows: payload.rangeSessions ?? [] });
       if (flags.documents) csvSections.push({ section: "documents", rows: payload.documents ?? [] });
+      if (flags.photos) csvSections.push({ section: "photos", rows: payload.photos ?? [] });
       if (flags.settings) csvSections.push({ section: "settings", rows: payload.settings ?? [] });
       if (includeUploadReferences) {
         csvSections.push({ section: "uploadedAssetReferences", rows: payload.uploadedAssetReferences ?? [] });

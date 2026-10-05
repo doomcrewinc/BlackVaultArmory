@@ -5,6 +5,7 @@ import { decideRequest, effectiveHost, isPublicHost, trustsForwardedHeaders, typ
 import { decideAuth, isPublicPath } from "@/lib/server/auth-gate";
 import { SESSION_COOKIE, sessionCookie, validateSession } from "@/lib/auth/sessions";
 import { hasAnyUser } from "@/lib/auth/setup-state";
+import { CAPTURE_PAGE_HEADER, isCapturePagePath } from "@/lib/server/capture-page";
 
 /**
  * Runs on every request (Next 16 proxy, always the Node.js runtime). The TCP
@@ -63,7 +64,16 @@ export async function proxy(request: NextRequest) {
   }
   if (auth.kind === "json") return NextResponse.json({ error: auth.error }, { status: auth.status });
 
-  const response = auth.kind === "rewrite" ? NextResponse.rewrite(new URL(auth.pathname, request.url), { status: 403 }) : NextResponse.next();
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.delete(CAPTURE_PAGE_HEADER);
+  if (isCapturePagePath(pathname)) requestHeaders.set(CAPTURE_PAGE_HEADER, "1");
+  const response =
+    auth.kind === "rewrite"
+      ? NextResponse.rewrite(new URL(auth.pathname, request.url), {
+          status: 403,
+          request: { headers: requestHeaders },
+        })
+      : NextResponse.next({ request: { headers: requestHeaders } });
   if (session?.slidTo && rawSession) response.cookies.set(sessionCookie(rawSession, session.slidTo, request));
   return response;
 }

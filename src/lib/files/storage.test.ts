@@ -3,6 +3,7 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
+import sharp from "sharp";
 import { resetFieldKeysForTests } from "@/lib/encryption/keys";
 import * as keysModule from "@/lib/encryption/keys";
 import * as core from "@/lib/encryption/core.mjs";
@@ -32,16 +33,17 @@ vi.mock("@/lib/rate-limit", () => ({
   enforceRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
-vi.mock("@/lib/prisma", () => ({
-  prisma: {
-    document: {
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
-        id: "doc-1",
-        ...data,
-      })),
-    },
-  },
-}));
+vi.mock("@/lib/prisma", () => {
+  const document = {
+    create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "doc-1",
+      ...data,
+    })),
+  };
+  return {
+    prisma: { document, $transaction: async (fn: (tx: unknown) => Promise<unknown>) => await fn({ document }) },
+  };
+});
 
 // Imported statically: both routes resolve the uploads root at call time
 // (via uploadsRoot()/documentsRoot(), which read IMAGE_UPLOAD_DIR from
@@ -56,6 +58,12 @@ import { GET as libraryImages } from "@/app/api/images/library/route";
 // Real PNG magic (first 8 bytes) padded to the 12 bytes detectFileSignature
 // requires. Not a valid full PNG, but enough to pass signature detection.
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+// A real 1x1 PNG: the upload route decodes and re-saves every picture, so its
+// input must be decodable.
+const REAL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
 const PDF_TEXT = "%PDF-1.4\nreceipt body\n%%EOF\n";
 
 let tmpRoot: string;
@@ -572,7 +580,7 @@ describe("end-to-end: upload then serve, real filesystem", () => {
   // the REAL serving route, not a mocked basename.
   it("image upload writes BVF1 for a cuid entity id containing - and _, and the serving route decrypts it", async () => {
     const entityId = "cm2x9k3qw-ab_01";
-    const res = await uploadImage(imageUploadRequest("firearm", entityId, PNG_BYTES));
+    const res = await uploadImage(imageUploadRequest("firearm", entityId, REAL_PNG));
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.fileName).toContain(entityId);
@@ -588,7 +596,10 @@ describe("end-to-end: upload then serve, real filesystem", () => {
     expect(serveRes.headers.get("Cache-Control")).toBe("private, no-store");
     expect(serveRes.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const served = Buffer.from(await serveRes.arrayBuffer());
-    expect(served.equals(PNG_BYTES)).toBe(true);
+    expect(served).toHaveLength(body.size);
+    const servedMeta = await sharp(served).metadata();
+    expect(servedMeta.format).toBe("png");
+    expect(servedMeta.width).toBe(1);
   });
 
   it("a plaintext document at rest gives 500 with a generic body", async () => {
@@ -620,7 +631,7 @@ describe("end-to-end: upload then serve, real filesystem", () => {
   });
 
   it("the image library listing skips .tmp, .rot and .pre-encryption-* entries", async () => {
-    const res = await uploadImage(imageUploadRequest("firearm", "lib-test-1", PNG_BYTES));
+    const res = await uploadImage(imageUploadRequest("firearm", "lib-test-1", REAL_PNG));
     const { fileName } = await res.json();
     const dir = path.join(uploadsRoot(), "images", "firearms");
     await fsp.writeFile(path.join(dir, "stray.tmp"), "junk");
@@ -651,7 +662,7 @@ describe("end-to-end: upload then serve, real filesystem", () => {
     const { DELETE: deleteImageFresh } = await import("@/app/api/images/delete/route");
     const { POST: uploadImageFresh } = await import("@/app/api/images/upload/route");
 
-    const res = await uploadImageFresh(imageUploadRequest("firearm", "del-test-1", PNG_BYTES));
+    const res = await uploadImageFresh(imageUploadRequest("firearm", "del-test-1", REAL_PNG));
     const { fileName } = await res.json();
     const onDiskPath = path.join(uploadsRoot(), "images", "firearms", fileName);
     await expect(fsp.access(onDiskPath)).resolves.toBeUndefined();

@@ -21,6 +21,10 @@ const m = vi.hoisted(() => ({
 
 vi.mock("@/lib/server/auth", () => ({ getCurrentUser: m.getCurrentUser }));
 vi.mock("@/lib/prisma", () => ({ prisma: { firearm: { findUnique: m.findUnique } } }));
+vi.mock("next/navigation", () => ({
+  notFound: vi.fn(),
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 vi.mock("@/lib/kits/itemAllocation", () => ({ getItemAllocation: m.getItemAllocation }));
 
 import FirearmDetailPage from "./page";

@@ -32,7 +32,7 @@ const PUBLIC_EXACT = new Set([
   "/site.webmanifest",
 ]);
 
-const PUBLIC_PREFIXES = ["/invite/", "/reset/", "/api/auth/", "/_next/static/"];
+const PUBLIC_PREFIXES = ["/invite/", "/reset/", "/api/auth/", "/_next/static/", "/capture/", "/api/capture/"];
 
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_EXACT.has(pathname) || PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));

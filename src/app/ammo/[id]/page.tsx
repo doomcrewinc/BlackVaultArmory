@@ -11,6 +11,8 @@ import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { AmmoTransactionList } from "@/components/ammo/AmmoTransactionList";
 import { DeleteAmmoButton } from "./DeleteAmmoButton";
 import { getCurrentUser } from "@/lib/server/auth";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
+import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { ItemHistory } from "@/components/audit/ItemHistory";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
@@ -22,9 +24,8 @@ import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
  * item half landed on gear, supplies, accessories and firearms, and ammo was
  * missed for one reason only — there was no page to render it on. There is now.
  *
- * NO ItemDocumentPanel: the Document model carries firearmId, accessoryId and
- * gearId and nothing for ammo (prisma/schema.base.prisma:238-260), so a
- * document panel here would be a permanently empty box.
+ * The photo gallery and the documents panel sit above the ledger: `Document`
+ * and `Photo` both carry an `ammoStockId`.
  *
  * THREE QUERIES, sequential, never Promise.all — SQLite here runs with
  * connection_limit=1, so a parallel await is a serialized query with a worse
@@ -262,6 +263,14 @@ export default async function AmmoDetailPage({
             </p>
           </div>
         )}
+
+        <PhotoGallery entityType="ammo" entityId={stock.id} />
+
+        <ItemDocumentPanel
+          entityType="ammo"
+          entityId={stock.id}
+          title="Ammunition Documents"
+        />
 
         <AmmoTransactionList transactions={transactions} />
 

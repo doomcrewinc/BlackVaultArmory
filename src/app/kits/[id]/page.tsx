@@ -11,6 +11,8 @@ import { KitContents } from "./KitContents";
 import { AddKitItem } from "./AddKitItem";
 import { DeleteKitButton } from "./DeleteKitButton";
 import { getCurrentUser } from "@/lib/server/auth";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
+import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { ItemHistory } from "@/components/audit/ItemHistory";
 
 /**
@@ -206,6 +208,10 @@ export default async function KitDetailPage({
             </p>
           </div>
         )}
+
+        <PhotoGallery entityType="kit" entityId={kit.id} />
+
+        <ItemDocumentPanel entityType="kit" entityId={kit.id} title="Kit Documents" />
 
         {currentUser?.role === "ADMIN" && (
           <ItemHistory entityType="Kit" entityId={kit.id} />

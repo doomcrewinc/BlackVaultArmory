@@ -31,6 +31,7 @@ interface AmmoStock {
   storageLocation: string | null;
   lowStockAlert: number | null;
   notes: string | null;
+  imageUrl: string | null;
 }
 
 interface CaliberGroup {
@@ -745,6 +746,14 @@ export default function AmmoPage() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-0.5">
                                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ss.dot}`} />
+                                  {stock.imageUrl && (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      src={stock.imageUrl}
+                                      alt=""
+                                      className="w-9 h-9 rounded border border-vault-border object-cover shrink-0"
+                                    />
+                                  )}
                                   {/* The lot's name is the way into its detail
                                       page — ammo was the only inventory kind
                                       with no page to open. The name truncates

@@ -294,12 +294,12 @@ describe("backup -> restore round trip for kits", () => {
     expect(await prisma.supply.count()).toBe(1);
   }, 60_000);
 
-  it("keeps KitItem last in the registry, after everything it references", () => {
+  it("keeps KitItem after everything it references, with only Photo (nothing references it) behind it", () => {
     // The code-level companion to the executed trip above, in the same file so
     // a reader sees both. Kit and the five inventory models must all precede
-    // KitItem; nothing may be inserted after it, because nothing references it.
+    // KitItem. Photo follows it: it references the six owners, nothing references it.
     const order = BACKUP_MODELS.map((m) => m.model);
-    expect(order[order.length - 1]).toBe("KitItem");
+    expect(order.slice(-2)).toEqual(["KitItem", "Photo"]);
     for (const referenced of ["Kit", "Gear", "Supply", "Accessory", "AmmoStock", "Firearm"]) {
       expect(order.indexOf(referenced), referenced).toBeLessThan(order.indexOf("KitItem"));
     }

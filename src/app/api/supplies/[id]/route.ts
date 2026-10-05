@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ownerWhere } from "@/lib/photos/owner";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeMoney } from "@/lib/money";
 import {
@@ -150,7 +152,9 @@ export async function DELETE(
       return NextResponse.json({ error: "Supply not found" }, { status: 404 });
     }
 
+    const files = await photoFilesFor(ownerWhere("supply", id));
     await prisma.supply.delete({ where: { id } });
+    await removePhotoFiles(files);
 
     revalidateDashboardData();
 

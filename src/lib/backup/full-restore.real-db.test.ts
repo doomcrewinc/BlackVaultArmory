@@ -74,6 +74,7 @@ import { createBackupSealer, envelopeKeyId, fileKeyId, isEncryptedFile, SealErro
 import { getFieldKeys, resetFieldKeysForTests } from "@/lib/encryption/keys";
 import { readDecryptedFile, writeEncryptedFile } from "@/lib/files/storage";
 import { assertNoUnfinishedRestore, runFileStartup } from "@/lib/files/startup";
+import { clearGallery, galleryFiles, seedGallery, seedPass } from "./gallery.test-support";
 import { BACKUP_MODELS } from "./models";
 import { buildManifest } from "./manifest";
 import { collectBackupRecords, buildBackupPayload, backupCounts } from "./records";
@@ -275,8 +276,9 @@ async function craftArchive(name: string, entries: Array<[string, Buffer]>): Pro
   return out;
 }
 
-async function validParts(files: Array<[string, Buffer]>) {
-  const records = await within(20_000, collectBackupRecords());
+async function validParts(files: Array<[string, Buffer]>, omitKeys: string[] = []) {
+  // `omitKeys` leaves whole models out of db.json and the counts, as a backup from before they existed does.
+  const records = Object.fromEntries(Object.entries(await within(20_000, collectBackupRecords())).filter(([k]) => !omitKeys.includes(k)));
   const now = new Date("2026-10-03T10:00:00.000Z");
   const db = Buffer.from(JSON.stringify(buildBackupPayload(records, { now, includeUploads: true })));
   const manifest = (listed: Array<[string, Buffer]>) =>
@@ -390,6 +392,60 @@ describe.skipIf(!isPosix)(`runFullRestore against real ${ctx.pg ? "PostgreSQL" :
     await restore(source.archive);
     const actions = (await within(10_000, raw.auditEvent.findMany({ orderBy: { at: "asc" } }))).map((e) => e.action);
     expect(actions).toEqual(["LOGIN", "RESTORE"]);
+  });
+
+  describe("galleries", () => {
+    it("restores photo rows (same ids and owner columns) and both files of each onto an empty install; a pass from before the restore survives and one at backup time is not brought back", async () => {
+      switchKey(KEY_A);
+      await wipeRecords();
+      const gallery = await seedGallery(prisma, (rel, bytes) => upload(rootA, rel, bytes));
+      const passAtBackup = await seedPass(raw, gallery.ammoStockId);
+      const made = await within(60_000, runFullBackup({ passphrase: PASS, dir: backups, env: { ...process.env, IMAGE_UPLOAD_DIR: rootA } as NodeJS.ProcessEnv }));
+      await raw.capturePass.deleteMany();
+      const keyIdB = switchKey(KEY_B);
+      await wipeRecords();
+      const passBeforeRestore = await seedPass(raw, "item-on-the-target");
+      try {
+        const result = await restore(made.path);
+        expect(result.counts).toMatchObject({ photos: 2, documents: 1, ammoStocks: 1, firearms: 1 });
+
+        const rows = await within(10_000, raw.photo.findMany({ orderBy: { id: "asc" } }));
+        expect(rows.map((r) => r.id)).toEqual(gallery.photos.map((p) => p.id).sort());
+        for (const photo of gallery.photos) {
+          expect(rows.find((r) => r.id === photo.id), photo.id).toMatchObject({ [photo.ownerColumn]: photo.ownerId, fileName: `${photo.id}.jpg` });
+        }
+        expect(await within(10_000, raw.document.findMany({ where: { ammoStockId: gallery.ammoStockId } }))).toHaveLength(1);
+
+        for (const [rel, bytes] of galleryFiles(gallery)) {
+          const stored = readFileSync(path.join(rootB, rel));
+          expect(isEncryptedFile(stored), rel).toBe(true);
+          expect(fileKeyId(stored), rel).toBe(keyIdB);
+          expect(sha(await readDecryptedFile(path.join(rootB, rel))), rel).toBe(sha(bytes));
+        }
+
+        expect((await within(10_000, raw.capturePass.findMany())).map((p) => p.id)).toEqual([passBeforeRestore]);
+        expect(passAtBackup).not.toBe(passBeforeRestore);
+      } finally {
+        await raw.user.deleteMany({ where: { username: "gallery-user" } });
+        await clearGallery(raw, gallery);
+      }
+    });
+
+    it("an archive made before photos existed (no photos key) restores; the target's photo rows are replaced by none", async () => {
+      await makeSource();
+      await makeTarget();
+      const gallery = await seedGallery(prisma, (rel, bytes) => upload(rootB, rel, bytes));
+      const p = await validParts([], ["photos"]);
+      expect(JSON.parse(p.db.toString("utf8"))).not.toHaveProperty("photos");
+      const archive = await craftArchive("before-photos.bvb", [["db.json", p.db], ["manifest.json", p.manifest([])]]);
+      try {
+        const result = await restore(archive);
+        expect(result.counts.photos).toBe(0);
+        expect(await within(10_000, raw.photo.count())).toBe(0);
+      } finally {
+        await clearGallery(raw, gallery);
+      }
+    });
   });
 
   it("after a restore, the 3b startup file scan accepts the uploads folder: .pre-restore-<ts>/ (and a leftover .restore-*/) never locks startup and is never encrypted or moved", async () => {
