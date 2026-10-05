@@ -44,6 +44,7 @@ vi.mock("fs", () => ({
 
 import { POST } from "./route";
 import { HEIC_MESSAGE } from "@/lib/images/process";
+import { UPLOADS_NOT_WRITABLE_MESSAGE } from "@/lib/photos/errors";
 
 // Real bytes (ASCII, so the string encodes byte-for-byte), which means
 // detectFileSignature is exercised rather than mocked.
@@ -113,6 +114,14 @@ describe("POST /api/documents/upload", () => {
     expect(include.ammoStock).toEqual({ select: { id: true, caliber: true, brand: true } });
     expect(include.supply).toEqual({ select: { id: true, name: true } });
     expect(include.kit).toEqual({ select: { id: true, name: true } });
+  });
+
+  it.each(["EACCES", "EPERM", "EROFS"])("%s from the write answers 500 with the permissions message", async (code) => {
+    mocks.writeEncryptedFile.mockRejectedValue(Object.assign(new Error("secret-detail"), { code }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(uploadRequest({ name: "Receipt" }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: UPLOADS_NOT_WRITABLE_MESSAGE });
   });
 
   it("answers a HEIC file with the HEIC message", async () => {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { describeError, uploadFailureMessage } from "@/lib/photos/errors";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { MAX_PHOTO_BYTES, PictureRejected, processPicture, type ProcessedPicture } from "@/lib/images/process";
 import { requireEntityWriteAccess, type WritableEntityType } from "@/lib/server/entity-write-access";
@@ -133,10 +134,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 201 }
     );
-  } catch {
-    console.error("POST /api/images/upload failed");
+  } catch (e) {
+    console.error("POST /api/images/upload failed:", describeError(e));
     return NextResponse.json(
-      { error: "Failed to upload image" },
+      { error: uploadFailureMessage(e, "Failed to upload image") },
       { status: 500 }
     );
   }

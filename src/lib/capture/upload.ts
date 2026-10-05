@@ -5,7 +5,7 @@ import { HEIC_MESSAGE, MAX_PHOTO_BYTES, PictureRejected, processPicture } from "
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { getClientIp } from "@/lib/server/client-ip";
 import { detectFileSignature } from "@/lib/server/file-signatures";
-import { describeError } from "@/lib/photos/errors";
+import { describeError, uploadFailureMessage } from "@/lib/photos/errors";
 import { OWNER_COLUMN, findOwnerName } from "@/lib/photos/owner";
 import { addPhoto, normaliseLabel } from "@/lib/photos/store";
 import { normaliseAddress } from "./client-address";
@@ -205,7 +205,7 @@ async function storeUpload(
     await giveSlotBack(pass.id);
     if (e instanceof PictureRejected) return bad(e.code === "HEIC" ? HEIC_MESSAGE : e.message);
     console.error("Capture pass upload failed:", describeError(e));
-    return bad("Failed to upload", 500);
+    return bad(uploadFailureMessage(e, "Failed to upload"), 500);
   }
 }
 

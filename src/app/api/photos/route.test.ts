@@ -32,6 +32,7 @@ vi.mock("@/lib/photos/store", async (importOriginal) => ({
 
 import { GET, POST } from "./route";
 import { MAX_PHOTO_BYTES, PictureRejected } from "@/lib/images/process";
+import { UPLOADS_NOT_WRITABLE_MESSAGE } from "@/lib/photos/errors";
 
 const row = {
   id: "p1",
@@ -66,6 +67,23 @@ beforeEach(() => {
   mocks.itemFindUnique.mockResolvedValue({ imageUrl: "/uploads/images/photos/p1.jpg" });
   mocks.photoFindMany.mockResolvedValue([row, { ...row, id: "p2", fileName: "p2.jpg" }]);
   mocks.addPhoto.mockResolvedValue(row);
+});
+
+const permissionError = (code: string) => Object.assign(new Error("secret-detail"), { code });
+
+describe("POST /api/photos when the uploads folder is not writable", () => {
+  it.each(["EACCES", "EPERM", "EROFS"])("%s answers 500 with the permissions message", async (code) => {
+    mocks.addPhoto.mockRejectedValue(permissionError(code));
+    const res = await POST(postReq(valid));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: UPLOADS_NOT_WRITABLE_MESSAGE });
+  });
+
+  it("any other failure keeps the plain message", async () => {
+    mocks.addPhoto.mockRejectedValue(permissionError("ENOSPC"));
+    const res = await POST(postReq(valid));
+    expect(await res.json()).toEqual({ error: "Failed to upload photo" });
+  });
 });
 
 describe("GET /api/photos", () => {
