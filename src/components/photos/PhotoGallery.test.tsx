@@ -6,6 +6,17 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 const refresh = vi.fn();
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh }) }));
 
+vi.mock("./CapturePassDialog", () => ({
+  CapturePassDialog: (p: { entityType: string; entityId: string; onClose: () => void }) => (
+    <div data-testid="pass-dialog">
+      {p.entityType}:{p.entityId}
+      <button type="button" onClick={p.onClose}>
+        close-dialog
+      </button>
+    </div>
+  ),
+}));
+
 import { PhotoGallery } from "./PhotoGallery";
 
 function dto(id: string, over: Record<string, unknown> = {}) {
@@ -80,17 +91,30 @@ describe("PhotoGallery listing", () => {
   });
 
   it.each([
-    [undefined, false],
-    [vi.fn(), true],
-  ])("Continue on phone with handler %# is shown: %s", async (handler, shown) => {
+    [undefined, true],
+    [true, true],
+    [false, false],
+  ])("Continue on phone with withPhonePass=%s is shown: %s", async (withPhonePass, shown) => {
     stubFetch([]);
-    render(<PhotoGallery entityType="ammo" entityId="a1" onContinueOnPhone={handler} />);
+    render(<PhotoGallery entityType="ammo" entityId="a1" withPhonePass={withPhonePass} />);
     await screen.findByText("No photos yet.");
     expect(!!screen.queryByRole("button", { name: "Continue on phone" })).toBe(shown);
-    if (handler) {
-      fireEvent.click(screen.getByRole("button", { name: "Continue on phone" }));
-      expect(handler).toHaveBeenCalledTimes(1);
-    }
+  });
+
+  it("opens the pass dialog for this item and reloads the photos when it closes", async () => {
+    const fetchMock = stubFetch([]);
+    render(<PhotoGallery entityType="ammo" entityId="a1" />);
+    await screen.findByText("No photos yet.");
+    expect(screen.queryByTestId("pass-dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue on phone" }));
+    expect(screen.getByTestId("pass-dialog")).toHaveTextContent("ammo:a1");
+    const loads = () => fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/api/photos?")).length;
+    expect(loads()).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "close-dialog" }));
+    expect(screen.queryByTestId("pass-dialog")).toBeNull();
+    await waitFor(() => expect(loads()).toBe(2));
   });
 });
 

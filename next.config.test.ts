@@ -37,3 +37,19 @@ describe("next.config.ts — proxyClientMaxBodySize (review C1 / round 2)", () =
     expect(parsed).toBeLessThan(256 * 1024 * 1024);
   });
 });
+
+describe("next.config.ts — capture page headers", () => {
+  it("sends Referrer-Policy: no-referrer and Cache-Control: no-store for /capture/:path*", async () => {
+    const rules = (await nextConfig.headers?.()) ?? [];
+    const rule = rules.find((r) => r.source === "/capture/:path*");
+    expect(rule, "a headers rule for /capture/:path*").toBeDefined();
+    const byKey = Object.fromEntries(rule!.headers.map((h) => [h.key, h.value]));
+    expect(byKey["Referrer-Policy"]).toBe("no-referrer");
+    expect(byKey["Cache-Control"]).toBe("no-store");
+  });
+
+  it("does not add headers to the signed-in app's pages", async () => {
+    const rules = (await nextConfig.headers?.()) ?? [];
+    expect(rules.map((r) => r.source)).toEqual(["/capture/:path*"]);
+  });
+});

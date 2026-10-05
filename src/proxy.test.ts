@@ -222,3 +222,25 @@ describe("proxy — login enforcement", () => {
     expect(res.headers.get("location")).toBe("http://localhost:3000/login?next=%2Fvault");
   });
 });
+
+describe("proxy — capture page marker", () => {
+  const MARKER = "x-middleware-request-x-bv-capture-page";
+
+  it("marks /capture/<token> for the root layout", async () => {
+    auth.validateSession.mockResolvedValue(null);
+    const res = await proxy(req("https://vault.example.com/capture/abc", { headers: { host: "vault.example.com" } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get(MARKER)).toBe("1");
+  });
+
+  it("does not mark other pages, and drops a marker the client sent", async () => {
+    const res = await proxy(
+      req("https://vault.example.com/vault", {
+        headers: { host: "vault.example.com", "x-bv-capture-page": "1" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get(MARKER)).toBeNull();
+    expect(res.headers.get("x-middleware-override-headers") ?? "").not.toContain("x-bv-capture-page");
+  });
+});

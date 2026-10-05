@@ -12,12 +12,13 @@ import {
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PhotoCard } from "./PhotoCard";
 import { PhotoOverlay } from "./PhotoOverlay";
+import { CapturePassDialog } from "./CapturePassDialog";
 
 interface PhotoGalleryProps {
   entityType: PhotoEntityType;
   entityId: string;
-  /** When given, the "Continue on phone" button is shown and calls this. */
-  onContinueOnPhone?: () => void;
+  /** Shows "Continue on phone" and its dialog. On by default. */
+  withPhonePass?: boolean;
   /** Called after a change that alters the item's main picture. */
   onMainChange?: () => void;
 }
@@ -33,7 +34,7 @@ async function errorFrom(res: Response, fallback: string): Promise<string> {
 export function PhotoGallery({
   entityType,
   entityId,
-  onContinueOnPhone,
+  withPhonePass = true,
   onMainChange,
 }: PhotoGalleryProps) {
   const router = useRouter();
@@ -48,13 +49,14 @@ export function PhotoGallery({
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState<PhotoDto | null>(null);
   const [deleting, setDeleting] = useState<PhotoDto | null>(null);
+  const [phoneOpen, setPhoneOpen] = useState(false);
 
   const mainChanged = useCallback(() => {
     if (onMainChange) onMainChange();
     else router.refresh();
   }, [onMainChange, router]);
 
-  useEffect(() => {
+  const loadPhotos = useCallback(() => {
     let cancelled = false;
     const query = new URLSearchParams({ entityType, entityId });
     fetch(`/api/photos?${query}`)
@@ -72,6 +74,13 @@ export function PhotoGallery({
       cancelled = true;
     };
   }, [entityType, entityId]);
+
+  useEffect(() => loadPhotos(), [loadPhotos]);
+
+  const closePhoneDialog = useCallback(() => {
+    setPhoneOpen(false);
+    loadPhotos();
+  }, [loadPhotos]);
 
   function chooseFile(file: File | undefined) {
     if (!file) return;
@@ -208,8 +217,8 @@ export function PhotoGallery({
             )}
             Add photo
           </button>
-          {onContinueOnPhone && (
-            <button type="button" onClick={onContinueOnPhone} className={HEADER_BUTTON}>
+          {withPhonePass && (
+            <button type="button" onClick={() => setPhoneOpen(true)} className={HEADER_BUTTON}>
               <Smartphone className="w-3.5 h-3.5" />
               Continue on phone
             </button>
@@ -291,6 +300,10 @@ export function PhotoGallery({
             />
           ))}
         </div>
+      )}
+
+      {phoneOpen && (
+        <CapturePassDialog entityType={entityType} entityId={entityId} onClose={closePhoneDialog} />
       )}
 
       {viewing && <PhotoOverlay photo={viewing} onClose={closeViewer} />}
