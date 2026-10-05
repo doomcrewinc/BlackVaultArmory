@@ -40,6 +40,7 @@ vi.mock("@/lib/images/process", async (importOriginal) => ({
 import * as route from "./route";
 import { auditStorage } from "@/lib/audit/context";
 import { MAX_PHOTO_BYTES, PictureRejected } from "@/lib/images/process";
+import { UPLOADS_NOT_WRITABLE_MESSAGE } from "@/lib/photos/errors";
 
 const TOKEN = "B".repeat(43);
 const pass = {
@@ -276,6 +277,24 @@ describe("POST /api/capture/[token]/upload", () => {
     expect(logged.length).toBeGreaterThan(0);
     expect(JSON.stringify(logged)).not.toContain(TOKEN);
     expect(JSON.stringify(logged)).not.toContain("secret-detail");
+  });
+
+  it.each([
+    ["photo", "EACCES"],
+    ["photo", "EPERM"],
+    ["photo", "EROFS"],
+    ["paperwork", "EACCES"],
+    ["paperwork", "EPERM"],
+    ["paperwork", "EROFS"],
+  ])("a failed %s write with %s answers 500 with the permissions message and returns the slot", async (kind, code) => {
+    const failure = Object.assign(new Error("secret-detail"), { code });
+    mocks.addPhoto.mockRejectedValue(failure);
+    mocks.storeDocument.mockRejectedValue(failure);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const res = await post({ kind });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: UPLOADS_NOT_WRITABLE_MESSAGE });
+    expect(mocks.returnSlot).toHaveBeenCalledWith("pass-1");
   });
 
   it("an unexpected failure outside the upload is a no-store 500", async () => {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { describeError } from "@/lib/photos/errors";
+import { describeError, uploadFailureMessage } from "@/lib/photos/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { getCurrentUser, requireAuth } from "@/lib/server/auth";
 import { MAX_PHOTO_BYTES, PictureRejected } from "@/lib/images/process";
@@ -101,6 +101,6 @@ export async function POST(request: NextRequest) {
     }
   } catch (e) {
     console.error("POST /api/photos failed:", describeError(e));
-    return bad("Failed to upload photo", 500);
+    return bad(uploadFailureMessage(e, "Failed to upload photo"), 500);
   }
 }

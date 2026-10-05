@@ -28,6 +28,8 @@ const skip = process.platform === "win32" || process.getuid?.() === 0;
 let tmp: string;
 let bin: string;
 let backups: string;
+let uploads: string;
+let data: string;
 let script: string;
 
 function stub(name: string, body: string) {
@@ -38,10 +40,14 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bv-entrypoint-"));
   bin = path.join(tmp, "bin");
   backups = path.join(tmp, "app-backups");
+  uploads = path.join(tmp, "app-uploads");
+  data = path.join(tmp, "app-data");
   fs.mkdirSync(bin);
   const text = fs
     .readFileSync(path.join(ROOT, "scripts/docker-entrypoint.sh"), "utf8")
     .replaceAll("/app/backups", backups)
+    .replaceAll("/app/uploads", uploads)
+    .replaceAll("/app/data", data)
     .replaceAll("/run/blackvault-secrets", path.join(tmp, "src-secrets"))
     .replaceAll("/run/secrets", path.join(tmp, "dst-secrets"))
     .replaceAll("/proc/self/mountinfo", path.join(tmp, "mountinfo"));
@@ -49,22 +55,46 @@ beforeEach(() => {
   script = path.join(tmp, "entrypoint.sh");
   fs.writeFileSync(script, text);
   stub("id", '[ "$1" = "-u" ] && { echo 0; exit 0; }; exec /usr/bin/id "$@"');
-  // Refuse (like a network share) when told to, but only for the backup folder: the key files keep working.
+  // Refuse (like a network share) when told to, but only for the backup folder
+  // and the folders in BV_REFUSE_AT: the key files keep working.
   for (const tool of ["chown", "chmod"]) {
     stub(
       tool,
       `echo "${tool} $*" >> "${tmp}/calls"
 for a in "$@"; do last=$a; done
 case ",$BV_REFUSE," in *,${tool},*) [ "$last" = "${backups}" ] && { echo "${tool}: Operation not permitted" >&2; exit 1; } ;; esac
-${tool === "chown" ? "exit 0" : `exec /bin/chmod "$@"`}`,
+${
+  tool === "chown"
+    ? `case ",$BV_REFUSE_AT," in *,"$last",*) echo "chown: Operation not permitted" >&2; exit 1 ;; esac
+case "$last" in ${uploads}|${data})
+  # What the folder would report as its owner afterwards (the host test user cannot really chown).
+  find "$last" -print | while IFS= read -r p; do echo nextjs:nodejs > "${tmp}/owner.$(echo "$p" | tr / _)"; done ;;
+esac
+exit 0`
+    : `exec /bin/chmod "$@"`
+}`,
     );
   }
+  // stat -c %U:%G reads the owner a test recorded with setOwner(); nothing recorded means the app user.
+  stub(
+    "stat",
+    `if [ "$1" = "-c" ] && [ "$2" = "%U:%G" ]; then
+  f="${tmp}/owner.$(echo "$3" | tr / _)"; if [ -f "$f" ]; then cat "$f"; else echo nextjs:nodejs; fi; exit 0
+fi
+exec /usr/bin/stat "$@"`,
+  );
   stub("su-exec", `echo "su-exec $1" >> "${tmp}/calls"; shift; exec "$@"`);
 });
 afterEach(() => {
   if (fs.existsSync(backups) && fs.statSync(backups).isDirectory()) fs.chmodSync(backups, 0o700);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+const setOwner = (p: string, owner: string) => fs.writeFileSync(path.join(tmp, `owner.${p.replaceAll("/", "_")}`), `${owner}\n`);
+const ownerOf = (p: string) => {
+  const f = path.join(tmp, `owner.${p.replaceAll("/", "_")}`);
+  return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim() : "nextjs:nodejs";
+};
 
 function run(env: Record<string, string> = {}) {
   const r = spawnSync("sh", [script, "sh", "-c", "echo APP-STARTED; exit 7"], {
@@ -239,6 +269,86 @@ describe.skipIf(skip)("docker-entrypoint.sh: the /app/backups step", () => {
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toMatch(/could not create the backup folder/);
     });
+  });
+
+  describe.each([
+    ["uploads", () => uploads, "Uploading photos and documents", "<DATA_DIR>/uploads"],
+    ["data", () => data, "Saving to the SQLite database", "<DATA_DIR>/db"],
+  ])("the /app/%s folder", (_name, folderOf, what, hostFolder) => {
+    const folder = () => folderOf();
+    const warnings = (r: ReturnType<typeof run>) => r.stderr.split("\n").filter(Boolean);
+    const fixes = (r: ReturnType<typeof run>) => r.calls.split("\n").filter((l) => l.startsWith("chown ") && l.endsWith(` ${folder()}`));
+
+    it("owned by another uid: given to the app user together with what is inside it, no warning", () => {
+      fs.mkdirSync(path.join(folder(), "images"), { recursive: true });
+      fs.writeFileSync(path.join(folder(), "images", "a.jpg"), "x");
+      for (const p of [folder(), path.join(folder(), "images"), path.join(folder(), "images", "a.jpg")]) setOwner(p, "host:host");
+      const r = run();
+      started(r);
+      expect(fixes(r)).toEqual([`chown -hR nextjs:nodejs ${folder()}`]);
+      expect(ownerOf(folder())).toBe("nextjs:nodejs");
+      expect(ownerOf(path.join(folder(), "images", "a.jpg"))).toBe("nextjs:nodejs");
+      expect(r.stderr).toBe("");
+      expect(r.calls.split("\n").filter((l) => l.startsWith("chmod ") && l.includes(folder()))).toEqual([]);
+      expect(fs.readdirSync(folder())).toEqual(["images"]); // the write test left nothing behind
+    });
+
+    it("already owned by the app user: nothing is changed and nothing inside is walked", () => {
+      fs.mkdirSync(folder());
+      fs.writeFileSync(path.join(folder(), "foreign.jpg"), "x");
+      setOwner(path.join(folder(), "foreign.jpg"), "host:host");
+      const r = run();
+      started(r);
+      expect(fixes(r)).toEqual([]);
+      expect(r.calls).not.toMatch(/chown -\w*R/);
+      expect(ownerOf(path.join(folder(), "foreign.jpg"))).toBe("host:host");
+      expect(r.stderr).toBe("");
+    });
+
+    it("chown refused but the app user can write: no warning, and the app starts", () => {
+      fs.mkdirSync(folder());
+      setOwner(folder(), "host:host");
+      const r = run({ BV_REFUSE_AT: folder() });
+      started(r);
+      expect(fixes(r)).toHaveLength(1);
+      expect(r.stderr).toBe("");
+      expect(ownerOf(folder())).toBe("host:host");
+    });
+
+    it("chown refused and the app user cannot write: one warning naming the folder and the host command, and the app still starts", () => {
+      fs.mkdirSync(folder(), { mode: 0o500 });
+      setOwner(folder(), "host:host");
+      const r = run({ BV_REFUSE_AT: folder() });
+      started(r);
+      const w = warnings(r);
+      expect(w).toHaveLength(1);
+      expect(w[0]).toContain(`[entrypoint] WARNING: the folder ${folder()} is not writable by the app (uid 1001).`);
+      expect(w[0]).toContain("Its owner could not be changed");
+      expect(w[0]).toContain(what);
+      expect(w[0]).toContain(`DATA_DIR`);
+      expect(w[0]).toContain(`sudo chown -R 1001:1001 ${hostFolder}`);
+      expect(w[0]).toMatch(/BlackVault starts anyway\.$/);
+      fs.chmodSync(folder(), 0o700);
+    });
+
+    it("not started as root: the folder is not touched and the command just runs", () => {
+      stub("id", '[ "$1" = "-u" ] && { echo 1001; exit 0; }; exec /usr/bin/id "$@"');
+      fs.mkdirSync(folder());
+      setOwner(folder(), "host:host");
+      const r = run();
+      expect(r.stdout).toBe("APP-STARTED\n");
+      expect(r.code).toBe(7);
+      expect(r.calls).toBe("");
+      expect(ownerOf(folder())).toBe("host:host");
+    });
+  });
+
+  it("a folder that does not exist is skipped without a word", () => {
+    const r = run();
+    started(r);
+    expect(r.stderr).toBe("");
+    expect(fs.existsSync(uploads)).toBe(false);
+    expect(fs.existsSync(data)).toBe(false);
   });
 
   it("started as a non-root user: nothing is touched, the command just runs", () => {

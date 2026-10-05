@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { storeDocument } from "@/lib/documents/store";
 import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { describeError, uploadFailureMessage } from "@/lib/photos/errors";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
 import { HEIC_MESSAGE, PictureRejected, processPicture } from "@/lib/images/process";
 
@@ -112,9 +113,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(doc, { status: 201 });
   } catch (error) {
-    console.error("POST /api/documents/upload error:", error);
+    console.error("POST /api/documents/upload failed:", describeError(error));
     return NextResponse.json(
-      { error: "Failed to upload document" },
+      { error: uploadFailureMessage(error, "Failed to upload document") },
       { status: 500 },
     );
   }

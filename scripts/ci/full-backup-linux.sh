@@ -322,8 +322,8 @@ new_install() {
   sudo cp -a "$PWD" "$dir"
   sudo chown -R "$TEST_USER:$TEST_USER" "$dir"
   sudo rm -rf "$dir/secrets/blackvault_encryption_key"* "$dir/backups" "$dir/data" "$dir/.env"
-  sudo install -d -o 1001 -g 1001 "$dir/data/db" "$dir/data/uploads"
-  sudo chown "$TEST_USER:$TEST_USER" "$dir/data"
+  # As install.sh leaves them: owned by the installing user. The entrypoint gives them to uid 1001 at the first start.
+  as_in "$dir" "mkdir -p data/db data/uploads"
   as_in "$dir" "umask 077 && cat > .env" <<EOF
 DATA_DIR=$dir/data
 PORT=3000
@@ -347,6 +347,7 @@ EOF
   docker tag app-blackvault "$name-blackvault"
   as_in "$dir" "docker compose config --images" | grep -qx "$name-blackvault" || fail "$dir: the compose project does not use the image $name-blackvault"
   up
+  expect "$name: the uploads and database folders the host user made are 1001:1001 (the entrypoint)" eq "$(sudo stat -c '%u:%g' "$dir/data/uploads" "$dir/data/db" | tr '\n' ' ')" "1001:1001 1001:1001 "
   expect "$name: the fresh backup folder is 1001:1001 mode 700" eq "$(sudo stat -c '%u:%g %a' "$dir/data/backups")" "1001:1001 700"
   make_admin
 }

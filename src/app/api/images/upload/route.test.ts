@@ -46,6 +46,7 @@ vi.mock("@/lib/files/storage", () => ({
 
 import { POST } from "./route";
 import { HEIC_MESSAGE, MAX_PHOTO_BYTES } from "@/lib/images/process";
+import { UPLOADS_NOT_WRITABLE_MESSAGE } from "@/lib/photos/errors";
 
 // Bytes that match no known image signature, so the request is rejected on the
 // file-type check — after the entityType gate. That keeps the assertion about
@@ -128,6 +129,14 @@ describe("POST /api/images/upload", () => {
     expect(writtenPath).toBe(`/tmp/blackvault-test-uploads/images/firearms/${json.fileName}`);
     expect(json.fileName).toContain(entityId);
     expect(Buffer.isBuffer(writtenBuffer)).toBe(true);
+  });
+
+  it.each(["EACCES", "EPERM", "EROFS"])("%s from the write answers 500 with the permissions message", async (code) => {
+    storageMocks.writeEncryptedFile.mockRejectedValue(Object.assign(new Error("secret-detail"), { code }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(await validPngUploadRequest("firearm", "f1"));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: UPLOADS_NOT_WRITABLE_MESSAGE });
   });
 
   it("writes a JPEG without its GPS EXIF and reports the stored size and type", async () => {
