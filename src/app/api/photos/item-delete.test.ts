@@ -18,6 +18,7 @@ vi.mock("@/lib/prisma", () => {
     firearm: delegate(),
     buildSlot: { findMany: mocks.buildSlotFindMany, updateMany: vi.fn() },
     accessory: { deleteMany: mocks.accessoryDeleteMany },
+    build: { delete: mocks.del },
   };
   return {
     prisma: {
@@ -27,7 +28,7 @@ vi.mock("@/lib/prisma", () => {
       kit: delegate(),
       ammoStock: delegate(),
       supply: delegate(),
-      build: { findMany: mocks.buildFindMany },
+      build: { findMany: mocks.buildFindMany, findUnique: mocks.findUnique },
       buildSlot: { findMany: mocks.buildSlotFindMany },
       rangeSessionAmmoLink: { count: mocks.linkCount },
       $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
@@ -120,5 +121,43 @@ describe("DELETE firearm with deleteAccessories", () => {
     expect(mocks.photoFilesFor).toHaveBeenCalledWith({
       OR: [{ firearmId: "i1" }, { accessoryId: { in: ["a1", "a2"] } }],
     });
+  });
+});
+
+describe("DELETE build", () => {
+  const load = () => import("../builds/[id]/route");
+
+  it("collects the photos of the accessories it deletes, then removes them after the delete", async () => {
+    const order: string[] = [];
+    mocks.buildSlotFindMany.mockResolvedValue([{ accessoryId: "a1" }, { accessoryId: "a2" }]);
+    mocks.photoFilesFor.mockImplementation(async () => (order.push("collect"), FILES));
+    mocks.del.mockImplementation(async () => (order.push("delete"), {}));
+    mocks.removePhotoFiles.mockImplementation(async () => void order.push("remove"));
+
+    const res = await remove((await load()).DELETE as never, { deleteAccessories: true });
+
+    expect(res.status).toBe(200);
+    expect(mocks.accessoryDeleteMany).toHaveBeenCalled();
+    expect(mocks.photoFilesFor).toHaveBeenCalledWith({ accessoryId: { in: ["a1", "a2"] } });
+    expect(mocks.removePhotoFiles).toHaveBeenCalledWith(FILES);
+    expect(order).toEqual(["collect", "delete", "remove"]);
+  });
+
+  it("keeps the files when the delete fails", async () => {
+    mocks.buildSlotFindMany.mockResolvedValue([{ accessoryId: "a1" }]);
+    mocks.del.mockRejectedValue(new Error("db"));
+
+    const res = await remove((await load()).DELETE as never, { deleteAccessories: true });
+
+    expect(res.status).toBe(500);
+    expect(mocks.removePhotoFiles).not.toHaveBeenCalled();
+  });
+
+  it("collects nothing when the accessories are kept", async () => {
+    const res = await remove((await load()).DELETE as never);
+
+    expect(res.status).toBe(200);
+    expect(mocks.photoFilesFor).not.toHaveBeenCalled();
+    expect(mocks.accessoryDeleteMany).not.toHaveBeenCalled();
   });
 });
