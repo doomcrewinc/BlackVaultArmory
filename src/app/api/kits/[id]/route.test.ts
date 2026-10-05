@@ -32,6 +32,12 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+// Photo files are covered by src/app/api/photos/item-delete.test.ts.
+vi.mock("@/lib/photos/store", () => ({
+  photoFilesFor: async () => [],
+  removePhotoFiles: async () => {},
+}));
+
 import { DELETE, GET, PUT } from "./route";
 
 const params = Promise.resolve({ id: "k1" });

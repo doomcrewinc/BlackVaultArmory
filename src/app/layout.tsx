@@ -7,7 +7,9 @@ import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { GlobalSearch } from "@/components/search/GlobalSearch";
 import { DatabaseStatusProvider } from "@/components/layout/DatabaseStatusProvider";
+import { headers } from "next/headers";
 import { getCurrentUser } from "@/lib/server/auth";
+import { CAPTURE_PAGE_HEADER } from "@/lib/server/capture-page";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
@@ -33,6 +35,18 @@ export default async function RootLayout({
   // the admin-only "Users" link. Auth pages (/login,
   // /setup, /invite/*, /reset/*) render with no chrome at all: no Sidebar, no
   // MobileHeader, no GlobalSearch, no ThemeToggle.
+  // The phone capture page is a bare page for everyone, signed in or not: no
+  // chrome and no database-status provider (see src/lib/server/capture-page.ts).
+  if ((await headers()).get(CAPTURE_PAGE_HEADER) === "1") {
+    return (
+      <html lang="en" suppressHydrationWarning>
+        <body className="antialiased bg-vault-bg text-vault-text">
+          <main className="min-h-svh">{children}</main>
+        </body>
+      </html>
+    );
+  }
+
   const user = await getCurrentUser();
   // NavUser (Sidebar.tsx) is deliberately just { displayName, role } — id and
   // sessionId never need to reach a client component, so they're never passed.

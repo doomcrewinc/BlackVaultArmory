@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 
 // GET /api/builds/[id] - Get a single build with slots and accessories populated
 export async function GET(
@@ -122,14 +123,24 @@ export async function DELETE(
     const body = await request.json().catch(() => ({}));
     const deleteAccessories = body.deleteAccessories === true;
 
+    // The accessories that go with the build, and their photos, are read
+    // before the delete.
+    const accessoryIds: string[] = [];
+    if (deleteAccessories) {
+      const slots = await prisma.buildSlot.findMany({
+        where: { buildId: id, accessoryId: { not: null } },
+        select: { accessoryId: true },
+      });
+      accessoryIds.push(...(slots.map((s) => s.accessoryId).filter(Boolean) as string[]));
+    }
+    const files =
+      accessoryIds.length > 0
+        ? await photoFilesFor({ accessoryId: { in: accessoryIds } })
+        : [];
+
     // Wrap all mutations in a transaction so partial failures don't leave orphaned data
     await prisma.$transaction(async (tx) => {
       if (deleteAccessories) {
-        const slots = await tx.buildSlot.findMany({
-          where: { buildId: id, accessoryId: { not: null } },
-          select: { accessoryId: true },
-        });
-        const accessoryIds = slots.map((s) => s.accessoryId).filter(Boolean) as string[];
         if (accessoryIds.length > 0) {
           await tx.accessory.deleteMany({ where: { id: { in: accessoryIds } } });
         }
@@ -142,6 +153,7 @@ export async function DELETE(
 
       await tx.build.delete({ where: { id } });
     });
+    await removePhotoFiles(files);
 
     revalidateDashboardData();
 

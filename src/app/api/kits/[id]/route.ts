@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ownerWhere } from "@/lib/photos/owner";
+import { photoFilesFor, removePhotoFiles } from "@/lib/photos/store";
 import { normalizeKitCategory } from "@/lib/kit";
 
 export const dynamic = "force-dynamic";
@@ -119,7 +121,9 @@ export async function DELETE(
       return NextResponse.json({ error: "Kit not found" }, { status: 404 });
     }
 
+    const files = await photoFilesFor(ownerWhere("kit", id));
     await prisma.kit.delete({ where: { id } });
+    await removePhotoFiles(files);
 
     return NextResponse.json({ success: true, id });
   } catch (error) {

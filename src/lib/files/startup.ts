@@ -28,7 +28,7 @@ import { legacyDocumentsRoot, uploadsRoot, writeAtomic } from "./storage";
  * 4. move legacy documents onto the volume;
  * 5. snapshot every plaintext file (unless the update script already did);
  * 6. encrypt every plaintext file in place, atomically, one at a time;
- * 7. report documents whose file is missing;
+ * 7. report documents and gallery photos whose file is missing;
  * 8. write one FILES_ENCRYPTED audit event when something changed.
  *
  * Every failure that could leave a file unreadable throws; the caller
@@ -51,7 +51,7 @@ export type FileStartupResult = {
 
 export type FileStartupOptions = { now?: Date; cwd?: string; env?: NodeJS.ProcessEnv };
 
-type RawClient = Pick<PrismaClient, "document" | "auditEvent">;
+type RawClient = Pick<PrismaClient, "document" | "photo" | "auditEvent">;
 
 /** A refusal to start, with a message that names the file and the fix. */
 export class FileStartupError extends Error {
@@ -502,7 +502,7 @@ async function encryptInPlace(f: Entry, keys: FieldKeys): Promise<boolean> {
   return true;
 }
 
-// ─── Step 7: missing documents ──────────────────────────────────
+// ─── Step 7: missing documents and photos ───────────────────────
 
 async function findMissingDocuments(raw: RawClient, docsDir: string, warn: (l: string) => void): Promise<{ id: string; name: string }[]> {
   const rows = await raw.document.findMany({
@@ -520,6 +520,38 @@ async function findMissingDocuments(raw: RawClient, docsDir: string, warn: (l: s
     const item = d.firearmId ? `firearm ${d.firearmId}` : d.accessoryId ? `accessory ${d.accessoryId}` : d.gearId ? `gear ${d.gearId}` : "none";
     warn(`[files] Missing document file: id=${d.id} name=${JSON.stringify(d.name)} item=${item} file=${abs}`);
   }
+  return missing;
+}
+
+/**
+ * Gallery photos whose original or preview file is absent (a JSON-only restore brings the rows without
+ * the files). Reported like missing documents: named by id, never a refusal.
+ */
+async function findMissingPhotos(raw: RawClient, photosDir: string, warn: (l: string) => void): Promise<{ id: string; name: string }[]> {
+  const rows = await raw.photo.findMany({ select: { id: true, fileName: true }, orderBy: { id: "asc" } });
+  const missing: { id: string; name: string }[] = [];
+  // Bounded batches, so a large gallery never opens thousands of files at once.
+  const BATCH = 50;
+  const batches = Array.from({ length: Math.ceil(rows.length / BATCH) }, (_, i) => rows.slice(i * BATCH, (i + 1) * BATCH));
+  await batches.reduce(
+    (previous, batch) =>
+      previous.then(async () => {
+        const present = await Promise.all(
+          batch.map(async (p) => {
+            const original = path.join(photosDir, p.fileName);
+            const preview = path.join(photosDir, "thumbs", `${p.id}.webp`);
+            const [hasOriginal, hasPreview] = await Promise.all([lexists(original), lexists(preview)]);
+            return hasOriginal && hasPreview;
+          }),
+        );
+        batch.forEach((p, i) => {
+          if (present[i]) return;
+          missing.push({ id: p.id, name: p.fileName });
+          warn(`[files] Missing photo file: id=${p.id} file=${path.join(photosDir, p.fileName)}`);
+        });
+      }),
+    Promise.resolve(),
+  );
   return missing;
 }
 
@@ -691,8 +723,11 @@ export async function runFileStartup(raw: RawClient, opts: FileStartupOptions = 
     log(`[files] Encrypted existing uploads: ${counts.images} photos, ${counts.documents} documents.`);
   }
 
-  // 7. Missing documents (logged; never a refusal).
-  const missing = await findMissingDocuments(raw, docsDir, warn);
+  // 7. Missing documents and photos (logged; never a refusal).
+  const missing = [
+    ...(await findMissingDocuments(raw, docsDir, warn)),
+    ...(await findMissingPhotos(raw, path.join(root, "images", "photos"), warn)),
+  ];
 
   // 8. Audit. While no FILES_ENCRYPTED event exists yet, the
   // first one carries the TOTALS — every BVF1 file per folder — so an event

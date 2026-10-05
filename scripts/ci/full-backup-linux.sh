@@ -192,7 +192,31 @@ upload_pdf() {
   [ "$code" = "201" ] || fail "$CUR: document upload: HTTP $code $(cat "$WORK/up.json")"
   jq -r .fileUrl "$WORK/up.json"
 }
-make_png() { { printf '\x89PNG\r\n\x1a\n'; head -c "$2" /dev/urandom; } >"$1"; }
+# make_png FILE BYTES: a real RGB PNG of random pixels, about BYTES of raw pixel data (pictures are decoded and re-saved on upload).
+make_png() {
+  local file="$1" bytes="$2"
+  python3 - "$file" "$bytes" <<'PYEOF'
+import os, struct, sys, zlib
+
+
+def chunk(kind, data):
+    body = kind + data
+    return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+width = 64
+height = max(1, int(sys.argv[2]) // (width * 3))
+rows = b"".join(b"\0" + os.urandom(width * 3) for _ in range(height))
+png = (
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(rows, 1))
+    + chunk(b"IEND", b"")
+)
+with open(sys.argv[1], "wb") as out:
+    out.write(png)
+PYEOF
+}
 make_pdf() { { printf '%%PDF-1.4\n'; head -c "$2" /dev/urandom; } >"$1"; }
 
 # served_by_app < URLS: "url sha256 bytes" per line, each fetched through the
@@ -450,8 +474,10 @@ failing_restore() {
   # Make the install differ from the backup first, or "unchanged" proves nothing.
   sql "$dir" "DELETE FROM \"AmmoStock\" WHERE id LIKE 'ci-ammo-10%';" >/dev/null
   make_png "$WORK/extra.png" 5000
-  extra_sha=$(sha256sum <"$WORK/extra.png" | cut -d' ' -f1)
   extra_url=$(upload_image "$WORK/extra.png" ammo ci-ammo-1)
+  # The app re-saves a picture, so the reference is what it serves right after the upload.
+  extra_sha=$(served_by_app <<<"$extra_url" | cut -d' ' -f2)
+  [[ "$extra_sha" =~ ^[0-9a-f]{64}$ ]] || fail "$CUR: the picture just uploaded is not served: '$extra_sha'"
   expect "before: 139 AmmoStock rows (the backup holds 150)" eq "$(sql "$dir" "SELECT count(*) FROM \"AmmoStock\";")" 139
   before_fp=$(fingerprint_of "$dir")
   before_tree=$(tree_of "$dir")
@@ -538,12 +564,20 @@ echo "$A_SERVED" | sed 's/^/  /'
 expect "install A holds 10 uploads" eq "$A_FILES" 10
 if has "$A_SERVED" " HTTP-"; then fail "install A does not serve all its own files"; fi
 A_BYTES=$(awk '{s += $3} END {print s}' <<<"$A_SERVED")
-# The six uploaded here are served with exactly the bytes that were sent.
+# The two PDFs are served with exactly the bytes that were sent; the pictures are
+# decoded and re-saved by the app, so each is only checked to be served.
 i=0
 for f in a1.png a2.png a3.png a4.png a5.pdf a6.pdf; do
   i=$((i + 1))
   url=$(sed -n "${i}p" <<<"$NEW_URLS")
-  expect "$f is served back as uploaded ($url)" hasf "$A_SERVED" "$url $(sha256sum <"$WORK/$f" | cut -d' ' -f1) "
+  if [[ "$f" == *.pdf ]]; then
+    expect "$f is served back as uploaded ($url)" hasf "$A_SERVED" "$url $(sha256sum <"$WORK/$f" | cut -d' ' -f1) "
+  else
+    expect "$f is served ($url)" hasf "$A_SERVED" "$url "
+    curl -sS -b "$JAR" -o "$WORK/served.png" "$BASE$url" || fail "$f: $url could not be fetched"
+    expect "$f is served as a PNG" eq "$(head -c8 "$WORK/served.png" | xxd -p)" "89504e470d0a1a0a"
+    expect "$f keeps its width and height" eq "$(dd if="$WORK/served.png" bs=1 skip=16 count=8 status=none | xxd -p)" "$(dd if="$WORK/$f" bs=1 skip=16 count=8 status=none | xxd -p)"
+  fi
 done
 A_COUNTS=$(counts_of "$A")
 echo "$A_COUNTS" | tr '\n' ' '; echo

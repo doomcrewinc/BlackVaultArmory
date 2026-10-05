@@ -295,7 +295,7 @@ If it fails, find what now buffers; do not raise the cap.
 image it builds, on real containers:
 
 ```bash
-./scripts/ci/encryption-key-linux.sh                          # install A; key handling (3a, 3b)
+./scripts/ci/encryption-key-linux.sh                          # install A; key handling (3a, 3b); sharp and the capture routes
 ./scripts/ci/full-backup-entrypoint-linux.sh app-blackvault   # a backup folder that refuses chown
 ./scripts/ci/full-backup-linux.sh                             # backup, restore, rollback, re-encrypt
 ```
@@ -325,6 +325,36 @@ scenarios by wrapper: `BK<n>` for `backup.bat`, `RS<n>` for `restore.bat`, `RF<n
 they prove the batch logic and that the passphrase bytes arrive on docker's standard input, not
 that a backup works. Every scenario passes `--passphrase-file` (and `--yes`): the typed prompts
 have no scenario. Add the next number; do not renumber.
+
+## Photos
+
+A gallery photo is a `Photo` row owned by exactly one of six item types, with two encrypted files
+under `<uploadsRoot>/images/photos/`: the original (`<id>.<ext>`) and a preview
+(`thumbs/<id>.webp`). Both are under `images/`, so full backups, restore and key rotation cover
+them with no change to `src/lib/files/upload-walk.ts`. `Photo` is in `BACKUP_MODELS`
+(`src/lib/backup/models.ts`, after all six owners) and is not a required key, so an older archive
+without `photos` still restores. `CapturePass` is in `BACKUP_EXCLUDED_MODELS`: a pass is a short-lived
+credential and is neither backed up nor restored (a restore leaves the passes that exist).
+
+Two files are the only place their decision is made:
+
+- **`src/lib/images/process.ts` is the only place pictures are processed.** Every picture upload
+  (photos, main pictures, paperwork, jpg/png/webp documents) goes through `processPicture`, which
+  re-encodes with `sharp`, removes the metadata, rejects HEIC and enforces the size and pixel limits.
+  Do not call `sharp` anywhere else.
+- **`src/lib/photos/owner.ts` is the only place a photo's owner column is chosen.** It maps the
+  entity type to `firearmId`, `accessoryId`, `gearId`, `kitId`, `ammoStockId` or `supplyId`, and the
+  routes never take an owner from a request body once a capture pass has resolved the item. `src/lib/photos/client-constants.ts` mirrors the
+  values for client components; the server module is the authority.
+
+The public capture routes (`/capture/<token>`, `/api/capture/<token>`) are the only unauthenticated
+upload routes; the token reaches them only in the URL path and only its hash is stored. A gallery
+photo whose file is missing (a JSON-only restore) is reported at startup like a missing document
+(`src/lib/files/startup.ts`), never as a startup failure.
+
+`sharp` is a native module: the standalone image must carry it. `scripts/ci/encryption-key-linux.sh`
+(step 2e) runs it inside the built container and also checks the capture page's headers and layout
+against the running server.
 
 ## Docker Compose
 

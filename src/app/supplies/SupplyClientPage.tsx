@@ -191,7 +191,16 @@ export function SupplyClientPage({
                       href={`/supplies/item/${item.id}`}
                       className="w-11 h-11 rounded bg-vault-bg border border-vault-border overflow-hidden flex items-center justify-center shrink-0"
                     >
-                      <Boxes className="w-4 h-4 text-vault-text-faint" />
+                      {item.imageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={item.imageUrl}
+                          alt={item.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Boxes className="w-4 h-4 text-vault-text-faint" />
+                      )}
                     </Link>
                     <div className="min-w-0 flex-1">
                       <Link
@@ -262,6 +271,14 @@ export function SupplyClientPage({
                             className="block"
                           >
                             <p className="font-semibold text-vault-text group-hover:text-[#00C2FF] transition-colors max-w-[220px] flex items-center gap-1.5">
+                              {item.imageUrl && (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={item.imageUrl}
+                                  alt=""
+                                  className="w-9 h-9 rounded border border-vault-border object-cover shrink-0"
+                                />
+                              )}
                               <span className="truncate min-w-0">
                                 {item.name}
                               </span>

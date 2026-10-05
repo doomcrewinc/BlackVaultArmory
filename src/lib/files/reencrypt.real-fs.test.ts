@@ -220,6 +220,24 @@ describe("reencryptFiles (real filesystem)", { timeout: 60_000 }, () => {
     expect(summaryLine(r)).toBe("BLACKVAULT_REENCRYPT_OK reencrypted=4 already_current=2 unknown_key=2 not_encrypted=1 failed=0 stopped=0");
   });
 
+  it("gallery photos are re-encrypted too, including the previews two folders below images/", async () => {
+    const gallery: Array<[string, Buffer]> = [
+      ["images/photos/ph1.jpg", Buffer.from("original of a gallery photo ".repeat(40))],
+      ["images/photos/thumbs/ph1.webp", Buffer.from("preview of a gallery photo")],
+    ];
+    for (const [rel, plain] of gallery) putEnc(rel, OLD, plain);
+
+    const r = await run();
+
+    expect(r.outcome).toBe("ok");
+    expect(r.counts).toMatchObject({ reencrypted: 2, failed: 0 });
+    const current = getFieldKeys();
+    for (const [rel, plain] of gallery) {
+      expect(idOf(rel), rel).toBe(current.id);
+      expect(plainOf(rel, current).equals(plain), rel).toBe(true);
+    }
+  });
+
   it("the unknown-key files are named in WARNING lines (key id for a readable header, 'damaged' otherwise)", async () => {
     seedMixed();
     const warnings: string[] = [];

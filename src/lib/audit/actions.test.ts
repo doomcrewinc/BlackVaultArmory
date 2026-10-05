@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AUDIT_ACTIONS } from "./actions";
 
 describe("AUDIT_ACTIONS", () => {
-  it("is the exact 19 action strings", () => {
+  it("is the exact 21 action strings", () => {
     expect(AUDIT_ACTIONS).toEqual([
       "CREATE",
       "UPDATE",
@@ -23,8 +23,10 @@ describe("AUDIT_ACTIONS", () => {
       "ENCRYPTION_ENABLED",
       "KEY_ROTATED",
       "FILES_ENCRYPTED",
+      "CAPTURE_PASS_CREATED",
+      "CAPTURE_PASS_CLOSED",
     ]);
-    expect(AUDIT_ACTIONS).toHaveLength(19);
+    expect(AUDIT_ACTIONS).toHaveLength(21);
   });
 
   it("has unique entries", () => {

@@ -1,7 +1,18 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { FileText, Upload, X, AlertCircle, FileIcon } from "lucide-react";
+import {
+  FileText,
+  Upload,
+  X,
+  AlertCircle,
+  FileIcon,
+  Camera,
+} from "lucide-react";
+import {
+  DOCUMENT_FIELD,
+  type PhotoEntityType,
+} from "@/lib/photos/client-constants";
 
 export interface UploadedDocument {
   id: string;
@@ -14,6 +25,9 @@ export interface UploadedDocument {
   firearmId: string | null;
   accessoryId: string | null;
   gearId: string | null;
+  kitId?: string | null;
+  ammoStockId?: string | null;
+  supplyId?: string | null;
   createdAt: string;
   firearm?: { id: string; name: string } | null;
   accessory?: { id: string; name: string } | null;
@@ -21,7 +35,7 @@ export interface UploadedDocument {
 }
 
 interface DocumentUploaderProps {
-  entityType?: "firearm" | "accessory" | "gear" | null;
+  entityType?: PhotoEntityType | null;
   entityId?: string | null;
   defaultDocType?: "RECEIPT" | "PHOTO" | "NFA_TAX_STAMP" | "OTHER";
   onUploadComplete: (doc: UploadedDocument) => void;
@@ -58,6 +72,7 @@ export function DocumentUploader({
   onCancel,
 }: DocumentUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [docName, setDocName] = useState("");
   const [docType, setDocType] = useState<
@@ -104,13 +119,7 @@ export function DocumentUploader({
       formData.append("name", docName.trim());
       formData.append("type", docType);
       if (entityType && entityId) {
-        const fieldName =
-          entityType === "firearm"
-            ? "firearmId"
-            : entityType === "accessory"
-              ? "accessoryId"
-              : "gearId";
-        formData.append(fieldName, entityId);
+        formData.append(DOCUMENT_FIELD[entityType], entityId);
       }
       if (notes.trim()) formData.append("notes", notes.trim());
 
@@ -140,37 +149,59 @@ export function DocumentUploader({
     <div className="space-y-4">
       {/* Drop zone */}
       {!file ? (
-        <div
-          onDrop={handleDrop}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onClick={() => fileInputRef.current?.click()}
-          className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-            dragOver
-              ? "border-[#00C2FF] bg-[#00C2FF]/5"
-              : "border-vault-border hover:border-[#00C2FF]/40 hover:bg-vault-border/20"
-          }`}
-        >
+        <>
+          <div
+            onDrop={handleDrop}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onClick={() => fileInputRef.current?.click()}
+            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+              dragOver
+                ? "border-[#00C2FF] bg-[#00C2FF]/5"
+                : "border-vault-border hover:border-[#00C2FF]/40 hover:bg-vault-border/20"
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png,.webp"
+              className="sr-only"
+              onChange={(e) => {
+                if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+              }}
+            />
+            <Upload className="w-8 h-8 text-vault-text-faint mx-auto mb-2" />
+            <p className="text-sm text-vault-text-muted">
+              Drop file here or click to browse
+            </p>
+            <p className="text-xs text-vault-text-faint mt-1">
+              PDF, JPG, PNG, WebP — max 20MB
+            </p>
+          </div>
           <input
-            ref={fileInputRef}
+            ref={cameraInputRef}
             type="file"
-            accept=".pdf,.jpg,.jpeg,.png,.webp"
+            accept="image/*"
+            capture="environment"
+            aria-label="Take a picture"
             className="sr-only"
             onChange={(e) => {
               if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+              e.target.value = "";
             }}
           />
-          <Upload className="w-8 h-8 text-vault-text-faint mx-auto mb-2" />
-          <p className="text-sm text-vault-text-muted">
-            Drop file here or click to browse
-          </p>
-          <p className="text-xs text-vault-text-faint mt-1">
-            PDF, JPG, PNG, WebP — max 20MB
-          </p>
-        </div>
+          <button
+            type="button"
+            onClick={() => cameraInputRef.current?.click()}
+            className="flex items-center gap-2 px-3 py-2 rounded-md border border-vault-border text-vault-text-muted text-sm hover:bg-vault-border transition-colors"
+          >
+            <Camera className="w-4 h-4" />
+            Take a picture
+          </button>
+        </>
       ) : (
         <div className="flex items-center gap-3 p-3 rounded-lg border border-vault-border bg-vault-bg">
           {isPdf ? (

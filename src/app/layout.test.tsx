@@ -2,10 +2,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  hdrs.value = new Headers();
+});
 
 const auth = vi.hoisted(() => ({ getCurrentUser: vi.fn() }));
 vi.mock("@/lib/server/auth", () => ({ getCurrentUser: auth.getCurrentUser }));
+
+const hdrs = vi.hoisted(() => ({ value: new Headers() }));
+vi.mock("next/headers", () => ({ headers: async () => hdrs.value }));
 
 // Chrome components replaced with detectable stand-ins so the test asserts on
 // presence/absence, not on their internals (they have their own tests).
@@ -41,5 +47,18 @@ describe("RootLayout", () => {
     expect(queryByTestId("mobile-header")).not.toBeNull();
     expect(queryByTestId("global-search")).not.toBeNull();
     expect(queryByTestId("theme-toggle")).not.toBeNull();
+  });
+
+  it("renders the capture page bare, signed in or not, and never asks who is signed in", async () => {
+    hdrs.value = new Headers({ "x-bv-capture-page": "1" });
+    auth.getCurrentUser.mockClear();
+    auth.getCurrentUser.mockResolvedValue({ id: "u1", username: "jeff", displayName: "Jeff", role: "USER", sessionId: "s1" });
+    const jsx = await RootLayout({ children: <div data-testid="page-content">hi</div> });
+    const { queryByTestId } = render(jsx);
+    expect(queryByTestId("page-content")).not.toBeNull();
+    for (const id of ["sidebar", "mobile-header", "global-search", "theme-toggle"]) {
+      expect(queryByTestId(id)).toBeNull();
+    }
+    expect(auth.getCurrentUser).not.toHaveBeenCalled();
   });
 });

@@ -25,6 +25,8 @@ export const BACKUP_MODELS: BackupModel[] = [
   { model: "AmmoStock", delegate: "ammoStock", key: "ammoStocks" },
   { model: "Gear", delegate: "gear", key: "gear" },
   { model: "Supply", delegate: "supply", key: "supplies" },
+  // Before Document: a document can belong to a kit.
+  { model: "Kit", delegate: "kit", key: "kits" },
   { model: "Build", delegate: "build", key: "builds" },
   { model: "BuildSlot", delegate: "buildSlot", key: "buildSlots" },
   { model: "Document", delegate: "document", key: "documents" },
@@ -57,8 +59,9 @@ export const BACKUP_MODELS: BackupModel[] = [
     delegate: "dateNormalizationAudit",
     key: "dateNormalizationAudits",
   },
-  { model: "Kit", delegate: "kit", key: "kits" },
   { model: "KitItem", delegate: "kitItem", key: "kitItems" },
+  // After all six owners (Firearm, Accessory, Gear, Kit, AmmoStock, Supply).
+  { model: "Photo", delegate: "photo", key: "photos" },
 ];
 
 /**
@@ -105,5 +108,14 @@ export const REQUIRED_BACKUP_KEYS: readonly string[] = BACKUP_MODELS.filter(
  * AuditEvent is excluded: it is append-only history, not restorable inventory state — a
  * restore must never delete or overwrite what already happened, and a backup export is not
  * the audit log's own export path.
+ * CapturePass is excluded: a pass is a 15-minute credential tied to a session and is never
+ * restorable state.
  */
-export const BACKUP_EXCLUDED_MODELS: readonly string[] = ["AppSettings", "User", "Session", "AuthToken", "AuditEvent"];
+export const BACKUP_EXCLUDED_MODELS: readonly string[] = [
+  "AppSettings",
+  "User",
+  "Session",
+  "AuthToken",
+  "AuditEvent",
+  "CapturePass",
+];

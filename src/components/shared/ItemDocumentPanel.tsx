@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ExternalLink, FileText, Trash2, Upload, X } from "lucide-react";
+import {
+  DOCUMENT_FIELD,
+  ENTITY_NOUN,
+  ITEM_ATTACHMENTS_CHANGED,
+  type ItemAttachmentsChange,
+  type PhotoEntityType,
+} from "@/lib/photos/client-constants";
 import {
   DocumentUploader,
   type UploadedDocument,
 } from "@/components/shared/DocumentUploader";
 
 interface ItemDocumentPanelProps {
-  entityType: "firearm" | "accessory" | "gear";
+  entityType: PhotoEntityType;
   entityId: string;
   title?: string;
 }
@@ -62,21 +69,32 @@ export function ItemDocumentPanel({
   } | null>(null);
 
   useEffect(() => {
-    const param =
-      entityType === "firearm"
-        ? "firearmId"
-        : entityType === "accessory"
-          ? "accessoryId"
-          : "gearId";
-    const query = `${param}=${entityId}`;
-    fetch(`/api/documents?${query}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setDocuments(data);
-        }
-      })
-      .finally(() => setLoading(false));
+    const query = `${DOCUMENT_FIELD[entityType]}=${entityId}`;
+    let cancelled = false;
+    const load = () =>
+      fetch(`/api/documents?${query}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled && Array.isArray(data)) {
+            setDocuments(data);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    void load();
+
+    // The phone dialog on this item's gallery announces when it closes.
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ItemAttachmentsChange>).detail;
+      if (detail?.entityType === entityType && detail.entityId === entityId) void load();
+    };
+    window.addEventListener(ITEM_ATTACHMENTS_CHANGED, onChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(ITEM_ATTACHMENTS_CHANGED, onChanged);
+    };
   }, [entityId, entityType]);
 
   async function handleDelete(id: string) {
@@ -104,15 +122,7 @@ export function ItemDocumentPanel({
     }
   }
 
-  const emptyText = useMemo(() => {
-    if (entityType === "firearm") {
-      return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this firearm.";
-    }
-    if (entityType === "gear") {
-      return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this item.";
-    }
-    return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this accessory.";
-  }, [entityType]);
+  const emptyText = `No docs attached yet. Upload receipts, photos, and tax stamps directly on this ${ENTITY_NOUN[entityType]}.`;
 
   return (
     <div className="rounded-xl border border-vault-border bg-vault-surface overflow-hidden">
@@ -223,6 +233,7 @@ export function ItemDocumentPanel({
                   </a>
                   <button
                     onClick={() => handleDelete(doc.id)}
+                    aria-label={`Delete ${doc.name}`}
                     disabled={deletingId === doc.id}
                     className="p-1.5 rounded text-vault-text-faint hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
                   >

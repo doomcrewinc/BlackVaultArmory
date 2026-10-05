@@ -1,19 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
-import { prisma } from "@/lib/prisma";
-import { detectFileSignature } from "@/lib/server/file-signatures";
+import { storeDocument } from "@/lib/documents/store";
+import { detectFileSignature, isHeicFamilySignature } from "@/lib/server/file-signatures";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requireAuth, getCurrentUser } from "@/lib/server/auth";
-import { documentsRoot, writeEncryptedFile } from "@/lib/files/storage";
+import { HEIC_MESSAGE, PictureRejected, processPicture } from "@/lib/images/process";
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "jpg", "png", "webp"]);
 
 const MAX_SIZE = 20 * 1024 * 1024; // 20MB
 
 // POST /api/documents/upload
-// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?, notes?
+// Accepts multipart form data: file, name, type, firearmId?, accessoryId?, gearId?,
+// ammoStockId?, supplyId?, kitId?, notes?
 // Saves to <uploadsRoot>/documents/{uuid}.{ext}, encrypted at rest (BVF1).
 // Creates a Document record and returns it.
 export async function POST(request: NextRequest) {
@@ -44,6 +42,9 @@ export async function POST(request: NextRequest) {
     const firearmId = formData.get("firearmId") as string | null;
     const accessoryId = formData.get("accessoryId") as string | null;
     const gearId = formData.get("gearId") as string | null;
+    const ammoStockId = formData.get("ammoStockId") as string | null;
+    const supplyId = formData.get("supplyId") as string | null;
+    const kitId = formData.get("kitId") as string | null;
     const notes = formData.get("notes") as string | null;
 
     if (!file) {
@@ -68,6 +69,9 @@ export async function POST(request: NextRequest) {
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    if (isHeicFamilySignature(buffer)) {
+      return NextResponse.json({ error: HEIC_MESSAGE }, { status: 400 });
+    }
     const detected = detectFileSignature(buffer);
 
     if (!detected || !ALLOWED_EXTENSIONS.has(detected.extension)) {
@@ -79,36 +83,31 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Generate a unique ID for the file
-    const fileId = randomUUID().replace(/-/g, "");
+    // Pictures are re-saved without location or other hidden metadata; PDFs
+    // are stored as uploaded.
+    let stored: Buffer = buffer;
+    let storedMimeType = detected.mimeType;
+    if (detected.extension !== "pdf") {
+      try {
+        const processed = await processPicture(buffer, { maxBytes: MAX_SIZE });
+        stored = processed.bytes;
+        storedMimeType = processed.mimeType;
+      } catch (e) {
+        if (e instanceof PictureRejected) {
+          return NextResponse.json({ error: e.message }, { status: 400 });
+        }
+        throw e;
+      }
+    }
 
-    const fileName = `${fileId}.${detected.extension}`;
-    const relativeUrl = `/api/files/documents/${fileName}`;
-
-    const uploadDir = documentsRoot();
-    const filePath = path.join(uploadDir, fileName);
-
-    await fs.mkdir(uploadDir, { recursive: true });
-
-    await writeEncryptedFile(filePath, buffer);
-
-    const doc = await prisma.document.create({
-      data: {
-        name,
-        type,
-        fileUrl: relativeUrl,
-        fileSize: file.size,
-        mimeType: detected.mimeType,
-        notes: notes || null,
-        firearmId: firearmId || null,
-        accessoryId: accessoryId || null,
-        gearId: gearId || null,
-      },
-      include: {
-        firearm: { select: { id: true, name: true } },
-        accessory: { select: { id: true, name: true } },
-        gear: { select: { id: true, name: true } },
-      },
+    const doc = await storeDocument({
+      bytes: stored,
+      extension: detected.extension,
+      mimeType: storedMimeType,
+      name,
+      type,
+      notes: notes || null,
+      owners: { firearmId, accessoryId, gearId, ammoStockId, supplyId, kitId },
     });
 
     return NextResponse.json(doc, { status: 201 });
