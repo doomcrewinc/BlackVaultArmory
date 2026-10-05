@@ -15,6 +15,7 @@ import {
 } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -424,6 +425,8 @@ export default async function FirearmDetailPage({
             </p>
           </div>
         )}
+
+        <PhotoGallery entityType="firearm" entityId={firearm.id} />
 
         <ItemDocumentPanel
           entityType="firearm"

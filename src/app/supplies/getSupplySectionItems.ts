@@ -14,6 +14,7 @@ export interface SupplySectionItem {
   quantity: number;
   unit: string;
   storageLocation: string | null;
+  imageUrl: string | null;
   isLow: boolean;
   expiry: ExpiryStatus;
 }
@@ -52,6 +53,7 @@ export function mapSupplyRow(
     quantity: supply.quantity,
     unit: supply.unit,
     storageLocation: supply.storageLocation,
+    imageUrl: supply.imageUrl,
     isLow: isLowStock(supply),
     expiry: expiryStatus(supply.expirationDate, today, warningDays),
   };

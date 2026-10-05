@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
 import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { RemoveImageButton } from "@/components/shared/RemoveImageButton";
@@ -195,6 +196,20 @@ export default function AccessoryDetailPage() {
         setLoading(false);
       });
   }, [id]);
+
+  // The gallery changed the main picture: pick up the new `imageUrl` for the
+  // header image without replacing the rest of the loaded record.
+  function refreshAccessory() {
+    fetch(`/api/accessories/${id}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) return;
+        setAccessory((prev) =>
+          prev ? { ...prev, imageUrl: data.imageUrl ?? null } : prev,
+        );
+      })
+      .catch(() => {});
+  }
 
   async function submitLogRounds(e: React.FormEvent) {
     e.preventDefault();
@@ -581,6 +596,12 @@ export default function AccessoryDetailPage() {
             </p>
           </div>
         )}
+
+        <PhotoGallery
+          entityType="accessory"
+          entityId={accessory.id}
+          onMainChange={refreshAccessory}
+        />
 
         <ItemDocumentPanel
           entityType="accessory"

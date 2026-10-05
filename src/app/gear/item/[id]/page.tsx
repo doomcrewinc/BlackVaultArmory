@@ -14,6 +14,7 @@ import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import { DeleteGearButton } from "./DeleteGearButton";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { SectionLoadError } from "@/components/sections/SectionLoadError";
 import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
@@ -277,6 +278,8 @@ export default async function GearDetailPage({
             </p>
           </div>
         )}
+
+        <PhotoGallery entityType="gear" entityId={gear.id} />
 
         <ItemDocumentPanel
           entityType="gear"

@@ -21,6 +21,8 @@ import { ItemKitAllocation } from "@/components/kits/ItemKitAllocation";
 import { getItemAllocation } from "@/lib/kits/itemAllocation";
 import { DeleteSupplyButton } from "./DeleteSupplyButton";
 import { getCurrentUser } from "@/lib/server/auth";
+import { PhotoGallery } from "@/components/photos/PhotoGallery";
+import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
 import { ItemHistory } from "@/components/audit/ItemHistory";
 import { ArrowLeft, Pencil, DollarSign, Calendar, MapPin } from "lucide-react";
 
@@ -245,6 +247,14 @@ export default async function SupplyDetailPage({
             </p>
           </div>
         )}
+
+        <PhotoGallery entityType="supply" entityId={supply.id} />
+
+        <ItemDocumentPanel
+          entityType="supply"
+          entityId={supply.id}
+          title="Supply Documents"
+        />
 
         {currentUser?.role === "ADMIN" && (
           <ItemHistory entityType="Supply" entityId={supply.id} />

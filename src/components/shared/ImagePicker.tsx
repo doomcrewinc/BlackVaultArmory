@@ -7,6 +7,7 @@ import {
   IMAGE_PICKER_ACCEPT,
 } from "@/lib/image-formats";
 import { Camera, Loader2, X, AlertCircle } from "lucide-react";
+import { MAX_PHOTO_UPLOAD_BYTES } from "@/lib/photos/client-constants";
 
 interface ImagePickerProps {
   entityType: "firearm" | "accessory" | "ammo" | "build" | "gear" | "kit";
@@ -16,7 +17,7 @@ interface ImagePickerProps {
   onChange: (url: string | null, source?: string | null) => void;
 }
 
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BYTES = MAX_PHOTO_UPLOAD_BYTES;
 
 export default function ImagePicker({
   entityType,
@@ -49,7 +50,7 @@ export default function ImagePicker({
       return;
     }
     if (file.size > MAX_BYTES) {
-      setError("Photo must be 10 MB or smaller.");
+      setError("Photo must be 25 MB or smaller.");
       return;
     }
 
@@ -142,7 +143,7 @@ export default function ImagePicker({
                   Click to choose, or drag and drop.
                 </p>
                 <p className="text-[10px] text-vault-text-faint mt-1 font-mono">
-                  JPG · JPEG · PNG &nbsp;·&nbsp; Max 10 MB
+                  JPG · JPEG · PNG &nbsp;·&nbsp; Max 25 MB
                 </p>
               </div>
             </>

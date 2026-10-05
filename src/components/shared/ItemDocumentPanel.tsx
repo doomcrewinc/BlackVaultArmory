@@ -1,14 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ExternalLink, FileText, Trash2, Upload, X } from "lucide-react";
+import {
+  DOCUMENT_FIELD,
+  ENTITY_NOUN,
+  type PhotoEntityType,
+} from "@/lib/photos/client-constants";
 import {
   DocumentUploader,
   type UploadedDocument,
 } from "@/components/shared/DocumentUploader";
 
 interface ItemDocumentPanelProps {
-  entityType: "firearm" | "accessory" | "gear";
+  entityType: PhotoEntityType;
   entityId: string;
   title?: string;
 }
@@ -62,13 +67,7 @@ export function ItemDocumentPanel({
   } | null>(null);
 
   useEffect(() => {
-    const param =
-      entityType === "firearm"
-        ? "firearmId"
-        : entityType === "accessory"
-          ? "accessoryId"
-          : "gearId";
-    const query = `${param}=${entityId}`;
+    const query = `${DOCUMENT_FIELD[entityType]}=${entityId}`;
     fetch(`/api/documents?${query}`)
       .then((r) => r.json())
       .then((data) => {
@@ -104,15 +103,7 @@ export function ItemDocumentPanel({
     }
   }
 
-  const emptyText = useMemo(() => {
-    if (entityType === "firearm") {
-      return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this firearm.";
-    }
-    if (entityType === "gear") {
-      return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this item.";
-    }
-    return "No docs attached yet. Upload receipts, photos, and tax stamps directly on this accessory.";
-  }, [entityType]);
+  const emptyText = `No docs attached yet. Upload receipts, photos, and tax stamps directly on this ${ENTITY_NOUN[entityType]}.`;
 
   return (
     <div className="rounded-xl border border-vault-border bg-vault-surface overflow-hidden">
@@ -223,6 +214,7 @@ export function ItemDocumentPanel({
                   </a>
                   <button
                     onClick={() => handleDelete(doc.id)}
+                    aria-label={`Delete ${doc.name}`}
                     disabled={deletingId === doc.id}
                     className="p-1.5 rounded text-vault-text-faint hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
                   >
