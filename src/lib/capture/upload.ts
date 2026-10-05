@@ -58,6 +58,8 @@ export async function resolvePass(
     if (key !== null) captureThrottle.fail(key);
     return { ok: false, status: 404, body: { error: "This link is not valid." } };
   }
+  // A link that names a real pass, open or ended, clears the address's wrong-link count.
+  if (key !== null) captureThrottle.succeed(key);
   if (!found.ok) return endedFailure(found.reason);
   return { ok: true, pass: found.pass };
 }
