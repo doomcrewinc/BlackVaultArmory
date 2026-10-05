@@ -49,6 +49,15 @@ describe("RootLayout", () => {
     expect(queryByTestId("theme-toggle")).not.toBeNull();
   });
 
+  it("lets the wheel reach the document from the page area", async () => {
+    auth.getCurrentUser.mockResolvedValue({ id: "u1", username: "jeff", displayName: "Jeff", role: "USER", sessionId: "s1" });
+    const jsx = await RootLayout({ children: <div data-testid="page-content">hi</div> });
+    const { container } = render(jsx);
+    const main = container.querySelector("main");
+    expect(main).not.toBeNull();
+    expect(Array.from(main!.classList).filter((c) => c.includes("overscroll"))).toEqual([]);
+  });
+
   it("renders the capture page bare, signed in or not, and never asks who is signed in", async () => {
     hdrs.value = new Headers({ "x-bv-capture-page": "1" });
     auth.getCurrentUser.mockClear();

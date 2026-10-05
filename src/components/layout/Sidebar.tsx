@@ -324,7 +324,9 @@ export function Sidebar({
         )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto overscroll-contain py-3 space-y-0.5 px-2 pb-6">
+      {/* Contained only in the phone drawer. On a wide screen a list that fits
+          must let the wheel through to the page. */}
+      <nav className="flex-1 overflow-y-auto overscroll-contain md:overscroll-auto py-3 space-y-0.5 px-2 pb-6">
         <button
           onClick={() =>
             window.dispatchEvent(new CustomEvent("bv:search:open"))

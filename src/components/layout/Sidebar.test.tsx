@@ -110,3 +110,15 @@ describe("Sidebar — signed-in account block", () => {
     expect(assign).not.toHaveBeenCalled();
   });
 });
+
+describe("Sidebar — scrolling", () => {
+  it("contains overscroll in the phone drawer only", () => {
+    const { container } = render(<Sidebar user={{ displayName: "Jeff", role: "USER" }} />);
+    const navs = Array.from(container.querySelectorAll("nav"));
+    expect(navs.length).toBeGreaterThan(0);
+    for (const nav of navs) {
+      expect(nav.classList.contains("overscroll-contain")).toBe(true);
+      expect(nav.classList.contains("md:overscroll-auto")).toBe(true);
+    }
+  });
+});
