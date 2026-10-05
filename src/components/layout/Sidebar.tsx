@@ -596,7 +596,7 @@ export function Sidebar({
         <aside
           data-print-hide
           className={cn(
-            "hidden md:flex flex-col h-svh border-r border-vault-border bg-vault-surface transition-all duration-300 ease-in-out shrink-0",
+            "hidden md:flex flex-col h-svh sticky top-0 border-r border-vault-border bg-vault-surface transition-all duration-300 ease-in-out shrink-0",
             collapsed ? "w-16" : "w-56",
           )}
         >
