@@ -335,7 +335,8 @@ endstep
 
 step "2e. photo ingest: sharp in the image, the capture routes on a real server"
 # The image must carry sharp's native files (the standalone output copies only what it traces).
-SHARP_JS="require('sharp')({create:{width:8,height:8,channels:3,background:'#fff'}}).jpeg().toBuffer().then(b=>{if(b.length<100)process.exit(1);console.log('sharp ok')})"
+# It encodes a generated JPEG, then decodes it again and writes a WebP, the paths the app takes.
+SHARP_JS="const s=require('sharp');s({create:{width:8,height:8,channels:3,background:'#fff'}}).jpeg().toBuffer().then(b=>{if(b.length<100)process.exit(1);return s(b).rotate().webp().toBuffer()}).then(w=>{if(w.length<10||w.subarray(8,12).toString()!=='WEBP')process.exit(1);console.log('sharp ok')})"
 SHARP_OUT=$(timeout 120 docker exec blackvault node -e "$SHARP_JS" 2>&1) || fail "sharp does not run inside the image: $SHARP_OUT"
 [ "$SHARP_OUT" = "sharp ok" ] || fail "sharp printed '$SHARP_OUT', want 'sharp ok'"
 echo "$SHARP_OUT"

@@ -679,10 +679,13 @@ on Mac/Linux to find your IP, then open `http://YOUR_IP:3000` on your phone.
 Every firearm, accessory, gear item, kit, ammunition stock and supply has a **Photos** section on its
 page. Add a picture with **Add photo**, give it a label if you like (up to 80 characters), and
 pick **Make main picture** on the one you want shown in lists. Deleting a photo that is the main
-picture clears the main picture. Deleting an item deletes its photos.
+picture clears the main picture. Deleting an item deletes its photos. Its documents are not
+deleted: they stay, no longer attached to anything, as before.
 
-Pictures can be JPEG, PNG or WebP, up to **25 MB** each. Receipts and other paperwork are still
-documents, and ammunition, supplies and kits can now have documents too.
+Pictures can be JPEG, PNG or WebP, up to **25 MB** each. A picture over **100 megapixels** is
+rejected (some phones' 108 and 200 megapixel modes are that large; use a lower setting). Receipts
+and other paperwork are still documents, and ammunition, supplies and kits can now have documents
+too. Documents are limited to **20 MB** each.
 
 ### Continue on phone
 
@@ -708,6 +711,9 @@ where people you do not trust can see it, and press **Close pass** when you are 
 behind a reverse proxy, the code is part of the web address, so it can appear in the proxy's access
 log while the pass is open.
 
+Uploads made through a pass are recorded in the audit log under the account that created the
+pass, and the audit log notes that they came from a pass.
+
 The phone must be able to reach BlackVault. If you opened BlackVault on the computer as
 `localhost`, the dialog tells you to open it by the computer's network address first (see
 [Mobile Access](#mobile-access-same-network)). Any signed-in account can make a pass.
@@ -717,7 +723,8 @@ The phone must be able to reach BlackVault. If you opened BlackVault on the comp
 BlackVault re-saves every JPEG, PNG and WebP you upload as a photo, as a main picture, or as
 paperwork, and removes the location (GPS) and other hidden data from it. The picture keeps its full
 size and is stored upright. This applies to pictures uploaded from this version on: **pictures
-stored earlier are not changed.**
+stored earlier are not changed.** Only pictures have hidden data removed: a PDF is stored exactly
+as it was uploaded.
 
 ### HEIC (iPhone) pictures
 
