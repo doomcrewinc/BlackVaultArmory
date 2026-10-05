@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -122,3 +124,23 @@ describe("Sidebar — scrolling", () => {
     }
   });
 });
+
+describe("Sidebar — stays in view", () => {
+  it("is sticky to the top of the viewport on a wide screen", () => {
+    const { container } = render(<Sidebar user={{ displayName: "Jeff", role: "USER" }} />);
+    const aside = container.querySelector("aside");
+    expect(aside).not.toBeNull();
+    expect(aside!.classList.contains("sticky")).toBe(true);
+    expect(aside!.classList.contains("top-0")).toBe(true);
+    expect(aside!.classList.contains("h-svh")).toBe(true);
+  });
+
+  it("the body does not become a scroll container, which would defeat position: sticky", () => {
+    const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+    const body = /\nbody\s*\{([^}]*)\}/.exec(css);
+    expect(body).not.toBeNull();
+    expect(body![1]).toMatch(/overflow-x:\s*clip;/);
+    expect(body![1]).not.toMatch(/overflow(-[xy])?:\s*(hidden|auto|scroll)/);
+  });
+});
+

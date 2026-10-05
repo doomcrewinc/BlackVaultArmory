@@ -73,7 +73,10 @@ body {
   color: var(--vault-text);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   min-height: 100vh;
-  overflow-x: hidden;
+  /* clip, not hidden: hidden would make the body a scroll container, and the
+     sidebar and the phone header, which are position: sticky, would then
+     stick to the body (which never scrolls) and leave with the page. */
+  overflow-x: clip;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
