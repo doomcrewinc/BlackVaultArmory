@@ -394,12 +394,15 @@ docker exec -u nextjs blackvault sh -c ': > /app/uploads/.ci-probe && rm /app/up
 LOGS=$(as_user "docker compose logs --no-color --since 3m blackvault")
 has "$LOGS" "is not writable by the app" && fail "the entrypoint warned about a folder it could fix"
 # A folder that already belongs to uid 1001 is not walked: a foreign file in it stays foreign.
+# The foreign file is a copy of an upload that is already encrypted under the current key, so the
+# app's own startup pass has no reason to rewrite it (and so give it to uid 1001 itself).
 as_user "docker compose stop"
-sudo install -o "$TEST_UID" -g "$TEST_UID" -m 644 /dev/null "$UPLOADS/ci-foreign"
+FOREIGN="$UPLOADS/images/firearms/ci-foreign.png"
+sudo install -o "$TEST_UID" -g "$TEST_UID" -m 600 "$UP_IMG_FILE" "$FOREIGN"
 as_user "docker compose up -d"
 wait_healthy
-[ "$(sudo stat -c '%u' "$UPLOADS/ci-foreign")" = "$TEST_UID" ] || fail "a start walked a folder that already belonged to uid 1001"
-sudo rm -f "$UPLOADS/ci-foreign"
+[ "$(sudo stat -c '%u' "$FOREIGN")" = "$TEST_UID" ] || fail "a start walked a folder that already belonged to uid 1001"
+sudo rm -f "$FOREIGN"
 echo "upgrade: host-owned folders given to uid 1001 with their contents, writable; a foreign file in a right folder left alone"
 endstep
 
