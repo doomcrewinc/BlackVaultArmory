@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CaptureScreen } from "./CaptureScreen";
 
 const TOKEN = "tok-secret-123";
@@ -143,6 +143,34 @@ describe("CaptureScreen, sending", () => {
     expect(formOf(uploadCalls(fetchMock)[1]).get("docType")).toBe("NFA_TAX_STAMP");
   });
 
+  it("names paperwork with the phone's own date when the person typed no name", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // 22:30 on 3 October in this machine's zone is already 4 October in UTC for anyone west of it.
+    vi.setSystemTime(new Date(2026, 9, 3, 22, 30));
+    try {
+      const fetchMock = stubFetch(INFO, [SENT(11)]);
+      await ready();
+      fireEvent.click(screen.getByRole("button", { name: "Paperwork" }));
+      pick("a.jpg");
+      fireEvent.change(screen.getByLabelText("Type"), { target: { value: "NFA_TAX_STAMP" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(uploadCalls(fetchMock)).toHaveLength(1));
+      expect(formOf(uploadCalls(fetchMock)[0]).get("name")).toBe("NFA Tax Stamp 2026-10-03");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends no name with a photo", async () => {
+    const fetchMock = stubFetch(INFO, [SENT(11)]);
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Photo" }));
+    pick();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(uploadCalls(fetchMock)).toHaveLength(1));
+    expect(formOf(uploadCalls(fetchMock)[0]).has("name")).toBe(false);
+  });
+
   it("shows a busy state while a send is in flight", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -185,6 +213,35 @@ describe("CaptureScreen, sending", () => {
     expect(formOf(calls[1]).get("file")).toBe(file);
     expect(formOf(calls[1]).get("label")).toBe("Rear");
     expect(screen.getByText("9 uploads left")).toBeInTheDocument();
+  });
+
+  it("sends a double tap on Retry once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let posts = 0;
+    const fetchMock = vi.fn(async (_u: string, init?: RequestInit) => {
+      if (init?.method !== "POST") {
+        return { ok: true, status: 200, json: async () => ({ itemName: "Glock 19", remaining: 4 }) };
+      }
+      if (++posts === 1) throw new Error("offline");
+      await gate;
+      return { ok: true, status: 201, json: async () => ({ remaining: 3 }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Photo" }));
+    pick();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const retry = await screen.findByRole("button", { name: "Retry" });
+
+    act(() => {
+      retry.click();
+      retry.click();
+    });
+
+    release();
+    await screen.findByText("Sent");
+    expect(uploadCalls(fetchMock)).toHaveLength(2);
   });
 
   it("keeps the item name and the sent rows when the pass ends, replacing only the buttons", async () => {

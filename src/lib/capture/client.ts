@@ -1,6 +1,8 @@
 // Browser calls to the two public capture endpoints. The token travels in the
 // URL path of these calls and nowhere else; no message built here contains it.
 
+import { todayLocalISO } from "@/lib/date";
+
 export const DOC_TYPE_OPTIONS = [
   { value: "RECEIPT", label: "Receipt" },
   { value: "NFA_TAX_STAMP", label: "NFA Tax Stamp" },
@@ -9,6 +11,12 @@ export const DOC_TYPE_OPTIONS = [
 ] as const;
 
 export type DocTypeValue = (typeof DOC_TYPE_OPTIONS)[number]["value"];
+
+/** "<Type label> <YYYY-MM-DD>" for the date on this phone. */
+export function defaultPaperworkName(docType: DocTypeValue, now: Date = new Date()): string {
+  const label = DOC_TYPE_OPTIONS.find((o) => o.value === docType)?.label ?? "Other";
+  return `${label} ${todayLocalISO(now)}`;
+}
 
 export const NETWORK_MESSAGE = "Could not send. Check your connection and retry.";
 export const RATE_LIMIT_MESSAGE = "Too many attempts. Wait a moment and try again.";
@@ -49,7 +57,7 @@ export async function loadPassInfo(token: string): Promise<InfoResult> {
 
 export type UploadFields =
   | { kind: "photo"; label: string }
-  | { kind: "paperwork"; docType: DocTypeValue };
+  | { kind: "paperwork"; docType: DocTypeValue; name?: string };
 
 export type UploadResult =
   | { ok: true; remaining: number | null }
@@ -60,7 +68,10 @@ export async function sendUpload(token: string, file: File, fields: UploadFields
   form.append("file", file);
   form.append("kind", fields.kind);
   if (fields.kind === "photo" && fields.label.trim()) form.append("label", fields.label.trim());
-  if (fields.kind === "paperwork") form.append("docType", fields.docType);
+  if (fields.kind === "paperwork") {
+    form.append("docType", fields.docType);
+    if (fields.name?.trim()) form.append("name", fields.name.trim());
+  }
 
   let res: Response;
   try {

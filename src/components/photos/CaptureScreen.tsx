@@ -5,6 +5,7 @@ import { Camera, FileText, Loader2, X } from "lucide-react";
 import { MAX_PHOTO_LABEL_LENGTH, photoFileError } from "@/lib/photos/client-constants";
 import {
   DOC_TYPE_OPTIONS,
+  defaultPaperworkName,
   loadPassInfo,
   sendUpload,
   type DocTypeValue,
@@ -32,6 +33,7 @@ function usesLeft(n: number): string {
 export function CaptureScreen({ token }: { token: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
+  const sending = useRef(new Set<number>());
   const [load, setLoad] = useState<Load>({ state: "loading" });
   const [remaining, setRemaining] = useState(0);
   const [kind, setKind] = useState<Kind>("photo");
@@ -71,8 +73,11 @@ export function CaptureScreen({ token }: { token: string }) {
   }
 
   async function run(id: number, file: File, fields: UploadFields) {
+    // A second tap while this file is on its way would send it twice.
+    if (sending.current.has(id)) return;
+    sending.current.add(id);
     patchJob(id, { status: "sending", message: undefined });
-    const result = await sendUpload(token, file, fields);
+    const result = await sendUpload(token, file, fields).finally(() => sending.current.delete(id));
     if (result.ok) {
       setRemaining((prev) =>
         Math.max(0, result.remaining === null ? prev - 1 : Math.min(prev, result.remaining)),
@@ -113,7 +118,7 @@ export function CaptureScreen({ token }: { token: string }) {
   function send() {
     if (!chosen) return;
     const fields: UploadFields =
-      kind === "photo" ? { kind, label } : { kind, docType };
+      kind === "photo" ? { kind, label } : { kind, docType, name: defaultPaperworkName(docType) };
     const id = nextId.current++;
     setJobs((prev) => [{ id, name: chosen.name, status: "sending", file: chosen, fields }, ...prev]);
     reset();
