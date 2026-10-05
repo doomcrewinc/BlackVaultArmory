@@ -73,7 +73,11 @@ export default async function RootLayout({
                 <Sidebar user={navUser} />
                 <div className="flex flex-col flex-1 min-w-0 min-h-svh overflow-x-clip">
                   <MobileHeader user={navUser} />
-                  <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip overscroll-contain min-w-0 pb-safe">
+                  {/* The document is what scrolls: this element grows with its
+                      content. It must not set overscroll-behavior — a browser
+                      then stops the wheel from reaching the document, even
+                      though this element has nothing of its own to scroll. */}
+                  <main className="flex-1 min-h-0 overflow-y-auto overflow-x-clip min-w-0 pb-safe">
                     <ErrorBoundary>{children}</ErrorBoundary>
                   </main>
                 </div>
