@@ -330,12 +330,19 @@ function kitSection(): SectionMatcher {
   };
 }
 
+/** The words for a Vault section, whose pages word themselves ("firearm"). */
+function vaultNouns(singular: string, plural: string): SectionNoun {
+  return {
+    singular,
+    plural,
+    emptyHint: `Add your ${plural} to track them here.`,
+  };
+}
+
 export const CATEGORY_SECTIONS: CategorySection[] = [
   {
     slug: "handguns",
-    singular: "handgun",
-    plural: "handguns",
-    emptyHint: "Add the pistols and revolvers you own to track them here.",
+    ...vaultNouns("handgun", "handguns"),
     label: "Handguns",
     description: "Pistols & revolvers",
     group: "vault",
@@ -344,9 +351,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "rifles",
-    singular: "rifle",
-    plural: "rifles",
-    emptyHint: "Add your rifles, PCCs and bolt guns to track them here.",
+    ...vaultNouns("rifle", "rifles"),
     label: "Rifles",
     description: "Rifles, PCCs & bolt guns",
     group: "vault",
@@ -355,9 +360,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "shotguns",
-    singular: "shotgun",
-    plural: "shotguns",
-    emptyHint: "Add the shotguns you own to track them here.",
+    ...vaultNouns("shotgun", "shotguns"),
     label: "Shotguns",
     description: "Shotguns",
     group: "vault",
@@ -366,9 +369,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "other-firearms",
-    singular: "firearm",
-    plural: "firearms",
-    emptyHint: "Firearms that fit no other section show up here.",
+    ...vaultNouns("firearm", "firearms"),
     label: "Other",
     description: "Unsorted & other platforms",
     group: "vault",
@@ -377,9 +378,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "sbr",
-    singular: "SBR",
-    plural: "SBRs",
-    emptyHint: "Add your short-barreled rifles to track them here.",
+    ...vaultNouns("SBR", "SBRs"),
     label: "SBR",
     description: "Short-barreled rifles",
     group: "vault",
@@ -388,9 +387,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "sbs",
-    singular: "SBS",
-    plural: "SBSs",
-    emptyHint: "Add your short-barreled shotguns to track them here.",
+    ...vaultNouns("SBS", "SBSs"),
     label: "SBS",
     description: "Short-barreled shotguns",
     group: "vault",
@@ -399,9 +396,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "machine-guns",
-    singular: "machine gun",
-    plural: "machine guns",
-    emptyHint: "Add your select-fire firearms to track them here.",
+    ...vaultNouns("machine gun", "machine guns"),
     label: "Machine Guns",
     description: "Select-fire, any platform",
     group: "vault",
@@ -410,9 +405,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "aow",
-    singular: "AOW",
-    plural: "AOWs",
-    emptyHint: "Add your any-other-weapon items to track them here.",
+    ...vaultNouns("AOW", "AOWs"),
     label: "AOW",
     description: "Any other weapon",
     group: "vault",
@@ -421,9 +414,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "destructive-devices",
-    singular: "destructive device",
-    plural: "destructive devices",
-    emptyHint: "Add your destructive devices to track them here.",
+    ...vaultNouns("destructive device", "destructive devices"),
     label: "Destructive Devices",
     description: "DD-classified items",
     group: "vault",
