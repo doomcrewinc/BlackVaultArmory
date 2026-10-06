@@ -183,3 +183,26 @@ export function todayLocalISO(now: Date = new Date()): string {
   const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * A date-only value moved by whole days, as a date-only value (UTC midnight).
+ * Calendar arithmetic on the stored day: no time of day and no timezone take
+ * part, so 3 July plus 90 days is 1 October for every viewer.
+ */
+export function addDaysDateOnly(value: Date | string, days: number): Date {
+  return new Date(toDateOnlyUTC(value).getTime() + days * MS_PER_DAY);
+}
+
+/**
+ * Whole calendar days from the viewer's today to a date-only value: 0 on the
+ * day itself, negative once it has passed (-4 means "4 days ago").
+ *
+ * `todayISO` is the viewer's own date (see todayLocalISO), never the UTC day:
+ * a date due on 1 October is 4 days overdue all through 5 October on the
+ * viewer's calendar, whatever the UTC clock says. Call from client components.
+ */
+export function calendarDaysUntil(value: Date | string, todayISO: string = todayLocalISO()): number {
+  return Math.round((toDateOnlyUTC(value).getTime() - toDateOnlyUTC(todayISO).getTime()) / MS_PER_DAY);
+}

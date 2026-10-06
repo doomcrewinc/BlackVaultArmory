@@ -19,7 +19,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { StatCard } from "@/components/shared/StatCard";
 import { formatCurrency, formatNumber } from "@/lib/utils";
-import { formatDateOnly } from "@/lib/date";
+import { addDaysDateOnly, formatDateOnly } from "@/lib/date";
+import { dueInLabel, partitionByDue } from "@/lib/due";
 import { SUPPLY_UNIT_LABELS, type SupplyUnit } from "@/lib/supply";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import {
@@ -167,14 +168,6 @@ interface BatteryDueItem {
   replacementIntervalDays: number;
 }
 
-function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-const UPCOMING_MS = 30 * 24 * 60 * 60 * 1000;
-
 interface MaintenanceDueItemWithDue extends MaintenanceDueItem {
   dueDate: Date;
   days: number;
@@ -183,15 +176,6 @@ interface MaintenanceDueItemWithDue extends MaintenanceDueItem {
 interface BatteryDueItemWithDue extends BatteryDueItem {
   dueDate: Date;
   days: number;
-}
-
-/**
- * Whole days between two timestamps, unsigned.
- * Callers must pre-partition by direction — this cannot distinguish
- * "3 days overdue" from "due in 3 days".
- */
-function daysBetween(a: number, b: number) {
-  return Math.ceil(Math.abs(a - b) / 86400000);
 }
 
 function MaintenanceDueWidget() {
@@ -204,28 +188,14 @@ function MaintenanceDueWidget() {
     fetch("/api/firearms", { cache: "no-store" })
       .then((r) => r.json())
       .then((firearms) => {
-        const now = new Date();
-        const upcoming = new Date(now.getTime() + UPCOMING_MS);
-        const allDue = (Array.isArray(firearms) ? firearms : [])
-          .filter((f) => f.lastMaintenanceDate && f.maintenanceIntervalDays)
-          .map((f) => ({
-            ...f,
-            dueDate: addDays(new Date(f.lastMaintenanceDate), Number(f.maintenanceIntervalDays)),
-          }))
-          .filter((f) => f.dueDate <= upcoming)
-          .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
-
-        const overdue = allDue.filter((f) => f.dueDate <= now);
-        const dueSoon = allDue.filter((f) => f.dueDate > now);
-        const MAX = 8;
-        const overdueDisplay = overdue
-          .slice(0, MAX)
-          .map((f) => ({ ...f, days: daysBetween(now.getTime(), f.dueDate.getTime()) }));
-        const dueSoonDisplay = dueSoon
-          .slice(0, MAX - overdueDisplay.length)
-          .map((f) => ({ ...f, days: daysBetween(now.getTime(), f.dueDate.getTime()) }));
-        setOverdueFirearms(overdueDisplay);
-        setDueSoonFirearms(dueSoonDisplay);
+        const tracked = (Array.isArray(firearms) ? firearms : []).filter(
+          (f: MaintenanceDueItem) => f.lastMaintenanceDate && f.maintenanceIntervalDays,
+        ) as MaintenanceDueItem[];
+        const { overdue, dueSoon } = partitionByDue(tracked, (f) =>
+          addDaysDateOnly(f.lastMaintenanceDate as string, Number(f.maintenanceIntervalDays)),
+        );
+        setOverdueFirearms(overdue);
+        setDueSoonFirearms(dueSoon);
       })
       .catch(() => {
         setOverdueFirearms([]);
@@ -235,33 +205,15 @@ function MaintenanceDueWidget() {
     fetch("/api/accessories", { cache: "no-store" })
       .then((r) => r.json())
       .then((accessories) => {
-        const now = new Date();
-        const upcoming = new Date(now.getTime() + UPCOMING_MS);
-        const allDue = (Array.isArray(accessories) ? accessories : [])
-          .filter(
-            (a) =>
-              a.hasBattery === true &&
-              a.lastBatteryChangeDate != null &&
-              a.replacementIntervalDays != null
-          )
-          .map((a) => ({
-            ...a,
-            dueDate: addDays(new Date(a.lastBatteryChangeDate), Number(a.replacementIntervalDays)),
-          }))
-          .filter((a) => a.dueDate <= upcoming)
-          .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
-
-        const overdue = allDue.filter((a) => a.dueDate <= now);
-        const dueSoon = allDue.filter((a) => a.dueDate > now);
-        const MAX = 8;
-        const overdueDisplay = overdue
-          .slice(0, MAX)
-          .map((a) => ({ ...a, days: daysBetween(now.getTime(), a.dueDate.getTime()) }));
-        const dueSoonDisplay = dueSoon
-          .slice(0, MAX - overdueDisplay.length)
-          .map((a) => ({ ...a, days: daysBetween(now.getTime(), a.dueDate.getTime()) }));
-        setOverdueItems(overdueDisplay);
-        setDueSoonItems(dueSoonDisplay);
+        const tracked = (Array.isArray(accessories) ? accessories : []).filter(
+          (a: BatteryDueItem & { hasBattery?: boolean }) =>
+            a.hasBattery === true && a.lastBatteryChangeDate != null && a.replacementIntervalDays != null,
+        ) as BatteryDueItem[];
+        const { overdue, dueSoon } = partitionByDue(tracked, (a) =>
+          addDaysDateOnly(a.lastBatteryChangeDate, Number(a.replacementIntervalDays)),
+        );
+        setOverdueItems(overdue);
+        setDueSoonItems(dueSoon);
       })
       .catch(() => {
         setOverdueItems([]);
@@ -322,7 +274,7 @@ function MaintenanceDueWidget() {
                       <p className="text-sm font-semibold text-vault-text">{item.name}</p>
                       <p className="text-xs text-vault-text-muted">{item.manufacturer} · {item.model}</p>
                     </div>
-                    <span className="text-xs text-yellow-400 font-mono">Due in {item.days}d</span>
+                    <span className="text-xs text-yellow-400 font-mono">{dueInLabel(item.days)}</span>
                   </Link>
                 ))}
               </>
@@ -382,7 +334,7 @@ function MaintenanceDueWidget() {
                           {item.batteryType ? ` — ${item.batteryType}` : ""}
                         </p>
                       </div>
-                      <span className="text-xs text-yellow-400 font-mono">Due in {item.days}d</span>
+                      <span className="text-xs text-yellow-400 font-mono">{dueInLabel(item.days)}</span>
                     </Link>
                   ))}
                 </>

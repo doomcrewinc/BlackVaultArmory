@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { hostTimeZone } from "@/test/host-timezone";
 import {
+  addDaysDateOnly,
+  calendarDaysUntil,
   formatDateOnly,
   formatDateTime,
   formatTimestamp,
@@ -272,3 +274,35 @@ describe("todayLocalISO", () => {
     expect(todayLocalISO(earlyJanuary)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+describe("addDaysDateOnly", () => {
+  it.each([
+    ["2026-07-03T00:00:00.000Z", 90, "2026-10-01"],
+    ["2026-07-03", 90, "2026-10-01"],
+    ["2026-12-31", 1, "2027-01-01"],
+    ["2028-02-28", 1, "2028-02-29"],
+    ["2026-03-07", 2, "2026-03-09"], // across a US daylight-saving change
+    ["2026-10-01", -90, "2026-07-03"],
+  ])("%s + %i days = %s", (from, days, expected) => {
+    expect(addDaysDateOnly(from, days).toISOString()).toBe(`${expected}T00:00:00.000Z`);
+  });
+});
+
+describe("calendarDaysUntil", () => {
+  it.each([
+    ["2026-10-01", "2026-10-05", -4],
+    ["2026-10-01T00:00:00.000Z", "2026-10-05", -4],
+    ["2026-10-01", "2026-10-01", 0],
+    ["2026-10-01", "2026-09-30", 1],
+    ["2026-11-02", "2026-10-31", 2], // across a US daylight-saving change
+  ])("%s seen on %s is %i", (value, today, expected) => {
+    expect(calendarDaysUntil(value, today)).toBe(expected);
+  });
+
+  it("uses the viewer's own date, not the UTC day, late in the evening west of UTC", () => {
+    // 5 October, 19:47 in Denver is already 6 October in UTC.
+    const viewerToday = "2026-10-05";
+    expect(calendarDaysUntil("2026-10-01", viewerToday)).toBe(-4);
+  });
+});
+
