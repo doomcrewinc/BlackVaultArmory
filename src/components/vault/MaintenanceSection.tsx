@@ -8,7 +8,7 @@ import {
   Plus,
   Wrench,
 } from "lucide-react";
-import { formatDateOnly, todayLocalISO } from "@/lib/date";
+import { addDaysDateOnly, calendarDaysUntil, formatDateOnly, todayLocalISO } from "@/lib/date";
 
 type LogEntry = {
   id: string;
@@ -27,8 +27,7 @@ type Props = {
 
 function computeStatus(lastDate: string | null, intervalDays: number | null) {
   if (!lastDate || !intervalDays) return { label: "Neutral", style: "text-vault-text-faint border-vault-border" };
-  const next = new Date(new Date(lastDate).getTime() + intervalDays * 86400000);
-  const days = Math.ceil((next.getTime() - Date.now()) / 86400000);
+  const days = calendarDaysUntil(addDaysDateOnly(lastDate, intervalDays));
   if (days < 0) return { label: "Due", style: "text-[#E53935] border-[#E53935]/40" };
   if (days <= 14) return { label: "Upcoming", style: "text-[#F5A623] border-[#F5A623]/40" };
   return { label: "On Track", style: "text-[#00C853] border-[#00C853]/40" };
@@ -36,7 +35,7 @@ function computeStatus(lastDate: string | null, intervalDays: number | null) {
 
 function computeNextDue(lastDate: string | null, intervalDays: number | null): string | null {
   if (!lastDate || !intervalDays) return null;
-  return new Date(new Date(lastDate).getTime() + intervalDays * 86400000).toISOString();
+  return addDaysDateOnly(lastDate, intervalDays).toISOString();
 }
 
 export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLastDate, maintenanceIntervalDays: initialInterval, initialLogs }: Props) {
