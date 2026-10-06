@@ -16,6 +16,25 @@ afterEach(() => {
 
 // mobileOpen keeps the drawer's aria-hidden off, so getByRole finds its content; mobileOnly
 // keeps only one copy of the nav in the DOM (the desktop <aside> renders the same links too).
+describe("Sidebar — no storage-named Accessories entry", () => {
+  it.each([
+    ["a plain USER", { displayName: "Jeff", role: "USER" as const }],
+    ["an ADMIN", { displayName: "Ann", role: "ADMIN" as const }],
+  ])("has no Accessories link for %s", (_who, user) => {
+    render(<Sidebar mobileOnly mobileOpen user={user} />);
+    expect(screen.queryByRole("link", { name: /accessories/i })).toBeNull();
+    expect(
+      screen.getAllByRole("link").some((link) => link.getAttribute("href") === "/accessories"),
+    ).toBe(false);
+  });
+
+  it("still lists the Documents and Settings links", () => {
+    render(<Sidebar mobileOnly mobileOpen />);
+    expect(screen.getByRole("link", { name: /documents/i })).toHaveAttribute("href", "/documents");
+    expect(screen.getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+  });
+});
+
 describe("Sidebar — admin-only Users link", () => {
   it("hides the Users link for a plain USER", () => {
     render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);

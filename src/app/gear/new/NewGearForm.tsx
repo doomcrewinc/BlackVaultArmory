@@ -1,95 +1,55 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { itemNoun } from "@/lib/sections/wording";
 import {
   GEAR_CATEGORIES,
   GEAR_CATEGORY_LABELS,
   DEFAULT_GEAR_CATEGORY,
   isArmorCategory,
 } from "@/lib/gear";
-import { toISODate } from "@/lib/date";
 import ImagePicker from "@/components/shared/ImagePicker";
-import { ArrowLeft, Save, Loader2, AlertCircle } from "lucide-react";
+import { addFormContext, capitalizeFirst } from "@/lib/sections/wording";
+import { TypeSelectField } from "@/components/shared/TypeSelectField";
+import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
 const LABEL_CLASS =
   "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
-interface GearItem {
-  id: string;
-  name: string;
-  manufacturer: string | null;
-  model: string | null;
-  serialNumber: string | null;
-  category: string;
-  quantity: number;
-  purchasePrice: number | null;
-  currentValue: number | null;
-  acquisitionDate: string | null;
-  expirationDate: string | null;
-  protectionLevel: string | null;
-  armorSize: string | null;
-  storageLocation: string | null;
-  notes: string | null;
-  imageUrl: string | null;
-  imageSource: string | null;
-}
+type Props = Readonly<{
+  /** The `section` query value; ignored unless it names a section this form can add to. */
+  section?: string | null;
+}>;
 
-export default function EditGearPage() {
+export function NewGearForm({ section }: Props) {
   const router = useRouter();
-  const params = useParams<{ id: string }>();
-  const gearId = Array.isArray(params.id) ? params.id[0] : params.id;
-  const invalidRoute = !gearId;
-
-  const [gear, setGear] = useState<GearItem | null>(null);
-  const [dataLoading, setDataLoading] = useState(!invalidRoute);
-  const [dataError, setDataError] = useState<string | null>(null);
-
+  const context = addFormContext("gear", section);
+  const noun = context?.singular ?? "gear";
+  const categoryOptions = GEAR_CATEGORIES.filter(
+    (c) => !context || context.allowedValues.includes(c),
+  ).map((c) => ({ value: c, label: GEAR_CATEGORY_LABELS[c] }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-
-  // Controlled so the select and quantity input always render the loaded
-  // record's values, never the form's own uninitialised defaults.
-  const [category, setCategory] = useState<string>(DEFAULT_GEAR_CATEGORY);
   const [quantity, setQuantity] = useState("1");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!gearId) return;
-
-    fetch(`/api/gear/${gearId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.error) {
-          setDataError(data.error);
-        } else {
-          setGear(data);
-          setCategory(data.category ?? DEFAULT_GEAR_CATEGORY);
-          setQuantity(String(data.quantity ?? 1));
-          setImageUrl(data.imageUrl ?? null);
-        }
-        setDataLoading(false);
-      })
-      .catch(() => {
-        setDataError("Failed to load item");
-        setDataLoading(false);
-      });
-  }, [gearId]);
+  const [category, setCategory] = useState<string>(
+    context?.allowedValues[0] ?? DEFAULT_GEAR_CATEGORY,
+  );
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-    setSuccess(false);
     setLoading(true);
 
     const form = e.currentTarget;
     const data = new FormData(form);
 
+    // A truthy check, not Number.isFinite: Number("") is 0, which is finite
+    // and >= 0, so an empty field would otherwise be stored as a real $0
+    // instead of null and render "$0" instead of "—".
     const payload = {
       name: data.get("name") as string,
       category: data.get("category") as string,
@@ -114,8 +74,8 @@ export default function EditGearPage() {
     };
 
     try {
-      const res = await fetch(`/api/gear/${gearId}`, {
-        method: "PUT",
+      const res = await fetch("/api/gear", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -123,79 +83,44 @@ export default function EditGearPage() {
       const json = await res.json();
 
       if (!res.ok) {
-        setError(json.error ?? "Failed to update item");
+        setError(json.error ?? `Failed to create ${noun}`);
         setLoading(false);
         return;
       }
 
-      setSuccess(true);
-      setTimeout(() => {
-        router.push(`/gear/item/${gearId}`);
-      }, 800);
+      router.push(context?.returnHref ?? `/gear/item/${json.id}`);
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);
     }
   }
 
-  if (dataLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-full">
-        <Loader2 className="w-8 h-8 text-[#00C2FF] animate-spin" />
-      </div>
-    );
-  }
-
-  if (invalidRoute) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">Invalid gear route.</p>
-        <Link href="/gear" className="text-sm text-[#00C2FF] hover:underline">
-          Back to Gear
-        </Link>
-      </div>
-    );
-  }
-
-  if (dataError || !gear) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">{dataError ?? "Item not found"}</p>
-        <Link href="/gear" className="text-sm text-[#00C2FF] hover:underline">
-          Back to Gear
-        </Link>
-      </div>
-    );
-  }
-
-  const noun = itemNoun("gear", gear.category);
-
   return (
     <div className="min-h-full">
-      {/* Header */}
-      <div className="flex items-center gap-4 px-6 py-4 border-b border-vault-border flex-wrap">
+      {/* Breadcrumb header */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
         <Link
-          href={`/gear/item/${gearId}`}
+          href={context?.returnHref ?? "/gear"}
           className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to {gear.name}
+          Back to {context?.sectionLabel ?? "Gear"}
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit {noun}
+          Add {noun}
         </h1>
       </div>
 
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <div className="mb-8">
           <h2 className="text-xl font-bold text-vault-text mb-1">
-            Edit {gear.name}
+            New {noun} entry
           </h2>
           <p className="text-sm text-vault-text-muted">
-            Update the details for this item.
+            {context
+              ? `Register a new ${noun} in the arsenal.`
+              : "Register a knife, case or other standalone item in the arsenal."}
           </p>
         </div>
 
@@ -203,13 +128,6 @@ export default function EditGearPage() {
           <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
             <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
             <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
-
-        {success && (
-          <div className="flex items-center gap-3 bg-[#00C853]/10 border border-[#00C853]/30 rounded-lg px-4 py-3 mb-6">
-            <Save className="w-4 h-4 text-[#00C853] shrink-0" />
-            <p className="text-sm text-[#00C853]">Saved! Redirecting...</p>
           </div>
         )}
 
@@ -222,36 +140,29 @@ export default function EditGearPage() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                Item Name <span className="text-[#E53935]">*</span>
+                {context ? capitalizeFirst(noun) : "Item"} name{" "}
+                <span className="text-[#E53935]">*</span>
               </label>
               <input
                 id="name"
                 name="name"
                 type="text"
                 required
-                defaultValue={gear.name}
+                placeholder="e.g. Benchmade Bugout"
                 className={INPUT_CLASS}
               />
             </div>
 
-            <div>
-              <label htmlFor="category" className={LABEL_CLASS}>
-                Category
-              </label>
-              <select
-                id="category"
-                name="category"
-                value={category}
-                onChange={(event) => setCategory(event.target.value)}
-                className={INPUT_CLASS}
-              >
-                {GEAR_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {GEAR_CATEGORY_LABELS[c]}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <TypeSelectField
+              id="category"
+              label="Category"
+              options={categoryOptions}
+              value={category}
+              onChange={setCategory}
+              fixed={categoryOptions.length === 1 && context !== null}
+              inputClassName={INPUT_CLASS}
+              labelClassName={LABEL_CLASS}
+            />
 
             {isArmorCategory(category) && (
               <fieldset className="rounded-lg border border-vault-border p-4">
@@ -267,7 +178,6 @@ export default function EditGearPage() {
                       type="text"
                       id="protectionLevel"
                       name="protectionLevel"
-                      defaultValue={gear.protectionLevel ?? ""}
                       placeholder="IIIA, III, IV"
                       className={INPUT_CLASS}
                     />
@@ -280,7 +190,6 @@ export default function EditGearPage() {
                       type="text"
                       id="armorSize"
                       name="armorSize"
-                      defaultValue={gear.armorSize ?? ""}
                       placeholder="M SAPI, Swimmer, 10x12"
                       className={INPUT_CLASS}
                     />
@@ -301,7 +210,7 @@ export default function EditGearPage() {
                   id="manufacturer"
                   name="manufacturer"
                   type="text"
-                  defaultValue={gear.manufacturer ?? ""}
+                  placeholder="e.g. Benchmade"
                   className={INPUT_CLASS}
                 />
               </div>
@@ -313,7 +222,7 @@ export default function EditGearPage() {
                   id="model"
                   name="model"
                   type="text"
-                  defaultValue={gear.model ?? ""}
+                  placeholder="e.g. 535 Bugout"
                   className={INPUT_CLASS}
                 />
               </div>
@@ -327,7 +236,6 @@ export default function EditGearPage() {
                 id="serialNumber"
                 name="serialNumber"
                 type="text"
-                defaultValue={gear.serialNumber ?? ""}
                 placeholder="e.g. SN-12345 (optional)"
                 className={`${INPUT_CLASS} font-mono`}
               />
@@ -368,7 +276,6 @@ export default function EditGearPage() {
                   id="acquisitionDate"
                   name="acquisitionDate"
                   type="date"
-                  defaultValue={toISODate(gear.acquisitionDate)}
                   className={INPUT_CLASS}
                 />
               </div>
@@ -380,7 +287,6 @@ export default function EditGearPage() {
                   id="storageLocation"
                   name="storageLocation"
                   type="text"
-                  defaultValue={gear.storageLocation ?? ""}
                   placeholder="e.g. Safe, drawer 2"
                   className={INPUT_CLASS}
                 />
@@ -395,7 +301,6 @@ export default function EditGearPage() {
                 type="date"
                 id="expirationDate"
                 name="expirationDate"
-                defaultValue={toISODate(gear.expirationDate)}
                 className={INPUT_CLASS}
               />
               <p className="mt-1 text-xs text-vault-text-muted">
@@ -418,7 +323,6 @@ export default function EditGearPage() {
                     type="number"
                     min="0"
                     step="0.01"
-                    defaultValue={gear.purchasePrice ?? ""}
                     placeholder="0.00"
                     className={`${INPUT_CLASS} pl-7`}
                   />
@@ -438,7 +342,6 @@ export default function EditGearPage() {
                     type="number"
                     min="0"
                     step="0.01"
-                    defaultValue={gear.currentValue ?? ""}
                     placeholder="0.00"
                     className={`${INPUT_CLASS} pl-7`}
                   />
@@ -454,7 +357,6 @@ export default function EditGearPage() {
             </legend>
             <ImagePicker
               entityType="gear"
-              entityId={gear.id}
               value={imageUrl}
               onChange={setImageUrl}
             />
@@ -473,7 +375,6 @@ export default function EditGearPage() {
                 id="notes"
                 name="notes"
                 rows={3}
-                defaultValue={gear.notes ?? ""}
                 placeholder="Any additional notes about this item..."
                 className={`${INPUT_CLASS} resize-none`}
               />
@@ -483,22 +384,22 @@ export default function EditGearPage() {
           {/* Actions */}
           <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
             <Link
-              href={`/gear/item/${gearId}`}
+              href={context?.returnHref ?? "/gear"}
               className="w-full sm:w-auto text-center px-4 py-2 text-sm text-vault-text-muted hover:text-vault-text border border-vault-border rounded-md hover:border-vault-text-muted/30 transition-colors"
             >
               Cancel
             </Link>
             <button
               type="submit"
-              disabled={loading || success}
+              disabled={loading}
               className="w-full sm:w-auto justify-center flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-md text-sm font-medium transition-colors"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
-                <Save className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
               )}
-              {loading ? "Saving..." : success ? "Saved!" : "Save Changes"}
+              {loading ? "Adding..." : `Add ${noun}`}
             </button>
           </div>
         </form>

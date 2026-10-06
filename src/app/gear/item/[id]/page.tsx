@@ -284,7 +284,7 @@ export default async function GearDetailPage({
         <ItemDocumentPanel
           entityType="gear"
           entityId={gear.id}
-          title="Gear Documents"
+          title="Documents"
         />
 
         {currentUser?.role === "ADMIN" && (

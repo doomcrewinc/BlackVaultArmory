@@ -253,7 +253,7 @@ export default async function SupplyDetailPage({
         <ItemDocumentPanel
           entityType="supply"
           entityId={supply.id}
-          title="Supply Documents"
+          title="Documents"
         />
 
         {currentUser?.role === "ADMIN" && (

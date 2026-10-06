@@ -85,12 +85,6 @@ const BOTTOM_NAV_ITEMS = [
     adminOnly: true,
   },
   {
-    label: "Accessories",
-    href: "/accessories",
-    icon: Crosshair,
-    description: "All accessories",
-  },
-  {
     label: "Documents",
     href: "/documents",
     icon: FileText,

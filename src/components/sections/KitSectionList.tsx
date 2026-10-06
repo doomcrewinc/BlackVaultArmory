@@ -114,7 +114,7 @@ export function KitSectionList({
       className="flex items-center gap-2 rounded border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-3 py-1.5 text-sm font-medium text-[#00C2FF] transition-colors hover:bg-[#00C2FF]/20"
     >
       <Plus className="h-4 w-4" />
-      Add Kit
+      Add kit
     </Link>
   );
 
@@ -161,7 +161,7 @@ export function KitSectionList({
               className="flex items-center gap-2 rounded border border-[#00C2FF]/30 bg-[#00C2FF]/10 px-4 py-2 text-sm font-medium text-[#00C2FF] transition-colors hover:bg-[#00C2FF]/20"
             >
               <Plus className="h-4 w-4" />
-              Add First Kit
+              Add first kit
             </Link>
           </div>
         ) : (

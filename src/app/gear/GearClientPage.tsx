@@ -8,6 +8,18 @@ import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import type { ExpiryStatus } from "@/lib/supply";
+import { type ListWording } from "@/lib/sections/wording";
+
+const DEFAULT_WORDING: ListWording = {
+  addLabel: "Add gear",
+  addHref: "/gear/new",
+  emptyTitle: "No gear yet",
+  emptyHint:
+    "Add knives, cases and other standalone kit to track what you own.",
+  addFirstLabel: "Add first item",
+  totalLabel: "Total items",
+  noMatch: "No items match the selected filter.",
+};
 
 interface GearItem {
   id: string;
@@ -40,6 +52,11 @@ interface Props {
   timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
+  /**
+   * The words for this list's rows. Defaults to the generic wording of the
+   * standalone page; a section page passes its own.
+   */
+  wording?: ListWording;
   /**
    * True when this list is one block of a multi-source section page (see
    * SectionView). The page owns the `h1`, so the block gets the lighter
@@ -81,6 +98,7 @@ export function GearClientPage({
   timezoneConfigured,
   heading = "GEAR",
   subheading,
+  wording = DEFAULT_WORDING,
   embedded = false,
 }: Props) {
   // The SAME rule KitSectionList/KitContents use: show the notice only where
@@ -93,11 +111,11 @@ export function GearClientPage({
 
   const addAction = (
     <Link
-      href="/gear/new"
+      href={wording.addHref}
       className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
     >
       <Plus className="w-4 h-4" />
-      Add Gear
+      {wording.addLabel}
     </Link>
   );
 
@@ -136,17 +154,17 @@ export function GearClientPage({
               <Package className="w-8 h-8 text-[#00C2FF]" />
             </div>
             <h3 className="text-lg font-semibold text-vault-text mb-2">
-              No gear yet
+              {wording.emptyTitle}
             </h3>
             <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-              Add knives, cases and other standalone kit to track what you own.
+              {wording.emptyHint}
             </p>
             <Link
-              href="/gear/new"
+              href={wording.addHref}
               className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-4 py-2 rounded text-sm font-medium transition-colors"
             >
               <Plus className="w-4 h-4" />
-              Add First Item
+              {wording.addFirstLabel}
             </Link>
           </div>
         ) : (

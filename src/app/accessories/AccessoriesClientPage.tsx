@@ -8,6 +8,7 @@ import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
+import { type ListWording } from "@/lib/sections/wording";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
   MUZZLE: "Muzzle",
@@ -70,10 +71,26 @@ interface AccessoryWithBuild {
   } | null;
 }
 
+const DEFAULT_WORDING: ListWording = {
+  addLabel: "Add accessory",
+  addHref: "/accessories/new",
+  emptyTitle: "No accessories yet",
+  emptyHint:
+    "Add parts, optics, suppressors and other attachments to track round counts and build configurations.",
+  addFirstLabel: "Add first accessory",
+  totalLabel: "Total parts",
+  noMatch: "No accessories match the selected filter.",
+};
+
 interface Props {
   accessories: AccessoryWithBuild[];
   heading?: string;
   subheading?: string;
+  /**
+   * The words for this list's rows. Defaults to the generic wording of the
+   * standalone page; a section page passes its own.
+   */
+  wording?: ListWording;
   /**
    * True when this list is one block of a multi-source section page (see
    * SectionView). The page owns the `h1`, so the block gets the lighter
@@ -86,6 +103,7 @@ export function AccessoriesClientPage({
   accessories,
   heading = "ACCESSORIES",
   subheading,
+  wording = DEFAULT_WORDING,
   embedded = false,
 }: Props) {
   const [selectedType, setSelectedType] = useState<string | null>(null);
@@ -106,11 +124,11 @@ export function AccessoriesClientPage({
 
   const addAction = (
     <Link
-      href="/accessories/new"
+      href={wording.addHref}
       className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
     >
       <Plus className="w-4 h-4" />
-      Add Accessory
+      {wording.addLabel}
     </Link>
   );
 
@@ -134,7 +152,7 @@ export function AccessoriesClientPage({
         <div className="flex flex-wrap items-center gap-4 sm:gap-6 mb-6 bg-vault-surface border border-vault-border rounded-lg px-4 sm:px-5 py-3">
           <div>
             <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">
-              Total Parts
+              {wording.totalLabel}
             </p>
             <p className="text-lg font-bold font-mono text-vault-text">
               {formatNumber(accessories.length)}
@@ -191,24 +209,23 @@ export function AccessoriesClientPage({
                   <Crosshair className="w-8 h-8 text-[#00C2FF]" />
                 </div>
                 <h3 className="text-lg font-semibold text-vault-text mb-2">
-                  No accessories yet
+                  {wording.emptyTitle}
                 </h3>
                 <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-                  Add parts, optics, suppressors and other attachments to track
-                  round counts and build configurations.
+                  {wording.emptyHint}
                 </p>
                 <Link
-                  href="/accessories/new"
+                  href={wording.addHref}
                   className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-4 py-2 rounded text-sm font-medium transition-colors"
                 >
                   <Plus className="w-4 h-4" />
-                  Add First Accessory
+                  {wording.addFirstLabel}
                 </Link>
               </>
             ) : (
               <>
                 <p className="text-sm text-vault-text-muted mb-3">
-                  No accessories match the selected filter.
+                  {wording.noMatch}
                 </p>
                 <button
                   onClick={() => setSelectedType(null)}

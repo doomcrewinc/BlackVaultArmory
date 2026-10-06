@@ -14,6 +14,18 @@ import {
 } from "@/lib/supply";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import type { SupplySectionItem } from "./getSupplySectionItems";
+import { type ListWording } from "@/lib/sections/wording";
+
+const DEFAULT_WORDING: ListWording = {
+  addLabel: "Add supply",
+  addHref: "/supplies/new",
+  emptyTitle: "No supplies yet",
+  emptyHint:
+    "Track consumables here — quantity, low-stock alerts and expiry dates.",
+  addFirstLabel: "Add first supply",
+  totalLabel: "Total supplies",
+  noMatch: "No supplies match the selected filter.",
+};
 
 interface Props {
   items: SupplySectionItem[];
@@ -28,6 +40,11 @@ interface Props {
   timezoneConfigured: boolean;
   heading?: string;
   subheading?: string;
+  /**
+   * The words for this list's rows. Defaults to the generic wording of the
+   * standalone page; a section page passes its own.
+   */
+  wording?: ListWording;
   /**
    * True when this list is one block of a multi-source section page (see
    * SectionView). The page owns the `h1` AND the timezone notice — the notice
@@ -109,6 +126,7 @@ export function SupplyClientPage({
   timezoneConfigured,
   heading = "SUPPLIES",
   subheading,
+  wording = DEFAULT_WORDING,
   embedded = false,
 }: Props) {
   // The SAME rule KitSectionList/KitContents use: show the notice only where
@@ -122,11 +140,11 @@ export function SupplyClientPage({
 
   const addAction = (
     <Link
-      href="/supplies/new"
+      href={wording.addHref}
       className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
     >
       <Plus className="w-4 h-4" />
-      Add Supply
+      {wording.addLabel}
     </Link>
   );
 
@@ -163,18 +181,17 @@ export function SupplyClientPage({
               <Boxes className="w-8 h-8 text-[#00C2FF]" />
             </div>
             <h3 className="text-lg font-semibold text-vault-text mb-2">
-              No supplies yet
+              {wording.emptyTitle}
             </h3>
             <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-              Track consumables here — quantity, low-stock alerts and expiry
-              dates.
+              {wording.emptyHint}
             </p>
             <Link
-              href="/supplies/new"
+              href={wording.addHref}
               className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-4 py-2 rounded text-sm font-medium transition-colors"
             >
               <Plus className="w-4 h-4" />
-              Add First Supply
+              {wording.addFirstLabel}
             </Link>
           </div>
         ) : (

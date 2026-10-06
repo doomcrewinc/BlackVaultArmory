@@ -12,8 +12,10 @@ import {
   groupHref,
   kitWhereForSection,
   sectionBySlug,
+  sectionAllowedValues,
   sectionHref,
   sectionIsRenderable,
+  sectionNounFor,
   sectionSources,
   sectionsForGroup,
   supplySectionForItem,
@@ -848,6 +850,9 @@ describe("section renderability", () => {
         slug: "hollow",
         label: "Hollow",
         description: "",
+        singular: "hollow",
+        plural: "hollows",
+        emptyHint: "Nothing here.",
         group: "prep",
         icon: "Package",
         sources: [],
@@ -981,4 +986,117 @@ describe("the kits section", () => {
     expect(kitWhereForSection(kits)).toEqual({});
     expect(kitWhereForSection(sectionBySlug("armor")!)).toBeNull();
   });
+});
+
+describe("section wording", () => {
+  const renderedGroups = CATEGORY_SECTIONS.filter(
+    (section) => section.group !== "vault",
+  );
+
+  // Sections whose own words may contain the storage name. None today: the
+  // accessory sections say what the thing is (magazine, optic, receiver).
+  const MAY_NAME_ACCESSORIES: string[] = [];
+
+  function wordsOf(section: CategorySection): string[] {
+    const blocks = Object.values(section.blocks ?? {});
+    return [
+      section.singular,
+      section.plural,
+      section.emptyHint,
+      ...blocks.flatMap((b) => [b.heading, b.singular, b.plural, b.emptyHint]),
+    ];
+  }
+
+  it.each(CATEGORY_SECTIONS.map((section) => [section.slug, section] as const))(
+    "%s has a singular and plural noun and an empty-state sentence",
+    (_slug, section) => {
+      expect(section.singular.trim()).not.toBe("");
+      expect(section.plural.trim()).not.toBe("");
+      expect(section.plural).not.toBe(section.singular);
+      expect(section.emptyHint.trim()).not.toBe("");
+      expect(section.emptyHint).toMatch(/\.$/);
+    },
+  );
+
+  it.each(renderedGroups.map((section) => [section.slug, section] as const))(
+    "%s does not call its things by a storage name",
+    (slug, section) => {
+      const storageNames = MAY_NAME_ACCESSORIES.includes(slug)
+        ? /\bgear\b/i
+        : /\baccessor(y|ies)\b|\bgear\b/i;
+      for (const words of wordsOf(section)) {
+        expect(words, `${slug}: ${words}`).not.toMatch(storageNames);
+      }
+    },
+  );
+
+  it.each(
+    CATEGORY_SECTIONS.filter((s) => sectionSources(s).length > 1).map(
+      (section) => [section.slug, section] as const,
+    ),
+  )("%s, which has several sources, words every block", (_slug, section) => {
+    for (const kind of sectionSources(section)) {
+      const block = section.blocks?.[kind];
+      expect(block?.heading.trim(), `${kind} heading`).toBeTruthy();
+      expect(sectionNounFor(section, kind)).toBe(block);
+    }
+  });
+
+  it("uses the section's own words for a single-source section", () => {
+    expect(
+      sectionNounFor(sectionBySlug("magazines")!, "accessory"),
+    ).toMatchObject({
+      singular: "magazine",
+      plural: "magazines",
+    });
+  });
+});
+
+describe("sectionAllowedValues", () => {
+  it.each([
+    ["magazines", "accessory", ["MAGAZINE"]],
+    ["optics", "accessory", ["OPTIC", "OPTIC_MOUNT"]],
+    ["lowers", "accessory", ["LOWER_RECEIVER", "UPPER_RECEIVER"]],
+    ["knives", "gear", ["KNIFE"]],
+    ["medical", "gear", ["MEDICAL_KIT"]],
+    ["medical", "supply", ["MEDICAL"]],
+    ["cleaning", "supply", ["CLEANING"]],
+    ["food-water", "supply", ["FOOD", "WATER", "FILTER"]],
+  ] as const)("%s / %s", (slug, kind, expected) => {
+    expect(sectionAllowedValues(sectionBySlug(slug)!, kind)).toEqual(expected);
+  });
+
+  it("gives the catch-all Parts section every accessory type no other section claims", () => {
+    const claimed = CATEGORY_SECTIONS.filter(
+      (section) => section.slug !== "parts",
+    ).flatMap((section) => sectionAllowedValues(section, "accessory"));
+    const parts = sectionAllowedValues(sectionBySlug("parts")!, "accessory");
+    expect(parts).toEqual(SLOT_TYPES.filter((type) => !claimed.includes(type)));
+    expect(parts).toContain("STOCK");
+    expect(parts).not.toContain("MAGAZINE");
+    expect(parts).not.toContain("SUPPRESSOR");
+  });
+
+  it("is empty for a section with no source of that kind", () => {
+    expect(sectionAllowedValues(sectionBySlug("magazines")!, "gear")).toEqual(
+      [],
+    );
+    expect(
+      sectionAllowedValues(sectionBySlug("handguns")!, "accessory"),
+    ).toEqual([]);
+  });
+
+  it.each(["gear", "supply"] as const)(
+    "splits every %s category across the sections with no value claimed twice or dropped",
+    (kind) => {
+      const universe = kind === "gear" ? GEAR_CATEGORIES : SUPPLY_CATEGORIES;
+      const all = CATEGORY_SECTIONS.flatMap((section) =>
+        sectionAllowedValues(section, kind),
+      );
+      expect([...new Set(all)].sort((a, b) => a.localeCompare(b))).toEqual(
+        [...universe].sort((a, b) => a.localeCompare(b)),
+      );
+      expect(all.length).toBe(universe.length);
+    },
+  );
 });

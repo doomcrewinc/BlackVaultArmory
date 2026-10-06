@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { itemNoun } from "@/lib/sections/wording";
 import {
   SUPPLY_CATEGORIES,
   SUPPLY_CATEGORY_LABELS,
@@ -12,77 +11,47 @@ import {
   SUPPLY_UNIT_LABELS,
   DEFAULT_SUPPLY_UNIT,
 } from "@/lib/supply";
-import { toISODate } from "@/lib/date";
-import { ArrowLeft, Save, Loader2, AlertCircle } from "lucide-react";
+import { addFormContext } from "@/lib/sections/wording";
+import { TypeSelectField } from "@/components/shared/TypeSelectField";
+import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
 const LABEL_CLASS =
   "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
-interface SupplyItem {
-  id: string;
-  name: string;
-  brand: string | null;
-  category: string;
-  quantity: number;
-  unit: string;
-  lowStockAlert: number | null;
-  expirationDate: string | null;
-  purchasePrice: number | null;
-  purchaseDate: string | null;
-  storageLocation: string | null;
-  notes: string | null;
-}
+type Props = Readonly<{
+  /** The `section` query value; ignored unless it names a section this form can add to. */
+  section?: string | null;
+}>;
 
-export default function EditSupplyPage() {
+export function NewSupplyForm({ section }: Props) {
   const router = useRouter();
-  const params = useParams<{ id: string }>();
-  const supplyId = Array.isArray(params.id) ? params.id[0] : params.id;
-  const invalidRoute = !supplyId;
-
-  const [supply, setSupply] = useState<SupplyItem | null>(null);
-  const [dataLoading, setDataLoading] = useState(!invalidRoute);
-  const [dataError, setDataError] = useState<string | null>(null);
-
+  const context = addFormContext("supply", section);
+  const noun = context?.singular ?? "supply";
+  const categoryOptions = SUPPLY_CATEGORIES.filter(
+    (c) => !context || context.allowedValues.includes(c),
+  ).map((c) => ({ value: c, label: SUPPLY_CATEGORY_LABELS[c] }));
+  const [category, setCategory] = useState<string>(
+    context?.allowedValues[0] ?? DEFAULT_SUPPLY_CATEGORY,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-
-  useEffect(() => {
-    if (!supplyId) return;
-
-    fetch(`/api/supplies/${supplyId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.error) {
-          setDataError(data.error);
-        } else {
-          setSupply(data);
-        }
-        setDataLoading(false);
-      })
-      .catch(() => {
-        setDataError("Failed to load item");
-        setDataLoading(false);
-      });
-  }, [supplyId]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-    setSuccess(false);
     setLoading(true);
 
     const form = e.currentTarget;
     const data = new FormData(form);
 
-    // quantity is sent as the raw FormData string — never Number()-parsed —
-    // so the API's normalizeAmount can tell "left blank" (preserve the
-    // stored value) apart from a real 0. lowStockAlert is nullable and can
-    // be intentionally cleared, so a blank field is sent as explicit null
-    // rather than a blank string, which the API would otherwise treat as
-    // "leave it alone" and never actually clear.
+    // quantity and lowStockAlert are sent as the raw FormData string (never
+    // Number()-parsed here) so the API's normalizeAmount does the trimming
+    // and blank-check itself — Number("") is 0, and parsing client-side would
+    // silently store a real 0 instead of letting the API fall back correctly.
+    // purchasePrice has no such fallback in the API, so a blank value must be
+    // sent as null explicitly rather than a parsed 0.
     const payload = {
       name: data.get("name") as string,
       brand: (data.get("brand") as string) || null,
@@ -102,8 +71,8 @@ export default function EditSupplyPage() {
     };
 
     try {
-      const res = await fetch(`/api/supplies/${supplyId}`, {
-        method: "PUT",
+      const res = await fetch("/api/supplies", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -111,79 +80,55 @@ export default function EditSupplyPage() {
       const json = await res.json();
 
       if (!res.ok) {
-        setError(json.error ?? "Failed to update item");
+        setError(json.error ?? `Failed to create ${noun}`);
         setLoading(false);
         return;
       }
 
-      setSuccess(true);
-      setTimeout(() => {
-        router.push(`/supplies/item/${supplyId}`);
-      }, 800);
+      router.push(context?.returnHref ?? `/supplies/item/${json.id}`);
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);
     }
   }
 
-  if (dataLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-full">
-        <Loader2 className="w-8 h-8 text-[#00C2FF] animate-spin" />
-      </div>
-    );
-  }
-
-  if (invalidRoute) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">Invalid supply route.</p>
-        <Link href="/" className="text-sm text-[#00C2FF] hover:underline">
-          Back to Command Center
-        </Link>
-      </div>
-    );
-  }
-
-  if (dataError || !supply) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">{dataError ?? "Item not found"}</p>
-        <Link href="/" className="text-sm text-[#00C2FF] hover:underline">
-          Back to Command Center
-        </Link>
-      </div>
-    );
-  }
-
-  const noun = itemNoun("supply", supply.category);
-
   return (
     <div className="min-h-full">
-      {/* Header */}
-      <div className="flex items-center gap-4 px-6 py-4 border-b border-vault-border flex-wrap">
-        <Link
-          href={`/supplies/item/${supplyId}`}
-          className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to {supply.name}
-        </Link>
+      {/* Breadcrumb header */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
+        {context ? (
+          <Link
+            href={context.returnHref}
+            className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to {context.sectionLabel}
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={() => router.back()}
+            className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back
+          </button>
+        )}
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit {noun}
+          Add {noun}
         </h1>
       </div>
 
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <div className="mb-8">
           <h2 className="text-xl font-bold text-vault-text mb-1">
-            Edit {supply.name}
+            New {noun} entry
           </h2>
           <p className="text-sm text-vault-text-muted">
-            Update the details for this item.
+            {context
+              ? `Track a new ${noun}: quantity, low-stock alerts and expiry dates.`
+              : "Track a consumable — cleaning supplies, medical, food, water and the rest."}
           </p>
         </div>
 
@@ -194,18 +139,6 @@ export default function EditSupplyPage() {
           </div>
         )}
 
-        {success && (
-          <div className="flex items-center gap-3 bg-[#00C853]/10 border border-[#00C853]/30 rounded-lg px-4 py-3 mb-6">
-            <Save className="w-4 h-4 text-[#00C853] shrink-0" />
-            <p className="text-sm text-[#00C853]">Saved! Redirecting...</p>
-          </div>
-        )}
-
-        {/* This form only renders once `supply` is loaded (see the loading
-            guards above), so every defaultValue below reads straight off the
-            fetched record — there is no uninitialised-field window for a
-            field to silently fall back to a form default and be overwritten
-            on save. Every field from the API response is represented here. */}
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Identity */}
           <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
@@ -222,7 +155,7 @@ export default function EditSupplyPage() {
                 name="name"
                 type="text"
                 required
-                defaultValue={supply.name}
+                placeholder="e.g. Hoppe's No. 9"
                 className={INPUT_CLASS}
               />
             </div>
@@ -236,27 +169,20 @@ export default function EditSupplyPage() {
                   id="brand"
                   name="brand"
                   type="text"
-                  defaultValue={supply.brand ?? ""}
+                  placeholder="e.g. Hoppe's"
                   className={INPUT_CLASS}
                 />
               </div>
-              <div>
-                <label htmlFor="category" className={LABEL_CLASS}>
-                  Category
-                </label>
-                <select
-                  id="category"
-                  name="category"
-                  defaultValue={supply.category ?? DEFAULT_SUPPLY_CATEGORY}
-                  className={INPUT_CLASS}
-                >
-                  {SUPPLY_CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {SUPPLY_CATEGORY_LABELS[c]}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <TypeSelectField
+                id="category"
+                label="Category"
+                options={categoryOptions}
+                value={category}
+                onChange={setCategory}
+                fixed={categoryOptions.length === 1 && context !== null}
+                inputClassName={INPUT_CLASS}
+                labelClassName={LABEL_CLASS}
+              />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -270,7 +196,7 @@ export default function EditSupplyPage() {
                   type="number"
                   min="0"
                   step="any"
-                  defaultValue={supply.quantity}
+                  placeholder="0"
                   className={INPUT_CLASS}
                 />
               </div>
@@ -281,7 +207,7 @@ export default function EditSupplyPage() {
                 <select
                   id="unit"
                   name="unit"
-                  defaultValue={supply.unit ?? DEFAULT_SUPPLY_UNIT}
+                  defaultValue={DEFAULT_SUPPLY_UNIT}
                   className={INPUT_CLASS}
                 >
                   {SUPPLY_UNITS.map((u) => (
@@ -303,7 +229,6 @@ export default function EditSupplyPage() {
                 type="number"
                 min="0"
                 step="any"
-                defaultValue={supply.lowStockAlert ?? ""}
                 placeholder="Leave blank for no alert"
                 className={INPUT_CLASS}
               />
@@ -320,7 +245,6 @@ export default function EditSupplyPage() {
                 id="expirationDate"
                 name="expirationDate"
                 type="date"
-                defaultValue={toISODate(supply.expirationDate)}
                 className={INPUT_CLASS}
               />
             </div>
@@ -341,7 +265,6 @@ export default function EditSupplyPage() {
                   id="purchaseDate"
                   name="purchaseDate"
                   type="date"
-                  defaultValue={toISODate(supply.purchaseDate)}
                   className={INPUT_CLASS}
                 />
               </div>
@@ -353,7 +276,6 @@ export default function EditSupplyPage() {
                   id="storageLocation"
                   name="storageLocation"
                   type="text"
-                  defaultValue={supply.storageLocation ?? ""}
                   placeholder="e.g. Pantry shelf 2"
                   className={INPUT_CLASS}
                 />
@@ -374,7 +296,6 @@ export default function EditSupplyPage() {
                   type="number"
                   min="0"
                   step="0.01"
-                  defaultValue={supply.purchasePrice ?? ""}
                   placeholder="0.00"
                   className={`${INPUT_CLASS} pl-7`}
                 />
@@ -395,7 +316,6 @@ export default function EditSupplyPage() {
                 id="notes"
                 name="notes"
                 rows={3}
-                defaultValue={supply.notes ?? ""}
                 placeholder="Any additional notes about this item..."
                 className={`${INPUT_CLASS} resize-none`}
               />
@@ -405,22 +325,22 @@ export default function EditSupplyPage() {
           {/* Actions */}
           <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
             <Link
-              href={`/supplies/item/${supplyId}`}
+              href={context?.returnHref ?? "/"}
               className="w-full sm:w-auto text-center px-4 py-2 text-sm text-vault-text-muted hover:text-vault-text border border-vault-border rounded-md hover:border-vault-text-muted/30 transition-colors"
             >
               Cancel
             </Link>
             <button
               type="submit"
-              disabled={loading || success}
+              disabled={loading}
               className="w-full sm:w-auto justify-center flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-md text-sm font-medium transition-colors"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
-                <Save className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
               )}
-              {loading ? "Saving..." : success ? "Saved!" : "Save Changes"}
+              {loading ? "Adding..." : `Add ${noun}`}
             </button>
           </div>
         </form>

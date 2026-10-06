@@ -1,75 +1,49 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { itemNoun } from "@/lib/sections/wording";
 import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import { addFormContext, capitalizeFirst } from "@/lib/sections/wording";
+import { TypeSelectField } from "@/components/shared/TypeSelectField";
+import { parseOptionalNumber } from "@/lib/forms";
 import ImagePicker from "@/components/shared/ImagePicker";
+import { HelpTip } from "@/components/shared/HelpTip";
 import {
   NfaFieldset,
   EMPTY_NFA_FIELDSET_VALUE,
   type NfaFieldsetValue,
   type NfaFieldsetField,
 } from "@/components/shared/NfaFieldset";
-import { toISODate } from "@/lib/date";
-import { ArrowLeft, Save, Loader2, AlertCircle } from "lucide-react";
+import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
 const LABEL_CLASS =
   "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
-interface Accessory {
-  id: string;
-  name: string;
-  manufacturer: string;
-  model: string | null;
-  serialNumber: string | null;
-  type: string;
-  caliber: string | null;
-  acquisitionDate: string | null;
-  purchasePrice: number | null;
-  notes: string | null;
-  imageUrl: string | null;
-  hasBattery: boolean;
-  batteryType: string | null;
-  lastBatteryChangeDate: string | null;
-  replacementIntervalDays: number | null;
-  roundCount: number;
-  quantity: number;
-  nfaTransferMethod: string | null;
-  nfaControlNumber: string | null;
-  nfaApprovalDate: string | null;
-  nfaTaxPaid: number | null;
-  nfaRegisteredTo: string | null;
-}
+type Props = Readonly<{
+  /** The `section` query value; ignored unless it names a section this form can add to. */
+  section?: string | null;
+}>;
 
-export default function EditAccessoryPage() {
+export function NewAccessoryForm({ section }: Props) {
   const router = useRouter();
-  const params = useParams<{ id: string }>();
-  const accessoryId = Array.isArray(params.id) ? params.id[0] : params.id;
-  const invalidRoute = !accessoryId;
-
-  const [accessory, setAccessory] = useState<Accessory | null>(null);
-  const [dataLoading, setDataLoading] = useState(!invalidRoute);
-  const [dataError, setDataError] = useState<string | null>(null);
-
+  const context = addFormContext("accessory", section);
+  const noun = context?.singular ?? "accessory";
+  const typeOptions = SLOT_TYPES.filter(
+    (t) => !context || context.allowedValues.includes(t),
+  ).map((t) => ({ value: t, label: SLOT_TYPE_LABELS[t] }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-
   const [caliberInput, setCaliberInput] = useState("");
   const [caliberDropdownOpen, setCaliberDropdownOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
-  const [type, setType] = useState("");
+  const [type, setType] = useState(context?.allowedValues[0] ?? "");
   const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
     EMPTY_NFA_FIELDSET_VALUE,
   );
-
-  const [priorRounds, setPriorRounds] = useState("");
-  const [priorRoundsNote, setPriorRoundsNote] = useState("");
 
   function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
     setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
@@ -79,45 +53,17 @@ export default function EditAccessoryPage() {
     c.toLowerCase().includes(caliberInput.toLowerCase()),
   );
 
-  useEffect(() => {
-    if (!accessoryId) return;
-
-    fetch(`/api/accessories/${accessoryId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.error) {
-          setDataError(data.error);
-        } else {
-          setAccessory(data);
-          setCaliberInput(data.caliber ?? "");
-          setImageUrl(data.imageUrl ?? "");
-          setQuantity(String(data.quantity ?? 1));
-          setType(data.type ?? "");
-          setNfaPaperwork({
-            nfaTransferMethod: data.nfaTransferMethod ?? "",
-            nfaControlNumber: data.nfaControlNumber ?? "",
-            nfaApprovalDate: toISODate(data.nfaApprovalDate),
-            nfaTaxPaid: data.nfaTaxPaid != null ? String(data.nfaTaxPaid) : "",
-            nfaRegisteredTo: data.nfaRegisteredTo ?? "",
-          });
-        }
-        setDataLoading(false);
-      })
-      .catch(() => {
-        setDataError("Failed to load accessory");
-        setDataLoading(false);
-      });
-  }, [accessoryId]);
-
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-    setSuccess(false);
     setLoading(true);
 
     const form = e.currentTarget;
     const data = new FormData(form);
 
+    const parsedReplacementInterval = Number(
+      data.get("replacementIntervalDays"),
+    );
     const payload = {
       name: data.get("name") as string,
       manufacturer: data.get("manufacturer") as string,
@@ -132,9 +78,7 @@ export default function EditAccessoryPage() {
       nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
       nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
-      purchasePrice: data.get("purchasePrice")
-        ? Number(data.get("purchasePrice"))
-        : null,
+      purchasePrice: parseOptionalNumber(data.get("purchasePrice")),
       notes: (data.get("notes") as string) || null,
       imageUrl: imageUrl || null,
       imageSource: imageUrl ? "uploaded" : null,
@@ -142,14 +86,19 @@ export default function EditAccessoryPage() {
       batteryType: (data.get("batteryType") as string) || null,
       lastBatteryChangeDate:
         (data.get("lastBatteryChangeDate") as string) || null,
-      replacementIntervalDays: data.get("replacementIntervalDays")
-        ? Number(data.get("replacementIntervalDays"))
+      replacementIntervalDays:
+        Number.isFinite(parsedReplacementInterval) &&
+        parsedReplacementInterval > 0
+          ? parsedReplacementInterval
+          : null,
+      initialRoundCount: data.get("initialRoundCount")
+        ? Number(data.get("initialRoundCount"))
         : null,
     };
 
     try {
-      const res = await fetch(`/api/accessories/${accessoryId}`, {
-        method: "PUT",
+      const res = await fetch("/api/accessories", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -157,98 +106,44 @@ export default function EditAccessoryPage() {
       const json = await res.json();
 
       if (!res.ok) {
-        setError(json.error ?? "Failed to update accessory");
+        setError(json.error ?? `Failed to create ${noun}`);
         setLoading(false);
         return;
       }
 
-      // Log prior round count if provided (only allowed when current count is 0)
-      const priorRoundsNum = parseInt(priorRounds);
-      if (priorRoundsNum > 0) {
-        await fetch(`/api/accessories/${accessoryId}/rounds`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            rounds: priorRoundsNum,
-            note: priorRoundsNote || "Prior use at time of entry",
-          }),
-        });
-      }
-
-      setSuccess(true);
-      setTimeout(() => {
-        router.push(`/accessories/${accessoryId}`);
-      }, 800);
+      router.push(context?.returnHref ?? `/accessories/${json.id}`);
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);
     }
   }
 
-  if (dataLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-full">
-        <Loader2 className="w-8 h-8 text-[#00C2FF] animate-spin" />
-      </div>
-    );
-  }
-
-  if (invalidRoute) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">Invalid accessory route.</p>
-        <Link
-          href="/accessories"
-          className="text-sm text-[#00C2FF] hover:underline"
-        >
-          Back to Accessories
-        </Link>
-      </div>
-    );
-  }
-
-  if (dataError || !accessory) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-full gap-4">
-        <AlertCircle className="w-10 h-10 text-[#E53935]" />
-        <p className="text-[#E53935]">{dataError ?? "Accessory not found"}</p>
-        <Link
-          href="/accessories"
-          className="text-sm text-[#00C2FF] hover:underline"
-        >
-          Back to Accessories
-        </Link>
-      </div>
-    );
-  }
-
-  const noun = itemNoun("accessory", accessory.type);
-
   return (
     <div className="min-h-full">
-      {/* Header */}
-      <div className="flex items-center gap-4 px-6 py-4 border-b border-vault-border flex-wrap">
+      {/* Breadcrumb header */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
         <Link
-          href={`/accessories/${accessoryId}`}
+          href={context?.returnHref ?? "/accessories"}
           className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to {accessory.name}
+          Back to {context?.sectionLabel ?? "Accessories"}
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit {noun}
+          Add {noun}
         </h1>
       </div>
 
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <div className="mb-8">
           <h2 className="text-xl font-bold text-vault-text mb-1">
-            Edit {accessory.name}
+            New {noun} entry
           </h2>
           <p className="text-sm text-vault-text-muted">
-            Update the details for this {noun}.
+            {context
+              ? `Register a new ${noun} in the arsenal.`
+              : "Register a new part or attachment in the arsenal."}
           </p>
         </div>
 
@@ -256,13 +151,6 @@ export default function EditAccessoryPage() {
           <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
             <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
             <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
-
-        {success && (
-          <div className="flex items-center gap-3 bg-[#00C853]/10 border border-[#00C853]/30 rounded-lg px-4 py-3 mb-6">
-            <Save className="w-4 h-4 text-[#00C853] shrink-0" />
-            <p className="text-sm text-[#00C853]">Saved! Redirecting...</p>
           </div>
         )}
 
@@ -275,14 +163,15 @@ export default function EditAccessoryPage() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                Name <span className="text-[#E53935]">*</span>
+                {capitalizeFirst(noun)} name{" "}
+                <span className="text-[#E53935]">*</span>
               </label>
               <input
                 id="name"
                 name="name"
                 type="text"
                 required
-                defaultValue={accessory.name}
+                placeholder="e.g. Trijicon ACOG 4x32"
                 className={INPUT_CLASS}
               />
             </div>
@@ -296,7 +185,7 @@ export default function EditAccessoryPage() {
                   id="manufacturer"
                   name="manufacturer"
                   type="text"
-                  defaultValue={accessory.manufacturer}
+                  placeholder="e.g. Trijicon"
                   className={INPUT_CLASS}
                 />
               </div>
@@ -308,7 +197,7 @@ export default function EditAccessoryPage() {
                   id="model"
                   name="model"
                   type="text"
-                  defaultValue={accessory.model ?? ""}
+                  placeholder="e.g. TA31RCO-M150CP"
                   className={INPUT_CLASS}
                 />
               </div>
@@ -322,37 +211,30 @@ export default function EditAccessoryPage() {
                 id="serialNumber"
                 name="serialNumber"
                 type="text"
-                defaultValue={accessory.serialNumber ?? ""}
                 placeholder="e.g. SN-12345 (optional)"
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Type */}
-              <div>
-                <label htmlFor="type" className={LABEL_CLASS}>
-                  Type / Slot
-                </label>
-                <select
-                  id="type"
-                  name="type"
-                  defaultValue={accessory.type}
-                  onChange={(event) => setType(event.target.value)}
-                  className={INPUT_CLASS}
-                >
-                  <option value="">Select slot type...</option>
-                  {SLOT_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {SLOT_TYPE_LABELS[t]}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <TypeSelectField
+                id="type"
+                label="Type / Slot"
+                options={typeOptions}
+                value={type}
+                onChange={setType}
+                placeholder={context ? undefined : "Select slot type..."}
+                fixed={typeOptions.length === 1 && context !== null}
+                inputClassName={INPUT_CLASS}
+                labelClassName={LABEL_CLASS}
+              />
 
-              {/* Caliber */}
+              {/* Caliber (optional) */}
               <div>
-                <label className={LABEL_CLASS}>Caliber</label>
+                <label className={LABEL_CLASS}>
+                  Caliber
+                  <HelpTip text="Calibers this accessory works with. Used to filter compatible accessories when building a loadout." />
+                </label>
                 <div className="relative">
                   <input
                     type="text"
@@ -433,7 +315,6 @@ export default function EditAccessoryPage() {
                   id="acquisitionDate"
                   name="acquisitionDate"
                   type="date"
-                  defaultValue={toISODate(accessory.acquisitionDate)}
                   className={INPUT_CLASS}
                 />
               </div>
@@ -451,7 +332,6 @@ export default function EditAccessoryPage() {
                     type="number"
                     min="0"
                     step="0.01"
-                    defaultValue={accessory.purchasePrice ?? ""}
                     placeholder="0.00"
                     className={`${INPUT_CLASS} pl-7`}
                   />
@@ -460,44 +340,27 @@ export default function EditAccessoryPage() {
             </div>
           </fieldset>
 
-          {/* Prior Use — only show if no rounds logged yet */}
-          {accessory.roundCount === 0 && (
-            <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
-              <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
-                Prior Use
-              </legend>
-              <p className="text-xs text-vault-text-muted">
-                If this accessory has rounds from prior use, enter them here to
-                set a baseline round count.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className={LABEL_CLASS}>
-                    Round Count from Prior Use
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={priorRounds}
-                    onChange={(e) => setPriorRounds(e.target.value)}
-                    placeholder="e.g. 500"
-                    className={INPUT_CLASS}
-                  />
-                </div>
-                <div>
-                  <label className={LABEL_CLASS}>Note (optional)</label>
-                  <input
-                    type="text"
-                    value={priorRoundsNote}
-                    onChange={(e) => setPriorRoundsNote(e.target.value)}
-                    placeholder="e.g. Previous owner"
-                    className={INPUT_CLASS}
-                  />
-                </div>
-              </div>
-            </fieldset>
-          )}
+          {/* Prior Use */}
+          <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
+            <legend className="text-xs font-mono uppercase tracking-widest text-[#00C2FF] px-1 -ml-1">
+              Prior Use
+            </legend>
+            <div>
+              <label htmlFor="initialRoundCount" className={LABEL_CLASS}>
+                Existing Round Count
+                <HelpTip text="If this accessory has already been used, enter the approximate round count. This will be set as the starting round count." />
+              </label>
+              <input
+                id="initialRoundCount"
+                name="initialRoundCount"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="e.g. 500 (leave blank if new)"
+                className={INPUT_CLASS}
+              />
+            </div>
+          </fieldset>
 
           {/* Battery Tracking */}
           <fieldset className="bg-vault-surface border border-vault-border rounded-lg p-5 space-y-4">
@@ -510,7 +373,6 @@ export default function EditAccessoryPage() {
                 id="hasBattery"
                 name="hasBattery"
                 type="checkbox"
-                defaultChecked={accessory.hasBattery}
                 className="rounded border-vault-border"
               />
               This accessory uses a battery
@@ -525,7 +387,6 @@ export default function EditAccessoryPage() {
                   id="batteryType"
                   name="batteryType"
                   type="text"
-                  defaultValue={accessory.batteryType ?? ""}
                   placeholder="e.g. CR2032"
                   className={INPUT_CLASS}
                 />
@@ -543,7 +404,6 @@ export default function EditAccessoryPage() {
                   type="number"
                   min="1"
                   step="1"
-                  defaultValue={accessory.replacementIntervalDays ?? ""}
                   placeholder="e.g. 180"
                   className={INPUT_CLASS}
                 />
@@ -558,7 +418,6 @@ export default function EditAccessoryPage() {
                 id="lastBatteryChangeDate"
                 name="lastBatteryChangeDate"
                 type="date"
-                defaultValue={toISODate(accessory.lastBatteryChangeDate)}
                 className={INPUT_CLASS}
               />
             </div>
@@ -589,7 +448,6 @@ export default function EditAccessoryPage() {
                 id="notes"
                 name="notes"
                 rows={3}
-                defaultValue={accessory.notes ?? ""}
                 placeholder="Any additional notes about this accessory..."
                 className={`${INPUT_CLASS} resize-none`}
               />
@@ -599,22 +457,22 @@ export default function EditAccessoryPage() {
           {/* Actions */}
           <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
             <Link
-              href={`/accessories/${accessoryId}`}
+              href={context?.returnHref ?? "/accessories"}
               className="w-full sm:w-auto text-center px-4 py-2 text-sm text-vault-text-muted hover:text-vault-text border border-vault-border rounded-md hover:border-vault-text-muted/30 transition-colors"
             >
               Cancel
             </Link>
             <button
               type="submit"
-              disabled={loading || success}
+              disabled={loading}
               className="w-full sm:w-auto justify-center flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-md text-sm font-medium transition-colors"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
-                <Save className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
               )}
-              {loading ? "Saving..." : success ? "Saved!" : "Save Changes"}
+              {loading ? "Adding..." : `Add ${noun}`}
             </button>
           </div>
         </form>
