@@ -528,7 +528,10 @@ There is no release ritual and there are no release tags. **Merging is publishin
 | `develop`| `ghcr.io/doomcrewinc/blackvaultarmory:develop` + `:<calver>-<sha7>` |
 
 Every build pushes the immutable `:<calver>-<sha7>`, so any deploy can be pinned to an exact
-commit and rolled back to one. `.github/workflows/publish.yml` builds `linux/amd64,linux/arm64`.
+commit and rolled back to one. `.github/workflows/publish.yml` builds `linux/amd64` and
+`linux/arm64`, each on a runner of its own architecture (no emulation), then one last job ties the
+two images into a manifest list and writes the tags. Every job has a time limit, so a build that
+hangs fails instead of holding up the merges queued behind it.
 
 A push to any other ref publishes **nothing**: the derive script has no default arm and exits 1
 on an unmapped ref, and `:latest` is produced in exactly one place — the `master` arm of
@@ -543,9 +546,9 @@ bash scripts/ci/derive-image-tags.sh master "$(git rev-parse HEAD)"
 bash scripts/ci/derive-image-tags.sh develop "$(git rev-parse HEAD)"
 ```
 
-`publish.yml` does **not** set `cancel-in-progress`. It pushes a multi-arch manifest, and
-cancelling between the amd64 push, the arm64 push and the manifest list leaves ghcr.io holding
-unreferenced blobs or a `latest` pointing at a half-written list. The concurrency group is
+`publish.yml` does **not** set `cancel-in-progress`. The tags are written in one step by the last
+job; cancelling a run part-way leaves ghcr.io holding untagged images that nothing references, and
+a newer run cancelling an older one could leave a floating tag behind. The concurrency group is
 per-ref, so successive merges to the same branch queue rather than race. Note that GitHub still
 drops a *pending* run when a newer one queues behind the same group: a commit sandwiched between
 two rapid merges may not get an image. Re-run its workflow run from the Actions tab if you need
