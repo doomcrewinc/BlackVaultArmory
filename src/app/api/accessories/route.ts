@@ -4,6 +4,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeMoney } from "@/lib/money";
 import { normalizeQuantity } from "@/lib/quantity";
+import { resolveFullAutoFields } from "@/lib/full-auto-rated";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 import { normalizeTypeToken } from "@/lib/types";
 
@@ -99,6 +100,8 @@ export async function POST(request: NextRequest) {
       nfaApprovalDate,
       nfaTaxPaid,
       nfaRegisteredTo,
+      fullAutoRating,
+      fullAutoLimitedTo,
     } = body;
 
     const normalizedName = normalizeString(name);
@@ -123,6 +126,14 @@ export async function POST(request: NextRequest) {
       nfaRegisteredTo,
     });
 
+    const fullAuto = resolveFullAutoFields(resolvedType, {
+      fullAutoRating,
+      fullAutoLimitedTo,
+    });
+    if (!fullAuto.ok) {
+      return NextResponse.json({ error: fullAuto.error }, { status: 400 });
+    }
+
     const accessory = await prisma.accessory.create({
       data: {
         name: normalizedName,
@@ -131,6 +142,7 @@ export async function POST(request: NextRequest) {
         serialNumber: normalizeString(serialNumber) || null,
         type: resolvedType,
         ...nfaFields,
+        ...fullAuto.fields,
         caliber: caliber ?? null,
         purchasePrice: normalizeMoney(purchasePrice),
         acquisitionDate: acquisitionDate

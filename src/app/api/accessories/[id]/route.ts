@@ -6,6 +6,7 @@ import { revalidateDashboardData } from "@/lib/dashboard/revalidate-dashboard";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
 import { normalizeMoney } from "@/lib/money";
 import { normalizeQuantity } from "@/lib/quantity";
+import { resolveFullAutoFields } from "@/lib/full-auto-rated";
 import { normalizeAccessoryNfaFields } from "@/lib/nfa";
 import { normalizeTypeToken } from "@/lib/types";
 import { getItemAllocation } from "@/lib/kits/itemAllocation";
@@ -132,6 +133,8 @@ export async function PUT(
       nfaApprovalDate,
       nfaTaxPaid,
       nfaRegisteredTo,
+      fullAutoRating,
+      fullAutoLimitedTo,
     } = body;
 
     const existing = await prisma.accessory.findUnique({ where: { id } });
@@ -164,6 +167,30 @@ export async function PUT(
       type !== undefined
         ? normalizeTypeToken(type) || "UNSPECIFIED"
         : existing.type;
+
+    // Same gate as the paperwork group: a write that only changes `type` (or
+    // only one of the two fields) re-derives both columns from the RESULTING
+    // row, so a suppressor moved to another type loses them and a Limited
+    // rating changed to Yes loses its text.
+    const touchesFullAuto =
+      type !== undefined ||
+      fullAutoRating !== undefined ||
+      fullAutoLimitedTo !== undefined;
+    const fullAuto = touchesFullAuto
+      ? resolveFullAutoFields(resolvedType, {
+          fullAutoRating:
+            fullAutoRating !== undefined
+              ? fullAutoRating
+              : existing.fullAutoRating,
+          fullAutoLimitedTo:
+            fullAutoLimitedTo !== undefined
+              ? fullAutoLimitedTo
+              : existing.fullAutoLimitedTo,
+        })
+      : null;
+    if (fullAuto && !fullAuto.ok) {
+      return NextResponse.json({ error: fullAuto.error }, { status: 400 });
+    }
 
     const updated = await prisma.accessory.update({
       where: { id },
@@ -204,6 +231,7 @@ export async function PUT(
                   : existing.nfaRegisteredTo,
             })
           : {}),
+        ...(fullAuto?.ok ? fullAuto.fields : {}),
         ...(caliber !== undefined && { caliber }),
         ...(purchasePrice !== undefined && {
           purchasePrice: normalizeMoney(purchasePrice),

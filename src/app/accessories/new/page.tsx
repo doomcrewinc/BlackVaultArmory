@@ -12,6 +12,15 @@ import {
   AddFormIntro,
 } from "@/components/shared/AddFormHeader";
 import { parseOptionalNumber } from "@/lib/forms";
+import {
+  EMPTY_FULL_AUTO_RATED_VALUE,
+  FullAutoRatedSelect,
+  fullAutoRatedError,
+  fullAutoRatedPayload,
+  toFullAutoRatedValue,
+  type FullAutoRatedValue,
+} from "@/components/shared/FullAutoRatedSelect";
+import { isSuppressorType } from "@/lib/full-auto-rated";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
 import {
@@ -41,6 +50,10 @@ function NewAccessoryForm() {
     EMPTY_NFA_FIELDSET_VALUE,
   );
 
+  const [fullAutoRated, setFullAutoRated] = useState<FullAutoRatedValue>(
+    EMPTY_FULL_AUTO_RATED_VALUE,
+  );
+
   function handleNfaFieldChange(field: NfaFieldsetField, value: string) {
     setNfaPaperwork((prev) => ({ ...prev, [field]: value }));
   }
@@ -52,6 +65,14 @@ function NewAccessoryForm() {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
+    const fullAutoError = isSuppressorType(type)
+      ? fullAutoRatedError(fullAutoRated)
+      : null;
+    if (fullAutoError) {
+      setError(fullAutoError);
+      return;
+    }
+
     setLoading(true);
 
     const form = e.currentTarget;
@@ -73,6 +94,7 @@ function NewAccessoryForm() {
       nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
       nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
       nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
+      ...(isSuppressorType(type) && fullAutoRatedPayload(fullAutoRated)),
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       purchasePrice: parseOptionalNumber(data.get("purchasePrice")),
       notes: (data.get("notes") as string) || null,
@@ -248,12 +270,18 @@ function NewAccessoryForm() {
               </p>
             </div>
 
-            {type === "SUPPRESSOR" && (
-              <NfaFieldset
-                variant="suppressor"
-                value={nfaPaperwork}
-                onChange={handleNfaFieldChange}
-              />
+            {isSuppressorType(type) && (
+              <>
+                <FullAutoRatedSelect
+                  value={fullAutoRated}
+                  onChange={setFullAutoRated}
+                />
+                <NfaFieldset
+                  variant="suppressor"
+                  value={nfaPaperwork}
+                  onChange={handleNfaFieldChange}
+                />
+              </>
             )}
           </fieldset>
 

@@ -70,11 +70,11 @@ export function AuditRow({ event }: { event: AuditEventDto }) {
                 <span className="text-vault-text-muted italic">{entry.kind === "diff" ? "changed" : "redacted"}</span>
               ) : entry.kind === "diff" ? (
                 <span className="text-vault-text-muted">
-                  {displayValue(entry.before, entry.dateOnly)} <span className="text-vault-text-faint">→</span>{" "}
-                  <span className="text-vault-text">{displayValue(entry.after, entry.dateOnly)}</span>
+                  {displayValue(entry.before, entry.dateOnly, entry.field)} <span className="text-vault-text-faint">→</span>{" "}
+                  <span className="text-vault-text">{displayValue(entry.after, entry.dateOnly, entry.field)}</span>
                 </span>
               ) : (
-                <span className="text-vault-text-muted">{displayValue(entry.value, entry.dateOnly)}</span>
+                <span className="text-vault-text-muted">{displayValue(entry.value, entry.dateOnly, entry.field)}</span>
               )}
             </div>
           ))}

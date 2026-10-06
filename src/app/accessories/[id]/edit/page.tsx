@@ -5,6 +5,15 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { itemNoun, titleCase } from "@/lib/sections/wording";
 import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import {
+  EMPTY_FULL_AUTO_RATED_VALUE,
+  FullAutoRatedSelect,
+  fullAutoRatedError,
+  fullAutoRatedPayload,
+  toFullAutoRatedValue,
+  type FullAutoRatedValue,
+} from "@/components/shared/FullAutoRatedSelect";
+import { isSuppressorType } from "@/lib/full-auto-rated";
 import ImagePicker from "@/components/shared/ImagePicker";
 import {
   NfaFieldset,
@@ -43,6 +52,8 @@ interface Accessory {
   nfaApprovalDate: string | null;
   nfaTaxPaid: number | null;
   nfaRegisteredTo: string | null;
+  fullAutoRating: string | null;
+  fullAutoLimitedTo: string | null;
 }
 
 export default function EditAccessoryPage() {
@@ -66,6 +77,10 @@ export default function EditAccessoryPage() {
   const [type, setType] = useState("");
   const [nfaPaperwork, setNfaPaperwork] = useState<NfaFieldsetValue>(
     EMPTY_NFA_FIELDSET_VALUE,
+  );
+
+  const [fullAutoRated, setFullAutoRated] = useState<FullAutoRatedValue>(
+    EMPTY_FULL_AUTO_RATED_VALUE,
   );
 
   const [priorRounds, setPriorRounds] = useState("");
@@ -93,6 +108,7 @@ export default function EditAccessoryPage() {
           setImageUrl(data.imageUrl ?? "");
           setQuantity(String(data.quantity ?? 1));
           setType(data.type ?? "");
+          setFullAutoRated(toFullAutoRatedValue(data));
           setNfaPaperwork({
             nfaTransferMethod: data.nfaTransferMethod ?? "",
             nfaControlNumber: data.nfaControlNumber ?? "",
@@ -113,6 +129,14 @@ export default function EditAccessoryPage() {
     e.preventDefault();
     setError(null);
     setSuccess(false);
+    const fullAutoError = isSuppressorType(type)
+      ? fullAutoRatedError(fullAutoRated)
+      : null;
+    if (fullAutoError) {
+      setError(fullAutoError);
+      return;
+    }
+
     setLoading(true);
 
     const form = e.currentTarget;
@@ -131,6 +155,7 @@ export default function EditAccessoryPage() {
       nfaApprovalDate: nfaPaperwork.nfaApprovalDate || null,
       nfaTaxPaid: nfaPaperwork.nfaTaxPaid || null,
       nfaRegisteredTo: nfaPaperwork.nfaRegisteredTo || null,
+      ...(isSuppressorType(type) && fullAutoRatedPayload(fullAutoRated)),
       acquisitionDate: (data.get("acquisitionDate") as string) || null,
       purchasePrice: data.get("purchasePrice")
         ? Number(data.get("purchasePrice"))
@@ -409,12 +434,18 @@ export default function EditAccessoryPage() {
               </p>
             </div>
 
-            {type === "SUPPRESSOR" && (
-              <NfaFieldset
-                variant="suppressor"
-                value={nfaPaperwork}
-                onChange={handleNfaFieldChange}
-              />
+            {isSuppressorType(type) && (
+              <>
+                <FullAutoRatedSelect
+                  value={fullAutoRated}
+                  onChange={setFullAutoRated}
+                />
+                <NfaFieldset
+                  variant="suppressor"
+                  value={nfaPaperwork}
+                  onChange={handleNfaFieldChange}
+                />
+              </>
             )}
           </fieldset>
 

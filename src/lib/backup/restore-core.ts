@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { withoutRowAudit } from "@/lib/audit/context";
 import { runConfiguredDateMigration } from "@/lib/date-migration";
 import { BACKUP_MODELS, REQUIRED_BACKUP_KEYS } from "@/lib/backup/models";
+import { normalizeFullAutoFields } from "@/lib/full-auto-rated";
 import {
   isKnownNfaClass,
   normalizeAccessoryNfaFields,
@@ -139,7 +140,11 @@ async function normalizeLegacyNfaDatesInRows(rows: Record<string, unknown[]>): P
 }
 
 /**
- * Re-derives the NFA group on the firearm and accessory rows of a backup.
+ * Re-derives the NFA group on the firearm and accessory rows of a backup, and
+ * the two full-auto columns on the accessory rows: only a suppressor keeps a
+ * rating, the text survives only beside LIMITED, and a backup written before
+ * the columns existed restores them as null. A LIMITED row with no text keeps
+ * its rating (normalizeFullAutoFields never rejects), so restore loses nothing.
  *
  * The spec requires the clearing rules to hold "however the write arrives",
  * and restore is a write path: it hands uploaded JSON straight to createMany
@@ -180,7 +185,11 @@ function normalizeNfaGroups(rows: Record<string, unknown[]>): void {
   });
   rows.accessories = rows.accessories.map((row) =>
     isRowObject(row)
-      ? { ...row, ...normalizeAccessoryNfaFields(row.type, row) }
+      ? {
+          ...row,
+          ...normalizeAccessoryNfaFields(row.type, row),
+          ...normalizeFullAutoFields(row.type, row),
+        }
       : row
   );
 }

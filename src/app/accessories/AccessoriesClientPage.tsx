@@ -52,6 +52,42 @@ function roundCountColor(
   return { text: "text-[#00C853]", bar: "bg-[#00C853]" };
 }
 
+const BADGE_CLASS = "shrink-0 rounded border px-1.5 py-0.5 text-[11px]";
+
+/**
+ * A small tag for a suppressor's full-auto rating: Yes gets one, Limited gets
+ * a different one with the limit printed beside it (and as the tag's title),
+ * so the limit never depends on hover. No and not recorded get nothing.
+ */
+function FullAutoRatedBadge({
+  rating,
+  limitedTo,
+}: Readonly<{ rating?: string | null; limitedTo?: string | null }>) {
+  if (rating === "YES") {
+    return (
+      <span className={`${BADGE_CLASS} border-[#00C2FF]/40 text-[#00C2FF]`}>
+        Full-Auto Rated
+      </span>
+    );
+  }
+  if (rating !== "LIMITED") return null;
+  return (
+    <>
+      <span
+        title={limitedTo ?? undefined}
+        className={`${BADGE_CLASS} border-[#F5A623]/50 text-[#F5A623]`}
+      >
+        Full-Auto: Limited
+      </span>
+      {limitedTo && (
+        <span className="text-[11px] text-vault-text-faint truncate max-w-[180px]">
+          {limitedTo}
+        </span>
+      )}
+    </>
+  );
+}
+
 interface AccessoryWithBuild {
   id: string;
   name: string;
@@ -60,6 +96,8 @@ interface AccessoryWithBuild {
   type: string;
   roundCount: number;
   quantity: number;
+  fullAutoRating?: string | null;
+  fullAutoLimitedTo?: string | null;
   imageUrl: string | null;
   purchasePrice: number | null;
   acquisitionDate: Date | null;
@@ -250,6 +288,10 @@ export function AccessoriesClientPage({
                           : ""}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <FullAutoRatedBadge
+                          rating={accessory.fullAutoRating}
+                          limitedTo={accessory.fullAutoLimitedTo}
+                        />
                         <RoundCountBadge
                           roundCount={accessory.roundCount}
                           className="text-xs"
@@ -362,6 +404,15 @@ export function AccessoriesClientPage({
                                 <p className="text-xs text-vault-text-faint truncate max-w-[180px]">
                                   {accessory.model}
                                 </p>
+                              )}
+                              {(accessory.fullAutoRating === "YES" ||
+                                accessory.fullAutoRating === "LIMITED") && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  <FullAutoRatedBadge
+                                    rating={accessory.fullAutoRating}
+                                    limitedTo={accessory.fullAutoLimitedTo}
+                                  />
+                                </div>
                               )}
                             </Link>
                           </td>

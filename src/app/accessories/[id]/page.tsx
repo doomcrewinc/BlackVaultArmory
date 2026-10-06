@@ -7,6 +7,7 @@ import { formatCurrency, formatNumber } from "@/lib/utils";
 import { sectionHref } from "@/lib/categories";
 import { itemNoun, sectionForItem, titleCase } from "@/lib/sections/wording";
 import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
+import { fullAutoRatingText, isSuppressorType } from "@/lib/full-auto-rated";
 import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types";
 import { PhotoGallery } from "@/components/photos/PhotoGallery";
 import { ItemDocumentPanel } from "@/components/shared/ItemDocumentPanel";
@@ -105,6 +106,8 @@ interface Accessory {
   nfaApprovalDate: string | null;
   nfaTaxPaid: number | null;
   nfaRegisteredTo: string | null;
+  fullAutoRating: string | null;
+  fullAutoLimitedTo: string | null;
   /**
    * How much of this accessory is assigned across kits, resolved SERVER-SIDE
    * by `getItemAllocation` on `/api/accessories/[id]` and handed over whole.
@@ -529,6 +532,24 @@ export default function AccessoryDetailPage() {
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* Suppressor details */}
+        {isSuppressorType(accessory.type) && (
+          <div className="bg-vault-surface border border-vault-border rounded-lg p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-vault-text-muted mb-3">
+              Suppressor Details
+            </h3>
+            <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-1">
+              Full-Auto Rated
+            </p>
+            <p className="text-sm text-vault-text">
+              {fullAutoRatingText(
+                accessory.fullAutoRating,
+                accessory.fullAutoLimitedTo,
+              )}
+            </p>
           </div>
         )}
 

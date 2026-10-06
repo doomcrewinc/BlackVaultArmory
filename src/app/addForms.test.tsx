@@ -178,6 +178,95 @@ describe("accessory add form opened from a section", () => {
   });
 });
 
+describe("accessory add form Full-Auto Rated field", () => {
+  const RATING = () => screen.getByLabelText("Full-Auto Rated");
+  const rate = (value: string) => fireEvent.change(RATING(), { target: { value } });
+  const limitedTo = () => screen.queryByLabelText("Rated For") as HTMLInputElement | null;
+
+  it("offers Not recorded, Yes, No and Limited in that order, preset to Not recorded", () => {
+    open(FORMS.accessory, "suppressors");
+    const options = Array.from((RATING() as HTMLSelectElement).options).map((o) => [o.value, o.textContent]);
+    expect(options).toEqual([
+      ["", "Not recorded"],
+      ["YES", "Yes"],
+      ["NO", "No"],
+      ["LIMITED", "Limited"],
+    ]);
+    expect(RATING()).toHaveValue("");
+    expect(limitedTo()).toBeNull();
+  });
+
+  it.each([
+    ["", null],
+    ["YES", "YES"],
+    ["NO", "NO"],
+  ])("submits the choice %j as %j with no text", async (choice, expected) => {
+    open(FORMS.accessory, "suppressors");
+    rate(choice);
+    expect(limitedTo()).toBeNull();
+    const body = await submit();
+    expect(body.fullAutoRating).toBe(expected);
+    expect(body.fullAutoLimitedTo).toBeNull();
+  });
+
+  it("shows a required, 200 character Rated For input beneath the select for Limited", async () => {
+    open(FORMS.accessory, "suppressors");
+    rate("LIMITED");
+    const input = limitedTo() as HTMLInputElement;
+    expect(input).toBeRequired();
+    expect(input).toHaveAttribute("maxlength", "200");
+    expect(input).toHaveAttribute("placeholder", "e.g. 5.56 NATO only");
+    fireEvent.change(input, { target: { value: "  5.56 NATO only " } });
+    const body = await submit();
+    expect(body.fullAutoRating).toBe("LIMITED");
+    expect(body.fullAutoLimitedTo).toBe("5.56 NATO only");
+  });
+
+  it("blocks the submit with the server's message when Limited has no text", async () => {
+    open(FORMS.accessory, "suppressors");
+    rate("LIMITED");
+    fireEvent.change(document.getElementById("name") as HTMLInputElement, { target: { value: "Thing" } });
+    fireEvent.submit(document.querySelector("form") as HTMLFormElement);
+    expect(await screen.findByText("Say which rounds it is rated for full-auto fire with.")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["YES", "NO", ""])("drops the text when the rating changes from Limited to %j", async (next) => {
+    open(FORMS.accessory, "suppressors");
+    rate("LIMITED");
+    fireEvent.change(limitedTo() as HTMLInputElement, { target: { value: "5.56 NATO only" } });
+    rate(next);
+    expect(limitedTo()).toBeNull();
+    rate("LIMITED");
+    expect(limitedTo()).toHaveValue("");
+  });
+
+  it("is absent for an optic and the payload does not carry it", async () => {
+    open(FORMS.accessory, "optics");
+    expect(screen.queryByLabelText("Full-Auto Rated")).toBeNull();
+    const body = await submit();
+    expect(body).not.toHaveProperty("fullAutoRating");
+    expect(body).not.toHaveProperty("fullAutoLimitedTo");
+  });
+
+  it("follows the type picker on the generic form", async () => {
+    open(FORMS.accessory);
+    const type = document.getElementById("type") as HTMLSelectElement;
+    expect(screen.queryByLabelText("Full-Auto Rated")).toBeNull();
+
+    fireEvent.change(type, { target: { value: "SUPPRESSOR" } });
+    rate("LIMITED");
+    fireEvent.change(limitedTo() as HTMLInputElement, { target: { value: "5.56" } });
+    fireEvent.change(type, { target: { value: "OPTIC" } });
+    expect(screen.queryByLabelText("Full-Auto Rated")).toBeNull();
+    expect(limitedTo()).toBeNull();
+
+    const body = await submit();
+    expect(body).not.toHaveProperty("fullAutoRating");
+    expect(body).not.toHaveProperty("fullAutoLimitedTo");
+  });
+});
+
 describe.each([
   ["gear", "knives", "Knife", "KNIFE", "/gear/knives"],
   ["gear", "armor", "Armor", "ARMOR", "/prep/armor"],

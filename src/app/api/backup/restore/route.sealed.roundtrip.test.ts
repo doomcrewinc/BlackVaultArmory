@@ -104,6 +104,7 @@ describe("sealed backup round trip (field-encryption spec §3)", () => {
     const raw = createRawPrismaClient();
     try {
       await raw.firearm.deleteMany();
+      await raw.accessory.deleteMany();
       await raw.auditEvent.deleteMany();
     } finally {
       await raw.$disconnect();
@@ -287,6 +288,81 @@ describe("sealed backup round trip (field-encryption spec §3)", () => {
     });
     expect(JSON.parse(event.changes as string).sealed).toBe(false);
   }, 30_000);
+
+  describe("Accessory full-auto rating", () => {
+    const ROWS = [
+      { id: "rt-can-yes", fullAutoRating: "YES", fullAutoLimitedTo: null },
+      { id: "rt-can-no", fullAutoRating: "NO", fullAutoLimitedTo: null },
+      { id: "rt-can-limited", fullAutoRating: "LIMITED", fullAutoLimitedTo: "5.56 NATO only" },
+      { id: "rt-can-unrecorded", fullAutoRating: null, fullAutoLimitedTo: null },
+    ];
+
+    async function seedSuppressors() {
+      for (const row of ROWS) {
+        await prisma.accessory.create({
+          data: { ...row, type: "SUPPRESSOR", name: row.id, manufacturer: "Acme" },
+        });
+      }
+    }
+
+    async function storedValues() {
+      const rows = await prisma.accessory.findMany({ orderBy: { id: "asc" } });
+      return Object.fromEntries(
+        rows.map((row) => [row.id, [row.fullAutoRating, row.fullAutoLimitedTo]]),
+      );
+    }
+
+    it("keeps all four ratings and the Limited text through a sealed backup and restore", async () => {
+      await seedSuppressors();
+      const { envelope } = await takeBackup();
+      await prisma.accessory.deleteMany();
+
+      const response = await restoreBackup(restoreRequest({ sealed: envelope, passphrase: PASSPHRASE }));
+
+      expect(response.status).toBe(200);
+      expect(await storedValues()).toEqual({
+        "rt-can-yes": ["YES", null],
+        "rt-can-no": ["NO", null],
+        "rt-can-limited": ["LIMITED", "5.56 NATO only"],
+        "rt-can-unrecorded": [null, null],
+      });
+    }, 30_000);
+
+    it("restores a backup made before the columns existed with nulls", async () => {
+      await seedSuppressors();
+      const { envelope } = await takeBackup();
+      const plainPayload = JSON.parse(openBackup(PASSPHRASE, envelope));
+      for (const row of plainPayload.accessories) {
+        delete row.fullAutoRating;
+        delete row.fullAutoLimitedTo;
+      }
+      await prisma.accessory.deleteMany();
+
+      const response = await restoreBackup(restoreRequest(plainPayload));
+
+      expect(response.status).toBe(200);
+      expect(Object.values(await storedValues())).toEqual(ROWS.map(() => [null, null]));
+    }, 30_000);
+
+    it.each([
+      ["a row whose type is not a suppressor", { type: "OPTIC" }, [null, null]],
+      ["text beside a Yes rating", { fullAutoRating: "YES", fullAutoLimitedTo: "left over" }, ["YES", null]],
+      ["a Limited rating without text", { fullAutoRating: "LIMITED", fullAutoLimitedTo: null }, ["LIMITED", null]],
+      ["an unknown rating", { fullAutoRating: "MAYBE" }, [null, null]],
+    ])("restores %s by the same rule as the API", async (_label, edit, expected) => {
+      await seedSuppressors();
+      const { envelope } = await takeBackup();
+      const plainPayload = JSON.parse(openBackup(PASSPHRASE, envelope));
+      const edited = plainPayload.accessories.find((row: { id: string }) => row.id === "rt-can-limited");
+      Object.assign(edited, edit);
+      await prisma.accessory.deleteMany();
+
+      const response = await restoreBackup(restoreRequest(plainPayload));
+
+      expect(response.status).toBe(200);
+      expect((await storedValues())["rt-can-limited"]).toEqual(expected);
+    }, 30_000);
+  });
 
   it("the server-side copy at backupDestinationPath is the sealed envelope, never plaintext", async () => {
     const destDir = `${ctx.dir}/server-copy`;

@@ -223,4 +223,107 @@ describe("PUT /api/accessories/[id] — NFA paperwork", () => {
     expect(data.nfaTaxPaid).toBeNull();
     expect(data.nfaRegisteredTo).toBe("Doe Family Trust");
   });
+
+  describe("full-auto rating", () => {
+    const params = { params: Promise.resolve({ id: "accessory-1" }) };
+
+    function dataOfUpdate() {
+      return mocks.update.mock.calls[0][0].data;
+    }
+
+    it.each([
+      ["YES", null, null],
+      ["NO", null, null],
+      ["LIMITED", " 5.56 NATO only ", "5.56 NATO only"],
+      [null, null, null],
+    ])("stores %s on a suppressor", async (rating, text, storedText) => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor());
+
+      const response = await PUT(putRequest({ fullAutoRating: rating, fullAutoLimitedTo: text }), params);
+
+      expect(response.status).toBe(200);
+      expect(dataOfUpdate().fullAutoRating).toBe(rating);
+      expect(dataOfUpdate().fullAutoLimitedTo).toBe(storedText);
+    });
+
+    it.each(["YES", "NO", "LIMITED"])("forces %s to null for a non-suppressor type", async (rating) => {
+      mocks.findUnique.mockResolvedValue(existingAccessory());
+
+      await PUT(putRequest({ fullAutoRating: rating, fullAutoLimitedTo: "5.56" }), params);
+
+      expect(dataOfUpdate().fullAutoRating).toBeNull();
+      expect(dataOfUpdate().fullAutoLimitedTo).toBeNull();
+    });
+
+    it.each(["YES", "NO", "LIMITED"])("clears both when a stored %s suppressor changes type", async (rating) => {
+      mocks.findUnique.mockResolvedValue(
+        storedSuppressor({ fullAutoRating: rating, fullAutoLimitedTo: rating === "LIMITED" ? "5.56" : null }),
+      );
+
+      await PUT(putRequest({ type: "OPTIC" }), params);
+
+      expect(dataOfUpdate().fullAutoRating).toBeNull();
+      expect(dataOfUpdate().fullAutoLimitedTo).toBeNull();
+    });
+
+    it("clears the text when a Limited rating changes to Yes", async () => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "LIMITED", fullAutoLimitedTo: "5.56" }));
+
+      await PUT(putRequest({ fullAutoRating: "YES" }), params);
+
+      expect(dataOfUpdate().fullAutoRating).toBe("YES");
+      expect(dataOfUpdate().fullAutoLimitedTo).toBeNull();
+    });
+
+    it("applies the rule to the resulting row when only the rating changes to Limited", async () => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "YES" }));
+
+      const response = await PUT(putRequest({ fullAutoRating: "LIMITED" }), params);
+
+      expect(response.status).toBe(400);
+      expect(mocks.update).not.toHaveBeenCalled();
+    });
+
+    it("keeps the stored rating when only the text changes", async () => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "LIMITED", fullAutoLimitedTo: "5.56" }));
+
+      await PUT(putRequest({ fullAutoLimitedTo: "9mm only" }), params);
+
+      expect(dataOfUpdate().fullAutoRating).toBe("LIMITED");
+      expect(dataOfUpdate().fullAutoLimitedTo).toBe("9mm only");
+    });
+
+    it("keeps both when the type is re-sent as SUPPRESSOR", async () => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "LIMITED", fullAutoLimitedTo: "5.56" }));
+
+      await PUT(putRequest({ type: "SUPPRESSOR" }), params);
+
+      expect(dataOfUpdate().fullAutoRating).toBe("LIMITED");
+      expect(dataOfUpdate().fullAutoLimitedTo).toBe("5.56");
+    });
+
+    it("leaves both alone when the write names neither field nor the type", async () => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "YES" }));
+
+      await PUT(putRequest({ notes: "n" }), params);
+
+      expect(dataOfUpdate()).not.toHaveProperty("fullAutoRating");
+      expect(dataOfUpdate()).not.toHaveProperty("fullAutoLimitedTo");
+    });
+
+    it.each([
+      [{ fullAutoRating: "LIMITED", fullAutoLimitedTo: "" }, "Say which rounds it is rated for full-auto fire with."],
+      [{ fullAutoRating: "LIMITED" }, "Say which rounds it is rated for full-auto fire with."],
+      [{ fullAutoRating: "MAYBE" }, "fullAutoRating must be YES, NO, LIMITED or null"],
+      [{ fullAutoRating: "LIMITED", fullAutoLimitedTo: "a".repeat(201) }, "at most 200"],
+    ])("answers 400 for %j", async (fields, message) => {
+      mocks.findUnique.mockResolvedValue(storedSuppressor());
+
+      const response = await PUT(putRequest(fields), params);
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain(message);
+      expect(mocks.update).not.toHaveBeenCalled();
+    });
+  });
 });

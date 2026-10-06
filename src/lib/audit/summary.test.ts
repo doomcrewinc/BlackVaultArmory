@@ -437,3 +437,30 @@ describe("summarize — defensive fallback", () => {
     expect(() => summarize(e)).not.toThrow();
   });
 });
+
+describe("summarize - Accessory full-auto rating", () => {
+  it.each([
+    [null, "YES", "full auto rating \u2014 \u2192 Yes"],
+    ["YES", "NO", "full auto rating Yes \u2192 No"],
+    ["NO", "LIMITED", "full auto rating No \u2192 Limited"],
+    ["LIMITED", null, "full auto rating Limited \u2192 \u2014"],
+  ])("renders the rating %s to %s by its label", (before, after, fragment) => {
+    const e = event({
+      action: "UPDATE",
+      entityType: "Accessory",
+      entityLabel: "House Can",
+      changes: { fullAutoRating: [before, after] },
+    });
+    expect(summarize(e)).toBe(`Changed "House Can": ${fragment}`);
+  });
+
+  it("renders the Limited text as text", () => {
+    const e = event({
+      action: "UPDATE",
+      entityType: "Accessory",
+      entityLabel: "House Can",
+      changes: { fullAutoLimitedTo: [null, "5.56 NATO only"] },
+    });
+    expect(summarize(e)).toBe('Changed "House Can": full auto limited to \u2014 \u2192 5.56 NATO only');
+  });
+});
