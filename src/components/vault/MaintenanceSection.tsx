@@ -9,6 +9,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { addDaysDateOnly, calendarDaysUntil, formatDateOnly, todayLocalISO } from "@/lib/date";
+import { effectiveLastServiced } from "@/lib/maintenance";
 
 type LogEntry = {
   id: string;
@@ -24,8 +25,6 @@ type Props = {
   maintenanceIntervalDays: number | null;
   initialLogs: LogEntry[];
 };
-
-type FirearmMaintenance = { lastMaintenanceDate: string | null; maintenanceIntervalDays: number | null };
 
 function computeStatus(lastDate: string | null, intervalDays: number | null) {
   if (!lastDate || !intervalDays) return { label: "Neutral", style: "text-vault-text-faint border-vault-border" };
@@ -60,16 +59,15 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const status = computeStatus(lastMaintenanceDate, maintenanceIntervalDays);
-  const nextDue = computeNextDue(lastMaintenanceDate, maintenanceIntervalDays);
-
-  // The server decides what logging or deleting an entry does to the
-  // firearm's last-serviced date and interval; show what it answered.
-  function applyFirearm(firearm: FirearmMaintenance | null | undefined) {
-    if (!firearm) return;
-    setLastMaintenanceDate(firearm.lastMaintenanceDate);
-    setMaintenanceIntervalDays(firearm.maintenanceIntervalDays);
-  }
+  // A logged entry is work done: the newest one counts as the last service
+  // even when the date kept on the firearm is older.
+  const lastServiced =
+    effectiveLastServiced(
+      lastMaintenanceDate,
+      logs.map((log) => log.date),
+    )?.toISOString() ?? null;
+  const status = computeStatus(lastServiced, maintenanceIntervalDays);
+  const nextDue = computeNextDue(lastServiced, maintenanceIntervalDays);
 
   async function handleSave() {
     if (!formDate || !formNotes.trim()) {
@@ -96,10 +94,16 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
         setSaveError(data.error ?? "Failed to save.");
         return;
       }
-      const saved: LogEntry & { firearm?: FirearmMaintenance } = await res.json();
-      const { firearm, ...newEntry } = saved;
+      const newEntry: LogEntry = await res.json();
       setLogs((prev) => [newEntry, ...prev]);
-      applyFirearm(firearm);
+
+      // Update local maintenance state if nextDueDate was set
+      if (formSetNextDue && formNextDueDate) {
+        setLastMaintenanceDate(new Date(formDate).toISOString());
+        const intervalMs = new Date(formNextDueDate).getTime() - new Date(formDate).getTime();
+        const days = Math.round(intervalMs / 86400000);
+        setMaintenanceIntervalDays(days > 0 ? days : null);
+      }
 
       // Reset form
       setFormDate(todayLocalISO());
@@ -120,9 +124,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
         method: "DELETE",
       });
       if (res.ok) {
-        const data: { firearm?: FirearmMaintenance | null } = await res.json().catch(() => ({}));
         setLogs((prev) => prev.filter((l) => l.id !== entryId));
-        applyFirearm(data.firearm);
       }
     } finally {
       setDeleting(false);
@@ -160,7 +162,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
           <p className="text-vault-text-muted">
             Last serviced:{" "}
             <span className="text-vault-text">
-              {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
+              {lastServiced ? formatDateOnly(lastServiced) : "—"}
             </span>
           </p>
           <p className="text-vault-text-muted">
@@ -182,7 +184,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
             <p className="text-vault-text-muted">
               Last serviced:{" "}
               <span className="text-vault-text">
-                {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
+                {lastServiced ? formatDateOnly(lastServiced) : "—"}
               </span>
             </p>
             <p className="text-vault-text-muted">

@@ -1,36 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { lastServicedAfterDelete, lastServicedAfterEntry } from "./maintenance";
+import { effectiveLastServiced } from "./maintenance";
 
-const d = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
+const iso = (value: Date | null) => value?.toISOString().slice(0, 10) ?? null;
 
-describe("lastServicedAfterEntry", () => {
+describe("effectiveLastServiced", () => {
   it.each([
-    ["a later entry resets the clock", "2026-07-03", "2026-10-01", "2026-10-01"],
-    ["an older entry does not move it back", "2026-07-03", "2026-05-01", "2026-07-03"],
-    ["the same day stays", "2026-07-03", "2026-07-03", "2026-07-03"],
-  ])("%s", (_name, current, entry, expected) => {
-    expect(lastServicedAfterEntry(d(current), d(entry))).toEqual(d(expected));
+    ["a log entry after the stored date counts", "2026-07-03T00:00:00.000Z", ["2026-10-01T00:00:00.000Z"], "2026-10-01"],
+    ["an older log entry does not move it back", "2026-07-03", ["2026-05-01"], "2026-07-03"],
+    ["the newest of several entries wins", "2026-07-03", ["2026-08-01", "2026-10-01", "2026-09-01"], "2026-10-01"],
+    ["with no entries the stored date stands", "2026-07-03", [], "2026-07-03"],
+    ["with no stored date the newest entry is it", null, ["2026-10-01", "2026-09-01"], "2026-10-01"],
+    ["nothing recorded at all", null, [], null],
+  ])("%s", (_name, stored, logs, expected) => {
+    expect(iso(effectiveLastServiced(stored, logs))).toBe(expected);
   });
 
-  it("the first entry sets the date when there was none", () => {
-    expect(lastServicedAfterEntry(null, d("2026-10-01"))).toEqual(d("2026-10-01"));
-  });
-});
-
-describe("lastServicedAfterDelete", () => {
-  it("falls back to the latest remaining entry when the last service is deleted", () => {
-    expect(lastServicedAfterDelete(d("2026-10-01"), d("2026-10-01"), d("2026-07-03"))).toEqual(d("2026-07-03"));
+  it("deleting the newest entry falls back to the stored date", () => {
+    const before = effectiveLastServiced("2026-07-03", ["2026-10-01"]);
+    const after = effectiveLastServiced("2026-07-03", []);
+    expect([iso(before), iso(after)]).toEqual(["2026-10-01", "2026-07-03"]);
   });
 
-  it("keeps the date when the deleted entry was not the last service", () => {
-    expect(lastServicedAfterDelete(d("2026-10-01"), d("2026-07-03"), d("2026-10-01"))).toEqual(d("2026-10-01"));
-  });
-
-  it("keeps the date when no entry remains", () => {
-    expect(lastServicedAfterDelete(d("2026-10-01"), d("2026-10-01"), null)).toEqual(d("2026-10-01"));
-  });
-
-  it("stays null when there was no date", () => {
-    expect(lastServicedAfterDelete(null, d("2026-10-01"), null)).toBeNull();
+  it("accepts Date objects and ignores the time of day", () => {
+    const result = effectiveLastServiced(new Date("2026-07-03T00:00:00.000Z"), [new Date("2026-10-01T18:30:00.000Z")]);
+    expect(result?.toISOString()).toBe("2026-10-01T00:00:00.000Z");
   });
 });

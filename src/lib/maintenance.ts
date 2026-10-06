@@ -1,31 +1,19 @@
+import { toDateOnlyUTC } from "./date";
+
 /**
- * How a firearm's "last serviced" date follows its maintenance log.
+ * When a firearm was last serviced: the later of the date kept on the firearm
+ * (typed on its form, or set with a next-due date) and its newest maintenance
+ * log entry.
  *
- * The date is stored on the firearm (it can also be typed on the firearm's
- * form with no log entry behind it), so these rules say when a log entry
- * moves it. Dates are date-only values (UTC midnight).
+ * The log is the record of work done, so an entry counts the moment it exists
+ * and stops counting the moment it is deleted; the date kept on the firearm is
+ * the starting point for a firearm whose earlier service was never logged.
+ * Values are date-only (see toDateOnlyUTC). Safe in client components.
  */
-
-/**
- * After an entry is logged: the later of the current date and the entry's.
- * Logging work done today resets the clock; logging an older, forgotten job
- * does not move it back.
- */
-export function lastServicedAfterEntry(current: Date | null, entry: Date): Date {
-  return current && current.getTime() > entry.getTime() ? current : entry;
-}
-
-/**
- * After an entry is deleted. Only an entry that WAS the last service changes
- * anything: the date falls back to the latest entry that remains. With no
- * entry left there is nothing to fall back to, so the date stays; it can be
- * corrected on the firearm's form.
- */
-export function lastServicedAfterDelete(
-  current: Date | null,
-  deleted: Date,
-  latestRemaining: Date | null,
+export function effectiveLastServiced(
+  stored: Date | string | null | undefined,
+  logDates: ReadonlyArray<Date | string>,
 ): Date | null {
-  if (!current || current.getTime() !== deleted.getTime()) return current;
-  return latestRemaining ?? current;
+  const days = [...(stored ? [stored] : []), ...logDates].map((value) => toDateOnlyUTC(value).getTime());
+  return days.length === 0 ? null : new Date(Math.max(...days));
 }
