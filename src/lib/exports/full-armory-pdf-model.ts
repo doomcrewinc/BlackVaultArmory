@@ -311,21 +311,24 @@ export function buildFullArmoryPdfModel(
 
   const suppressors = payload.items.filter(isSuppressorItem);
   if (suppressors.length > 0) {
-    blocks.push({ kind: "spacer", height: 10 }, { kind: "heading", text: "Suppressors" });
-    blocks.push({
-      kind: "table",
-      columns: [
-        { label: "Item", weight: 40 },
-        { label: "Full-Auto Rated", weight: 20 },
-        { label: "Rated For", weight: 40 },
-      ],
-      rows: suppressors.map((item) => [
-        cell(`${item.manufacturer} ${item.model}`.trim()),
-        cell(item.fullAutoRated),
-        cell(item.fullAutoRatedFor),
-      ]),
-      emptyText: "No suppressors.",
-    });
+    blocks.push(
+      { kind: "spacer", height: 10 },
+      { kind: "heading", text: "Suppressors" },
+      {
+        kind: "table",
+        columns: [
+          { label: "Item", weight: 40 },
+          { label: "Full-Auto Rated", weight: 20 },
+          { label: "Rated For", weight: 40 },
+        ],
+        rows: suppressors.map((item) => [
+          cell(`${item.manufacturer} ${item.model}`.trim()),
+          cell(item.fullAutoRated),
+          cell(item.fullAutoRatedFor),
+        ]),
+        emptyText: "No suppressors.",
+      },
+    );
   }
 
   if (payload.gear.length > 0) {
