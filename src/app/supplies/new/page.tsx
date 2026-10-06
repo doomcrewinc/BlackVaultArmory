@@ -8,6 +8,7 @@ import {
   SUPPLY_UNIT_LABELS,
   DEFAULT_SUPPLY_UNIT,
 } from "@/lib/supply";
+import { LoadingState } from "@/components/shared/LoadingState";
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
@@ -101,7 +102,7 @@ function NewSupplyForm() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                Item Name <span className="text-[#E53935]">*</span>
+                {form.nameLabel} <span className="text-[#E53935]">*</span>
               </label>
               <input
                 id="name"
@@ -283,7 +284,7 @@ function NewSupplyForm() {
  */
 export default function NewSupplyPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<LoadingState />}>
       <NewSupplyForm />
     </Suspense>
   );

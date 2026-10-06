@@ -989,9 +989,14 @@ describe("the kits section", () => {
 });
 
 describe("section wording", () => {
-  const renderedGroups = CATEGORY_SECTIONS.filter(
-    (section) => section.group !== "vault",
+  const WORDED_KINDS = ["accessory", "gear", "supply"];
+  const worded = CATEGORY_SECTIONS.filter((section) =>
+    sectionSources(section).some((kind) => WORDED_KINDS.includes(kind)),
   );
+  const single = worded.filter(
+    (section) => sectionSources(section).length === 1,
+  );
+  const mixed = worded.filter((section) => sectionSources(section).length > 1);
 
   // Sections whose own words may contain the storage name. None today: the
   // accessory sections say what the thing is (magazine, optic, receiver).
@@ -1000,25 +1005,47 @@ describe("section wording", () => {
   function wordsOf(section: CategorySection): string[] {
     const blocks = Object.values(section.blocks ?? {});
     return [
-      section.singular,
-      section.plural,
-      section.emptyHint,
+      section.singular ?? "",
+      section.plural ?? "",
+      section.emptyHint ?? "",
       ...blocks.flatMap((b) => [b.heading, b.singular, b.plural, b.emptyHint]),
     ];
   }
 
-  it.each(CATEGORY_SECTIONS.map((section) => [section.slug, section] as const))(
-    "%s has a singular and plural noun and an empty-state sentence",
+  it.each(single.map((section) => [section.slug, section] as const))(
+    "%s, with one source, has its own nouns and an empty-state sentence and no blocks",
     (_slug, section) => {
-      expect(section.singular.trim()).not.toBe("");
-      expect(section.plural.trim()).not.toBe("");
-      expect(section.plural).not.toBe(section.singular);
-      expect(section.emptyHint.trim()).not.toBe("");
+      expect(section.singular?.trim()).toBeTruthy();
+      expect(section.plural?.trim()).toBeTruthy();
+      expect(section.emptyHint?.trim()).toBeTruthy();
       expect(section.emptyHint).toMatch(/\.$/);
+      expect(section.blocks).toBeUndefined();
+      // The two forms differ unless the noun is uncountable, and then the
+      // first-row button says so itself.
+      expect(
+        section.plural !== section.singular || section.addFirstLabel,
+      ).toBeTruthy();
     },
   );
 
-  it.each(renderedGroups.map((section) => [section.slug, section] as const))(
+  it.each(mixed.map((section) => [section.slug, section] as const))(
+    "%s, with several sources, words every block and has no nouns of its own",
+    (_slug, section) => {
+      expect(section.singular).toBeUndefined();
+      expect(section.plural).toBeUndefined();
+      expect(section.emptyHint).toBeUndefined();
+      for (const kind of sectionSources(section)) {
+        const block = section.blocks?.[kind];
+        expect(block?.heading.trim(), `${kind} heading`).toBeTruthy();
+        expect(block?.singular.trim(), `${kind} singular`).toBeTruthy();
+        expect(block?.plural.trim(), `${kind} plural`).toBeTruthy();
+        expect(block?.emptyHint).toMatch(/\.$/);
+        expect(sectionNounFor(section, kind)).toBe(block);
+      }
+    },
+  );
+
+  it.each(worded.map((section) => [section.slug, section] as const))(
     "%s does not call its things by a storage name",
     (slug, section) => {
       const storageNames = MAY_NAME_ACCESSORIES.includes(slug)
@@ -1030,15 +1057,23 @@ describe("section wording", () => {
     },
   );
 
-  it.each(
-    CATEGORY_SECTIONS.filter((s) => sectionSources(s).length > 1).map(
-      (section) => [section.slug, section] as const,
-    ),
-  )("%s, which has several sources, words every block", (_slug, section) => {
-    for (const kind of sectionSources(section)) {
-      const block = section.blocks?.[kind];
-      expect(block?.heading.trim(), `${kind} heading`).toBeTruthy();
-      expect(sectionNounFor(section, kind)).toBe(block);
+  it.each(worded.map((section) => [section.slug, section] as const))(
+    "%s does not mix 'and' and 'or' between its singular and plural",
+    (_slug, section) => {
+      const nouns = section.blocks
+        ? Object.values(section.blocks)
+        : [section as { singular: string; plural: string }];
+      for (const noun of nouns) {
+        expect(/\bor\b/.test(noun.singular)).toBe(/\bor\b/.test(noun.plural));
+        expect(noun.plural).not.toMatch(/\band\b/);
+      }
+    },
+  );
+
+  it("has no words for a Vault section or the kit list", () => {
+    for (const slug of ["handguns", "sbs", "kits"]) {
+      expect(sectionNounFor(sectionBySlug(slug)!, "firearm")).toBeUndefined();
+      expect(sectionNounFor(sectionBySlug(slug)!, "kit")).toBeUndefined();
     }
   });
 

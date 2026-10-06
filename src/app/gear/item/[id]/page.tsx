@@ -10,6 +10,7 @@ import {
 } from "@/lib/gear";
 import { expiryStatus, resolveExpiryContext } from "@/lib/supply";
 import { gearSectionForItem, sectionHref } from "@/lib/categories";
+import { itemNoun, titleCase } from "@/lib/sections/wording";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
@@ -284,7 +285,7 @@ export default async function GearDetailPage({
         <ItemDocumentPanel
           entityType="gear"
           entityId={gear.id}
-          title="Documents"
+          title={`${titleCase(itemNoun("gear", gear.category))} Documents`}
         />
 
         {currentUser?.role === "ADMIN" && (

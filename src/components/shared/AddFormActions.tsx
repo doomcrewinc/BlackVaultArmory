@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Loader2, Plus } from "lucide-react";
+import { titleCase } from "@/lib/sections/wording";
 import type { AddFormState } from "./useAddFormContext";
 
 /** Where Cancel goes when the form was not opened from a section. */
@@ -34,7 +35,7 @@ export function AddFormActions({ form, loading }: Props) {
         ) : (
           <Plus className="w-4 h-4" />
         )}
-        {loading ? "Adding..." : `Add ${form.noun}`}
+        {loading ? "Adding..." : `Add ${titleCase(form.noun)}`}
       </button>
     </div>
   );

@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
 import { COMMON_CALIBERS } from "@/lib/types";
-import { capitalizeFirst } from "@/lib/sections/wording";
+import { LoadingState } from "@/components/shared/LoadingState";
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
@@ -130,7 +130,7 @@ function NewAccessoryForm() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                {capitalizeFirst(noun)} name{" "}
+                {form.nameLabel}{" "}
                 <span className="text-[#E53935]">*</span>
               </label>
               <input
@@ -424,7 +424,7 @@ function NewAccessoryForm() {
  */
 export default function NewAccessoryPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<LoadingState />}>
       <NewAccessoryForm />
     </Suspense>
   );

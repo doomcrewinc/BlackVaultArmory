@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AlertCircle, ArrowLeft } from "lucide-react";
+import { titleCase } from "@/lib/sections/wording";
 import type { AddFormState } from "./useAddFormContext";
 
 /** Where Back goes (null: the previous page) and what the form says by default. */
@@ -62,7 +63,7 @@ export function AddFormBreadcrumb({ form }: Readonly<{ form: AddFormState }>) {
       )}
       <span className="text-vault-border">/</span>
       <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-        Add {noun}
+        Add {titleCase(noun)}
       </h1>
     </div>
   );
@@ -79,7 +80,7 @@ export function AddFormIntro({
     <>
       <div className="mb-8">
         <h2 className="text-xl font-bold text-vault-text mb-1">
-          New {noun} entry
+          New {titleCase(noun)} Entry
         </h2>
         <p className="text-sm text-vault-text-muted">
           {context ? copy.introForSection(noun) : copy.intro}

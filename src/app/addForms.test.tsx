@@ -53,8 +53,8 @@ const FORMS: Record<string, Form> = {
     page: () => <NewAccessoryPage />,
     field: "type",
     api: "/api/accessories",
-    genericTitle: "Add accessory",
-    genericSubmit: "Add accessory",
+    genericTitle: "Add Accessory",
+    genericSubmit: "Add Accessory",
     genericBack: "/accessories",
     itemPage: "/accessories/created-1",
   },
@@ -62,8 +62,8 @@ const FORMS: Record<string, Form> = {
     page: () => <NewGearPage />,
     field: "category",
     api: "/api/gear",
-    genericTitle: "Add gear",
-    genericSubmit: "Add gear",
+    genericTitle: "Add Gear",
+    genericSubmit: "Add Gear",
     genericBack: "/gear",
     itemPage: "/gear/item/created-1",
   },
@@ -71,8 +71,8 @@ const FORMS: Record<string, Form> = {
     page: () => <NewSupplyPage />,
     field: "category",
     api: "/api/supplies",
-    genericTitle: "Add supply",
-    genericSubmit: "Add supply",
+    genericTitle: "Add Supply",
+    genericSubmit: "Add Supply",
     genericBack: "/",
     itemPage: "/supplies/item/created-1",
   },
@@ -136,13 +136,13 @@ describe("accessory add form opened from a section", () => {
   it("fixes the type, titles the page and returns to the section", async () => {
     open(FORMS.accessory, "magazines");
     expect(
-      screen.getByRole("heading", { level: 1, name: "Add magazine" }),
+      screen.getByRole("heading", { level: 1, name: "Add Magazine" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Add magazine" }),
+      screen.getByRole("button", { name: "Add Magazine" }),
     ).toBeInTheDocument();
     expect(document.getElementById("type")).toBeInstanceOf(HTMLInputElement);
-    expect(screen.getByTestId("type-fixed")).toHaveTextContent("Magazine");
+    expect(screen.getByTestId("type-fixed")).toHaveValue("Magazine");
     expect(
       screen.getByRole("link", { name: "Back to Magazines" }),
     ).toHaveAttribute("href", "/gear/magazines");
@@ -173,16 +173,16 @@ describe("accessory add form opened from a section", () => {
 
   it("shows the suppressor paperwork when the fixed type is a suppressor", () => {
     open(FORMS.accessory, "suppressors");
-    expect(screen.getByTestId("type-fixed")).toHaveTextContent("Suppressor");
+    expect(screen.getByTestId("type-fixed")).toHaveValue("Suppressor");
     expect(document.getElementById("nfaTransferMethod")).not.toBeNull();
   });
 });
 
 describe.each([
-  ["gear", "knives", "knife", "KNIFE", "/gear/knives"],
-  ["gear", "armor", "armor piece", "ARMOR", "/prep/armor"],
-  ["supply", "cleaning", "cleaning supply", "CLEANING", "/gear/cleaning"],
-  ["supply", "medical", "medical supply", "MEDICAL", "/prep/medical"],
+  ["gear", "knives", "Knife", "KNIFE", "/gear/knives"],
+  ["gear", "armor", "Armor", "ARMOR", "/prep/armor"],
+  ["supply", "cleaning", "Cleaning Supply", "CLEANING", "/gear/cleaning"],
+  ["supply", "medical", "Medical Supply", "MEDICAL", "/prep/medical"],
 ] as const)(
   "%s add form opened from %s",
   (kind, slug, singular, category, returnHref) => {
@@ -196,6 +196,7 @@ describe.each([
       expect(
         screen.getByRole("button", { name: `Add ${singular}` }),
       ).toBeInTheDocument();
+      expect(screen.getByLabelText("Category")).toHaveAttribute("readonly");
       expect(screen.getByTestId("category-fixed")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Cancel" })).toHaveAttribute(
         "href",
@@ -211,6 +212,39 @@ describe.each([
     });
   },
 );
+
+describe("a fixed single value", () => {
+  it("is found by its label and is still submitted by a hidden input", async () => {
+    open(FORMS.accessory, "magazines");
+    expect(screen.getByLabelText("Type / Slot")).toHaveValue("Magazine");
+    const hidden = document.getElementById("type") as HTMLInputElement;
+    expect(hidden.type).toBe("hidden");
+    expect(hidden.name).toBe("type");
+    expect(hidden.value).toBe("MAGAZINE");
+    expect((await submit()).type).toBe("MAGAZINE");
+  });
+});
+
+describe.each(Object.keys(FORMS))("%s add form address edge cases", (name) => {
+  const form = FORMS[name];
+
+  it.each([
+    ["an empty section", "section="],
+    ["a repeated section", "section=magazines&section=knives&section=armor"],
+    ["the same section twice", "section=armor&section=armor"],
+  ])("treats %s as no section", async (_label, query) => {
+    address.query = query;
+    render(form.page());
+    expect(
+      screen.getByRole("heading", { level: 1, name: form.genericTitle }),
+    ).toBeInTheDocument();
+    expect(document.getElementById(form.field)).toBeInstanceOf(
+      HTMLSelectElement,
+    );
+    await submit();
+    expect(push).toHaveBeenCalledWith(form.itemPage);
+  });
+});
 
 describe("a section holding several categories", () => {
   it.each([

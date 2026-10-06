@@ -1,43 +1,120 @@
 import { describe, expect, it } from "vitest";
 import { CATEGORY_SECTIONS, sectionBySlug } from "@/lib/categories";
 import {
+  DEFAULT_LIST_WORDING,
   addFormContext,
-  capitalizeFirst,
+  addFormSectionForAddress,
   itemNoun,
   listWordingForSection,
+  sectionParam,
+  titleCase,
 } from "./wording";
 
+describe("titleCase", () => {
+  it.each([
+    ["magazine", "Magazine"],
+    ["armor piece", "Armor Piece"],
+    ["food or water item", "Food or Water Item"],
+    ["or the start of it", "Or the Start of It"],
+    ["cleaning supplies", "Cleaning Supplies"],
+    ["AOW", "AOW"],
+    ["", ""],
+  ])("%j becomes %j", (input, expected) => {
+    expect(titleCase(input)).toBe(expected);
+  });
+});
+
 describe("listWordingForSection", () => {
-  it("builds every string from the section's nouns", () => {
+  it("builds labels in Title Case and sentences in sentence case", () => {
     expect(
       listWordingForSection(sectionBySlug("magazines")!, "accessory"),
     ).toEqual({
-      addLabel: "Add magazine",
+      addLabel: "Add Magazine",
       addHref: "/accessories/new?section=magazines",
       emptyTitle: "No magazines yet",
       emptyHint: sectionBySlug("magazines")!.emptyHint,
-      addFirstLabel: "Add first magazine",
-      totalLabel: "Total magazines",
+      addFirstLabel: "Add First Magazine",
+      totalLabel: "Total Magazines",
       noMatch: "No magazines match the selected filter.",
+    });
+  });
+
+  it("lets an uncountable noun say its own first-row button", () => {
+    expect(
+      listWordingForSection(sectionBySlug("armor")!, "gear"),
+    ).toMatchObject({
+      addLabel: "Add Armor",
+      addFirstLabel: "Add Armor",
+      emptyTitle: "No armor yet",
+      totalLabel: "Total Armor",
     });
   });
 
   it("uses the block's words for one source of a mixed section", () => {
     const section = sectionBySlug("medical")!;
     expect(listWordingForSection(section, "gear")).toMatchObject({
-      addLabel: "Add medical kit",
+      addLabel: "Add Medical Kit",
       addHref: "/gear/new?section=medical",
     });
     expect(listWordingForSection(section, "supply")).toMatchObject({
-      addLabel: "Add medical supply",
+      addLabel: "Add Medical Supply",
       addHref: "/supplies/new?section=medical",
     });
+  });
+
+  it("uses 'or' in both forms of a block's noun", () => {
+    expect(
+      listWordingForSection(sectionBySlug("food-water")!, "supply"),
+    ).toMatchObject({
+      addLabel: "Add Food or Water Item",
+      emptyTitle: "No food or water items yet",
+    });
+  });
+
+  it("falls back to the default wording for a section with no words", () => {
+    expect(listWordingForSection(sectionBySlug("handguns")!, "gear")).toBe(
+      DEFAULT_LIST_WORDING.gear,
+    );
+  });
+});
+
+describe("DEFAULT_LIST_WORDING", () => {
+  it.each([
+    ["accessory", "Add Accessory", "No accessories yet", "Add First Accessory"],
+    ["gear", "Add Gear", "No gear yet", "Add First Item"],
+    ["supply", "Add Supply", "No supplies yet", "Add First Supply"],
+  ] as const)(
+    "%s keeps the wording it always had",
+    (kind, add, empty, first) => {
+      expect(DEFAULT_LIST_WORDING[kind]).toMatchObject({
+        addLabel: add,
+        emptyTitle: empty,
+        addFirstLabel: first,
+      });
+    },
+  );
+
+  it("keeps Total Parts on the accessory list", () => {
+    expect(DEFAULT_LIST_WORDING.accessory.totalLabel).toBe("Total Parts");
+  });
+});
+
+describe("sectionParam", () => {
+  it.each([
+    ["section=magazines", "magazines"],
+    ["", null],
+    ["section=", null],
+    ["other=1", null],
+    ["section=magazines&section=optics", null],
+    ["section=magazines&section=magazines", null],
+  ])("%j gives %j", (query, expected) => {
+    expect(sectionParam(new URLSearchParams(query))).toBe(expected);
   });
 });
 
 describe("addFormContext", () => {
   it("reads the section's words, return path and allowed values", () => {
-    expect(addFormContext("accessory", "magazines")).toEqual({
+    expect(addFormContext("accessory", "magazines")).toMatchObject({
       singular: "magazine",
       sectionLabel: "Magazines",
       returnHref: "/gear/magazines",
@@ -85,11 +162,33 @@ describe("addFormContext", () => {
   });
 });
 
+describe("addFormSectionForAddress", () => {
+  it.each([
+    ["/accessories/new", "magazines", "magazines"],
+    ["/gear/new", "armor", "armor"],
+    ["/supplies/new", "medical", "medical"],
+  ])("%s with %s names that section", (path, slug, expected) => {
+    expect(addFormSectionForAddress(path, slug)?.slug).toBe(expected);
+  });
+
+  it.each([
+    ["/accessories/new", "nonsense"],
+    ["/accessories/new", "handguns"],
+    ["/accessories/new", "knives"],
+    ["/accessories/new", null],
+    ["/gear/magazines", "magazines"],
+    ["/accessories/abc", "magazines"],
+    ["/", "magazines"],
+  ])("%s with %s names no section", (path, slug) => {
+    expect(addFormSectionForAddress(path, slug)).toBeNull();
+  });
+});
+
 describe("itemNoun", () => {
   it.each([
     ["accessory", "MAGAZINE", "magazine"],
     ["accessory", "STOCK", "part"],
-    ["gear", "ARMOR", "armor piece"],
+    ["gear", "ARMOR", "armor"],
     ["gear", "MEDICAL_KIT", "medical kit"],
     ["supply", "MEDICAL", "medical supply"],
     ["supply", "CLEANING", "cleaning supply"],
@@ -97,14 +196,7 @@ describe("itemNoun", () => {
     expect(itemNoun(kind, value)).toBe(noun);
   });
 
-  it("falls back to the storage name for a value no section holds", () => {
+  it("falls back to a section's noun for a value no section names", () => {
     expect(itemNoun("accessory", "NOT_A_TYPE")).toBe("part");
-  });
-});
-
-describe("capitalizeFirst", () => {
-  it("raises the first letter only", () => {
-    expect(capitalizeFirst("armor piece")).toBe("Armor piece");
-    expect(capitalizeFirst("")).toBe("");
   });
 });

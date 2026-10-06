@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   Shield,
   Crosshair,
@@ -27,13 +27,15 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusMessage } from "@/components/shared/StatusMessage";
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import {
   groupHref,
   sectionHref,
   sectionsForGroup,
+  type CategorySection,
   type SectionGroup,
 } from "@/lib/categories";
+import { addFormSectionForAddress, sectionParam } from "@/lib/sections/wording";
 import { fetchCategoryCounts } from "@/lib/category-counts";
 
 const PRIMARY_NAV_ITEMS = [
@@ -110,12 +112,46 @@ function initialsFor(displayName: string): string {
     .join("");
 }
 
+/**
+ * Reports the section an add form's address names (`/gear/new?section=armor`),
+ * so the menu can highlight where the person came from. It is the one part of
+ * the menu that reads the query string, in its own Suspense boundary so that
+ * reading it never makes the page around the menu wait for the browser.
+ */
+function AddFormSectionProbe({
+  pathname,
+  onSection,
+}: Readonly<{
+  pathname: string;
+  onSection: (section: CategorySection | null) => void;
+}>) {
+  const slug = sectionParam(useSearchParams());
+  useEffect(() => {
+    onSection(addFormSectionForAddress(pathname, slug));
+  }, [pathname, slug, onSection]);
+  return null;
+}
+
+/** Accessories have no menu entry of their own; they belong to Gear. */
+function isGroupActive(
+  group: SectionGroup,
+  pathname: string,
+  activeSection: CategorySection | null,
+): boolean {
+  return (
+    pathname.startsWith(groupHref(group)) ||
+    activeSection?.group === group ||
+    (group === "gear" && pathname.startsWith("/accessories"))
+  );
+}
+
 function NavGroup({
   label,
   description,
   icon: Icon,
   group,
   pathname,
+  activeSection,
   collapsed,
   counts,
   onNavigate,
@@ -125,6 +161,7 @@ function NavGroup({
   icon: LucideIcon;
   group: SectionGroup;
   pathname: string;
+  activeSection: CategorySection | null;
   collapsed: boolean;
   counts: Record<string, number>;
   onNavigate?: () => void;
@@ -135,7 +172,7 @@ function NavGroup({
   // section hrefs is what lets one test check both. (/prep was exactly that
   // 404 until this landed.)
   const href = groupHref(group);
-  const isActive = pathname.startsWith(href);
+  const isActive = isGroupActive(group, pathname, activeSection);
   const [open, setOpen] = useState(isActive);
   const sectionOpen = isActive || open;
   const sections = sectionsForGroup(group);
@@ -204,7 +241,7 @@ function NavGroup({
                 onClick={() => onNavigate?.()}
                 className={cn(
                   "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors",
-                  pathname === slugHref
+                  pathname === slugHref || activeSection?.slug === section.slug
                     ? "text-[#00C2FF]"
                     : "text-vault-text-muted hover:text-vault-text hover:bg-vault-border",
                 )}
@@ -241,6 +278,9 @@ export function Sidebar({
   const isRangeRoute = pathname.startsWith("/range");
   const rangeSectionOpen = isRangeRoute || rangeOpen;
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [activeSection, setActiveSection] = useState<CategorySection | null>(
+    null,
+  );
 
   useEffect(() => {
     onMobileClose?.();
@@ -294,6 +334,9 @@ export function Sidebar({
 
   const navContent = (
     <>
+      <Suspense fallback={null}>
+        <AddFormSectionProbe pathname={pathname} onSection={setActiveSection} />
+      </Suspense>
       <div className="flex items-center gap-3 px-4 h-14 border-b border-vault-border shrink-0">
         <div className="w-7 h-7 rounded bg-[#00C2FF]/10 border border-[#00C2FF]/30 flex items-center justify-center shrink-0">
           <Shield className="w-4 h-4 text-[#00C2FF]" />
@@ -391,6 +434,7 @@ export function Sidebar({
           icon={Shield}
           group="vault"
           pathname={pathname}
+          activeSection={activeSection}
           collapsed={collapsed}
           counts={counts}
           onNavigate={onMobileClose}
@@ -401,6 +445,7 @@ export function Sidebar({
           icon={Crosshair}
           group="gear"
           pathname={pathname}
+          activeSection={activeSection}
           collapsed={collapsed}
           counts={counts}
           onNavigate={onMobileClose}
@@ -411,6 +456,7 @@ export function Sidebar({
           icon={Backpack}
           group="prep"
           pathname={pathname}
+          activeSection={activeSection}
           collapsed={collapsed}
           counts={counts}
           onNavigate={onMobileClose}

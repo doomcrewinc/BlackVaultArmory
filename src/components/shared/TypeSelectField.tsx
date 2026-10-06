@@ -43,9 +43,9 @@ type Props = Readonly<{
 
 /**
  * The type or category field of an add form. A form opened from a section
- * offers only what the section holds; a single value is shown as text instead
- * of a choice and is still submitted, through a hidden input, so the form
- * reads it like any other field. Without a section it offers everything, and
+ * offers only what the section holds; a single value is shown in a read-only
+ * labelled input instead of a choice and is still submitted, through a hidden
+ * input, so the form reads it like any other field. Without a section it offers everything, and
  * the accessory form starts empty.
  */
 export function TypeSelectField({ form, value, onChange }: Props) {
@@ -55,14 +55,18 @@ export function TypeSelectField({ form, value, onChange }: Props) {
   if (allowed && offered.length === 1) {
     return (
       <div>
-        <p className={LABEL_CLASS}>{label}</p>
-        <p
+        <label htmlFor={`${id}-fixed`} className={LABEL_CLASS}>
+          {label}
+        </label>
+        <input
+          id={`${id}-fixed`}
           data-testid={`${id}-fixed`}
+          type="text"
+          readOnly
+          value={labels[offered[0]] ?? offered[0]}
           className={`${INPUT_CLASS} cursor-default text-vault-text-muted`}
-        >
-          {labels[offered[0]] ?? offered[0]}
-        </p>
-        <input type="hidden" id={id} name={id} value={offered[0]} readOnly />
+        />
+        <input type="hidden" id={id} name={id} value={offered[0]} />
       </div>
     );
   }

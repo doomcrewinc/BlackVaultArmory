@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { sectionHref } from "@/lib/categories";
-import { sectionForItem } from "@/lib/sections/wording";
+import { itemNoun, sectionForItem, titleCase } from "@/lib/sections/wording";
 import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
 import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types";
 import { PhotoGallery } from "@/components/photos/PhotoGallery";
@@ -609,7 +609,7 @@ export default function AccessoryDetailPage() {
         <ItemDocumentPanel
           entityType="accessory"
           entityId={accessory.id}
-          title="Documents"
+          title={`${titleCase(itemNoun("accessory", accessory.type))} Documents`}
         />
 
         {/* Round Count History */}

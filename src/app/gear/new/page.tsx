@@ -4,7 +4,7 @@ import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DEFAULT_GEAR_CATEGORY, isArmorCategory } from "@/lib/gear";
 import ImagePicker from "@/components/shared/ImagePicker";
-import { capitalizeFirst } from "@/lib/sections/wording";
+import { LoadingState } from "@/components/shared/LoadingState";
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
@@ -102,7 +102,7 @@ function NewGearForm() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                {context ? capitalizeFirst(noun) : "Item"} name{" "}
+                {form.nameLabel}{" "}
                 <span className="text-[#E53935]">*</span>
               </label>
               <input
@@ -351,7 +351,7 @@ function NewGearForm() {
  */
 export default function NewGearPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<LoadingState />}>
       <NewGearForm />
     </Suspense>
   );

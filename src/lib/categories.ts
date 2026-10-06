@@ -81,14 +81,19 @@ export type SectionMatcher =
     };
 
 /**
- * The words a page uses for the things in a section, in sentence case: the
- * lowercase noun a button or heading is built around ("Add magazine", "No
- * magazines yet") and one sentence for the empty state.
+ * The words a page uses for the things in a section: the lowercase noun that
+ * buttons and headings are built around (title-cased where they are labels:
+ * "Add Magazine", "No magazines yet") and one sentence for the empty state.
  */
 export type SectionNoun = {
   singular: string;
   plural: string;
   emptyHint: string;
+  /**
+   * The Title Case text of the empty state's button, for a noun where "Add
+   * First <Singular>" reads wrong (armor is uncountable).
+   */
+  addFirstLabel?: string;
 };
 
 /**
@@ -97,14 +102,16 @@ export type SectionNoun = {
  */
 export type SectionBlock = SectionNoun & { heading: string };
 
-export type CategorySection = SectionNoun & {
+export type CategorySection = Partial<SectionNoun> & {
   slug: string;
   label: string;
   description: string;
   group: SectionGroup;
   /**
-   * Required for every section that has more than one source kind, keyed by
-   * that kind. A single-source section uses its own `singular`/`plural`.
+   * The words of a section whose rows are accessories, gear or supplies: either
+   * the section's own `singular`/`plural`/`emptyHint` (one source) or one block
+   * per source kind here (several sources), never both. Vault sections word
+   * themselves in their own page, and the kit list does not read them.
    */
   blocks?: Partial<Record<SectionSource, SectionBlock>>;
   /**
@@ -334,13 +341,9 @@ function nouns(
   singular: string,
   plural: string,
   emptyHint: string,
+  addFirstLabel?: string,
 ): SectionNoun {
-  return { singular, plural, emptyHint };
-}
-
-/** The words for a Vault section, whose pages word themselves ("firearm"). */
-function vaultNouns(singular: string, plural: string): SectionNoun {
-  return nouns(singular, plural, `Add your ${plural} to track them here.`);
+  return { singular, plural, emptyHint, addFirstLabel };
 }
 
 /** One block of a section that draws from more than one source. */
@@ -356,7 +359,6 @@ function block(
 export const CATEGORY_SECTIONS: CategorySection[] = [
   {
     slug: "handguns",
-    ...vaultNouns("handgun", "handguns"),
     label: "Handguns",
     description: "Pistols & revolvers",
     group: "vault",
@@ -365,7 +367,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "rifles",
-    ...vaultNouns("rifle", "rifles"),
     label: "Rifles",
     description: "Rifles, PCCs & bolt guns",
     group: "vault",
@@ -374,7 +375,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "shotguns",
-    ...vaultNouns("shotgun", "shotguns"),
     label: "Shotguns",
     description: "Shotguns",
     group: "vault",
@@ -383,7 +383,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "other-firearms",
-    ...vaultNouns("firearm", "firearms"),
     label: "Other",
     description: "Unsorted & other platforms",
     group: "vault",
@@ -392,7 +391,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "sbr",
-    ...vaultNouns("SBR", "SBRs"),
     label: "SBR",
     description: "Short-barreled rifles",
     group: "vault",
@@ -401,7 +399,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "sbs",
-    ...vaultNouns("SBS", "SBSs"),
     label: "SBS",
     description: "Short-barreled shotguns",
     group: "vault",
@@ -410,7 +407,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "machine-guns",
-    ...vaultNouns("machine gun", "machine guns"),
     label: "Machine Guns",
     description: "Select-fire, any platform",
     group: "vault",
@@ -419,7 +415,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "aow",
-    ...vaultNouns("AOW", "AOWs"),
     label: "AOW",
     description: "Any other weapon",
     group: "vault",
@@ -428,7 +423,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "destructive-devices",
-    ...vaultNouns("destructive device", "destructive devices"),
     label: "Destructive Devices",
     description: "DD-classified items",
     group: "vault",
@@ -555,9 +549,10 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   {
     slug: "armor",
     ...nouns(
-      "armor piece",
-      "armor pieces",
+      "armor",
+      "armor",
       "Add plates, carriers and soft armor to track what you own.",
+      "Add Armor",
     ),
     label: "Armor",
     description: "Plates, carriers & soft armor",
@@ -567,24 +562,19 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "medical",
-    ...nouns(
-      "medical item",
-      "medical items",
-      "Add medical kits and first-aid supplies to track what you own.",
-    ),
     label: "Medical",
     description: "Kits, first aid & medical supplies",
     group: "prep",
     icon: "Cross",
     blocks: {
       gear: block(
-        "Kits & equipment",
+        "Kits & Equipment",
         "medical kit",
         "medical kits",
         "Add first-aid and trauma kits to track what you own.",
       ),
       supply: block(
-        "Consumable supplies",
+        "Consumable Supplies",
         "medical supply",
         "medical supplies",
         "Track bandages, medication and other consumables, with quantities and expiry dates.",
@@ -597,26 +587,21 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "food-water",
-    ...nouns(
-      "food or water item",
-      "food and water items",
-      "Add food, water, filters and treatment equipment to track what you own.",
-    ),
     label: "Food & Water",
     description: "Food, water, filters & treatment",
     group: "prep",
     icon: "Droplets",
     blocks: {
       gear: block(
-        "Water treatment equipment",
+        "Water Treatment Equipment",
         "water treatment item",
         "water treatment items",
         "Add purifiers and other water treatment equipment to track what you own.",
       ),
       supply: block(
-        "Food, water & filters",
+        "Food, Water & Filters",
         "food or water item",
-        "food and water items",
+        "food or water items",
         "Track food, water and filters, with quantities and expiry dates.",
       ),
     },
@@ -627,20 +612,15 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "power-comms",
-    ...nouns(
-      "power or comms item",
-      "power and comms items",
-      "Add batteries, power equipment and radios to track what you own.",
-    ),
     label: "Power & Comms",
     description: "Batteries, power & radios",
     group: "prep",
     icon: "BatteryCharging",
     blocks: {
       gear: block(
-        "Power & radio equipment",
+        "Power & Radio Equipment",
         "power or radio item",
-        "power and radio items",
+        "power or radio items",
         "Add power stations, solar equipment and radios to track what you own.",
       ),
       supply: block(
@@ -658,8 +638,8 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   {
     slug: "shelter-clothing",
     ...nouns(
-      "shelter or clothing item",
-      "shelter and clothing items",
+      "item",
+      "items",
       "Add shelter, sleep and clothing items to track what you own.",
     ),
     label: "Shelter & Clothing",
@@ -670,26 +650,21 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "tools-fire",
-    ...nouns(
-      "tool or light",
-      "tools and lights",
-      "Add tools, lights, fire starters and signaling equipment to track what you own.",
-    ),
     label: "Tools & Fire",
     description: "Tools, light, fire & signaling",
     group: "prep",
     icon: "Flame",
     blocks: {
       gear: block(
-        "Tools, lights & signaling",
-        "tool or light",
-        "tools and lights",
+        "Tools, Lights & Signaling",
+        "equipment item",
+        "equipment items",
         "Add tools, lights, fire starters and signaling equipment to track what you own.",
       ),
       supply: block(
-        "Fuel & signal supplies",
+        "Fuel & Signal Supplies",
         "fuel or signal supply",
-        "fuel and signal supplies",
+        "fuel or signal supplies",
         "Track fuel and signaling consumables, with quantities and expiry dates.",
       ),
     },
@@ -700,24 +675,19 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "other-prep",
-    ...nouns(
-      "item",
-      "items",
-      "Add sanitation, CBRN, navigation and other preparedness items here.",
-    ),
     label: "Other Prep",
     description: "Sanitation, CBRN, navigation & everything else",
     group: "prep",
     icon: "Package",
     blocks: {
       gear: block(
-        "Other equipment",
+        "Other Equipment",
         "equipment item",
         "equipment items",
         "Add sanitation, CBRN, navigation and other durable items here.",
       ),
       supply: block(
-        "Other consumables",
+        "Other Consumables",
         "consumable",
         "consumables",
         "Track other consumables, with quantities and expiry dates.",
@@ -732,11 +702,6 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "kits",
-    ...nouns(
-      "kit",
-      "kits",
-      "Build a packing list for a bugout, medical, range or vehicle kit.",
-    ),
     label: "Kits",
     description: "Bugout, medical, range & vehicle packing lists",
     group: "prep",
@@ -939,13 +904,19 @@ export function sectionAllowedValues(
 
 /**
  * The words for one source of a section: the block's own when the section has
- * one for that kind, otherwise the section's.
+ * one for that kind, otherwise the section's own; undefined for a section that
+ * has neither (a Vault section, or the kit list).
  */
 export function sectionNounFor(
   section: CategorySection,
   kind: SectionSource,
-): SectionNoun {
-  return section.blocks?.[kind] ?? section;
+): SectionNoun | undefined {
+  const own = section.blocks?.[kind];
+  if (own) return own;
+  const { singular, plural, emptyHint, addFirstLabel } = section;
+  return singular && plural && emptyHint
+    ? { singular, plural, emptyHint, addFirstLabel }
+    : undefined;
 }
 
 /**

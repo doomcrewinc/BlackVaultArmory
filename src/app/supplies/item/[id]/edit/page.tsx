@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
-import { itemNoun } from "@/lib/sections/wording";
+import { itemNoun, titleCase } from "@/lib/sections/wording";
 import {
   SUPPLY_CATEGORIES,
   SUPPLY_CATEGORY_LABELS,
@@ -173,7 +173,7 @@ export default function EditSupplyPage() {
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit {noun}
+          Edit {titleCase(noun)}
         </h1>
       </div>
 

@@ -13,9 +13,27 @@ import {
 } from "@/lib/categories";
 
 /**
- * Client-safe: nothing here reads the database, so the list screens and the
- * add forms can both import it.
+ * Client-safe: nothing here reads the database, so the list screens, the add
+ * forms and the side menu can all import it.
  */
+
+const LOWERCASE_WORDS = new Set(["a", "an", "and", "or", "of", "the", "to"]);
+
+/**
+ * Title Case for a label built from a noun: "food or water item" becomes "Food
+ * or Water Item". Small words stay lowercase unless first; the rest of each
+ * word is left as written, so "AOW" survives.
+ */
+export function titleCase(text: string): string {
+  return text
+    .split(" ")
+    .map((word, index) =>
+      index > 0 && LOWERCASE_WORDS.has(word)
+        ? word
+        : word.charAt(0).toUpperCase() + word.slice(1),
+    )
+    .join(" ");
+}
 
 /** The add form each kind of row is created on. */
 export const ADD_FORM_PATHS: Record<AddFormKind, string> = {
@@ -24,7 +42,22 @@ export const ADD_FORM_PATHS: Record<AddFormKind, string> = {
   supply: "/supplies/new",
 };
 
-/** Every string a list screen builds around the name of its rows. */
+/**
+ * The value of `?section=` when the address carries exactly one. An empty
+ * value, a repeated parameter or none at all is "no section".
+ */
+export function sectionParam(params: {
+  getAll(name: string): string[];
+}): string | null {
+  const all = params.getAll("section");
+  return all.length === 1 && all[0] ? all[0] : null;
+}
+
+/**
+ * Every string a list screen builds around the name of its rows. Labels
+ * (buttons, the stat) are Title Case; the empty title, the hint and the
+ * filter message are sentences.
+ */
 export type ListWording = {
   addLabel: string;
   addHref: string;
@@ -41,12 +74,13 @@ export function listWordingFromNoun(
   addHref: string,
 ): ListWording {
   return {
-    addLabel: `Add ${noun.singular}`,
+    addLabel: `Add ${titleCase(noun.singular)}`,
     addHref,
     emptyTitle: `No ${noun.plural} yet`,
     emptyHint: noun.emptyHint,
-    addFirstLabel: `Add first ${noun.singular}`,
-    totalLabel: `Total ${noun.plural}`,
+    addFirstLabel:
+      noun.addFirstLabel ?? `Add First ${titleCase(noun.singular)}`,
+    totalLabel: `Total ${titleCase(noun.plural)}`,
     noMatch: `No ${noun.plural} match the selected filter.`,
   };
 }
@@ -66,7 +100,7 @@ export const DEFAULT_LIST_WORDING: Record<AddFormKind, ListWording> = {
       },
       ADD_FORM_PATHS.accessory,
     ),
-    totalLabel: "Total parts",
+    totalLabel: "Total Parts",
   },
   gear: {
     ...listWordingFromNoun(
@@ -78,7 +112,7 @@ export const DEFAULT_LIST_WORDING: Record<AddFormKind, ListWording> = {
       },
       ADD_FORM_PATHS.gear,
     ),
-    addLabel: "Add gear",
+    addLabel: "Add Gear",
     emptyTitle: "No gear yet",
   },
   supply: listWordingFromNoun(
@@ -95,20 +129,24 @@ export const DEFAULT_LIST_WORDING: Record<AddFormKind, ListWording> = {
 /**
  * The wording of one list block on a section page. The add link carries the
  * section so the form can preset its type or category and send the person
- * back here.
+ * back here. A section with no words for that kind gets the default wording.
  */
 export function listWordingForSection(
   section: CategorySection,
   kind: AddFormKind,
 ): ListWording {
-  return listWordingFromNoun(
-    sectionNounFor(section, kind),
-    `${ADD_FORM_PATHS[kind]}?section=${encodeURIComponent(section.slug)}`,
-  );
+  const noun = sectionNounFor(section, kind);
+  return noun
+    ? listWordingFromNoun(
+        noun,
+        `${ADD_FORM_PATHS[kind]}?section=${encodeURIComponent(section.slug)}`,
+      )
+    : DEFAULT_LIST_WORDING[kind];
 }
 
 /** What an add form needs to know about the section the person came from. */
 export type AddFormContext = {
+  section: CategorySection;
   singular: string;
   sectionLabel: string;
   /** Built from the registry's group and slug, never from the query string. */
@@ -132,14 +170,30 @@ export function addFormContext(
   const section = sectionBySlug(slug);
   if (!section || section.group === "vault") return null;
   if (!sectionSources(section).includes(kind)) return null;
+  const noun = sectionNounFor(section, kind);
   const allowedValues = sectionAllowedValues(section, kind);
-  if (allowedValues.length === 0) return null;
+  if (!noun || allowedValues.length === 0) return null;
   return {
-    singular: sectionNounFor(section, kind).singular,
+    section,
+    singular: noun.singular,
     sectionLabel: section.label,
     returnHref: sectionHref(section),
     allowedValues,
   };
+}
+
+/**
+ * The section an add form's address names: only the three add-form paths
+ * count, and only with a section that form can add to.
+ */
+export function addFormSectionForAddress(
+  pathname: string,
+  slug: string | null,
+): CategorySection | null {
+  const kind = (Object.keys(ADD_FORM_PATHS) as AddFormKind[]).find(
+    (candidate) => ADD_FORM_PATHS[candidate] === pathname,
+  );
+  return kind ? (addFormContext(kind, slug)?.section ?? null) : null;
 }
 
 /** The section an existing row belongs to, from its type or category. */
@@ -163,10 +217,5 @@ export function sectionForItem(
  */
 export function itemNoun(kind: AddFormKind, value: string): string {
   const section = sectionForItem(kind, value);
-  return section ? sectionNounFor(section, kind).singular : kind;
-}
-
-/** "magazine" to "Magazine", for a label that starts a sentence. */
-export function capitalizeFirst(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  return (section && sectionNounFor(section, kind)?.singular) || kind;
 }
