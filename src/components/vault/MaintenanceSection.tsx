@@ -25,6 +25,8 @@ type Props = {
   initialLogs: LogEntry[];
 };
 
+type FirearmMaintenance = { lastMaintenanceDate: string | null; maintenanceIntervalDays: number | null };
+
 function computeStatus(lastDate: string | null, intervalDays: number | null) {
   if (!lastDate || !intervalDays) return { label: "Neutral", style: "text-vault-text-faint border-vault-border" };
   const days = calendarDaysUntil(addDaysDateOnly(lastDate, intervalDays));
@@ -61,6 +63,14 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
   const status = computeStatus(lastMaintenanceDate, maintenanceIntervalDays);
   const nextDue = computeNextDue(lastMaintenanceDate, maintenanceIntervalDays);
 
+  // The server decides what logging or deleting an entry does to the
+  // firearm's last-serviced date and interval; show what it answered.
+  function applyFirearm(firearm: FirearmMaintenance | null | undefined) {
+    if (!firearm) return;
+    setLastMaintenanceDate(firearm.lastMaintenanceDate);
+    setMaintenanceIntervalDays(firearm.maintenanceIntervalDays);
+  }
+
   async function handleSave() {
     if (!formDate || !formNotes.trim()) {
       setSaveError("Date and notes are required.");
@@ -86,16 +96,10 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
         setSaveError(data.error ?? "Failed to save.");
         return;
       }
-      const newEntry: LogEntry = await res.json();
+      const saved: LogEntry & { firearm?: FirearmMaintenance } = await res.json();
+      const { firearm, ...newEntry } = saved;
       setLogs((prev) => [newEntry, ...prev]);
-
-      // Update local maintenance state if nextDueDate was set
-      if (formSetNextDue && formNextDueDate) {
-        setLastMaintenanceDate(new Date(formDate).toISOString());
-        const intervalMs = new Date(formNextDueDate).getTime() - new Date(formDate).getTime();
-        const days = Math.round(intervalMs / 86400000);
-        setMaintenanceIntervalDays(days > 0 ? days : null);
-      }
+      applyFirearm(firearm);
 
       // Reset form
       setFormDate(todayLocalISO());
@@ -116,7 +120,9 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
         method: "DELETE",
       });
       if (res.ok) {
+        const data: { firearm?: FirearmMaintenance | null } = await res.json().catch(() => ({}));
         setLogs((prev) => prev.filter((l) => l.id !== entryId));
+        applyFirearm(data.firearm);
       }
     } finally {
       setDeleting(false);

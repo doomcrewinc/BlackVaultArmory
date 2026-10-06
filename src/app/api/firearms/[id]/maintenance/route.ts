@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { InvalidDateError, toDateOnlyUTC } from "@/lib/date";
+import { lastServicedAfterEntry } from "@/lib/maintenance";
 
 export async function GET(
   _req: NextRequest,
@@ -41,38 +42,44 @@ export async function POST(
   try {
     const entryDate = toDateOnlyUTC(body.date);
 
-    const log = await prisma.maintenanceLog.create({
-      data: {
-        firearmId: id,
-        date: entryDate,
-        notes: body.notes.trim(),
-        roundCount: body.roundCount ?? null,
-      },
-    });
-
-    // Optionally update the firearm's lastMaintenanceDate and maintenanceIntervalDays
+    // A next-due date, when given, sets the interval from this entry.
+    let intervalDays: number | null | undefined;
     if (body.nextDueDate) {
-      let nextDue: Date;
       try {
-        nextDue = toDateOnlyUTC(body.nextDueDate);
+        const days = Math.round((toDateOnlyUTC(body.nextDueDate).getTime() - entryDate.getTime()) / 86400000);
+        intervalDays = days > 0 ? days : null;
       } catch {
-        nextDue = new Date(NaN);
-      }
-      if (!isNaN(nextDue.getTime())) {
-        const intervalDays = Math.round(
-          (nextDue.getTime() - entryDate.getTime()) / 86400000
-        );
-        await prisma.firearm.update({
-          where: { id },
-          data: {
-            lastMaintenanceDate: entryDate,
-            maintenanceIntervalDays: intervalDays > 0 ? intervalDays : null,
-          },
-        });
+        intervalDays = undefined;
       }
     }
 
-    return NextResponse.json(log, { status: 201 });
+    // Logging the work is what resets the clock: the entry and the firearm's
+    // last-serviced date are written together. With a next-due date the entry
+    // becomes the last service outright (the interval is counted from it);
+    // otherwise the date only ever moves forward.
+    const lastMaintenanceDate =
+      intervalDays === undefined ? lastServicedAfterEntry(firearm.lastMaintenanceDate, entryDate) : entryDate;
+    const { log, updated } = await prisma.$transaction(async (tx) => {
+      const created = await tx.maintenanceLog.create({
+        data: {
+          firearmId: id,
+          date: entryDate,
+          notes: (body.notes as string).trim(),
+          roundCount: body.roundCount ?? null,
+        },
+      });
+      const saved = await tx.firearm.update({
+        where: { id },
+        data: {
+          lastMaintenanceDate,
+          ...(intervalDays === undefined ? {} : { maintenanceIntervalDays: intervalDays }),
+        },
+        select: { lastMaintenanceDate: true, maintenanceIntervalDays: true },
+      });
+      return { log: created, updated: saved };
+    });
+
+    return NextResponse.json({ ...log, firearm: updated }, { status: 201 });
   } catch (error) {
     if (error instanceof InvalidDateError) {
       return NextResponse.json({ error: "Invalid date" }, { status: 400 });
