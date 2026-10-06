@@ -93,6 +93,8 @@ function payload(overrides: Partial<FullArmoryExportResponse> = {}): FullArmoryE
         nfaRegisteredTo: "Trust",
         nfaClass: "SBR",
         mgRegistry: "",
+        fullAutoRated: "",
+        fullAutoRatedFor: "",
       },
     ],
     attachments: [
@@ -405,5 +407,41 @@ describe("buildFullArmoryPdfModel — machine-gun registry", () => {
     const at = labels.indexOf("Registry");
     expect(table.rows[0][at]).toBe("Pre-sample");
     expect(table.rows[1][at]).toBe(EMPTY_CELL);
+  });
+});
+
+describe("buildFullArmoryPdfModel - Full-Auto Rated", () => {
+  function suppressorTable(items: FullArmoryExportResponse["items"]) {
+    const model = buildFullArmoryPdfModel(payload({ items }), options());
+    const headingIndex = model.blocks.findIndex((b) => b.kind === "heading" && b.text === "Suppressors");
+    return {
+      headingIndex,
+      table: model.blocks.slice(headingIndex).find((b) => b.kind === "table") as Extract<PdfBlock, { kind: "table" }>,
+    };
+  }
+
+  it.each([
+    ["Yes", "", "Yes", EMPTY_CELL],
+    ["No", "", "No", EMPTY_CELL],
+    ["Limited", "5.56 NATO only", "Limited", "5.56 NATO only"],
+    ["", "", EMPTY_CELL, EMPTY_CELL],
+  ])("lists a suppressor recorded as %j / %j", (rated, ratedFor, shown, shownFor) => {
+    const [base] = payload().items;
+    const { table } = suppressorTable([
+      { ...base, entityType: "ACCESSORY", category: "SUPPRESSOR", fullAutoRated: rated, fullAutoRatedFor: ratedFor },
+    ]);
+
+    expect(table.columns.map((column) => column.label)).toEqual(["Item", "Full-Auto Rated", "Rated For"]);
+    expect(table.rows[0].slice(1)).toEqual([shown, shownFor]);
+  });
+
+  it("has no Suppressors section when no item is a suppressor", () => {
+    const [base] = payload().items;
+    const { headingIndex } = suppressorTable([
+      { ...base, entityType: "ACCESSORY", category: "OPTIC" },
+      base,
+    ]);
+
+    expect(headingIndex).toBe(-1);
   });
 });

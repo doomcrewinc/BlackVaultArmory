@@ -1,3 +1,4 @@
+import { isSuppressorType } from "@/lib/full-auto-rated";
 import {
   MG_REGISTRY_LABELS,
   NFA_CLASS_LABELS,
@@ -82,6 +83,14 @@ export interface FullArmoryItemRow {
    * Plain, like nfaClass, and kept directly after it in every renderer.
    */
   mgRegistry: string;
+  /**
+   * Full-Auto Rated, for a suppressor: "Yes", "No" or "Limited", blank when it
+   * was not recorded or the item is not a suppressor. With fullAutoRatedFor,
+   * the last two keys of the row, so no earlier CSV column moves.
+   */
+  fullAutoRated: string;
+  /** The rounds a Limited rating covers; blank for any other rating. */
+  fullAutoRatedFor: string;
 }
 
 export interface FullArmoryAttachmentRow {
@@ -338,6 +347,13 @@ export function formatExpiryFootnote(meta: {
     ? meta.expiryTimezone
     : `${meta.expiryTimezone} (server default)`;
   return `Expiry evaluated in ${zone} on ${meta.expiryEvaluatedOn}.`;
+}
+
+/** Whether an export row is a suppressor, the only item that records Full-Auto Rated. */
+export function isSuppressorItem(
+  item: Pick<FullArmoryItemRow, "entityType" | "category">
+): boolean {
+  return item.entityType === "ACCESSORY" && isSuppressorType(item.category);
 }
 
 /**

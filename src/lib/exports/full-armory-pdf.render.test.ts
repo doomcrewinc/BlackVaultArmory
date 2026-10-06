@@ -100,6 +100,8 @@ function payload(overrides: Partial<FullArmoryExportResponse> = {}): FullArmoryE
         nfaRegisteredTo: "",
         nfaClass: "NONE",
         mgRegistry: "",
+        fullAutoRated: "",
+        fullAutoRatedFor: "",
       },
     ],
     attachments: [
