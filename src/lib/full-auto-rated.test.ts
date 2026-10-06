@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { CATEGORY_SECTIONS } from "./categories";
+import { SLOT_TYPES } from "./types";
 import {
   FULL_AUTO_LIMITED_TO_REQUIRED_MESSAGE,
   FULL_AUTO_RATING_OPTIONS,
@@ -6,6 +8,7 @@ import {
   fullAutoRatingExportValue,
   fullAutoRatingLabel,
   fullAutoRatingText,
+  SUPPRESSOR_TYPES,
   isSuppressorType,
   normalizeFullAutoFields,
   resolveFullAutoFields,
@@ -118,5 +121,23 @@ describe("display", () => {
   it("labels a rating", () => {
     expect(fullAutoRatingLabel("LIMITED")).toBe("Limited");
     expect(fullAutoRatingLabel(null)).toBe("Not recorded");
+  });
+});
+
+describe("the suppressor type definition", () => {
+  const section = CATEGORY_SECTIONS.find((candidate) => candidate.slug === "suppressors");
+  const accessorySource = section?.sources.find((source) => source.source === "accessory");
+
+  it.each([...SLOT_TYPES, "SOMETHING_NEW", " suppressor "])(
+    "%s is a suppressor type exactly when the Suppressors section holds it",
+    (type) => {
+      const held =
+        accessorySource?.source === "accessory" && accessorySource.holds({ type } as never);
+      expect(isSuppressorType(type)).toBe(Boolean(held) || type === " suppressor ");
+    },
+  );
+
+  it("is the list the Suppressors section matches on", () => {
+    expect(accessorySource).toMatchObject({ where: { type: { in: [...SUPPRESSOR_TYPES] } } });
   });
 });

@@ -1256,7 +1256,7 @@ describe("GET /api/exports/full-armory", () => {
     ["YES", null, "Yes", "", "Full-Auto Rated: Yes"],
     ["NO", null, "No", "", "Full-Auto Rated: No"],
     ["LIMITED", "5.56 NATO only", "Limited", "5.56 NATO only", "Full-Auto Rated: Limited | Rated For: 5.56 NATO only"],
-    [null, null, "", "", "Full-Auto Rated: N/A"],
+    [null, null, "", "", "Full-Auto Rated: Not recorded"],
   ])("exports a suppressor stored as %s / %s in JSON, CSV and PDF", async (rating, text, rated, ratedFor, pdfLine) => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
     mocks.findAccessories.mockResolvedValue([{ ...documentedSuppressor, fullAutoRating: rating, fullAutoLimitedTo: text }]);

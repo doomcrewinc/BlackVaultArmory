@@ -153,6 +153,11 @@ export function fullAutoRatingText(
   return rating === "LIMITED" && text !== null ? `${label} — ${text}` : label;
 }
 
+/** What a person reads for an export row's rating: the value, or "Not recorded" when blank. */
+export function fullAutoRatedShown(exportValue: string): string {
+  return exportValue || "Not recorded";
+}
+
 /** An export cell: "Yes", "No", "Limited" or blank. */
 export function fullAutoRatingExportValue(rating: unknown): string {
   return isFullAutoRating(rating) ? FULL_AUTO_RATING_LABELS[rating] : "";

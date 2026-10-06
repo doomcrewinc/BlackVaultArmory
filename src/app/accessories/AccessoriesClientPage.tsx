@@ -7,6 +7,7 @@ import { SectionEmptyState } from "@/components/sections/SectionEmptyState";
 import { SectionListHeader } from "@/components/sections/SectionListHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
+import { isSuppressorType } from "@/lib/full-auto-rated";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
 import { DEFAULT_LIST_WORDING, type ListWording } from "@/lib/sections/wording";
 
@@ -60,9 +61,15 @@ const BADGE_CLASS = "shrink-0 rounded border px-1.5 py-0.5 text-[11px]";
  * so the limit never depends on hover. No and not recorded get nothing.
  */
 function FullAutoRatedBadge({
+  type,
   rating,
   limitedTo,
-}: Readonly<{ rating?: string | null; limitedTo?: string | null }>) {
+}: Readonly<{
+  type: string;
+  rating?: string | null;
+  limitedTo?: string | null;
+}>) {
+  if (!isSuppressorType(type)) return null;
   if (rating === "YES") {
     return (
       <span className={`${BADGE_CLASS} border-[#00C2FF]/40 text-[#00C2FF]`}>
@@ -80,7 +87,10 @@ function FullAutoRatedBadge({
         Full-Auto: Limited
       </span>
       {limitedTo && (
-        <span className="text-[11px] text-vault-text-faint truncate max-w-[180px]">
+        <span
+          title={limitedTo}
+          className="min-w-0 break-words text-[11px] text-vault-text-faint"
+        >
           {limitedTo}
         </span>
       )}
@@ -289,6 +299,7 @@ export function AccessoriesClientPage({
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <FullAutoRatedBadge
+                          type={accessory.type}
                           rating={accessory.fullAutoRating}
                           limitedTo={accessory.fullAutoLimitedTo}
                         />
@@ -405,10 +416,12 @@ export function AccessoriesClientPage({
                                   {accessory.model}
                                 </p>
                               )}
-                              {(accessory.fullAutoRating === "YES" ||
-                                accessory.fullAutoRating === "LIMITED") && (
+                              {isSuppressorType(accessory.type) &&
+                                (accessory.fullAutoRating === "YES" ||
+                                  accessory.fullAutoRating === "LIMITED") && (
                                 <div className="mt-1 flex flex-wrap items-center gap-1">
                                   <FullAutoRatedBadge
+                                    type={accessory.type}
                                     rating={accessory.fullAutoRating}
                                     limitedTo={accessory.fullAutoLimitedTo}
                                   />

@@ -14,6 +14,7 @@ import {
   selectVisualEvidence,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
+import { fullAutoRatedShown } from "@/lib/full-auto-rated";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly, formatTimestamp } from "@/lib/date";
 
@@ -439,7 +440,7 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4">
                         {[item.manufacturer, item.model].filter(Boolean).join(" ") || item.entityType}
                       </td>
-                      <td className="py-2 pr-4">{item.fullAutoRated || "—"}</td>
+                      <td className="py-2 pr-4">{fullAutoRatedShown(item.fullAutoRated)}</td>
                       <td className="py-2">{item.fullAutoRatedFor || "—"}</td>
                     </tr>
                   ))}

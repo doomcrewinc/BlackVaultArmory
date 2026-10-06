@@ -272,7 +272,7 @@ describe("Full Armory preview - Full-Auto Rated", () => {
     ["Yes", "", "Yes", "\u2014"],
     ["No", "", "No", "\u2014"],
     ["Limited", "5.56 NATO only", "Limited", "5.56 NATO only"],
-    ["", "", "\u2014", "\u2014"],
+    ["", "", "Not recorded", "\u2014"],
   ])("lists a suppressor recorded as %j / %j", async (rated, ratedFor, shown, shownFor) => {
     const [base] = EXPORT_PAYLOAD.items;
     stubItems([

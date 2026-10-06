@@ -6,13 +6,17 @@ import { AccessoriesClientPage } from "./AccessoriesClientPage";
 
 afterEach(cleanup);
 
-function row(fullAutoRating: string | null | undefined, fullAutoLimitedTo: string | null = null) {
+function row(
+  fullAutoRating: string | null | undefined,
+  fullAutoLimitedTo: string | null = null,
+  type = "SUPPRESSOR",
+) {
   return {
     id: "a1",
     name: "Quiet Can",
     manufacturer: "Maker",
     model: null,
-    type: "SUPPRESSOR",
+    type,
     roundCount: 0,
     quantity: 1,
     fullAutoRating,
@@ -51,5 +55,24 @@ describe("accessory list full-auto badges", () => {
     expect(screen.queryByText("Full-Auto Rated")).toBeNull();
     expect(screen.queryByText("Full-Auto: Limited")).toBeNull();
     expect(screen.queryByText("stale text")).toBeNull();
+  });
+
+  it.each([
+    ["YES", null],
+    ["LIMITED", "5.56 NATO only"],
+  ])("shows no badge for an optic that holds a stray %s", (rating, text) => {
+    render(<AccessoriesClientPage accessories={[row(rating, text, "OPTIC")]} />);
+    expect(screen.queryByText("Full-Auto Rated")).toBeNull();
+    expect(screen.queryByText("Full-Auto: Limited")).toBeNull();
+    expect(screen.queryByText("5.56 NATO only")).toBeNull();
+  });
+
+  it("prints a long limit in full, wrapping rather than truncating, with a title", () => {
+    const limit = "5.56 NATO and 300 BLK subsonic and supersonic, short barrels only, no belt-fed use ".repeat(2).trim();
+    render(<AccessoriesClientPage accessories={[row("LIMITED", limit)]} />);
+    for (const text of screen.getAllByText(limit)) {
+      expect(text).toHaveAttribute("title", limit);
+      expect(text.className).not.toContain("truncate");
+    }
   });
 });

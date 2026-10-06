@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { csvCell, csvQuote } from "@/lib/csv";
 import {
   fullAutoLimitedToExportValue,
+  fullAutoRatedShown,
   fullAutoRatingExportValue,
   isSuppressorType,
 } from "@/lib/full-auto-rated";
@@ -542,7 +543,7 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
     }
     if (isSuppressorItem(item)) {
       const ratedFor = item.fullAutoRatedFor ? ` | Rated For: ${item.fullAutoRatedFor}` : "";
-      pushWrapped(lines, `Full-Auto Rated: ${item.fullAutoRated || "N/A"}${ratedFor}`, "   ");
+      pushWrapped(lines, `Full-Auto Rated: ${fullAutoRatedShown(item.fullAutoRated)}${ratedFor}`, "   ");
     }
     if (item.imageUrl) pushWrapped(lines, `Image Ref: ${item.imageUrl}`, "   ");
   });

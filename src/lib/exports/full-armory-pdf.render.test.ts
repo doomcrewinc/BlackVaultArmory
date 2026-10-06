@@ -226,6 +226,32 @@ describe("buildFullArmoryPdf — the produced file", () => {
     expect(text).toContain("Expiry evaluated in America/Denver on 2026-03-04");
   });
 
+  it("prints a 200 character Rated For in full, wrapped, and Not recorded for a bare suppressor", async () => {
+    const limit = Array.from({ length: 25 }, (_, index) => `rounds${index}`).join(" ").padEnd(200, "x").slice(0, 200);
+    const data = payload({ attachments: [] });
+    const suppressor = {
+      ...data.items[0],
+      entityType: "ACCESSORY" as const,
+      category: "SUPPRESSOR",
+      manufacturer: "QuietCo",
+      model: "CAN-1",
+    };
+    data.items = [
+      { ...suppressor, itemId: "can-limited", fullAutoRated: "Limited", fullAutoRatedFor: limit },
+      { ...suppressor, itemId: "can-bare", model: "CAN-2", fullAutoRated: "", fullAutoRatedFor: "" },
+    ];
+
+    const { bytes } = await bytesOf(data, options());
+
+    const text = visibleText(bytes);
+    // Wrapping puts each line in its own text run, so compare with the line
+    // breaks removed: the whole 200 characters must be there, in order.
+    expect(limit).toHaveLength(200);
+    expect(text.replace(/\s+/g, "")).toContain(limit.replace(/\s+/g, ""));
+    expect(text).not.toContain("...");
+    expect(text).toContain("Not recorded");
+  });
+
   it("keeps every text run inside the printable width of the page", async () => {
     // The Document Index is the section that used to be drawn off the paper:
     // six fixed columns totalling 652pt in a 540pt box, with "File Ref"

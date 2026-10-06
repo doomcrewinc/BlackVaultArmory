@@ -21,6 +21,7 @@
  *     only ever reached through a dynamic `import()` keeps both libraries out
  *     of the server bundle.
  */
+import { fullAutoRatedShown } from "@/lib/full-auto-rated";
 import {
   formatExpiryFootnote,
   hasNfaPaperwork,
@@ -144,6 +145,10 @@ function money(value: number | null | undefined, allowed: boolean): string {
   if (!allowed) return WITHHELD;
   if (value == null) return EMPTY_CELL;
   return formatCurrency(value);
+}
+
+function suppressorName(item: { manufacturer: string; model: string }): string {
+  return `${item.manufacturer} ${item.model}`.trim();
 }
 
 function toFileSafeTimestamp(isoDate: string): string {
@@ -317,17 +322,23 @@ export function buildFullArmoryPdfModel(
       {
         kind: "table",
         columns: [
-          { label: "Item", weight: 40 },
-          { label: "Full-Auto Rated", weight: 20 },
-          { label: "Rated For", weight: 40 },
+          { label: "Item", weight: 60 },
+          { label: "Full-Auto Rated", weight: 40 },
         ],
         rows: suppressors.map((item) => [
-          cell(`${item.manufacturer} ${item.model}`.trim()),
-          cell(item.fullAutoRated),
-          cell(item.fullAutoRatedFor),
+          cell(suppressorName(item)),
+          fullAutoRatedShown(item.fullAutoRated),
         ]),
         emptyText: "No suppressors.",
       },
+      // A table cell is one clipped line; the limit is the one text that must
+      // not be cut, so each Limited suppressor gets a wrapping paragraph.
+      ...suppressors
+        .filter((item) => item.fullAutoRatedFor)
+        .map((item): PdfBlock => ({
+          kind: "paragraph",
+          text: `${suppressorName(item)}: rated for ${item.fullAutoRatedFor}`,
+        })),
     );
   }
 

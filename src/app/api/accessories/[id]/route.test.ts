@@ -284,6 +284,29 @@ describe("PUT /api/accessories/[id] — NFA paperwork", () => {
       expect(mocks.update).not.toHaveBeenCalled();
     });
 
+    describe("a stored LIMITED row with no text", () => {
+      const limitedWithoutText = () =>
+        storedSuppressor({ fullAutoRating: "LIMITED", fullAutoLimitedTo: null });
+
+      it("accepts a write that touches neither field nor the type", async () => {
+        mocks.findUnique.mockResolvedValue(limitedWithoutText());
+
+        const response = await PUT(putRequest({ name: "Renamed" }), params);
+
+        expect(response.status).toBe(200);
+        expect(dataOfUpdate()).not.toHaveProperty("fullAutoRating");
+      });
+
+      it("answers 400 to a write that includes the type, without text", async () => {
+        mocks.findUnique.mockResolvedValue(limitedWithoutText());
+
+        const response = await PUT(putRequest({ type: "SUPPRESSOR" }), params);
+
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toBe("Say which rounds it is rated for full-auto fire with.");
+      });
+    });
+
     it("keeps the stored rating when only the text changes", async () => {
       mocks.findUnique.mockResolvedValue(storedSuppressor({ fullAutoRating: "LIMITED", fullAutoLimitedTo: "5.56" }));
 

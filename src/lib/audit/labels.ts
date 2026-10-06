@@ -96,9 +96,15 @@ function splitWords(identifier: string): string[] {
     .filter(Boolean);
 }
 
+/** Fields whose label is the wording the forms use rather than the split column name. */
+const FIELD_LABELS: Readonly<Record<string, string>> = {
+  fullAutoRating: "full-auto rated",
+  fullAutoLimitedTo: "full-auto rated for",
+};
+
 /** A changed field's name for display: "serialNumber" -> "serial number". */
 export function fieldLabel(field: string): string {
-  return splitWords(field).join(" ").toLowerCase();
+  return FIELD_LABELS[field] ?? splitWords(field).join(" ").toLowerCase();
 }
 
 /** A Prisma model name for display: "AmmoStock" -> "ammo stock". */
