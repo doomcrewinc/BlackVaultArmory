@@ -9,13 +9,15 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { NewAccessoryForm } from "./accessories/new/NewAccessoryForm";
-import { NewGearForm } from "./gear/new/NewGearForm";
-import { NewSupplyForm } from "./supplies/new/NewSupplyForm";
+import NewAccessoryPage from "./accessories/new/page";
+import NewGearPage from "./gear/new/page";
+import NewSupplyPage from "./supplies/new/page";
 
 const push = vi.hoisted(() => vi.fn());
+const address = vi.hoisted(() => ({ query: "" }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(address.query),
 }));
 
 const fetchMock = vi.fn();
@@ -31,12 +33,13 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   push.mockReset();
+  address.query = "";
   fetchMock.mockReset();
   vi.unstubAllGlobals();
 });
 
 type Form = {
-  render: (section?: string | null) => ReactElement;
+  page: () => ReactElement;
   field: "type" | "category";
   api: string;
   genericTitle: string;
@@ -47,7 +50,7 @@ type Form = {
 
 const FORMS: Record<string, Form> = {
   accessory: {
-    render: (section) => <NewAccessoryForm section={section} />,
+    page: () => <NewAccessoryPage />,
     field: "type",
     api: "/api/accessories",
     genericTitle: "Add accessory",
@@ -56,7 +59,7 @@ const FORMS: Record<string, Form> = {
     itemPage: "/accessories/created-1",
   },
   gear: {
-    render: (section) => <NewGearForm section={section} />,
+    page: () => <NewGearPage />,
     field: "category",
     api: "/api/gear",
     genericTitle: "Add gear",
@@ -65,7 +68,7 @@ const FORMS: Record<string, Form> = {
     itemPage: "/gear/item/created-1",
   },
   supply: {
-    render: (section) => <NewSupplyForm section={section} />,
+    page: () => <NewSupplyPage />,
     field: "category",
     api: "/api/supplies",
     genericTitle: "Add supply",
@@ -74,6 +77,13 @@ const FORMS: Record<string, Form> = {
     itemPage: "/supplies/item/created-1",
   },
 };
+
+/** Opens the form at an address carrying `?section=` (or none). */
+function open(form: Form, section?: string): void {
+  address.query =
+    section === undefined ? "" : `section=${encodeURIComponent(section)}`;
+  render(form.page());
+}
 
 function optionValues(id: string): string[] {
   return Array.from(
@@ -103,7 +113,7 @@ describe.each(Object.keys(FORMS))("%s add form", (name) => {
     ],
     ["a path in place of a slug", "/vault/new"],
   ])("behaves as before with %s", async (_label, section) => {
-    render(form.render(section));
+    open(form, section);
     expect(
       screen.getByRole("heading", { level: 1, name: form.genericTitle }),
     ).toBeInTheDocument();
@@ -124,7 +134,7 @@ describe.each(Object.keys(FORMS))("%s add form", (name) => {
 
 describe("accessory add form opened from a section", () => {
   it("fixes the type, titles the page and returns to the section", async () => {
-    render(<NewAccessoryForm section="magazines" />);
+    open(FORMS.accessory, "magazines");
     expect(
       screen.getByRole("heading", { level: 1, name: "Add magazine" }),
     ).toBeInTheDocument();
@@ -146,7 +156,7 @@ describe("accessory add form opened from a section", () => {
   });
 
   it("limits the type list to the section's types, preset to the first", () => {
-    render(<NewAccessoryForm section="optics" />);
+    open(FORMS.accessory, "optics");
     expect(optionValues("type")).toEqual(["OPTIC", "OPTIC_MOUNT"]);
     expect((document.getElementById("type") as HTMLSelectElement).value).toBe(
       "OPTIC",
@@ -154,7 +164,7 @@ describe("accessory add form opened from a section", () => {
   });
 
   it("offers Parts every type no other section claims", () => {
-    render(<NewAccessoryForm section="parts" />);
+    open(FORMS.accessory, "parts");
     const values = optionValues("type");
     expect(values).toContain("STOCK");
     expect(values).not.toContain("MAGAZINE");
@@ -162,7 +172,7 @@ describe("accessory add form opened from a section", () => {
   });
 
   it("shows the suppressor paperwork when the fixed type is a suppressor", () => {
-    render(<NewAccessoryForm section="suppressors" />);
+    open(FORMS.accessory, "suppressors");
     expect(screen.getByTestId("type-fixed")).toHaveTextContent("Suppressor");
     expect(document.getElementById("nfaTransferMethod")).not.toBeNull();
   });
@@ -179,7 +189,7 @@ describe.each([
     const form = FORMS[kind];
 
     it("fixes the category, titles the page and returns to the section", async () => {
-      render(form.render(slug));
+      open(form, slug);
       expect(
         screen.getByRole("heading", { level: 1, name: `Add ${singular}` }),
       ).toBeInTheDocument();
@@ -209,7 +219,7 @@ describe("a section holding several categories", () => {
   ] as const)(
     "limits the %s form from %s to its values, preset to the first",
     (kind, slug, expected) => {
-      render(FORMS[kind].render(slug));
+      open(FORMS[kind], slug);
       expect(screen.queryByTestId("category-fixed")).toBeNull();
       expect(optionValues("category").sort()).toEqual([...expected].sort());
       const select = document.getElementById("category") as HTMLSelectElement;

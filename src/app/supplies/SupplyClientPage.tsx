@@ -14,18 +14,17 @@ import {
 } from "@/lib/supply";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import type { SupplySectionItem } from "./getSupplySectionItems";
-import { type ListWording } from "@/lib/sections/wording";
+import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
 
-const DEFAULT_WORDING: ListWording = {
-  addLabel: "Add supply",
-  addHref: "/supplies/new",
-  emptyTitle: "No supplies yet",
-  emptyHint:
-    "Track consumables here — quantity, low-stock alerts and expiry dates.",
-  addFirstLabel: "Add first supply",
-  totalLabel: "Total supplies",
-  noMatch: "No supplies match the selected filter.",
-};
+const DEFAULT_WORDING: ListWording = listWordingFromNoun(
+  {
+    singular: "supply",
+    plural: "supplies",
+    emptyHint:
+      "Track consumables here — quantity, low-stock alerts and expiry dates.",
+  },
+  "/supplies/new",
+);
 
 interface Props {
   items: SupplySectionItem[];

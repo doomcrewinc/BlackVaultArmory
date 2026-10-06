@@ -8,17 +8,20 @@ import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import type { ExpiryStatus } from "@/lib/supply";
-import { type ListWording } from "@/lib/sections/wording";
+import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
 
 const DEFAULT_WORDING: ListWording = {
+  ...listWordingFromNoun(
+    {
+      singular: "item",
+      plural: "items",
+      emptyHint:
+        "Add knives, cases and other standalone kit to track what you own.",
+    },
+    "/gear/new",
+  ),
   addLabel: "Add gear",
-  addHref: "/gear/new",
   emptyTitle: "No gear yet",
-  emptyHint:
-    "Add knives, cases and other standalone kit to track what you own.",
-  addFirstLabel: "Add first item",
-  totalLabel: "Total items",
-  noMatch: "No items match the selected filter.",
 };
 
 interface GearItem {

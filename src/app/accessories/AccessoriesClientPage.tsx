@@ -8,7 +8,7 @@ import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
-import { type ListWording } from "@/lib/sections/wording";
+import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
   MUZZLE: "Muzzle",
@@ -72,14 +72,16 @@ interface AccessoryWithBuild {
 }
 
 const DEFAULT_WORDING: ListWording = {
-  addLabel: "Add accessory",
-  addHref: "/accessories/new",
-  emptyTitle: "No accessories yet",
-  emptyHint:
-    "Add parts, optics, suppressors and other attachments to track round counts and build configurations.",
-  addFirstLabel: "Add first accessory",
+  ...listWordingFromNoun(
+    {
+      singular: "accessory",
+      plural: "accessories",
+      emptyHint:
+        "Add parts, optics, suppressors and other attachments to track round counts and build configurations.",
+    },
+    "/accessories/new",
+  ),
   totalLabel: "Total parts",
-  noMatch: "No accessories match the selected filter.",
 };
 
 interface Props {

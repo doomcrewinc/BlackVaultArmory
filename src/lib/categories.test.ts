@@ -1096,7 +1096,7 @@ describe("sectionAllowedValues", () => {
       expect([...new Set(all)].sort((a, b) => a.localeCompare(b))).toEqual(
         [...universe].sort((a, b) => a.localeCompare(b)),
       );
-      expect(all.length).toBe(universe.length);
+      expect(all).toHaveLength(universe.length);
     },
   );
 });
