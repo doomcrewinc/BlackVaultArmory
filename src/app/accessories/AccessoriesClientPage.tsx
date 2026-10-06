@@ -8,7 +8,7 @@ import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
-import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
+import { DEFAULT_LIST_WORDING, type ListWording } from "@/lib/sections/wording";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
   MUZZLE: "Muzzle",
@@ -71,19 +71,6 @@ interface AccessoryWithBuild {
   } | null;
 }
 
-const DEFAULT_WORDING: ListWording = {
-  ...listWordingFromNoun(
-    {
-      singular: "accessory",
-      plural: "accessories",
-      emptyHint:
-        "Add parts, optics, suppressors and other attachments to track round counts and build configurations.",
-    },
-    "/accessories/new",
-  ),
-  totalLabel: "Total parts",
-};
-
 interface Props {
   accessories: AccessoryWithBuild[];
   heading?: string;
@@ -105,7 +92,7 @@ export function AccessoriesClientPage({
   accessories,
   heading = "ACCESSORIES",
   subheading,
-  wording = DEFAULT_WORDING,
+  wording = DEFAULT_LIST_WORDING.accessory,
   embedded = false,
 }: Props) {
   const [selectedType, setSelectedType] = useState<string | null>(null);

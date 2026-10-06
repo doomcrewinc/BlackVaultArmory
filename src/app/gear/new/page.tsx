@@ -24,9 +24,6 @@ function NewGearForm() {
   const section = useSearchParams().get("section");
   const context = addFormContext("gear", section);
   const noun = context?.singular ?? "gear";
-  const categoryOptions = GEAR_CATEGORIES.filter(
-    (c) => !context || context.allowedValues.includes(c),
-  ).map((c) => ({ value: c, label: GEAR_CATEGORY_LABELS[c] }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
@@ -152,12 +149,11 @@ function NewGearForm() {
             <TypeSelectField
               id="category"
               label="Category"
-              options={categoryOptions}
+              values={GEAR_CATEGORIES}
+              labels={GEAR_CATEGORY_LABELS}
+              allowed={context?.allowedValues}
               value={category}
               onChange={setCategory}
-              fixed={categoryOptions.length === 1 && context !== null}
-              inputClassName={INPUT_CLASS}
-              labelClassName={LABEL_CLASS}
             />
 
             {isArmorCategory(category) && (

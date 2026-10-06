@@ -14,17 +14,7 @@ import {
 } from "@/lib/supply";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
 import type { SupplySectionItem } from "./getSupplySectionItems";
-import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
-
-const DEFAULT_WORDING: ListWording = listWordingFromNoun(
-  {
-    singular: "supply",
-    plural: "supplies",
-    emptyHint:
-      "Track consumables here — quantity, low-stock alerts and expiry dates.",
-  },
-  "/supplies/new",
-);
+import { DEFAULT_LIST_WORDING, type ListWording } from "@/lib/sections/wording";
 
 interface Props {
   items: SupplySectionItem[];
@@ -125,7 +115,7 @@ export function SupplyClientPage({
   timezoneConfigured,
   heading = "SUPPLIES",
   subheading,
-  wording = DEFAULT_WORDING,
+  wording = DEFAULT_LIST_WORDING.supply,
   embedded = false,
 }: Props) {
   // The SAME rule KitSectionList/KitContents use: show the notice only where

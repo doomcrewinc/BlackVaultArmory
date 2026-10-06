@@ -27,9 +27,6 @@ function NewAccessoryForm() {
   const section = useSearchParams().get("section");
   const context = addFormContext("accessory", section);
   const noun = context?.singular ?? "accessory";
-  const typeOptions = SLOT_TYPES.filter(
-    (t) => !context || context.allowedValues.includes(t),
-  ).map((t) => ({ value: t, label: SLOT_TYPE_LABELS[t] }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [caliberInput, setCaliberInput] = useState("");
@@ -216,13 +213,12 @@ function NewAccessoryForm() {
               <TypeSelectField
                 id="type"
                 label="Type / Slot"
-                options={typeOptions}
+                values={SLOT_TYPES}
+                labels={SLOT_TYPE_LABELS}
+                allowed={context?.allowedValues}
                 value={type}
                 onChange={setType}
                 placeholder={context ? undefined : "Select slot type..."}
-                fixed={typeOptions.length === 1 && context !== null}
-                inputClassName={INPUT_CLASS}
-                labelClassName={LABEL_CLASS}
               />
 
               {/* Caliber (optional) */}

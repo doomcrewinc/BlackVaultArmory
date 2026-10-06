@@ -25,9 +25,6 @@ function NewSupplyForm() {
   const section = useSearchParams().get("section");
   const context = addFormContext("supply", section);
   const noun = context?.singular ?? "supply";
-  const categoryOptions = SUPPLY_CATEGORIES.filter(
-    (c) => !context || context.allowedValues.includes(c),
-  ).map((c) => ({ value: c, label: SUPPLY_CATEGORY_LABELS[c] }));
   const [category, setCategory] = useState<string>(
     context?.allowedValues[0] ?? DEFAULT_SUPPLY_CATEGORY,
   );
@@ -172,12 +169,11 @@ function NewSupplyForm() {
               <TypeSelectField
                 id="category"
                 label="Category"
-                options={categoryOptions}
+                values={SUPPLY_CATEGORIES}
+                labels={SUPPLY_CATEGORY_LABELS}
+                allowed={context?.allowedValues}
                 value={category}
                 onChange={setCategory}
-                fixed={categoryOptions.length === 1 && context !== null}
-                inputClassName={INPUT_CLASS}
-                labelClassName={LABEL_CLASS}
               />
             </div>
 

@@ -52,6 +52,47 @@ export function listWordingFromNoun(
 }
 
 /**
+ * What each list screen says when it is not showing a section: the standalone
+ * /accessories page, and any caller that passes no wording.
+ */
+export const DEFAULT_LIST_WORDING: Record<AddFormKind, ListWording> = {
+  accessory: {
+    ...listWordingFromNoun(
+      {
+        singular: "accessory",
+        plural: "accessories",
+        emptyHint:
+          "Add parts, optics, suppressors and other attachments to track round counts and build configurations.",
+      },
+      ADD_FORM_PATHS.accessory,
+    ),
+    totalLabel: "Total parts",
+  },
+  gear: {
+    ...listWordingFromNoun(
+      {
+        singular: "item",
+        plural: "items",
+        emptyHint:
+          "Add knives, cases and other standalone kit to track what you own.",
+      },
+      ADD_FORM_PATHS.gear,
+    ),
+    addLabel: "Add gear",
+    emptyTitle: "No gear yet",
+  },
+  supply: listWordingFromNoun(
+    {
+      singular: "supply",
+      plural: "supplies",
+      emptyHint:
+        "Track consumables here — quantity, low-stock alerts and expiry dates.",
+    },
+    ADD_FORM_PATHS.supply,
+  ),
+};
+
+/**
  * The wording of one list block on a section page. The add link carries the
  * section so the form can preset its type or category and send the person
  * back here.

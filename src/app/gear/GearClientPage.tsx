@@ -8,21 +8,7 @@ import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice
 import { formatCurrency } from "@/lib/utils";
 import { GEAR_CATEGORY_LABELS, type GearCategory } from "@/lib/gear";
 import type { ExpiryStatus } from "@/lib/supply";
-import { listWordingFromNoun, type ListWording } from "@/lib/sections/wording";
-
-const DEFAULT_WORDING: ListWording = {
-  ...listWordingFromNoun(
-    {
-      singular: "item",
-      plural: "items",
-      emptyHint:
-        "Add knives, cases and other standalone kit to track what you own.",
-    },
-    "/gear/new",
-  ),
-  addLabel: "Add gear",
-  emptyTitle: "No gear yet",
-};
+import { DEFAULT_LIST_WORDING, type ListWording } from "@/lib/sections/wording";
 
 interface GearItem {
   id: string;
@@ -101,7 +87,7 @@ export function GearClientPage({
   timezoneConfigured,
   heading = "GEAR",
   subheading,
-  wording = DEFAULT_WORDING,
+  wording = DEFAULT_LIST_WORDING.gear,
   embedded = false,
 }: Props) {
   // The SAME rule KitSectionList/KitContents use: show the notice only where
