@@ -17,7 +17,6 @@ import {
   FullAutoRatedSelect,
   fullAutoRatedError,
   fullAutoRatedPayload,
-  toFullAutoRatedValue,
   type FullAutoRatedValue,
 } from "@/components/shared/FullAutoRatedSelect";
 import { isSuppressorType } from "@/lib/full-auto-rated";

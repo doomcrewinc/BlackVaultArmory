@@ -311,8 +311,7 @@ export function buildFullArmoryPdfModel(
 
   const suppressors = payload.items.filter(isSuppressorItem);
   if (suppressors.length > 0) {
-    blocks.push({ kind: "spacer", height: 10 });
-    blocks.push({ kind: "heading", text: "Suppressors" });
+    blocks.push({ kind: "spacer", height: 10 }, { kind: "heading", text: "Suppressors" });
     blocks.push({
       kind: "table",
       columns: [
