@@ -2,12 +2,15 @@
 
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
+import { COMMON_CALIBERS } from "@/lib/types";
 import { capitalizeFirst } from "@/lib/sections/wording";
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
+import {
+  AddFormBreadcrumb,
+  AddFormIntro,
+} from "@/components/shared/AddFormHeader";
 import { parseOptionalNumber } from "@/lib/forms";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { HelpTip } from "@/components/shared/HelpTip";
@@ -17,7 +20,6 @@ import {
   type NfaFieldsetValue,
   type NfaFieldsetField,
 } from "@/components/shared/NfaFieldset";
-import { ArrowLeft, AlertCircle } from "lucide-react";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
@@ -26,7 +28,8 @@ const LABEL_CLASS =
 
 function NewAccessoryForm() {
   const router = useRouter();
-  const { context, noun } = useAddFormContext("accessory");
+  const form = useAddFormContext("accessory");
+  const { context, noun } = form;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [caliberInput, setCaliberInput] = useState("");
@@ -113,39 +116,10 @@ function NewAccessoryForm() {
 
   return (
     <div className="min-h-full">
-      {/* Breadcrumb header */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
-        <Link
-          href={context?.returnHref ?? "/accessories"}
-          className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to {context?.sectionLabel ?? "Accessories"}
-        </Link>
-        <span className="text-vault-border">/</span>
-        <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Add {noun}
-        </h1>
-      </div>
+      <AddFormBreadcrumb form={form} />
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-        <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">
-            New {noun} entry
-          </h2>
-          <p className="text-sm text-vault-text-muted">
-            {context
-              ? `Register a new ${noun} in the arsenal.`
-              : "Register a new part or attachment in the arsenal."}
-          </p>
-        </div>
-
-        {error && (
-          <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
-            <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
-            <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
+        <AddFormIntro form={form} error={error} />
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Identity */}
@@ -210,16 +184,7 @@ function NewAccessoryForm() {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <TypeSelectField
-                id="type"
-                label="Type / Slot"
-                values={SLOT_TYPES}
-                labels={SLOT_TYPE_LABELS}
-                allowed={context?.allowedValues}
-                value={type}
-                onChange={setType}
-                placeholder={context ? undefined : "Select slot type..."}
-              />
+              <TypeSelectField form={form} value={type} onChange={setType} />
 
               {/* Caliber (optional) */}
               <div>
@@ -446,11 +411,7 @@ function NewAccessoryForm() {
             </div>
           </fieldset>
 
-          <AddFormActions
-            cancelHref={context?.returnHref ?? "/accessories"}
-            loading={loading}
-            label={`Add ${noun}`}
-          />
+          <AddFormActions form={form} loading={loading} />
         </form>
       </div>
     </div>

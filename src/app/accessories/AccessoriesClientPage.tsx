@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Plus, Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
-import { PageHeader } from "@/components/shared/PageHeader";
-import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
+import { Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
+import { SectionEmptyState } from "@/components/sections/SectionEmptyState";
+import { SectionListHeader } from "@/components/sections/SectionListHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
@@ -111,30 +111,17 @@ export function AccessoriesClientPage({
 
   const totalRounds = accessories.reduce((sum, a) => sum + a.roundCount, 0);
 
-  const addAction = (
-    <Link
-      href={wording.addHref}
-      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-    >
-      <Plus className="w-4 h-4" />
-      {wording.addLabel}
-    </Link>
-  );
-
   return (
     <div className={embedded ? undefined : "min-h-full"}>
-      {embedded ? (
-        <SectionBlockHeader title={heading} action={addAction} />
-      ) : (
-        <PageHeader
-          title={heading}
-          subtitle={
-            subheading ??
-            `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
-          }
-          actions={addAction}
-        />
-      )}
+      <SectionListHeader
+        heading={heading}
+        subtitle={
+          subheading ??
+          `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
+        }
+        wording={wording}
+        embedded={embedded}
+      />
 
       <div className="p-4 sm:p-6">
         {/* Summary bar */}
@@ -190,42 +177,23 @@ export function AccessoriesClientPage({
         )}
 
         {/* Table */}
-        {displayed.length === 0 ? (
+        {displayed.length === 0 && accessories.length === 0 && (
+          <SectionEmptyState icon={Crosshair} wording={wording} />
+        )}
+        {displayed.length === 0 && accessories.length > 0 && (
           <div className="flex flex-col items-center justify-center py-24 text-center">
-            {accessories.length === 0 ? (
-              <>
-                <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
-                  <Crosshair className="w-8 h-8 text-[#00C2FF]" />
-                </div>
-                <h3 className="text-lg font-semibold text-vault-text mb-2">
-                  {wording.emptyTitle}
-                </h3>
-                <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-                  {wording.emptyHint}
-                </p>
-                <Link
-                  href={wording.addHref}
-                  className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-4 py-2 rounded text-sm font-medium transition-colors"
-                >
-                  <Plus className="w-4 h-4" />
-                  {wording.addFirstLabel}
-                </Link>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-vault-text-muted mb-3">
-                  {wording.noMatch}
-                </p>
-                <button
-                  onClick={() => setSelectedType(null)}
-                  className="text-xs text-[#00C2FF] hover:underline"
-                >
-                  Show all
-                </button>
-              </>
-            )}
+            <p className="text-sm text-vault-text-muted mb-3">
+              {wording.noMatch}
+            </p>
+            <button
+              onClick={() => setSelectedType(null)}
+              className="text-xs text-[#00C2FF] hover:underline"
+            >
+              Show all
+            </button>
           </div>
-        ) : (
+        )}
+        {displayed.length > 0 && (
           <>
             {/* Mobile card list */}
             <div className="space-y-3 md:hidden">

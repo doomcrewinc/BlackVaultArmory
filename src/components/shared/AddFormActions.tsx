@@ -1,19 +1,25 @@
 import Link from "next/link";
 import { Loader2, Plus } from "lucide-react";
+import type { AddFormState } from "./useAddFormContext";
+
+/** Where Cancel goes when the form was not opened from a section. */
+const CANCEL_HREF = {
+  accessory: "/accessories",
+  gear: "/gear",
+  supply: "/",
+} as const;
 
 type Props = Readonly<{
-  cancelHref: string;
+  form: AddFormState;
   loading: boolean;
-  /** The submit button's text, e.g. "Add magazine". */
-  label: string;
 }>;
 
 /** The Cancel link and submit button that end every add form. */
-export function AddFormActions({ cancelHref, loading, label }: Props) {
+export function AddFormActions({ form, loading }: Props) {
   return (
     <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
       <Link
-        href={cancelHref}
+        href={form.context?.returnHref ?? CANCEL_HREF[form.kind]}
         className="w-full sm:w-auto text-center px-4 py-2 text-sm text-vault-text-muted hover:text-vault-text border border-vault-border rounded-md hover:border-vault-text-muted/30 transition-colors"
       >
         Cancel
@@ -28,7 +34,7 @@ export function AddFormActions({ cancelHref, loading, label }: Props) {
         ) : (
           <Plus className="w-4 h-4" />
         )}
-        {loading ? "Adding..." : label}
+        {loading ? "Adding..." : `Add ${form.noun}`}
       </button>
     </div>
   );

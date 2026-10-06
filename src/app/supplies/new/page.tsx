@@ -2,10 +2,7 @@
 
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import {
-  SUPPLY_CATEGORIES,
-  SUPPLY_CATEGORY_LABELS,
   DEFAULT_SUPPLY_CATEGORY,
   SUPPLY_UNITS,
   SUPPLY_UNIT_LABELS,
@@ -14,7 +11,10 @@ import {
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
-import { ArrowLeft, AlertCircle } from "lucide-react";
+import {
+  AddFormBreadcrumb,
+  AddFormIntro,
+} from "@/components/shared/AddFormHeader";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
@@ -23,7 +23,8 @@ const LABEL_CLASS =
 
 function NewSupplyForm() {
   const router = useRouter();
-  const { context, noun } = useAddFormContext("supply");
+  const form = useAddFormContext("supply");
+  const { context, noun } = form;
   const [category, setCategory] = useState<string>(
     context?.allowedValues[0] ?? DEFAULT_SUPPLY_CATEGORY,
   );
@@ -86,50 +87,10 @@ function NewSupplyForm() {
 
   return (
     <div className="min-h-full">
-      {/* Breadcrumb header */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
-        {context ? (
-          <Link
-            href={context.returnHref}
-            className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to {context.sectionLabel}
-          </Link>
-        ) : (
-          <button
-            type="button"
-            onClick={() => router.back()}
-            className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back
-          </button>
-        )}
-        <span className="text-vault-border">/</span>
-        <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Add {noun}
-        </h1>
-      </div>
+      <AddFormBreadcrumb form={form} />
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-        <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">
-            New {noun} entry
-          </h2>
-          <p className="text-sm text-vault-text-muted">
-            {context
-              ? `Track a new ${noun}: quantity, low-stock alerts and expiry dates.`
-              : "Track a consumable — cleaning supplies, medical, food, water and the rest."}
-          </p>
-        </div>
-
-        {error && (
-          <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
-            <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
-            <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
+        <AddFormIntro form={form} error={error} />
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Identity */}
@@ -166,11 +127,7 @@ function NewSupplyForm() {
                 />
               </div>
               <TypeSelectField
-                id="category"
-                label="Category"
-                values={SUPPLY_CATEGORIES}
-                labels={SUPPLY_CATEGORY_LABELS}
-                allowed={context?.allowedValues}
+                form={form}
                 value={category}
                 onChange={setCategory}
               />
@@ -313,11 +270,7 @@ function NewSupplyForm() {
             </div>
           </fieldset>
 
-          <AddFormActions
-            cancelHref={context?.returnHref ?? "/"}
-            loading={loading}
-            label={`Add ${noun}`}
-          />
+          <AddFormActions form={form} loading={loading} />
         </form>
       </div>
     </div>

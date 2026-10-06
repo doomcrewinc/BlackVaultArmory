@@ -330,13 +330,27 @@ function kitSection(): SectionMatcher {
   };
 }
 
+function nouns(
+  singular: string,
+  plural: string,
+  emptyHint: string,
+): SectionNoun {
+  return { singular, plural, emptyHint };
+}
+
 /** The words for a Vault section, whose pages word themselves ("firearm"). */
 function vaultNouns(singular: string, plural: string): SectionNoun {
-  return {
-    singular,
-    plural,
-    emptyHint: `Add your ${plural} to track them here.`,
-  };
+  return nouns(singular, plural, `Add your ${plural} to track them here.`);
+}
+
+/** One block of a section that draws from more than one source. */
+function block(
+  heading: string,
+  singular: string,
+  plural: string,
+  emptyHint: string,
+): SectionBlock {
+  return { heading, ...nouns(singular, plural, emptyHint) };
 }
 
 export const CATEGORY_SECTIONS: CategorySection[] = [
@@ -423,10 +437,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "optics",
-    singular: "optic",
-    plural: "optics",
-    emptyHint:
+    ...nouns(
+      "optic",
+      "optics",
       "Add sights, scopes and mounts to track round counts and builds.",
+    ),
     label: "Optics",
     description: "Sights & mounts",
     group: "gear",
@@ -435,9 +450,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "suppressors",
-    singular: "suppressor",
-    plural: "suppressors",
-    emptyHint: "Add your suppressors to track round counts and paperwork.",
+    ...nouns(
+      "suppressor",
+      "suppressors",
+      "Add your suppressors to track round counts and paperwork.",
+    ),
     label: "Suppressors",
     description: "Silencers",
     group: "gear",
@@ -446,9 +463,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "barrels",
-    singular: "barrel",
-    plural: "barrels",
-    emptyHint: "Add spare and swap barrels to track their round counts.",
+    ...nouns(
+      "barrel",
+      "barrels",
+      "Add spare and swap barrels to track their round counts.",
+    ),
     label: "Barrels",
     description: "Spare & swap barrels",
     group: "gear",
@@ -457,9 +476,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "lowers",
-    singular: "receiver",
-    plural: "receivers",
-    emptyHint: "Add your lower and upper receivers to track them here.",
+    ...nouns(
+      "receiver",
+      "receivers",
+      "Add your lower and upper receivers to track them here.",
+    ),
     label: "Lowers",
     description: "Receivers",
     group: "gear",
@@ -468,9 +489,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "magazines",
-    singular: "magazine",
-    plural: "magazines",
-    emptyHint: "Add your magazines and drums to keep count of what you own.",
+    ...nouns(
+      "magazine",
+      "magazines",
+      "Add your magazines and drums to keep count of what you own.",
+    ),
     label: "Magazines",
     description: "Mags & drums",
     group: "gear",
@@ -479,10 +502,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "parts",
-    singular: "part",
-    plural: "parts",
-    emptyHint:
+    ...nouns(
+      "part",
+      "parts",
       "Add components and other attachments to track round counts and builds.",
+    ),
     label: "Parts",
     description: "Components & everything else",
     group: "gear",
@@ -491,9 +515,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "knives",
-    singular: "knife",
-    plural: "knives",
-    emptyHint: "Add your knives and multitools to track what you own.",
+    ...nouns(
+      "knife",
+      "knives",
+      "Add your knives and multitools to track what you own.",
+    ),
     label: "Knives",
     description: "Blades & multitools",
     group: "gear",
@@ -502,9 +528,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "cases",
-    singular: "case",
-    plural: "cases",
-    emptyHint: "Add your cases and storage to track what you own.",
+    ...nouns(
+      "case",
+      "cases",
+      "Add your cases and storage to track what you own.",
+    ),
     label: "Cases",
     description: "Cases & storage",
     group: "gear",
@@ -513,10 +541,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "cleaning",
-    singular: "cleaning supply",
-    plural: "cleaning supplies",
-    emptyHint:
+    ...nouns(
+      "cleaning supply",
+      "cleaning supplies",
       "Track solvents, oils and other cleaning supplies, with quantities and low-stock alerts.",
+    ),
     label: "Cleaning",
     description: "Solvents, oils & cleaning supplies",
     group: "gear",
@@ -525,9 +554,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "armor",
-    singular: "armor piece",
-    plural: "armor pieces",
-    emptyHint: "Add plates, carriers and soft armor to track what you own.",
+    ...nouns(
+      "armor piece",
+      "armor pieces",
+      "Add plates, carriers and soft armor to track what you own.",
+    ),
     label: "Armor",
     description: "Plates, carriers & soft armor",
     group: "prep",
@@ -536,27 +567,28 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "medical",
-    singular: "medical item",
-    plural: "medical items",
-    emptyHint: "Add medical kits and first-aid supplies to track what you own.",
+    ...nouns(
+      "medical item",
+      "medical items",
+      "Add medical kits and first-aid supplies to track what you own.",
+    ),
     label: "Medical",
     description: "Kits, first aid & medical supplies",
     group: "prep",
     icon: "Cross",
     blocks: {
-      gear: {
-        heading: "Kits & equipment",
-        singular: "medical kit",
-        plural: "medical kits",
-        emptyHint: "Add first-aid and trauma kits to track what you own.",
-      },
-      supply: {
-        heading: "Consumable supplies",
-        singular: "medical supply",
-        plural: "medical supplies",
-        emptyHint:
-          "Track bandages, medication and other consumables, with quantities and expiry dates.",
-      },
+      gear: block(
+        "Kits & equipment",
+        "medical kit",
+        "medical kits",
+        "Add first-aid and trauma kits to track what you own.",
+      ),
+      supply: block(
+        "Consumable supplies",
+        "medical supply",
+        "medical supplies",
+        "Track bandages, medication and other consumables, with quantities and expiry dates.",
+      ),
     },
     sources: [
       gearSection(MEDICAL_GEAR_CATEGORIES),
@@ -565,29 +597,28 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "food-water",
-    singular: "food or water item",
-    plural: "food and water items",
-    emptyHint:
+    ...nouns(
+      "food or water item",
+      "food and water items",
       "Add food, water, filters and treatment equipment to track what you own.",
+    ),
     label: "Food & Water",
     description: "Food, water, filters & treatment",
     group: "prep",
     icon: "Droplets",
     blocks: {
-      gear: {
-        heading: "Water treatment equipment",
-        singular: "water treatment item",
-        plural: "water treatment items",
-        emptyHint:
-          "Add purifiers and other water treatment equipment to track what you own.",
-      },
-      supply: {
-        heading: "Food, water & filters",
-        singular: "food or water item",
-        plural: "food and water items",
-        emptyHint:
-          "Track food, water and filters, with quantities and expiry dates.",
-      },
+      gear: block(
+        "Water treatment equipment",
+        "water treatment item",
+        "water treatment items",
+        "Add purifiers and other water treatment equipment to track what you own.",
+      ),
+      supply: block(
+        "Food, water & filters",
+        "food or water item",
+        "food and water items",
+        "Track food, water and filters, with quantities and expiry dates.",
+      ),
     },
     sources: [
       gearSection(FOOD_WATER_GEAR_CATEGORIES),
@@ -596,28 +627,28 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "power-comms",
-    singular: "power or comms item",
-    plural: "power and comms items",
-    emptyHint:
+    ...nouns(
+      "power or comms item",
+      "power and comms items",
       "Add batteries, power equipment and radios to track what you own.",
+    ),
     label: "Power & Comms",
     description: "Batteries, power & radios",
     group: "prep",
     icon: "BatteryCharging",
     blocks: {
-      gear: {
-        heading: "Power & radio equipment",
-        singular: "power or radio item",
-        plural: "power and radio items",
-        emptyHint:
-          "Add power stations, solar equipment and radios to track what you own.",
-      },
-      supply: {
-        heading: "Batteries",
-        singular: "battery",
-        plural: "batteries",
-        emptyHint: "Track batteries, with quantities and low-stock alerts.",
-      },
+      gear: block(
+        "Power & radio equipment",
+        "power or radio item",
+        "power and radio items",
+        "Add power stations, solar equipment and radios to track what you own.",
+      ),
+      supply: block(
+        "Batteries",
+        "battery",
+        "batteries",
+        "Track batteries, with quantities and low-stock alerts.",
+      ),
     },
     sources: [
       gearSection(POWER_COMMS_GEAR_CATEGORIES),
@@ -626,9 +657,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "shelter-clothing",
-    singular: "shelter or clothing item",
-    plural: "shelter and clothing items",
-    emptyHint: "Add shelter, sleep and clothing items to track what you own.",
+    ...nouns(
+      "shelter or clothing item",
+      "shelter and clothing items",
+      "Add shelter, sleep and clothing items to track what you own.",
+    ),
     label: "Shelter & Clothing",
     description: "Shelter, sleep & clothing",
     group: "prep",
@@ -637,29 +670,28 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "tools-fire",
-    singular: "tool or light",
-    plural: "tools and lights",
-    emptyHint:
+    ...nouns(
+      "tool or light",
+      "tools and lights",
       "Add tools, lights, fire starters and signaling equipment to track what you own.",
+    ),
     label: "Tools & Fire",
     description: "Tools, light, fire & signaling",
     group: "prep",
     icon: "Flame",
     blocks: {
-      gear: {
-        heading: "Tools, lights & signaling",
-        singular: "tool or light",
-        plural: "tools and lights",
-        emptyHint:
-          "Add tools, lights, fire starters and signaling equipment to track what you own.",
-      },
-      supply: {
-        heading: "Fuel & signal supplies",
-        singular: "fuel or signal supply",
-        plural: "fuel and signal supplies",
-        emptyHint:
-          "Track fuel and signaling consumables, with quantities and expiry dates.",
-      },
+      gear: block(
+        "Tools, lights & signaling",
+        "tool or light",
+        "tools and lights",
+        "Add tools, lights, fire starters and signaling equipment to track what you own.",
+      ),
+      supply: block(
+        "Fuel & signal supplies",
+        "fuel or signal supply",
+        "fuel and signal supplies",
+        "Track fuel and signaling consumables, with quantities and expiry dates.",
+      ),
     },
     sources: [
       gearSection(TOOLS_FIRE_GEAR_CATEGORIES),
@@ -668,28 +700,28 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "other-prep",
-    singular: "item",
-    plural: "items",
-    emptyHint:
+    ...nouns(
+      "item",
+      "items",
       "Add sanitation, CBRN, navigation and other preparedness items here.",
+    ),
     label: "Other Prep",
     description: "Sanitation, CBRN, navigation & everything else",
     group: "prep",
     icon: "Package",
     blocks: {
-      gear: {
-        heading: "Other equipment",
-        singular: "equipment item",
-        plural: "equipment items",
-        emptyHint:
-          "Add sanitation, CBRN, navigation and other durable items here.",
-      },
-      supply: {
-        heading: "Other consumables",
-        singular: "consumable",
-        plural: "consumables",
-        emptyHint: "Track other consumables, with quantities and expiry dates.",
-      },
+      gear: block(
+        "Other equipment",
+        "equipment item",
+        "equipment items",
+        "Add sanitation, CBRN, navigation and other durable items here.",
+      ),
+      supply: block(
+        "Other consumables",
+        "consumable",
+        "consumables",
+        "Track other consumables, with quantities and expiry dates.",
+      ),
     },
     sources: [
       gearSection(OTHER_PREP_GEAR_CATEGORIES),
@@ -700,10 +732,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "kits",
-    singular: "kit",
-    plural: "kits",
-    emptyHint:
+    ...nouns(
+      "kit",
+      "kits",
       "Build a packing list for a bugout, medical, range or vehicle kit.",
+    ),
     label: "Kits",
     description: "Bugout, medical, range & vehicle packing lists",
     group: "prep",

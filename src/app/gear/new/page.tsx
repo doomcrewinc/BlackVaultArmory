@@ -2,19 +2,16 @@
 
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import {
-  GEAR_CATEGORIES,
-  GEAR_CATEGORY_LABELS,
-  DEFAULT_GEAR_CATEGORY,
-  isArmorCategory,
-} from "@/lib/gear";
+import { DEFAULT_GEAR_CATEGORY, isArmorCategory } from "@/lib/gear";
 import ImagePicker from "@/components/shared/ImagePicker";
 import { capitalizeFirst } from "@/lib/sections/wording";
 import { useAddFormContext } from "@/components/shared/useAddFormContext";
 import { TypeSelectField } from "@/components/shared/TypeSelectField";
 import { AddFormActions } from "@/components/shared/AddFormActions";
-import { ArrowLeft, AlertCircle } from "lucide-react";
+import {
+  AddFormBreadcrumb,
+  AddFormIntro,
+} from "@/components/shared/AddFormHeader";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
@@ -23,7 +20,8 @@ const LABEL_CLASS =
 
 function NewGearForm() {
   const router = useRouter();
-  const { context, noun } = useAddFormContext("gear");
+  const form = useAddFormContext("gear");
+  const { context, noun } = form;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quantity, setQuantity] = useState("1");
@@ -90,39 +88,10 @@ function NewGearForm() {
 
   return (
     <div className="min-h-full">
-      {/* Breadcrumb header */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
-        <Link
-          href={context?.returnHref ?? "/gear"}
-          className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to {context?.sectionLabel ?? "Gear"}
-        </Link>
-        <span className="text-vault-border">/</span>
-        <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Add {noun}
-        </h1>
-      </div>
+      <AddFormBreadcrumb form={form} />
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-        <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">
-            New {noun} entry
-          </h2>
-          <p className="text-sm text-vault-text-muted">
-            {context
-              ? `Register a new ${noun} in the arsenal.`
-              : "Register a knife, case or other standalone item in the arsenal."}
-          </p>
-        </div>
-
-        {error && (
-          <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
-            <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
-            <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
+        <AddFormIntro form={form} error={error} />
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Identity */}
@@ -147,11 +116,7 @@ function NewGearForm() {
             </div>
 
             <TypeSelectField
-              id="category"
-              label="Category"
-              values={GEAR_CATEGORIES}
-              labels={GEAR_CATEGORY_LABELS}
-              allowed={context?.allowedValues}
+              form={form}
               value={category}
               onChange={setCategory}
             />
@@ -373,11 +338,7 @@ function NewGearForm() {
             </div>
           </fieldset>
 
-          <AddFormActions
-            cancelHref={context?.returnHref ?? "/gear"}
-            loading={loading}
-            label={`Add ${noun}`}
-          />
+          <AddFormActions form={form} loading={loading} />
         </form>
       </div>
     </div>
