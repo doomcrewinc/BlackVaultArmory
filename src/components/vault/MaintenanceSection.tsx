@@ -9,6 +9,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { addDaysDateOnly, calendarDaysUntil, formatDateOnly, todayLocalISO } from "@/lib/date";
+import { effectiveLastServiced } from "@/lib/maintenance";
 
 type LogEntry = {
   id: string;
@@ -58,8 +59,15 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const status = computeStatus(lastMaintenanceDate, maintenanceIntervalDays);
-  const nextDue = computeNextDue(lastMaintenanceDate, maintenanceIntervalDays);
+  // A logged entry is work done: the newest one counts as the last service
+  // even when the date kept on the firearm is older.
+  const lastServiced =
+    effectiveLastServiced(
+      lastMaintenanceDate,
+      logs.map((log) => log.date),
+    )?.toISOString() ?? null;
+  const status = computeStatus(lastServiced, maintenanceIntervalDays);
+  const nextDue = computeNextDue(lastServiced, maintenanceIntervalDays);
 
   async function handleSave() {
     if (!formDate || !formNotes.trim()) {
@@ -154,7 +162,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
           <p className="text-vault-text-muted">
             Last serviced:{" "}
             <span className="text-vault-text">
-              {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
+              {lastServiced ? formatDateOnly(lastServiced) : "—"}
             </span>
           </p>
           <p className="text-vault-text-muted">
@@ -176,7 +184,7 @@ export function MaintenanceSection({ firearmId, lastMaintenanceDate: initialLast
             <p className="text-vault-text-muted">
               Last serviced:{" "}
               <span className="text-vault-text">
-                {lastMaintenanceDate ? formatDateOnly(lastMaintenanceDate) : "—"}
+                {lastServiced ? formatDateOnly(lastServiced) : "—"}
               </span>
             </p>
             <p className="text-vault-text-muted">

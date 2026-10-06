@@ -78,6 +78,43 @@ describe("GET /api/firearms", () => {
   });
 });
 
+describe("GET /api/firearms — last serviced", () => {
+  const row = (lastMaintenanceDate: Date | null, logDates: string[]) => ({
+    id: "f1",
+    name: "Blackened",
+    serialNumber: "X",
+    notes: null,
+    lastMaintenanceDate,
+    maintenanceIntervalDays: 90,
+    rangeSessions: [],
+    builds: [],
+    _count: { builds: 0 },
+    maintenanceLogs: logDates.map((d) => ({ date: new Date(`${d}T00:00:00.000Z`) })),
+  });
+
+  it.each([
+    ["a newer log entry counts as the last service", new Date("2026-07-03T00:00:00.000Z"), ["2026-10-01"], "2026-10-01T00:00:00.000Z"],
+    ["with no entry the stored date stands", new Date("2026-07-03T00:00:00.000Z"), [], "2026-07-03T00:00:00.000Z"],
+    ["nothing recorded", null, [], null],
+  ])("%s", async (_name, stored, logs, expected) => {
+    mocks.findMany.mockResolvedValue([row(stored, logs)]);
+    const res = await GET(new NextRequest("http://localhost/api/firearms"));
+    const [firearm] = await res.json();
+    expect(firearm.lastMaintenanceDate).toBe(expected);
+    expect(firearm).not.toHaveProperty("maintenanceLogs");
+  });
+
+  it("asks only for the newest entry's date", async () => {
+    mocks.findMany.mockResolvedValue([]);
+    await GET(new NextRequest("http://localhost/api/firearms"));
+    expect(mocks.findMany.mock.calls.at(-1)?.[0].include.maintenanceLogs).toEqual({
+      select: { date: true },
+      orderBy: { date: "desc" },
+      take: 1,
+    });
+  });
+});
+
 describe("POST /api/firearms", () => {
   beforeEach(() => {
     vi.clearAllMocks();

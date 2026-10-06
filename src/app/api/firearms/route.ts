@@ -6,6 +6,7 @@ import { isKnownNfaClass, normalizeFirearmNfaFields } from "@/lib/nfa";
 import { normalizeMoney } from "@/lib/money";
 import { NFA_CLASSES, normalizeTypeToken } from "@/lib/types";
 import { firearmWhereForSection, sectionBySlug } from "@/lib/categories";
+import { effectiveLastServiced } from "@/lib/maintenance";
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -52,6 +53,11 @@ export async function GET(request: NextRequest) {
         rangeSessions: {
           select: { roundsFired: true },
         },
+        maintenanceLogs: {
+          select: { date: true },
+          orderBy: { date: "desc" },
+          take: 1,
+        },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -66,8 +72,14 @@ export async function GET(request: NextRequest) {
       notes: firearm.notes,
       buildCount: firearm._count.builds,
       activeBuild: firearm.builds[0] ?? null,
+      // The newest log entry counts as the last service (see effectiveLastServiced).
+      lastMaintenanceDate: effectiveLastServiced(
+        firearm.lastMaintenanceDate,
+        firearm.maintenanceLogs.map((log) => log.date),
+      ),
       builds: undefined,
       rangeSessions: undefined,
+      maintenanceLogs: undefined,
       _count: undefined,
     }));
 
