@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { sectionHref } from "@/lib/categories";
+import { itemNoun, sectionForItem, titleCase } from "@/lib/sections/wording";
 import { formatDateOnly, formatTimestamp, todayLocalISO } from "@/lib/date";
 import { NFA_TRANSFER_METHOD_LABELS, type NfaTransferMethod } from "@/lib/types";
 import { PhotoGallery } from "@/components/photos/PhotoGallery";
@@ -307,6 +309,7 @@ export default function AccessoryDetailPage() {
   }
 
   const roundColor = roundCountColor(accessory.roundCount, accessory.type);
+  const section = sectionForItem("accessory", accessory.type);
   const hasNfaPaperwork =
     accessory.nfaTransferMethod != null ||
     accessory.nfaControlNumber != null ||
@@ -338,11 +341,11 @@ export default function AccessoryDetailPage() {
 
         <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-6 py-4">
           <Link
-            href="/accessories"
+            href={section ? sectionHref(section) : "/accessories"}
             className="flex items-center gap-1.5 text-[#E8EDF2]/80 hover:text-vault-text text-sm transition-colors bg-vault-bg/60 backdrop-blur-sm px-3 py-1.5 rounded-md border border-[#1C2530]/60"
           >
             <ArrowLeft className="w-4 h-4" />
-            Accessories
+            {section?.label ?? "Accessories"}
           </Link>
           <div className="flex items-center gap-2">
             {accessory.imageUrl && imageFilename && (
@@ -606,7 +609,7 @@ export default function AccessoryDetailPage() {
         <ItemDocumentPanel
           entityType="accessory"
           entityId={accessory.id}
-          title="Accessory Documents"
+          title={`${titleCase(itemNoun("accessory", accessory.type))} Documents`}
         />
 
         {/* Round Count History */}

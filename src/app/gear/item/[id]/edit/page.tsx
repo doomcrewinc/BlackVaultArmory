@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
+import { itemNoun, titleCase } from "@/lib/sections/wording";
 import {
   GEAR_CATEGORIES,
   GEAR_CATEGORY_LABELS,
@@ -169,6 +170,8 @@ export default function EditGearPage() {
     );
   }
 
+  const noun = itemNoun("gear", gear.category);
+
   return (
     <div className="min-h-full">
       {/* Header */}
@@ -182,7 +185,7 @@ export default function EditGearPage() {
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit Gear
+          Edit {titleCase(noun)}
         </h1>
       </div>
 

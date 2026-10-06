@@ -7,17 +7,9 @@ import { GearClientPage } from "@/app/gear/GearClientPage";
 import { SupplyClientPage } from "@/app/supplies/SupplyClientPage";
 import { KitSectionList } from "@/components/sections/KitSectionList";
 import type { CategorySection } from "@/lib/categories";
+import { listWordingForSection } from "@/lib/sections/wording";
 import type { SectionPayload } from "@/lib/sections/loadSectionItems";
 import type { SectionViewSource } from "@/lib/sections/renderableSources";
-
-/** The sub-heading one list block carries on a multi-source section page. */
-const BLOCK_LABELS: Record<SectionPayload["kind"], string> = {
-  firearm: "Firearms",
-  accessory: "Accessories",
-  gear: "Gear",
-  supply: "Supplies",
-  kit: "Kits",
-};
 
 /**
  * The payloads this view can render, derived from `SECTION_VIEW_SOURCES` —
@@ -45,11 +37,13 @@ type RenderablePayload = Extract<SectionPayload, { kind: SectionViewSource }>;
  */
 function RenderablePayloadList({
   payload,
+  section,
   heading,
   subheading,
   embedded,
 }: {
   payload: RenderablePayload;
+  section: CategorySection;
   heading: string;
   subheading?: string;
   embedded: boolean;
@@ -62,6 +56,7 @@ function RenderablePayloadList({
           timezoneConfigured={payload.timezoneConfigured}
           heading={heading}
           subheading={subheading}
+          wording={listWordingForSection(section, "gear")}
           embedded={embedded}
         />
       );
@@ -72,6 +67,7 @@ function RenderablePayloadList({
           timezoneConfigured={payload.timezoneConfigured}
           heading={heading}
           subheading={subheading}
+          wording={listWordingForSection(section, "supply")}
           embedded={embedded}
         />
       );
@@ -81,6 +77,7 @@ function RenderablePayloadList({
           accessories={payload.items}
           heading={heading}
           subheading={subheading}
+          wording={listWordingForSection(section, "accessory")}
           embedded={embedded}
         />
       );
@@ -110,14 +107,13 @@ function RenderablePayloadList({
  */
 function PayloadList({
   payload,
-  sectionSlug,
+  section,
   heading,
   subheading,
   embedded,
 }: {
   payload: SectionPayload;
-  /** Only used to name the section in the `firearm` branch's throw. */
-  sectionSlug: string;
+  section: CategorySection;
   heading: string;
   subheading?: string;
   embedded: boolean;
@@ -148,7 +144,7 @@ function PayloadList({
     // load-phase gate that keeps a registered section from getting this far
     // is `sectionIsRenderable`.
     throw new Error(
-      `Section "${sectionSlug}" declares a firearm source, which no ` +
+      `Section "${section.slug}" declares a firearm source, which no ` +
         `section renderer handles; firearms render through VaultClientPage ` +
         `at /vault/category/[slug].`,
     );
@@ -157,6 +153,7 @@ function PayloadList({
   return (
     <RenderablePayloadList
       payload={payload}
+      section={section}
       heading={heading}
       subheading={subheading}
       embedded={embedded}
@@ -221,7 +218,7 @@ export function SectionView({
     return (
       <PayloadList
         payload={payloads[0]}
-        sectionSlug={section.slug}
+        section={section}
         heading={section.label}
         subheading={section.description}
         embedded={false}
@@ -270,8 +267,8 @@ export function SectionView({
         <PayloadList
           key={payload.kind}
           payload={payload}
-          sectionSlug={section.slug}
-          heading={BLOCK_LABELS[payload.kind]}
+          section={section}
+          heading={section.blocks?.[payload.kind]?.heading ?? section.label}
           embedded
         />
       ))}

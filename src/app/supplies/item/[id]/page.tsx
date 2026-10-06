@@ -13,6 +13,7 @@ import {
   type SupplyUnit,
 } from "@/lib/supply";
 import { supplySectionForItem } from "@/lib/categories";
+import { itemNoun, titleCase } from "@/lib/sections/wording";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { SupplyTimezoneNotice } from "@/components/supplies/SupplyTimezoneNotice";
@@ -253,7 +254,7 @@ export default async function SupplyDetailPage({
         <ItemDocumentPanel
           entityType="supply"
           entityId={supply.id}
-          title="Supply Documents"
+          title={`${titleCase(itemNoun("supply", supply.category))} Documents`}
         />
 
         {currentUser?.role === "ADMIN" && (

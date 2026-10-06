@@ -12,8 +12,10 @@ import {
   groupHref,
   kitWhereForSection,
   sectionBySlug,
+  sectionAllowedValues,
   sectionHref,
   sectionIsRenderable,
+  sectionNounFor,
   sectionSources,
   sectionsForGroup,
   supplySectionForItem,
@@ -848,6 +850,9 @@ describe("section renderability", () => {
         slug: "hollow",
         label: "Hollow",
         description: "",
+        singular: "hollow",
+        plural: "hollows",
+        emptyHint: "Nothing here.",
         group: "prep",
         icon: "Package",
         sources: [],
@@ -981,4 +986,152 @@ describe("the kits section", () => {
     expect(kitWhereForSection(kits)).toEqual({});
     expect(kitWhereForSection(sectionBySlug("armor")!)).toBeNull();
   });
+});
+
+describe("section wording", () => {
+  const WORDED_KINDS = ["accessory", "gear", "supply"];
+  const worded = CATEGORY_SECTIONS.filter((section) =>
+    sectionSources(section).some((kind) => WORDED_KINDS.includes(kind)),
+  );
+  const single = worded.filter(
+    (section) => sectionSources(section).length === 1,
+  );
+  const mixed = worded.filter((section) => sectionSources(section).length > 1);
+
+  // Sections whose own words may contain the storage name. None today: the
+  // accessory sections say what the thing is (magazine, optic, receiver).
+  const MAY_NAME_ACCESSORIES: string[] = [];
+
+  function wordsOf(section: CategorySection): string[] {
+    const blocks = Object.values(section.blocks ?? {});
+    return [
+      section.singular ?? "",
+      section.plural ?? "",
+      section.emptyHint ?? "",
+      ...blocks.flatMap((b) => [b.heading, b.singular, b.plural, b.emptyHint]),
+    ];
+  }
+
+  it.each(single.map((section) => [section.slug, section] as const))(
+    "%s, with one source, has its own nouns and an empty-state sentence and no blocks",
+    (_slug, section) => {
+      expect(section.singular?.trim()).toBeTruthy();
+      expect(section.plural?.trim()).toBeTruthy();
+      expect(section.emptyHint?.trim()).toBeTruthy();
+      expect(section.emptyHint).toMatch(/\.$/);
+      expect(section.blocks).toBeUndefined();
+      // The two forms differ unless the noun is uncountable, and then the
+      // first-row button says so itself.
+      expect(
+        section.plural !== section.singular || section.addFirstLabel,
+      ).toBeTruthy();
+    },
+  );
+
+  it.each(mixed.map((section) => [section.slug, section] as const))(
+    "%s, with several sources, words every block and has no nouns of its own",
+    (_slug, section) => {
+      expect(section.singular).toBeUndefined();
+      expect(section.plural).toBeUndefined();
+      expect(section.emptyHint).toBeUndefined();
+      for (const kind of sectionSources(section)) {
+        const block = section.blocks?.[kind];
+        expect(block?.heading.trim(), `${kind} heading`).toBeTruthy();
+        expect(block?.singular.trim(), `${kind} singular`).toBeTruthy();
+        expect(block?.plural.trim(), `${kind} plural`).toBeTruthy();
+        expect(block?.emptyHint).toMatch(/\.$/);
+        expect(sectionNounFor(section, kind)).toBe(block);
+      }
+    },
+  );
+
+  it.each(worded.map((section) => [section.slug, section] as const))(
+    "%s does not call its things by a storage name",
+    (slug, section) => {
+      const storageNames = MAY_NAME_ACCESSORIES.includes(slug)
+        ? /\bgear\b/i
+        : /\baccessor(y|ies)\b|\bgear\b/i;
+      for (const words of wordsOf(section)) {
+        expect(words, `${slug}: ${words}`).not.toMatch(storageNames);
+      }
+    },
+  );
+
+  it.each(worded.map((section) => [section.slug, section] as const))(
+    "%s does not mix 'and' and 'or' between its singular and plural",
+    (_slug, section) => {
+      const nouns = section.blocks
+        ? Object.values(section.blocks)
+        : [section as { singular: string; plural: string }];
+      for (const noun of nouns) {
+        expect(/\bor\b/.test(noun.singular)).toBe(/\bor\b/.test(noun.plural));
+        expect(noun.plural).not.toMatch(/\band\b/);
+      }
+    },
+  );
+
+  it("has no words for a Vault section or the kit list", () => {
+    for (const slug of ["handguns", "sbs", "kits"]) {
+      expect(sectionNounFor(sectionBySlug(slug)!, "firearm")).toBeUndefined();
+      expect(sectionNounFor(sectionBySlug(slug)!, "kit")).toBeUndefined();
+    }
+  });
+
+  it("uses the section's own words for a single-source section", () => {
+    expect(
+      sectionNounFor(sectionBySlug("magazines")!, "accessory"),
+    ).toMatchObject({
+      singular: "magazine",
+      plural: "magazines",
+    });
+  });
+});
+
+describe("sectionAllowedValues", () => {
+  it.each([
+    ["magazines", "accessory", ["MAGAZINE"]],
+    ["optics", "accessory", ["OPTIC", "OPTIC_MOUNT"]],
+    ["lowers", "accessory", ["LOWER_RECEIVER", "UPPER_RECEIVER"]],
+    ["knives", "gear", ["KNIFE"]],
+    ["medical", "gear", ["MEDICAL_KIT"]],
+    ["medical", "supply", ["MEDICAL"]],
+    ["cleaning", "supply", ["CLEANING"]],
+    ["food-water", "supply", ["FOOD", "WATER", "FILTER"]],
+  ] as const)("%s / %s", (slug, kind, expected) => {
+    expect(sectionAllowedValues(sectionBySlug(slug)!, kind)).toEqual(expected);
+  });
+
+  it("gives the catch-all Parts section every accessory type no other section claims", () => {
+    const claimed = CATEGORY_SECTIONS.filter(
+      (section) => section.slug !== "parts",
+    ).flatMap((section) => sectionAllowedValues(section, "accessory"));
+    const parts = sectionAllowedValues(sectionBySlug("parts")!, "accessory");
+    expect(parts).toEqual(SLOT_TYPES.filter((type) => !claimed.includes(type)));
+    expect(parts).toContain("STOCK");
+    expect(parts).not.toContain("MAGAZINE");
+    expect(parts).not.toContain("SUPPRESSOR");
+  });
+
+  it("is empty for a section with no source of that kind", () => {
+    expect(sectionAllowedValues(sectionBySlug("magazines")!, "gear")).toEqual(
+      [],
+    );
+    expect(
+      sectionAllowedValues(sectionBySlug("handguns")!, "accessory"),
+    ).toEqual([]);
+  });
+
+  it.each(["gear", "supply"] as const)(
+    "splits every %s category across the sections with no value claimed twice or dropped",
+    (kind) => {
+      const universe = kind === "gear" ? GEAR_CATEGORIES : SUPPLY_CATEGORIES;
+      const all = CATEGORY_SECTIONS.flatMap((section) =>
+        sectionAllowedValues(section, kind),
+      );
+      expect([...new Set(all)].sort((a, b) => a.localeCompare(b))).toEqual(
+        [...universe].sort((a, b) => a.localeCompare(b)),
+      );
+      expect(all).toHaveLength(universe.length);
+    },
+  );
 });

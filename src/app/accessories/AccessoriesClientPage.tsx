@@ -2,12 +2,13 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Plus, Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
-import { PageHeader } from "@/components/shared/PageHeader";
-import { SectionBlockHeader } from "@/components/sections/SectionBlockHeader";
+import { Crosshair, Shield, ExternalLink, Pencil } from "lucide-react";
+import { SectionEmptyState } from "@/components/sections/SectionEmptyState";
+import { SectionListHeader } from "@/components/sections/SectionListHeader";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { formatDateOnly } from "@/lib/date";
 import { RoundCountBadge } from "@/components/shared/RoundCountBadge";
+import { DEFAULT_LIST_WORDING, type ListWording } from "@/lib/sections/wording";
 
 const SLOT_TYPE_LABELS: Record<string, string> = {
   MUZZLE: "Muzzle",
@@ -75,6 +76,11 @@ interface Props {
   heading?: string;
   subheading?: string;
   /**
+   * The words for this list's rows. Defaults to the generic wording of the
+   * standalone page; a section page passes its own.
+   */
+  wording?: ListWording;
+  /**
    * True when this list is one block of a multi-source section page (see
    * SectionView). The page owns the `h1`, so the block gets the lighter
    * SectionBlockHeader instead of a second PageHeader.
@@ -86,6 +92,7 @@ export function AccessoriesClientPage({
   accessories,
   heading = "ACCESSORIES",
   subheading,
+  wording = DEFAULT_LIST_WORDING.accessory,
   embedded = false,
 }: Props) {
   const [selectedType, setSelectedType] = useState<string | null>(null);
@@ -104,37 +111,24 @@ export function AccessoriesClientPage({
 
   const totalRounds = accessories.reduce((sum, a) => sum + a.roundCount, 0);
 
-  const addAction = (
-    <Link
-      href="/accessories/new"
-      className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-3 py-1.5 rounded text-sm font-medium transition-colors"
-    >
-      <Plus className="w-4 h-4" />
-      Add Accessory
-    </Link>
-  );
-
   return (
     <div className={embedded ? undefined : "min-h-full"}>
-      {embedded ? (
-        <SectionBlockHeader title={heading} action={addAction} />
-      ) : (
-        <PageHeader
-          title={heading}
-          subtitle={
-            subheading ??
-            `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
-          }
-          actions={addAction}
-        />
-      )}
+      <SectionListHeader
+        heading={heading}
+        subtitle={
+          subheading ??
+          `${accessories.length} part${accessories.length !== 1 ? "s" : ""} & attachment${accessories.length !== 1 ? "s" : ""}`
+        }
+        wording={wording}
+        embedded={embedded}
+      />
 
       <div className="p-4 sm:p-6">
         {/* Summary bar */}
         <div className="flex flex-wrap items-center gap-4 sm:gap-6 mb-6 bg-vault-surface border border-vault-border rounded-lg px-4 sm:px-5 py-3">
           <div>
             <p className="text-[10px] uppercase tracking-widest text-vault-text-faint mb-0.5">
-              Total Parts
+              {wording.totalLabel}
             </p>
             <p className="text-lg font-bold font-mono text-vault-text">
               {formatNumber(accessories.length)}
@@ -183,43 +177,23 @@ export function AccessoriesClientPage({
         )}
 
         {/* Table */}
-        {displayed.length === 0 ? (
+        {displayed.length === 0 && accessories.length === 0 && (
+          <SectionEmptyState icon={Crosshair} wording={wording} />
+        )}
+        {displayed.length === 0 && accessories.length > 0 && (
           <div className="flex flex-col items-center justify-center py-24 text-center">
-            {accessories.length === 0 ? (
-              <>
-                <div className="w-16 h-16 rounded-full bg-[#00C2FF]/10 border border-[#00C2FF]/20 flex items-center justify-center mb-4">
-                  <Crosshair className="w-8 h-8 text-[#00C2FF]" />
-                </div>
-                <h3 className="text-lg font-semibold text-vault-text mb-2">
-                  No accessories yet
-                </h3>
-                <p className="text-sm text-vault-text-muted mb-6 max-w-sm">
-                  Add parts, optics, suppressors and other attachments to track
-                  round counts and build configurations.
-                </p>
-                <Link
-                  href="/accessories/new"
-                  className="flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 px-4 py-2 rounded text-sm font-medium transition-colors"
-                >
-                  <Plus className="w-4 h-4" />
-                  Add First Accessory
-                </Link>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-vault-text-muted mb-3">
-                  No accessories match the selected filter.
-                </p>
-                <button
-                  onClick={() => setSelectedType(null)}
-                  className="text-xs text-[#00C2FF] hover:underline"
-                >
-                  Show all
-                </button>
-              </>
-            )}
+            <p className="text-sm text-vault-text-muted mb-3">
+              {wording.noMatch}
+            </p>
+            <button
+              onClick={() => setSelectedType(null)}
+              className="text-xs text-[#00C2FF] hover:underline"
+            >
+              Show all
+            </button>
           </div>
-        ) : (
+        )}
+        {displayed.length > 0 && (
           <>
             {/* Mobile card list */}
             <div className="space-y-3 md:hidden">

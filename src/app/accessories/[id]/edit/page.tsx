@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
+import { itemNoun, titleCase } from "@/lib/sections/wording";
 import { SLOT_TYPES, SLOT_TYPE_LABELS, COMMON_CALIBERS } from "@/lib/types";
 import ImagePicker from "@/components/shared/ImagePicker";
 import {
@@ -222,6 +223,8 @@ export default function EditAccessoryPage() {
     );
   }
 
+  const noun = itemNoun("accessory", accessory.type);
+
   return (
     <div className="min-h-full">
       {/* Header */}
@@ -235,7 +238,7 @@ export default function EditAccessoryPage() {
         </Link>
         <span className="text-vault-border">/</span>
         <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Edit Accessory
+          Edit {titleCase(noun)}
         </h1>
       </div>
 
@@ -245,7 +248,7 @@ export default function EditAccessoryPage() {
             Edit {accessory.name}
           </h2>
           <p className="text-sm text-vault-text-muted">
-            Update the details for this accessory.
+            Update the details for this {noun}.
           </p>
         </div>
 
@@ -272,7 +275,7 @@ export default function EditAccessoryPage() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                Accessory Name <span className="text-[#E53935]">*</span>
+                {titleCase(noun)} Name <span className="text-[#E53935]">*</span>
               </label>
               <input
                 id="name"

@@ -1,5 +1,7 @@
+import { GEAR_CATEGORIES } from "./gear";
 import { isRenderableSource } from "./sections/renderableSources";
-import { DEFAULT_NFA_CLASS, NFA_CLASSES } from "./types";
+import { SUPPLY_CATEGORIES } from "./supply";
+import { DEFAULT_NFA_CLASS, NFA_CLASSES, SLOT_TYPES } from "./types";
 
 /**
  * Every nav group, in sidebar order. A `readonly` tuple rather than a bare
@@ -78,11 +80,40 @@ export type SectionMatcher =
       holds: (row: KitRow) => boolean;
     };
 
-export type CategorySection = {
+/**
+ * The words a page uses for the things in a section: the lowercase noun that
+ * buttons and headings are built around (title-cased where they are labels:
+ * "Add Magazine", "No magazines yet") and one sentence for the empty state.
+ */
+export type SectionNoun = {
+  singular: string;
+  plural: string;
+  emptyHint: string;
+  /**
+   * The Title Case text of the empty state's button, for a noun where "Add
+   * First <Singular>" reads wrong (armor is uncountable).
+   */
+  addFirstLabel?: string;
+};
+
+/**
+ * A section that draws from more than one source shows one block per source;
+ * each block says what is in it and names its own things.
+ */
+export type SectionBlock = SectionNoun & { heading: string };
+
+export type CategorySection = Partial<SectionNoun> & {
   slug: string;
   label: string;
   description: string;
   group: SectionGroup;
+  /**
+   * The words of a section whose rows are accessories, gear or supplies: either
+   * the section's own `singular`/`plural`/`emptyHint` (one source) or one block
+   * per source kind here (several sources), never both. Vault sections word
+   * themselves in their own page, and the kit list does not read them.
+   */
+  blocks?: Partial<Record<SectionSource, SectionBlock>>;
   /**
    * lucide-react icon name. Declared for the later phases that give the section
    * list and its page headers their own icons; nothing renders it today — the
@@ -306,6 +337,25 @@ function kitSection(): SectionMatcher {
   };
 }
 
+function nouns(
+  singular: string,
+  plural: string,
+  emptyHint: string,
+  addFirstLabel?: string,
+): SectionNoun {
+  return { singular, plural, emptyHint, addFirstLabel };
+}
+
+/** One block of a section that draws from more than one source. */
+function block(
+  heading: string,
+  singular: string,
+  plural: string,
+  emptyHint: string,
+): SectionBlock {
+  return { heading, ...nouns(singular, plural, emptyHint) };
+}
+
 export const CATEGORY_SECTIONS: CategorySection[] = [
   {
     slug: "handguns",
@@ -381,6 +431,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "optics",
+    ...nouns(
+      "optic",
+      "optics",
+      "Add sights, scopes and mounts to track round counts and builds.",
+    ),
     label: "Optics",
     description: "Sights & mounts",
     group: "gear",
@@ -389,6 +444,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "suppressors",
+    ...nouns(
+      "suppressor",
+      "suppressors",
+      "Add your suppressors to track round counts and paperwork.",
+    ),
     label: "Suppressors",
     description: "Silencers",
     group: "gear",
@@ -397,6 +457,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "barrels",
+    ...nouns(
+      "barrel",
+      "barrels",
+      "Add spare and swap barrels to track their round counts.",
+    ),
     label: "Barrels",
     description: "Spare & swap barrels",
     group: "gear",
@@ -405,6 +470,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "lowers",
+    ...nouns(
+      "receiver",
+      "receivers",
+      "Add your lower and upper receivers to track them here.",
+    ),
     label: "Lowers",
     description: "Receivers",
     group: "gear",
@@ -413,6 +483,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "magazines",
+    ...nouns(
+      "magazine",
+      "magazines",
+      "Add your magazines and drums to keep count of what you own.",
+    ),
     label: "Magazines",
     description: "Mags & drums",
     group: "gear",
@@ -421,6 +496,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "parts",
+    ...nouns(
+      "part",
+      "parts",
+      "Add components and other attachments to track round counts and builds.",
+    ),
     label: "Parts",
     description: "Components & everything else",
     group: "gear",
@@ -429,6 +509,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "knives",
+    ...nouns(
+      "knife",
+      "knives",
+      "Add your knives and multitools to track what you own.",
+    ),
     label: "Knives",
     description: "Blades & multitools",
     group: "gear",
@@ -437,6 +522,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "cases",
+    ...nouns(
+      "case",
+      "cases",
+      "Add your cases and storage to track what you own.",
+    ),
     label: "Cases",
     description: "Cases & storage",
     group: "gear",
@@ -445,6 +535,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "cleaning",
+    ...nouns(
+      "cleaning supply",
+      "cleaning supplies",
+      "Track solvents, oils and other cleaning supplies, with quantities and low-stock alerts.",
+    ),
     label: "Cleaning",
     description: "Solvents, oils & cleaning supplies",
     group: "gear",
@@ -453,6 +548,12 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "armor",
+    ...nouns(
+      "armor",
+      "armor",
+      "Add plates, carriers and soft armor to track what you own.",
+      "Add Armor",
+    ),
     label: "Armor",
     description: "Plates, carriers & soft armor",
     group: "prep",
@@ -465,6 +566,20 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Kits, first aid & medical supplies",
     group: "prep",
     icon: "Cross",
+    blocks: {
+      gear: block(
+        "Kits & Equipment",
+        "medical kit",
+        "medical kits",
+        "Add first-aid and trauma kits to track what you own.",
+      ),
+      supply: block(
+        "Consumable Supplies",
+        "medical supply",
+        "medical supplies",
+        "Track bandages, medication and other consumables, with quantities and expiry dates.",
+      ),
+    },
     sources: [
       gearSection(MEDICAL_GEAR_CATEGORIES),
       supplySection(MEDICAL_SUPPLY_CATEGORIES),
@@ -476,6 +591,20 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Food, water, filters & treatment",
     group: "prep",
     icon: "Droplets",
+    blocks: {
+      gear: block(
+        "Water Treatment Equipment",
+        "water treatment item",
+        "water treatment items",
+        "Add purifiers and other water treatment equipment to track what you own.",
+      ),
+      supply: block(
+        "Food, Water & Filters",
+        "food or water item",
+        "food or water items",
+        "Track food, water and filters, with quantities and expiry dates.",
+      ),
+    },
     sources: [
       gearSection(FOOD_WATER_GEAR_CATEGORIES),
       supplySection(FOOD_WATER_SUPPLY_CATEGORIES),
@@ -487,6 +616,20 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Batteries, power & radios",
     group: "prep",
     icon: "BatteryCharging",
+    blocks: {
+      gear: block(
+        "Power & Radio Equipment",
+        "power or radio item",
+        "power or radio items",
+        "Add power stations, solar equipment and radios to track what you own.",
+      ),
+      supply: block(
+        "Batteries",
+        "battery",
+        "batteries",
+        "Track batteries, with quantities and low-stock alerts.",
+      ),
+    },
     sources: [
       gearSection(POWER_COMMS_GEAR_CATEGORIES),
       supplySection(POWER_COMMS_SUPPLY_CATEGORIES),
@@ -494,6 +637,11 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
   },
   {
     slug: "shelter-clothing",
+    ...nouns(
+      "item",
+      "items",
+      "Add shelter, sleep and clothing items to track what you own.",
+    ),
     label: "Shelter & Clothing",
     description: "Shelter, sleep & clothing",
     group: "prep",
@@ -506,6 +654,20 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Tools, light, fire & signaling",
     group: "prep",
     icon: "Flame",
+    blocks: {
+      gear: block(
+        "Tools, Lights & Signaling",
+        "equipment item",
+        "equipment items",
+        "Add tools, lights, fire starters and signaling equipment to track what you own.",
+      ),
+      supply: block(
+        "Fuel & Signal Supplies",
+        "fuel or signal supply",
+        "fuel or signal supplies",
+        "Track fuel and signaling consumables, with quantities and expiry dates.",
+      ),
+    },
     sources: [
       gearSection(TOOLS_FIRE_GEAR_CATEGORIES),
       supplySection(TOOLS_FIRE_SUPPLY_CATEGORIES),
@@ -517,6 +679,20 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Sanitation, CBRN, navigation & everything else",
     group: "prep",
     icon: "Package",
+    blocks: {
+      gear: block(
+        "Other Equipment",
+        "equipment item",
+        "equipment items",
+        "Add sanitation, CBRN, navigation and other durable items here.",
+      ),
+      supply: block(
+        "Other Consumables",
+        "consumable",
+        "consumables",
+        "Track other consumables, with quantities and expiry dates.",
+      ),
+    },
     sources: [
       gearSection(OTHER_PREP_GEAR_CATEGORIES),
       otherGearSection(),
@@ -686,6 +862,61 @@ export function sectionSources(section: CategorySection): SectionSource[] {
     if (!seen.includes(source.source)) seen.push(source.source);
   }
   return seen;
+}
+
+/** The kinds of row that have an add form with a type or category field. */
+export type AddFormKind = "accessory" | "gear" | "supply";
+
+/** Every value each add form's type or category field can offer. */
+const ADD_FORM_VALUES: Record<AddFormKind, readonly string[]> = {
+  accessory: SLOT_TYPES,
+  gear: GEAR_CATEGORIES,
+  supply: SUPPLY_CATEGORIES,
+};
+
+/**
+ * The type (accessory) or category (gear, supply) values a section's sources of
+ * that kind match, in the order the add form lists them. The registry's own
+ * matchers decide, applied to every value the form can offer, so a catch-all
+ * such as Parts yields exactly the values no other section claims. Empty when
+ * the section has no source of that kind.
+ */
+export function sectionAllowedValues(
+  section: CategorySection,
+  kind: AddFormKind,
+): string[] {
+  const matchers = section.sources.filter((source) => source.source === kind);
+  return ADD_FORM_VALUES[kind].filter((value) =>
+    matchers.some((matcher) => {
+      switch (matcher.source) {
+        case "accessory":
+          return matcher.holds({ type: value });
+        case "gear":
+        case "supply":
+        case "kit":
+          return matcher.holds({ category: value });
+        case "firearm":
+          return false;
+      }
+    }),
+  );
+}
+
+/**
+ * The words for one source of a section: the block's own when the section has
+ * one for that kind, otherwise the section's own; undefined for a section that
+ * has neither (a Vault section, or the kit list).
+ */
+export function sectionNounFor(
+  section: CategorySection,
+  kind: SectionSource,
+): SectionNoun | undefined {
+  const own = section.blocks?.[kind];
+  if (own) return own;
+  const { singular, plural, emptyHint, addFirstLabel } = section;
+  return singular && plural && emptyHint
+    ? { singular, plural, emptyHint, addFirstLabel }
+    : undefined;
 }
 
 /**

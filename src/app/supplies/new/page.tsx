@@ -1,25 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import {
-  SUPPLY_CATEGORIES,
-  SUPPLY_CATEGORY_LABELS,
   DEFAULT_SUPPLY_CATEGORY,
   SUPPLY_UNITS,
   SUPPLY_UNIT_LABELS,
   DEFAULT_SUPPLY_UNIT,
 } from "@/lib/supply";
-import { ArrowLeft, Plus, Loader2, AlertCircle } from "lucide-react";
+import { LoadingState } from "@/components/shared/LoadingState";
+import { useAddFormContext } from "@/components/shared/useAddFormContext";
+import { TypeSelectField } from "@/components/shared/TypeSelectField";
+import { AddFormActions } from "@/components/shared/AddFormActions";
+import {
+  AddFormBreadcrumb,
+  AddFormIntro,
+} from "@/components/shared/AddFormHeader";
 
 const INPUT_CLASS =
   "w-full bg-vault-surface border border-vault-border text-vault-text rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[#00C2FF] placeholder-vault-text-faint transition-colors";
 const LABEL_CLASS =
   "block text-xs font-medium uppercase tracking-widest text-vault-text-muted mb-1.5";
 
-export default function NewSupplyPage() {
+function NewSupplyForm() {
   const router = useRouter();
+  const form = useAddFormContext("supply");
+  const { context, noun } = form;
+  const [category, setCategory] = useState<string>(
+    context?.allowedValues[0] ?? DEFAULT_SUPPLY_CATEGORY,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,12 +74,12 @@ export default function NewSupplyPage() {
       const json = await res.json();
 
       if (!res.ok) {
-        setError(json.error ?? "Failed to create supply");
+        setError(json.error ?? `Failed to create ${noun}`);
         setLoading(false);
         return;
       }
 
-      router.push(`/supplies/item/${json.id}`);
+      router.push(context?.returnHref ?? `/supplies/item/${json.id}`);
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);
@@ -79,39 +88,10 @@ export default function NewSupplyPage() {
 
   return (
     <div className="min-h-full">
-      {/* Breadcrumb header */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-4 px-4 sm:px-6 py-4 border-b border-vault-border">
-        <button
-          type="button"
-          onClick={() => router.back()}
-          className="flex items-center gap-1.5 text-vault-text-muted hover:text-vault-text text-sm transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back
-        </button>
-        <span className="text-vault-border">/</span>
-        <h1 className="text-sm font-semibold text-vault-text tracking-wide uppercase">
-          Add Supply
-        </h1>
-      </div>
+      <AddFormBreadcrumb form={form} />
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-        <div className="mb-8">
-          <h2 className="text-xl font-bold text-vault-text mb-1">
-            New Supply Entry
-          </h2>
-          <p className="text-sm text-vault-text-muted">
-            Track a consumable — cleaning supplies, medical, food, water and the
-            rest.
-          </p>
-        </div>
-
-        {error && (
-          <div className="flex items-center gap-3 bg-[#E53935]/10 border border-[#E53935]/30 rounded-lg px-4 py-3 mb-6">
-            <AlertCircle className="w-4 h-4 text-[#E53935] shrink-0" />
-            <p className="text-sm text-[#E53935]">{error}</p>
-          </div>
-        )}
+        <AddFormIntro form={form} error={error} />
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Identity */}
@@ -122,7 +102,7 @@ export default function NewSupplyPage() {
 
             <div>
               <label htmlFor="name" className={LABEL_CLASS}>
-                Item Name <span className="text-[#E53935]">*</span>
+                {form.nameLabel} <span className="text-[#E53935]">*</span>
               </label>
               <input
                 id="name"
@@ -147,23 +127,11 @@ export default function NewSupplyPage() {
                   className={INPUT_CLASS}
                 />
               </div>
-              <div>
-                <label htmlFor="category" className={LABEL_CLASS}>
-                  Category
-                </label>
-                <select
-                  id="category"
-                  name="category"
-                  defaultValue={DEFAULT_SUPPLY_CATEGORY}
-                  className={INPUT_CLASS}
-                >
-                  {SUPPLY_CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {SUPPLY_CATEGORY_LABELS[c]}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <TypeSelectField
+                form={form}
+                value={category}
+                onChange={setCategory}
+              />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -303,29 +271,21 @@ export default function NewSupplyPage() {
             </div>
           </fieldset>
 
-          {/* Actions */}
-          <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
-            <Link
-              href="/"
-              className="w-full sm:w-auto text-center px-4 py-2 text-sm text-vault-text-muted hover:text-vault-text border border-vault-border rounded-md hover:border-vault-text-muted/30 transition-colors"
-            >
-              Cancel
-            </Link>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full sm:w-auto justify-center flex items-center gap-2 bg-[#00C2FF]/10 border border-[#00C2FF]/30 text-[#00C2FF] hover:bg-[#00C2FF]/20 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-md text-sm font-medium transition-colors"
-            >
-              {loading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Plus className="w-4 h-4" />
-              )}
-              {loading ? "Adding..." : "Add Supply"}
-            </button>
-          </div>
+          <AddFormActions form={form} loading={loading} />
         </form>
       </div>
     </div>
+  );
+}
+
+/**
+ * `useSearchParams` needs a Suspense boundary so the page can still be
+ * prerendered; the form reads `?section=` from the address.
+ */
+export default function NewSupplyPage() {
+  return (
+    <Suspense fallback={<LoadingState />}>
+      <NewSupplyForm />
+    </Suspense>
   );
 }

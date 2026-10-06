@@ -5,17 +5,42 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-vi.mock("next/navigation", () => ({ usePathname: () => "/" }));
+const nav = vi.hoisted(() => ({ path: "/", query: "" }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => nav.path,
+  useSearchParams: () => new URLSearchParams(nav.query),
+}));
 
 import { Sidebar } from "./Sidebar";
 
 afterEach(() => {
   cleanup();
+  nav.path = "/";
+  nav.query = "";
   vi.unstubAllGlobals();
 });
 
 // mobileOpen keeps the drawer's aria-hidden off, so getByRole finds its content; mobileOnly
 // keeps only one copy of the nav in the DOM (the desktop <aside> renders the same links too).
+describe("Sidebar — no storage-named Accessories entry", () => {
+  it.each([
+    ["a plain USER", { displayName: "Jeff", role: "USER" as const }],
+    ["an ADMIN", { displayName: "Ann", role: "ADMIN" as const }],
+  ])("has no Accessories link for %s", (_who, user) => {
+    render(<Sidebar mobileOnly mobileOpen user={user} />);
+    expect(screen.queryByRole("link", { name: /accessories/i })).toBeNull();
+    expect(
+      screen.getAllByRole("link").some((link) => link.getAttribute("href") === "/accessories"),
+    ).toBe(false);
+  });
+
+  it("still lists the Documents and Settings links", () => {
+    render(<Sidebar mobileOnly mobileOpen />);
+    expect(screen.getByRole("link", { name: /documents/i })).toHaveAttribute("href", "/documents");
+    expect(screen.getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+  });
+});
+
 describe("Sidebar — admin-only Users link", () => {
   it("hides the Users link for a plain USER", () => {
     render(<Sidebar mobileOnly mobileOpen user={{ displayName: "Jeff", role: "USER" }} />);
@@ -144,3 +169,67 @@ describe("Sidebar — stays in view", () => {
   });
 });
 
+
+describe("Sidebar — highlight on the add forms and accessory pages", () => {
+  const ACTIVE = "text-[#00C2FF]";
+
+  function open(path: string, query = "") {
+    nav.path = path;
+    nav.query = query;
+    return render(<Sidebar mobileOnly mobileOpen />);
+  }
+
+  function groupLink(container: HTMLElement, href: string): HTMLElement {
+    return container.querySelector(`a[href="${href}"]`) as HTMLElement;
+  }
+
+  function highlightedSections(container: HTMLElement, groupPrefix: string) {
+    return Array.from(
+      container.querySelectorAll<HTMLElement>(`a[href^="${groupPrefix}/"]`),
+    )
+      .filter((link) => link.className.includes(ACTIVE))
+      .map((link) => link.getAttribute("href"));
+  }
+
+  it("keeps the Gear group active and open on an accessory's own page", () => {
+    const { container } = open("/accessories/abc");
+    expect(groupLink(container, "/gear").className).toContain("border-[#00C2FF]/20");
+    expect(groupLink(container, "/gear/magazines")).not.toBeNull();
+    expect(highlightedSections(container, "/gear")).toEqual([]);
+  });
+
+  it("keeps the Gear group active on an accessory's edit page", () => {
+    const { container } = open("/accessories/abc/edit");
+    expect(groupLink(container, "/gear").className).toContain("border-[#00C2FF]/20");
+  });
+
+  it("highlights Gear and Magazines on the accessory form opened from Magazines", () => {
+    const { container } = open("/accessories/new", "section=magazines");
+    expect(groupLink(container, "/gear").className).toContain("border-[#00C2FF]/20");
+    expect(highlightedSections(container, "/gear")).toEqual(["/gear/magazines"]);
+  });
+
+  it("highlights Preparedness and Medical on the supply form opened from Medical", () => {
+    const { container } = open("/supplies/new", "section=medical");
+    expect(groupLink(container, "/prep").className).toContain("border-[#00C2FF]/20");
+    expect(groupLink(container, "/gear").className).not.toContain("border-[#00C2FF]/20");
+    expect(highlightedSections(container, "/prep")).toEqual(["/prep/medical"]);
+  });
+
+  it.each([
+    ["a made-up section", "/accessories/new", "section=nonsense"],
+    ["a firearm section", "/accessories/new", "section=handguns"],
+    ["a section of another kind", "/accessories/new", "section=knives"],
+    ["an empty section", "/accessories/new", "section="],
+    ["a repeated section", "/accessories/new", "section=magazines&section=optics"],
+  ])("highlights no section for %s", (_name, path, query) => {
+    const { container } = open(path, query);
+    expect(highlightedSections(container, "/gear")).toEqual([]);
+    expect(highlightedSections(container, "/prep")).toEqual([]);
+  });
+
+  it("ignores ?section= on a page that is not an add form", () => {
+    const { container } = open("/gear/item/abc", "section=magazines");
+    expect(highlightedSections(container, "/gear")).toEqual([]);
+  });
+});
