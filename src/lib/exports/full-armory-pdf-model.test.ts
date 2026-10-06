@@ -93,6 +93,8 @@ function payload(overrides: Partial<FullArmoryExportResponse> = {}): FullArmoryE
         nfaRegisteredTo: "Trust",
         nfaClass: "SBR",
         mgRegistry: "",
+        fullAutoRated: "",
+        fullAutoRatedFor: "",
       },
     ],
     attachments: [
@@ -405,5 +407,45 @@ describe("buildFullArmoryPdfModel — machine-gun registry", () => {
     const at = labels.indexOf("Registry");
     expect(table.rows[0][at]).toBe("Pre-sample");
     expect(table.rows[1][at]).toBe(EMPTY_CELL);
+  });
+});
+
+describe("buildFullArmoryPdfModel - Full-Auto Rated", () => {
+  function suppressorTable(items: FullArmoryExportResponse["items"]) {
+    const model = buildFullArmoryPdfModel(payload({ items }), options());
+    const headingIndex = model.blocks.findIndex((b) => b.kind === "heading" && b.text === "Suppressors");
+    return {
+      headingIndex,
+      table: model.blocks.slice(headingIndex).find((b) => b.kind === "table") as Extract<PdfBlock, { kind: "table" }>,
+    };
+  }
+
+  it.each([
+    ["Yes", "", "Yes"],
+    ["No", "", "No"],
+    ["Limited", "5.56 NATO only", "Limited"],
+    ["", "", "Not recorded"],
+  ])("lists a suppressor recorded as %j / %j", (rated, ratedFor, shown) => {
+    const [base] = payload().items;
+    const item = { ...base, entityType: "ACCESSORY" as const, category: "SUPPRESSOR", fullAutoRated: rated, fullAutoRatedFor: ratedFor };
+    const model = buildFullArmoryPdfModel(payload({ items: [item] }), options());
+    const at = model.blocks.findIndex((b) => b.kind === "heading" && b.text === "Suppressors");
+    const table = model.blocks[at + 1] as Extract<PdfBlock, { kind: "table" }>;
+
+    expect(table.columns.map((column) => column.label)).toEqual(["Item", "Full-Auto Rated"]);
+    expect(table.rows[0][1]).toBe(shown);
+    const paragraphs = model.blocks.slice(at + 2).filter((b) => b.kind === "paragraph");
+    const expected = ratedFor ? [`${item.manufacturer} ${item.model}: rated for ${ratedFor}`] : [];
+    expect(paragraphs.slice(0, expected.length).map((b) => (b as { text: string }).text)).toEqual(expected);
+  });
+
+  it("has no Suppressors section when no item is a suppressor", () => {
+    const [base] = payload().items;
+    const { headingIndex } = suppressorTable([
+      { ...base, entityType: "ACCESSORY", category: "OPTIC" },
+      base,
+    ]);
+
+    expect(headingIndex).toBe(-1);
   });
 });

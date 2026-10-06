@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   hasNfaPaperwork,
+  isSuppressorItem,
   mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
@@ -50,6 +51,8 @@ function itemRow(
     nfaRegisteredTo: "",
     nfaClass: "NONE",
     mgRegistry: "",
+    fullAutoRated: "",
+    fullAutoRatedFor: "",
     ...overrides,
   };
 }
@@ -219,5 +222,15 @@ describe("mgRegistryLabel", () => {
     expect(mgRegistryLabel("")).toBe("");
     expect(mgRegistryLabel("  ")).toBe("");
     expect(mgRegistryLabel("ODD")).toBe("ODD");
+  });
+});
+
+describe("isSuppressorItem", () => {
+  it.each([
+    ["ACCESSORY", "SUPPRESSOR", true],
+    ["ACCESSORY", "OPTIC", false],
+    ["FIREARM", "SUPPRESSOR", false],
+  ] as const)("%s of category %s is %s", (entityType, category, expected) => {
+    expect(isSuppressorItem(itemRow({ entityType, category }))).toBe(expected);
   });
 });

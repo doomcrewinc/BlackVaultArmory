@@ -76,6 +76,8 @@ const EXPORT_PAYLOAD = {
       nfaRegisteredTo: "",
       nfaClass: "NONE",
       mgRegistry: "",
+      fullAutoRated: "",
+      fullAutoRatedFor: "",
     },
   ],
   attachments: [],
@@ -255,5 +257,38 @@ describe("Full Armory preview — machine-gun registry", () => {
     ).getAllByRole("row");
     const inventoryHeaders = within(inventoryRows[0]).getAllByRole("columnheader").map((th) => th.textContent);
     expect(within(inventoryRows[2]).getAllByRole("cell")[inventoryHeaders.indexOf("Registry")].textContent).toBe("—");
+  });
+});
+
+describe("Full Armory preview - Full-Auto Rated", () => {
+  function stubItems(items: unknown[]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ...EXPORT_PAYLOAD, items }), { status: 200 }))
+    );
+  }
+
+  it.each([
+    ["Yes", "", "Yes", "\u2014"],
+    ["No", "", "No", "\u2014"],
+    ["Limited", "5.56 NATO only", "Limited", "5.56 NATO only"],
+    ["", "", "Not recorded", "\u2014"],
+  ])("lists a suppressor recorded as %j / %j", async (rated, ratedFor, shown, shownFor) => {
+    const [base] = EXPORT_PAYLOAD.items;
+    stubItems([
+      { ...base, entityType: "ACCESSORY", category: "SUPPRESSOR", model: "CAN-1", fullAutoRated: rated, fullAutoRatedFor: ratedFor },
+    ]);
+    await renderLoaded();
+
+    const section = screen.getByText("Suppressors").closest("section") as HTMLElement;
+    const headers = within(section).getAllByRole("columnheader").map((th) => th.textContent);
+    expect(headers).toEqual(["Item", "Full-Auto Rated", "Rated For"]);
+    const cells = within(within(section).getAllByRole("row")[1]).getAllByRole("cell");
+    expect(cells.slice(1).map((cell) => cell.textContent)).toEqual([shown, shownFor]);
+  });
+
+  it("has no Suppressors section without a suppressor", async () => {
+    await renderLoaded();
+    expect(screen.queryByText("Suppressors")).toBeNull();
   });
 });

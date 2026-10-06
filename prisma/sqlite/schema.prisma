@@ -177,6 +177,13 @@ model Accessory {
   nfaTaxPaid             String?
   nfaRegisteredTo        String?
 
+  // Full-auto rating. Applies when type = SUPPRESSOR; both columns are forced
+  // to null server-side otherwise.
+  // fullAutoRating: YES | NO | LIMITED; null = not recorded.
+  // fullAutoLimitedTo: which rounds it is rated for; only set when LIMITED.
+  fullAutoRating         String?
+  fullAutoLimitedTo      String?
+
   createdAt              DateTime        @default(now())
   updatedAt              DateTime        @updatedAt
 

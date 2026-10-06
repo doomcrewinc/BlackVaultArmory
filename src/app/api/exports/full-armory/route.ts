@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { csvCell, csvQuote } from "@/lib/csv";
+import {
+  fullAutoLimitedToExportValue,
+  fullAutoRatedShown,
+  fullAutoRatingExportValue,
+  isSuppressorType,
+} from "@/lib/full-auto-rated";
 import { toISODate } from "@/lib/date";
 import {
   parseExportFormatFromSearchParams,
@@ -8,6 +14,7 @@ import {
   type ExportPreset,
   parseExportOptionsFromSearchParams,
   hasNfaPaperwork,
+  isSuppressorItem,
   formatExpiryFootnote,
   mgRegistryLabel,
   nfaClassLabel,
@@ -77,6 +84,8 @@ type FirearmExportRecord = NfaPaperworkRecord & {
 };
 
 type AccessoryExportRecord = NfaPaperworkRecord & {
+  fullAutoRating: string | null;
+  fullAutoLimitedTo: string | null;
   id: string;
   name: string;
   manufacturer: string | null;
@@ -532,6 +541,10 @@ function buildExportPdfLines(payload: FullArmoryExportResponse): string[] {
         "   "
       );
     }
+    if (isSuppressorItem(item)) {
+      const ratedFor = item.fullAutoRatedFor ? ` | Rated For: ${item.fullAutoRatedFor}` : "";
+      pushWrapped(lines, `Full-Auto Rated: ${fullAutoRatedShown(item.fullAutoRated)}${ratedFor}`, "   ");
+    }
     if (item.imageUrl) pushWrapped(lines, `Image Ref: ${item.imageUrl}`, "   ");
   });
 
@@ -672,6 +685,8 @@ export async function GET(request: NextRequest) {
         nfaApprovalDate: true,
         nfaTaxPaid: true,
         nfaRegisteredTo: true,
+        fullAutoRating: true,
+        fullAutoLimitedTo: true,
         acquisitionDate: true,
         purchasePrice: true,
         notes: true,
@@ -810,12 +825,17 @@ export async function GET(request: NextRequest) {
             exportOptions.includeSerialNumbers,
             exportOptions.includeValue
           ),
+          // The last two keys of the row, so no earlier CSV column moves.
+          // Only a suppressor records them.
+          fullAutoRated: "",
+          fullAutoRatedFor: "",
         };
       }),
       ...accessories.map((accessory) => {
         const itemDocs = documents.filter((doc) => doc.accessoryId === accessory.id);
         const receiptCount = itemDocs.filter((doc) => doc.type === "RECEIPT").length;
         const hasPhoto = exportOptions.includeImages && !!accessory.imageUrl;
+        const isSuppressor = isSuppressorType(accessory.type);
 
         return {
           itemId: accessory.id,
@@ -847,6 +867,15 @@ export async function GET(request: NextRequest) {
             exportOptions.includeSerialNumbers,
             exportOptions.includeValue
           ),
+          fullAutoRated: isSuppressor
+            ? fullAutoRatingExportValue(accessory.fullAutoRating)
+            : "",
+          fullAutoRatedFor: isSuppressor
+            ? fullAutoLimitedToExportValue(
+                accessory.fullAutoRating,
+                accessory.fullAutoLimitedTo,
+              )
+            : "",
         };
       }),
     ];

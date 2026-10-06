@@ -3,6 +3,7 @@ import { REDACTED, isRedactedField } from "./redact";
 import { fieldLabel, modelDisplayName } from "./labels";
 import { formatDateOnly, formatDateTime } from "../date";
 import { DATE_ONLY_FIELDS } from "../date-only-fields";
+import { FULL_AUTO_RATING_LABELS, isFullAutoRating } from "../full-auto-rated";
 
 /**
  * `summarize(event)` — the one-line description shown in the audit list and
@@ -64,8 +65,9 @@ function looksLikeIsoInstant(value: unknown): value is string {
  * object (RESTORE's `counts`) renders as compact JSON instead of
  * `[object Object]`.
  */
-export function displayValue(value: unknown, dateOnly = false): string {
+export function displayValue(value: unknown, dateOnly = false, field?: string): string {
   if (value === null || value === undefined || value === "") return "—";
+  if (field === "fullAutoRating" && isFullAutoRating(value)) return FULL_AUTO_RATING_LABELS[value];
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (looksLikeIsoInstant(value)) return dateOnly ? formatDateOnly(value) : formatDateTime(value);
   if (typeof value === "object") {
@@ -127,7 +129,7 @@ export function detailEntries(changes: unknown, entityType: string | null = null
 function changeFragments(changes: unknown, entityType: string | null): string[] {
   return detailEntries(changes, entityType)
     .filter((e): e is Extract<AuditDetailEntry, { kind: "diff" }> => e.kind === "diff")
-    .map((e) => (e.redacted ? `${e.label} changed` : `${e.label} ${displayValue(e.before, e.dateOnly)} → ${displayValue(e.after, e.dateOnly)}`));
+    .map((e) => (e.redacted ? `${e.label} changed` : `${e.label} ${displayValue(e.before, e.dateOnly, e.field)} → ${displayValue(e.after, e.dateOnly, e.field)}`));
 }
 
 /**

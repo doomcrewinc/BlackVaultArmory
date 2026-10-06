@@ -1,4 +1,5 @@
 import { InvalidDateError, toDateOnlyUTC } from "./date";
+import { isSuppressorType } from "./full-auto-rated";
 import { normalizeMoney } from "./money";
 import {
   DEFAULT_NFA_CLASS,
@@ -180,7 +181,5 @@ export function normalizeAccessoryNfaFields(
   type: unknown,
   input: NfaPaperworkInput,
 ): NfaPaperwork {
-  const normalizedType =
-    typeof type === "string" ? type.trim().toUpperCase() : "";
-  return normalizePaperwork(input, normalizedType === "SUPPRESSOR");
+  return normalizePaperwork(input, isSuppressorType(type));
 }

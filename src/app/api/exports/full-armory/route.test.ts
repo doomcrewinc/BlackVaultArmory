@@ -1240,6 +1240,73 @@ describe("GET /api/exports/full-armory", () => {
     expect(redactedCsv).toContain("Jane Q Owner");
   });
 
+  // Full-Auto Rated and Full-Auto Rated For: a suppressor's two columns, the
+  // last two keys of the inventory row so no earlier CSV column moves. Blank
+  // for anything that is not a suppressor whatever the columns hold.
+
+  it("asks the database for both full-auto columns on accessories", async () => {
+    await GET(new NextRequest("http://localhost/api/exports/full-armory"));
+    expect(mocks.findAccessories.mock.calls[0][0].select).toMatchObject({
+      fullAutoRating: true,
+      fullAutoLimitedTo: true,
+    });
+  });
+
+  it.each([
+    ["YES", null, "Yes", "", "Full-Auto Rated: Yes"],
+    ["NO", null, "No", "", "Full-Auto Rated: No"],
+    ["LIMITED", "5.56 NATO only", "Limited", "5.56 NATO only", "Full-Auto Rated: Limited | Rated For: 5.56 NATO only"],
+    [null, null, "", "", "Full-Auto Rated: Not recorded"],
+  ])("exports a suppressor stored as %s / %s in JSON, CSV and PDF", async (rating, text, rated, ratedFor, pdfLine) => {
+    mocks.findFirearms.mockResolvedValue([documentedSbr]);
+    mocks.findAccessories.mockResolvedValue([{ ...documentedSuppressor, fullAutoRating: rating, fullAutoLimitedTo: text }]);
+
+    const json = await (await GET(new NextRequest("http://localhost/api/exports/full-armory"))).json();
+    expect(json.items.map((item: { fullAutoRated: string }) => item.fullAutoRated)).toEqual(["", rated]);
+    expect(json.items.map((item: { fullAutoRatedFor: string }) => item.fullAutoRatedFor)).toEqual(["", ratedFor]);
+    expect(Object.keys(json.items[1]).slice(-2)).toEqual(["fullAutoRated", "fullAutoRatedFor"]);
+
+    const csv = await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))).text();
+    const header = csv.split("\n")[0].split(",");
+    const column = header.indexOf("fullAutoRated");
+    expect(column).toBe(header.indexOf("nfaRegisteredTo") + 1);
+    expect(header[column + 1]).toBe("fullAutoRatedFor");
+    const rows = csv.split("\n").filter((line) => line.startsWith("inventory,"));
+    expect(rows.map((row) => row.split(",")[column])).toEqual(["", rated]);
+    expect(rows.map((row) => row.split(",")[column + 1])).toEqual(["", ratedFor]);
+
+    const text2 = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+    expect(text2).toContain(pdfLine);
+  });
+
+  it("guards a Rated For text that starts like a formula in the CSV", async () => {
+    mocks.findAccessories.mockResolvedValue([
+      { ...documentedSuppressor, fullAutoRating: "LIMITED", fullAutoLimitedTo: "=HYPERLINK(1)" },
+    ]);
+
+    const csv = await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=csv"))).text();
+    expect(csv).toContain("'=HYPERLINK(1)");
+    expect(csv).not.toContain(",=HYPERLINK(1)");
+  });
+
+  it.each(["YES", "LIMITED"])("leaves both columns blank for an optic stored as %s", async (rating) => {
+    mocks.findAccessories.mockResolvedValue([
+      { ...documentedSuppressor, type: "OPTIC", fullAutoRating: rating, fullAutoLimitedTo: "5.56" },
+    ]);
+
+    const json = await (await GET(new NextRequest("http://localhost/api/exports/full-armory"))).json();
+    const optic = json.items.find((item: { entityType: string }) => item.entityType === "ACCESSORY");
+    expect(optic.fullAutoRated).toBe("");
+    expect(optic.fullAutoRatedFor).toBe("");
+
+    const text = extractPdfFlatText(
+      await (await GET(new NextRequest("http://localhost/api/exports/full-armory?format=pdf"))).text()
+    );
+    expect(text).not.toContain("Full-Auto Rated");
+  });
+
   it("prints the class and paperwork in the PDF, and never the withheld control number", async () => {
     mocks.findFirearms.mockResolvedValue([documentedSbr]);
     mocks.findAccessories.mockResolvedValue([documentedSuppressor]);

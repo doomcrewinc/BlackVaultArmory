@@ -136,4 +136,67 @@ describe("POST /api/accessories", () => {
     const { data } = mocks.create.mock.calls[0][0];
     expect(data.purchasePrice).toBe(0);
   });
+
+  it.each([
+    ["YES", null, null],
+    ["NO", null, null],
+    ["LIMITED", "5.56 NATO only", "5.56 NATO only"],
+    [null, null, null],
+  ])("stores the rating %s on a SUPPRESSOR", async (rating, text, storedText) => {
+    await POST(
+      postRequest({ name: "Can", type: "SUPPRESSOR", fullAutoRating: rating, fullAutoLimitedTo: text }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fullAutoRating).toBe(rating);
+    expect(data.fullAutoLimitedTo).toBe(storedText);
+  });
+
+  it("stores nulls when a SUPPRESSOR is sent without either field", async () => {
+    await POST(postRequest({ name: "Can", type: "SUPPRESSOR" }));
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fullAutoRating).toBeNull();
+    expect(data.fullAutoLimitedTo).toBeNull();
+  });
+
+  it("drops the text sent beside YES", async () => {
+    await POST(
+      postRequest({ name: "Can", type: "SUPPRESSOR", fullAutoRating: "YES", fullAutoLimitedTo: "left over" }),
+    );
+
+    expect(mocks.create.mock.calls[0][0].data.fullAutoLimitedTo).toBeNull();
+  });
+
+  it.each(["YES", "NO", "LIMITED"])("forces the rating %s and its text to null on an OPTIC", async (rating) => {
+    await POST(
+      postRequest({ name: "Scope", type: "OPTIC", fullAutoRating: rating, fullAutoLimitedTo: "5.56" }),
+    );
+
+    const { data } = mocks.create.mock.calls[0][0];
+    expect(data.fullAutoRating).toBeNull();
+    expect(data.fullAutoLimitedTo).toBeNull();
+  });
+
+  it.each([undefined, null, "", "   "])("answers 400 for LIMITED with the text %j", async (text) => {
+    const response = await POST(
+      postRequest({ name: "Can", type: "SUPPRESSOR", fullAutoRating: "LIMITED", fullAutoLimitedTo: text }),
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("Say which rounds it is rated for full-auto fire with.");
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ fullAutoRating: "MAYBE" }],
+    [{ fullAutoRating: true }],
+    [{ fullAutoRating: "LIMITED", fullAutoLimitedTo: "a".repeat(201) }],
+    [{ fullAutoRating: "LIMITED", fullAutoLimitedTo: 5 }],
+  ])("answers 400 for %j", async (fields) => {
+    const response = await POST(postRequest({ name: "Can", type: "SUPPRESSOR", ...fields }));
+
+    expect(response.status).toBe(400);
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
 });

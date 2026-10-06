@@ -6,6 +6,7 @@ import {
   buildExportQueryString,
   formatExpiryFootnote,
   hasNfaPaperwork,
+  isSuppressorItem,
   mgRegistryLabel,
   nfaClassLabel,
   nfaTransferMethodLabel,
@@ -13,6 +14,7 @@ import {
   selectVisualEvidence,
   type FullArmoryExportResponse,
 } from "@/lib/exports/full-armory";
+import { fullAutoRatedShown } from "@/lib/full-auto-rated";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly, formatTimestamp } from "@/lib/date";
 
@@ -127,6 +129,13 @@ export default function FullArmoryPreviewPage() {
   const nfaItems = useMemo(() => {
     if (!data) return [];
     return data.items.filter(hasNfaPaperwork);
+  }, [data]);
+
+  // The suppressors, for the Suppressors section below: Full-Auto Rated has no
+  // column in the inventory table, whose width is already spent.
+  const suppressorItems = useMemo(() => {
+    if (!data) return [];
+    return data.items.filter(isSuppressorItem);
   }, [data]);
 
   // The gear rows whose four screen-only columns have anything in them, for the
@@ -405,6 +414,34 @@ export default function FullArmoryPreviewPage() {
                       <td className="py-2 pr-4">{formatDateOnly(item.nfaApprovalDate)}</td>
                       <td className="py-2 pr-4 text-right">{formatCurrency(item.nfaTaxPaid)}</td>
                       <td className="py-2">{item.nfaRegisteredTo || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {suppressorItems.length > 0 && (
+          <section className="rounded-lg border border-vault-border bg-vault-surface p-5">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-vault-text-muted">Suppressors</h2>
+            <div className="armory-print-scroll mt-3 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-vault-border text-vault-text-faint">
+                    <th className="py-2 pr-4 text-left">Item</th>
+                    <th className="py-2 pr-4 text-left">Full-Auto Rated</th>
+                    <th className="py-2 text-left">Rated For</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {suppressorItems.map((item) => (
+                    <tr key={item.itemId} className="border-b border-vault-border/60 break-inside-avoid">
+                      <td className="py-2 pr-4">
+                        {[item.manufacturer, item.model].filter(Boolean).join(" ") || item.entityType}
+                      </td>
+                      <td className="py-2 pr-4">{fullAutoRatedShown(item.fullAutoRated)}</td>
+                      <td className="py-2">{item.fullAutoRatedFor || "—"}</td>
                     </tr>
                   ))}
                 </tbody>

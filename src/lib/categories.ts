@@ -1,3 +1,4 @@
+import { SUPPRESSOR_TYPES } from "./full-auto-rated";
 import { GEAR_CATEGORIES } from "./gear";
 import { isRenderableSource } from "./sections/renderableSources";
 import { SUPPLY_CATEGORIES } from "./supply";
@@ -132,7 +133,7 @@ const SHOTGUN_TYPES = ["SHOTGUN"];
 const GROUPED_PLATFORMS = [...HANDGUN_TYPES, ...RIFLE_TYPES, ...SHOTGUN_TYPES];
 
 const OPTIC_TYPES = ["OPTIC", "OPTIC_MOUNT"];
-const SUPPRESSOR_TYPES = ["SUPPRESSOR"];
+
 const BARREL_TYPES = ["BARREL"];
 const RECEIVER_TYPES = ["LOWER_RECEIVER", "UPPER_RECEIVER"];
 const MAGAZINE_TYPES = ["MAGAZINE"];
@@ -453,7 +454,7 @@ export const CATEGORY_SECTIONS: CategorySection[] = [
     description: "Silencers",
     group: "gear",
     icon: "Crosshair",
-    sources: [accessorySection(SUPPRESSOR_TYPES)],
+    sources: [accessorySection([...SUPPRESSOR_TYPES])],
   },
   {
     slug: "barrels",
