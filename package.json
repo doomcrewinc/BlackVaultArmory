@@ -71,7 +71,7 @@
     "tailwindcss": "^4",
     "ts-node": "^10.9.2",
     "typescript": "^5",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "prisma": {
     "schema": "prisma/sqlite/schema.prisma",
