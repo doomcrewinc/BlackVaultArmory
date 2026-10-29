@@ -7,7 +7,9 @@ import { recordEvent } from "@/lib/audit/events";
 
 const ACTIVE_ADMIN = { role: "ADMIN", disabledAt: null } as const;
 const LAST_ADMIN_ERROR = "At least one active admin is required";
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 5;
+/** Upper bound of the wait before the first retry; it doubles for each later one. */
+const RETRY_BASE_MS = 10;
 
 export type ChangeResult = { ok: true } | { ok: false; status: 400 | 404 | 409; error: string };
 
@@ -38,6 +40,14 @@ function isSerializationFailure(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2034";
 }
 
+/**
+ * Waits a random time of up to RETRY_BASE_MS * 2^(attempt-1) ms. The transaction that won
+ * the conflict may still be open; retrying at once runs into it again.
+ */
+function waitBeforeRetry(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.random() * RETRY_BASE_MS * 2 ** (attempt - 1)));
+}
+
 function isValidChange(change: unknown): change is { role?: Role; disabled?: boolean } {
   if (typeof change !== "object" || change === null) return false;
   const { role, disabled } = change as Record<string, unknown>;
@@ -55,7 +65,9 @@ function isValidChange(change: unknown): change is { role?: Role; disabled?: boo
  * updating would let two admins demote each other concurrently (each sees the other still
  * active). The transaction is Serializable: on PostgreSQL the default READ COMMITTED would still
  * let both of those transactions commit (write skew — they update different rows); SSI aborts
- * one of them with P2034, which is retried here and then sees the committed demotion. SQLite
+ * one of them with P2034, which is retried here and then sees the committed demotion. The retry
+ * waits a short random time first: the winner may not have committed yet, and an immediate retry
+ * conflicts with it again (3 immediate attempts failed about 1 race in 300). SQLite
  * only offers Serializable (and writers are serialised anyway), so the option is valid on both.
  */
 export async function changeRoleOrStatus(
@@ -113,7 +125,10 @@ export async function changeRoleOrStatus(
       break;
     } catch (error) {
       if (error instanceof ChangeRefused) return { ok: false, status: error.status, error: error.error };
-      if (isSerializationFailure(error) && attempt < MAX_ATTEMPTS) continue;
+      if (isSerializationFailure(error) && attempt < MAX_ATTEMPTS) {
+        await waitBeforeRetry(attempt);
+        continue;
+      }
       throw error;
     }
   }
