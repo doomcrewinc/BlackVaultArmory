@@ -16,6 +16,8 @@ const m = vi.hoisted(() => ({
   txOptions: [] as unknown[],
   countOverride: null as null | ((updated: boolean) => number),
   failFirstWith: null as null | { code: string },
+  /** How many transactions in a row failFirstWith fails; 1 unless a test sets it. */
+  failTimes: 1,
   endUserSessions: vi.fn(async () => {}),
   findMany: vi.fn(),
   recordEvent: vi.fn(async () => {}),
@@ -32,7 +34,7 @@ vi.mock("@/lib/prisma", () => ({
       m.txOptions.push(options);
       if (m.failFirstWith) {
         const err = Object.assign(new Error("write conflict"), m.failFirstWith);
-        m.failFirstWith = null;
+        if (--m.failTimes <= 0) m.failFirstWith = null;
         throw err;
       }
       const staged = m.users.map((u) => ({ ...u }));
@@ -102,6 +104,7 @@ beforeEach(() => {
   m.txOptions = [];
   m.countOverride = null;
   m.failFirstWith = null;
+  m.failTimes = 1;
   vi.spyOn(console, "info").mockImplementation(() => {});
 });
 
@@ -171,6 +174,46 @@ describe("changeRoleOrStatus — last active admin (Review Focus #5)", () => {
     m.failFirstWith = { code: "P2034" };
     expect(await changeRoleOrStatus("b", { role: "USER" }, "a")).toEqual({ ok: true });
     expect(m.txOptions).toHaveLength(2);
+  });
+
+  it("waits a random, growing time before each retry", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      m.users = [admin("a"), admin("b")];
+      m.failFirstWith = { code: "P2034" };
+      m.failTimes = 2;
+      const pending = changeRoleOrStatus("b", { role: "USER" }, "a");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.txOptions).toHaveLength(1);
+      // First wait: 0.5 * 10 ms.
+      await vi.advanceTimersByTimeAsync(4);
+      expect(m.txOptions).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(m.txOptions).toHaveLength(2);
+      // Second wait: 0.5 * 20 ms.
+      await vi.advanceTimersByTimeAsync(9);
+      expect(m.txOptions).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toEqual({ ok: true });
+      expect(m.txOptions).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+      random.mockRestore();
+    }
+  });
+
+  it("gives up after 5 serialization failures and rethrows the last one", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      m.users = [admin("a"), admin("b")];
+      m.failFirstWith = { code: "P2034" };
+      m.failTimes = 10;
+      await expect(changeRoleOrStatus("b", { role: "USER" }, "a")).rejects.toMatchObject({ code: "P2034" });
+      expect(m.txOptions).toHaveLength(5);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it("does not retry other errors", async () => {
