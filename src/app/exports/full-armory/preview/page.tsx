@@ -27,7 +27,7 @@ function readQueryString() {
   return window.location.search.replace(/^\?/, "");
 }
 
-// The server render (and hydration) sees no query string, as before.
+// The server render and the hydration render see no query string, so they match.
 function readServerQueryString() {
   return "";
 }
