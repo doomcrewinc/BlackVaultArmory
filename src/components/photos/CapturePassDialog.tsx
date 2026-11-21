@@ -21,9 +21,11 @@ function clock(seconds: number): string {
 /** A QR code and link for a short-lived pass that lets a phone add to one item. */
 export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
   const pass = useCapturePass(entityType, entityId);
-  const [qr, setQr] = useState("");
+  // The image is stored with the URL it encodes, so it is only shown for that URL.
+  const [qrImage, setQrImage] = useState<{ url: string; data: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const url = pass.link?.reachable && !pass.ended ? pass.link.url : null;
+  const qr = url && qrImage?.url === url ? qrImage.data : "";
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -34,15 +36,12 @@ export function CapturePassDialog({ entityType, entityId, onClose }: Props) {
   }, [onClose]);
 
   useEffect(() => {
-    if (!url) {
-      setQr("");
-      return;
-    }
+    if (!url) return;
     let cancelled = false;
     import("qrcode")
       .then((QRCode) => QRCode.toDataURL(url, { width: 200, margin: 2 }))
       .then((data) => {
-        if (!cancelled) setQr(data);
+        if (!cancelled) setQrImage({ url, data });
       })
       .catch(() => {
         // No image: the link and Copy still work.

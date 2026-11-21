@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Archive, Copy, Download, Files, HardDriveDownload, RotateCcw, Settings, Upload } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { SectionCard } from "@/components/shared/SectionCard";
@@ -50,6 +50,34 @@ function isPlainHttpPage(): boolean {
   return typeof window !== "undefined" && !window.isSecureContext;
 }
 
+// Browser-only Intl values, read through useSyncExternalStore: the server snapshot is
+// empty, so SSR/hydration render the same as before mount and the client value
+// appears right after hydration (what the old mount effects did). Neither value
+// changes during a page's life, so the subscription is a no-op.
+const noopSubscribe = () => () => {};
+
+function getBrowserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+const NO_TIMEZONES: string[] = [];
+let cachedTimezoneOptions: string[] | null = null;
+/** Cached so the snapshot is referentially stable, as useSyncExternalStore requires. */
+function getTimezoneOptions(): string[] {
+  if (cachedTimezoneOptions === null) {
+    try {
+      cachedTimezoneOptions = Intl.supportedValuesOf("timeZone");
+    } catch {
+      cachedTimezoneOptions = NO_TIMEZONES;
+    }
+  }
+  return cachedTimezoneOptions;
+}
+
 function PassphraseWarning() {
   if (!isPlainHttpPage()) return null;
   return (
@@ -76,7 +104,12 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
   const [defaultAmmoAlertThreshold, setDefaultAmmoAlertThreshold] = useState<string>("");
   const [expiryWarningDays, setExpiryWarningDays] = useState<string>("");
   const [timezone, setTimezone] = useState("");
-  const [timezoneOptions, setTimezoneOptions] = useState<string[]>([]);
+  const timezoneOptions = useSyncExternalStore(noopSubscribe, getTimezoneOptions, () => NO_TIMEZONES);
+  // A blank timezone falls back to the browser's own zone (client only — the server
+  // snapshot is "", so the server's zone is never baked into the HTML). The field is
+  // only rendered, and Save only reachable, once settings have loaded.
+  const browserTimezone = useSyncExternalStore(noopSubscribe, getBrowserTimezone, () => "");
+  const effectiveTimezone = timezone || browserTimezone;
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -86,7 +119,8 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
   const [localPort, setLocalPort] = useState("3000");
   const [isDocker, setIsDocker] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
-  const [qrDataUrl, setQrDataUrl] = useState<string>("");
+  // Tagged with the URL it encodes so a QR for an old target is never shown.
+  const [qr, setQr] = useState<{ target: string; dataUrl: string } | null>(null);
   const [publicUrl, setPublicUrl] = useState("");
   const [trustedProxiesConfigured, setTrustedProxiesConfigured] = useState(false);
   const [directAccess, setDirectAccess] = useState<DirectAccessState | null>(null);
@@ -136,27 +170,6 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
       });
   }, []);
 
-  // Runs only after mount, never during render: the server has no notion of
-  // the browser's timezone, and using it during SSR would bake the server's
-  // zone into the HTML and desync from the client on hydration.
-  useEffect(() => {
-    if (dataLoading || timezone) return;
-    try {
-      const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (detected) setTimezone(detected);
-    } catch {
-      // Ignore: leave the field blank if detection fails.
-    }
-  }, [dataLoading, timezone]);
-
-  useEffect(() => {
-    try {
-      setTimezoneOptions(Intl.supportedValuesOf("timeZone"));
-    } catch {
-      setTimezoneOptions([]);
-    }
-  }, []);
-
   useEffect(() => {
     fetch("/api/network/local-access")
       .then((r) => r.json())
@@ -181,14 +194,21 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
   const directAllowed = directAccess?.allowed ?? false;
   const qrTarget = directAllowed ? finalLanUrl : publicUrl;
 
+  const qrDataUrl = qrTarget && qr?.target === qrTarget ? qr.dataUrl : "";
+
   useEffect(() => {
-    if (qrTarget) {
-      import("qrcode").then((QRCode) => {
-        QRCode.toDataURL(qrTarget, { width: 160, margin: 2 }).then(setQrDataUrl).catch(() => {});
-      });
-    } else {
-      setQrDataUrl("");
-    }
+    if (!qrTarget) return;
+    let cancelled = false;
+    import("qrcode").then((QRCode) => {
+      QRCode.toDataURL(qrTarget, { width: 160, margin: 2 })
+        .then((dataUrl) => {
+          if (!cancelled) setQr({ target: qrTarget, dataUrl });
+        })
+        .catch(() => {});
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [qrTarget]);
   const lanStatusLabel = manualHost
     ? "Using your saved Mobile Access Host/IP"
@@ -236,7 +256,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
           manualLanHost,
           defaultAmmoAlertThreshold: parsedThreshold,
           expiryWarningDays: parsedExpiryWarningDays,
-          timezone,
+          timezone: effectiveTimezone,
         }),
       });
 
@@ -789,7 +809,7 @@ export function SettingsView({ isAdmin }: { isAdmin: boolean }) {
                 id="timezone"
                 type="text"
                 list="timezone-options"
-                value={timezone}
+                value={effectiveTimezone}
                 onChange={(e) => setTimezone(e.target.value)}
                 className={INPUT_CLASS}
                 placeholder="e.g. America/Denver"

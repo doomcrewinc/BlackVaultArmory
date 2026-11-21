@@ -13,6 +13,20 @@ type InviteDialogProps =
 
 type LinkResult = { url: string; expiresAt: string };
 
+/** POST for a reset link. Never rejects: failures come back as `{ error }`. Sets no state. */
+async function requestResetLink(userId: string): Promise<LinkResult | { error: string }> {
+  try {
+    const res = await fetch(`/api/admin/users/${userId}/reset-link`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { error: typeof data.error === "string" ? data.error : "Something went wrong" };
+    }
+    return { url: data.url, expiresAt: data.expiresAt };
+  } catch {
+    return { error: "Something went wrong" };
+  }
+}
+
 /**
  * Shared shape for "Invite someone" (choose a role, then create an invite) and "Reset
  * link" (fires immediately for the given user) — both end up showing the same thing:
@@ -24,7 +38,8 @@ export function InviteDialog(props: InviteDialogProps) {
   const [loading, setLoading] = useState(mode === "reset");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<LinkResult | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState("");
+  // The QR image is tagged with the URL it encodes so a stale image is never shown.
+  const [qr, setQr] = useState<{ url: string; dataUrl: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function createInvite() {
@@ -49,47 +64,38 @@ export function InviteDialog(props: InviteDialogProps) {
     }
   }
 
-  async function createResetLink(userId: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/admin/users/${userId}/reset-link`, { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(typeof data.error === "string" ? data.error : "Something went wrong");
-        return;
-      }
-      setResult({ url: data.url, expiresAt: data.expiresAt });
-    } catch {
-      setError("Something went wrong");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   useEffect(() => {
-    if (mode === "reset") void createResetLink(props.userId);
+    // `loading` starts true and `error` starts null in reset mode, so no state is reset
+    // before the request; every setter below runs in a promise callback.
+    if (mode === "reset") {
+      void requestResetLink(props.userId)
+        .then((outcome) => {
+          if ("error" in outcome) setError(outcome.error);
+          else setResult(outcome);
+        })
+        .finally(() => setLoading(false));
+    }
     // Fires once, for the token this dialog was opened with.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const resultUrl = result?.url;
+  const qrDataUrl = resultUrl && qr?.url === resultUrl ? qr.dataUrl : "";
+
   useEffect(() => {
-    if (!result?.url) {
-      setQrDataUrl("");
-      return;
-    }
+    if (!resultUrl) return;
     let cancelled = false;
     import("qrcode").then((QRCode) => {
-      QRCode.toDataURL(result.url, { width: 200, margin: 2 })
+      QRCode.toDataURL(resultUrl, { width: 200, margin: 2 })
         .then((dataUrl) => {
-          if (!cancelled) setQrDataUrl(dataUrl);
+          if (!cancelled) setQr({ url: resultUrl, dataUrl });
         })
         .catch(() => {});
     });
     return () => {
       cancelled = true;
     };
-  }, [result?.url]);
+  }, [resultUrl]);
 
   async function handleCopy() {
     if (!result?.url) return;

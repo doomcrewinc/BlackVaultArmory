@@ -56,11 +56,20 @@ export function GlobalSearch() {
     return () => window.removeEventListener("bv:search:open", handler);
   }, []);
 
-  // Auto-focus when opened
-  useEffect(() => {
+  // Each opening starts from an empty search: reset while rendering the
+  // closed -> open transition, not in an effect after it.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (open) {
       setQ("");
       setResults(EMPTY);
+    }
+  }
+
+  // Auto-focus when opened
+  useEffect(() => {
+    if (open) {
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [open]);

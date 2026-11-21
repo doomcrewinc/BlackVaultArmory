@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { AlertTriangle, Download, Loader2, Printer, RefreshCw } from "lucide-react";
 import {
   buildExportQueryString,
@@ -18,8 +18,22 @@ import { fullAutoRatedShown } from "@/lib/full-auto-rated";
 import { formatCurrency } from "@/lib/utils";
 import { formatDateOnly, formatTimestamp } from "@/lib/date";
 
+// The page never changes its own query string, so there is nothing to subscribe to.
+function subscribeToNothing() {
+  return () => {};
+}
+
+function readQueryString() {
+  return window.location.search.replace(/^\?/, "");
+}
+
+// The server render (and hydration) sees no query string, as before.
+function readServerQueryString() {
+  return "";
+}
+
 export default function FullArmoryPreviewPage() {
-  const [queryString, setQueryString] = useState("");
+  const queryString = useSyncExternalStore(subscribeToNothing, readQueryString, readServerQueryString);
   const [data, setData] = useState<FullArmoryExportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -29,10 +43,6 @@ export default function FullArmoryPreviewPage() {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [pdfNotice, setPdfNotice] = useState<string | null>(null);
-
-  useEffect(() => {
-    setQueryString(window.location.search.replace(/^\?/, ""));
-  }, []);
 
   const options = useMemo(
     () => parseExportOptionsFromSearchParams(new URLSearchParams(queryString)),

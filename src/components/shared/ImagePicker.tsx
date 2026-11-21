@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState } from "react";
 import {
   ALLOWED_IMAGE_MIME_TYPES,
   SUPPORTED_IMAGE_FORMATS_LABEL,
@@ -27,20 +27,34 @@ export default function ImagePicker({
   onChange,
 }: ImagePickerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Stable temp ID for new items — generated once per form session
-  const tempId = useRef<string>(
-    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  );
+  // Stable temp ID for new items — generated lazily on the first upload, then reused
+  // for the rest of this form session (only read in the upload event handler).
+  const tempId = useRef<string | null>(null);
+  function getTempId(): string {
+    if (tempId.current === null) {
+      // crypto.randomUUID() only exists in secure contexts, and phones on the LAN
+      // load the app over plain http. crypto.getRandomValues() works in both.
+      tempId.current =
+        typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `tmp-${Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+              b.toString(16).padStart(2, "0")
+            ).join("")}`;
+    }
+    return tempId.current;
+  }
 
   const [preview, setPreview] = useState<string | null>(value ?? currentUrl ?? null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Re-sync the preview whenever the `value` / `currentUrl` props change
+  // (adjust-state-during-render with the previous props stored in state).
+  const [prevSource, setPrevSource] = useState({ currentUrl, value });
+  if (prevSource.currentUrl !== currentUrl || prevSource.value !== value) {
+    setPrevSource({ currentUrl, value });
     setPreview(value ?? currentUrl ?? null);
-  }, [currentUrl, value]);
+  }
 
   async function handleFile(file: File) {
     setError(null);
@@ -59,7 +73,7 @@ export default function ImagePicker({
       const fd = new FormData();
       fd.append("file", file);
       fd.append("entityType", entityType);
-      fd.append("entityId", entityId ?? tempId.current);
+      fd.append("entityId", entityId ?? getTempId());
 
       const res = await fetch("/api/images/upload", { method: "POST", body: fd });
       const json = await res.json().catch(() => ({}));

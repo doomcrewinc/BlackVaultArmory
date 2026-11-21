@@ -1039,8 +1039,12 @@ export default function BuildConfiguratorPage() {
 
   const [build, setBuild] = useState<Build | null>(null);
   const [allBuilds, setAllBuilds] = useState<Build[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [fetchLoading, setLoading] = useState(true);
+  const [fetchError, setError] = useState<string | null>(null);
+  // A missing route param never fetches: it is an error from the first render.
+  const routeValid = Boolean(firearmId && buildId);
+  const loading = routeValid ? fetchLoading : false;
+  const error = routeValid ? fetchError : "Invalid build route.";
   const [actionFeedback, setActionFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [activatingBuild, setActivatingBuild] = useState(false);
@@ -1073,33 +1077,33 @@ export default function BuildConfiguratorPage() {
     };
   }, []);
 
-  const fetchBuild = useCallback(async () => {
-    if (!firearmId || !buildId) {
-      setError("Invalid build route.");
-      setLoading(false);
-      return;
-    }
-    try {
-      const [buildRes, allBuildsRes] = await Promise.all([
-        fetch(`/api/builds/${buildId}`),
-        fetch(`/api/builds?firearmId=${firearmId}`),
-      ]);
-      const buildData = await buildRes.json();
-      const allBuildsData = await allBuildsRes.json();
+  // A promise chain, not async/await with try/catch: every state update
+  // happens in a callback, after the request. Never rejects.
+  const fetchBuild = useCallback((): Promise<void> => {
+    if (!firearmId || !buildId) return Promise.resolve();
+    return Promise.all([
+      fetch(`/api/builds/${buildId}`),
+      fetch(`/api/builds?firearmId=${firearmId}`),
+    ])
+      .then(async ([buildRes, allBuildsRes]) => {
+        const buildData = await buildRes.json();
+        const allBuildsData = await allBuildsRes.json();
 
-      if (!buildRes.ok) {
-        setError(buildData.error ?? "Build not found");
-      } else {
-        setBuild(buildData);
-      }
-      if (allBuildsRes.ok && Array.isArray(allBuildsData)) {
-        setAllBuilds(allBuildsData);
-      }
-    } catch {
-      setError("Failed to load build");
-    } finally {
-      setLoading(false);
-    }
+        if (!buildRes.ok) {
+          setError(buildData.error ?? "Build not found");
+        } else {
+          setBuild(buildData);
+        }
+        if (allBuildsRes.ok && Array.isArray(allBuildsData)) {
+          setAllBuilds(allBuildsData);
+        }
+      })
+      .catch(() => {
+        setError("Failed to load build");
+      })
+      .finally(() => {
+        setLoading(false);
+      });
   }, [buildId, firearmId]);
 
   useEffect(() => {
