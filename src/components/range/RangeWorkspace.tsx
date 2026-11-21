@@ -289,7 +289,6 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const [savedSessionId, setSavedSessionId] = useState<string | null>(null);
 
   // Session history — delete + expand
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [deleteErrorId, setDeleteErrorId] = useState<string | null>(null);
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
@@ -421,13 +420,22 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     void fetchSessions();
   }, [fetchSessions]);
 
-  const handleDeleteSession = async (id: string) => {
+  // Deleting a session removes it from history only. The ammo it used and the
+  // rounds it added to accessories stay as logged: those rounds were fired.
+  const handleDeleteHistoryItem = async (id: string) => {
+    if (deletingSessionId) return;
     setDeletingSessionId(id);
     setDeleteErrorId(null);
     try {
       const res = await fetch(`/api/range/sessions/${id}`, { method: "DELETE" });
-      if (res.ok) {
+      // 404 means it is already gone (deleted from another tab or device), so it
+      // leaves the list either way.
+      if (res.ok || res.status === 404) {
+        setHistoryItems((prev) => prev.filter((s) => s.id !== id));
+        // One fewer row on the server, so the next page starts one row earlier.
+        setHistoryOffset((prev) => Math.max(0, prev - 1));
         setSessions((prev) => prev.filter((s) => s.id !== id));
+        setHistoryConfirmId(null);
       } else {
         setDeleteErrorId(id);
       }
@@ -435,16 +443,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
       setDeleteErrorId(id);
     } finally {
       setDeletingSessionId(null);
-      setDeleteConfirmId(null);
     }
-  };
-
-  const handleDeleteHistoryItem = async (id: string) => {
-    const res = await fetch(`/api/range/sessions/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setHistoryItems((prev) => prev.filter((s) => s.id !== id));
-    }
-    setHistoryConfirmId(null);
   };
 
   // Callers raise loadingBuilds before calling (see the firearm-change block below).
@@ -2157,16 +2156,31 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
                         </Link>
                         {historyConfirmId === session.id ? (
                           <span className="flex items-center gap-1">
-                            <span className="text-xs text-vault-text-muted">Delete?</span>
+                            {deleteErrorId === session.id ? (
+                              <span className="text-xs text-[#E53935]">Couldn&apos;t delete. Try again?</span>
+                            ) : (
+                              <span className="text-xs text-vault-text-muted">Delete?</span>
+                            )}
                             <button
                               onClick={() => void handleDeleteHistoryItem(session.id)}
-                              className="text-xs text-red-400 hover:text-red-300"
-                            >Yes</button>
-                            <button onClick={() => setHistoryConfirmId(null)} className="text-xs text-vault-text-muted hover:text-vault-text">Cancel</button>
+                              disabled={deletingSessionId !== null}
+                              className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+                            >{deletingSessionId === session.id ? "Deleting…" : "Yes"}</button>
+                            <button
+                              onClick={() => {
+                                setHistoryConfirmId(null);
+                                setDeleteErrorId(null);
+                              }}
+                              disabled={deletingSessionId === session.id}
+                              className="text-xs text-vault-text-muted hover:text-vault-text disabled:opacity-50"
+                            >Cancel</button>
                           </span>
                         ) : (
                           <button
-                            onClick={() => setHistoryConfirmId(session.id)}
+                            onClick={() => {
+                              setHistoryConfirmId(session.id);
+                              setDeleteErrorId(null);
+                            }}
                             className="p-1.5 text-vault-text-faint hover:text-red-400 transition-colors"
                             title="Delete session"
                           >
