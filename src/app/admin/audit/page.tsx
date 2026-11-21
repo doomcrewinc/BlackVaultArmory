@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Download } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -83,13 +83,41 @@ function toQueryString(filters: AuditFiltersState, cursor?: string): string {
   return params.toString();
 }
 
+type AuditPageResult =
+  | { ok: true; events: AuditEventDto[]; nextCursor: unknown }
+  | { ok: false };
+
+/** One page of the audit list. Never throws: any failure is `{ ok: false }`. */
+async function requestAuditPage(
+  filters: AuditFiltersState,
+  afterCursor?: string,
+): Promise<AuditPageResult> {
+  try {
+    const qs = toQueryString(filters, afterCursor);
+    const res = await fetch(`/api/admin/audit${qs ? `?${qs}` : ""}`);
+    if (!res.ok) return { ok: false };
+    const data = await res.json().catch(() => ({}));
+    return {
+      ok: true,
+      events: Array.isArray(data.events) ? data.events : [],
+      nextCursor: data.nextCursor,
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function AdminAuditPageInner() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const searchParamsString = searchParams.toString();
 
-  const [filters, setFilters] = useState<AuditFiltersState>(EMPTY_AUDIT_FILTERS);
+  // The URL is the source of truth for the applied filters: derived, not stored.
+  const filters = useMemo(
+    () => filtersFromParams(new URLSearchParams(searchParamsString)),
+    [searchParamsString],
+  );
   const [events, setEvents] = useState<AuditEventDto[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -109,40 +137,29 @@ function AdminAuditPageInner() {
   const requestIdRef = useRef(0);
 
   // The latest filters REQUESTED, whether or not the URL has caught up yet.
-  // `filters` state only updates after router.replace changes the URL and the
-  // effect below runs, so merging a change against it would drop any earlier
-  // change still in flight. The URL effect resets this to
-  // what the URL says, so back/forward still wins.
+  // `filters` only updates after router.replace changes the URL, so merging
+  // a change against it would drop any earlier change still in flight. The
+  // URL effect resets this to what the URL says, so back/forward still wins.
   const latestFiltersRef = useRef<AuditFiltersState>(EMPTY_AUDIT_FILTERS);
 
-  const fetchPage = useCallback(async (f: AuditFiltersState, afterCursor?: string) => {
+  // Callers set the loading flag and clear `error` before calling: Load more
+  // in its click handler, a URL change during render (below).
+  const fetchPage = useCallback((f: AuditFiltersState, afterCursor?: string) => {
     const requestId = ++requestIdRef.current;
-    if (afterCursor) setLoadingMore(true);
-    else setLoading(true);
-    setError(null);
-    try {
-      const qs = toQueryString(f, afterCursor);
-      const res = await fetch(`/api/admin/audit${qs ? `?${qs}` : ""}`);
+    return requestAuditPage(f, afterCursor).then((result) => {
       if (requestIdRef.current !== requestId) return; // superseded while in flight
-      if (!res.ok) {
+      if (result.ok) {
+        const page = result.events;
+        setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
+        setCursor(typeof result.nextCursor === "string" ? result.nextCursor : null);
+        setHasMore(Boolean(result.nextCursor));
+        setLastPageEmpty(page.length === 0 && Boolean(result.nextCursor));
+      } else {
         setError("Failed to load audit events.");
-        return;
       }
-      const data = await res.json().catch(() => ({}));
-      if (requestIdRef.current !== requestId) return; // superseded while parsing
-      const page: AuditEventDto[] = Array.isArray(data.events) ? data.events : [];
-      setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
-      setCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
-      setHasMore(Boolean(data.nextCursor));
-      setLastPageEmpty(page.length === 0 && Boolean(data.nextCursor));
-    } catch {
-      if (requestIdRef.current === requestId) setError("Failed to load audit events.");
-    } finally {
-      if (requestIdRef.current === requestId) {
-        setLoading(false);
-        setLoadingMore(false);
-      }
-    }
+      setLoading(false);
+      setLoadingMore(false);
+    });
   }, []);
 
   // The single source of truth for which page is loaded is the URL: on
@@ -150,12 +167,23 @@ function AdminAuditPageInner() {
   // back/forward button), re-derive filters from the query string and fetch
   // that page fresh. Filter changes never call fetchPage directly — only
   // through this effect — so there is exactly one fetch per URL, not two.
+  const [loadedQuery, setLoadedQuery] = useState(searchParamsString);
+  if (loadedQuery !== searchParamsString) {
+    setLoadedQuery(searchParamsString);
+    setLoading(true);
+    setError(null);
+  }
+
   useEffect(() => {
-    const next = filtersFromParams(new URLSearchParams(searchParamsString));
-    latestFiltersRef.current = next;
-    setFilters(next);
-    void fetchPage(next);
-  }, [searchParamsString, fetchPage]);
+    latestFiltersRef.current = filters;
+    void fetchPage(filters);
+  }, [filters, fetchPage]);
+
+  function loadMore(afterCursor: string) {
+    setLoadingMore(true);
+    setError(null);
+    void fetchPage(filters, afterCursor);
+  }
 
   function handleFiltersChange(patch: Partial<AuditFiltersState>) {
     const next = { ...latestFiltersRef.current, ...patch };
@@ -195,7 +223,7 @@ function AdminAuditPageInner() {
             hasMore={hasMore}
             lastPageEmpty={lastPageEmpty}
             loading={loadingMore}
-            onLoadMore={cursor ? () => fetchPage(filters, cursor) : undefined}
+            onLoadMore={cursor ? () => loadMore(cursor) : undefined}
             emptyMessage="No audit events match these filters."
           />
         )}

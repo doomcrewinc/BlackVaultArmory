@@ -52,6 +52,17 @@ function phaseProgress(s: FullBackupStatusDto): { pct: number | null; detail: st
   return { pct: null, detail: filesDetail };
 }
 
+/** GET the job status; null when the response is not OK or cannot be read. Sets no state. */
+async function fetchFullBackupStatus(): Promise<FullBackupStatusDto | null> {
+  try {
+    const res = await fetch("/api/backup/full/status", { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as FullBackupStatusDto;
+  } catch {
+    return null;
+  }
+}
+
 export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -69,47 +80,53 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
     timer.current = null;
   }, []);
 
-  const refresh = useCallback(async () => {
-    try {
-      const res = await fetch("/api/backup/full/status", { cache: "no-store" });
-      if (!res.ok) return null;
-      const next = (await res.json()) as FullBackupStatusDto;
-      lastState.current = next.state;
-      failures.current = 0;
-      if (alive.current) {
-        setStatus(next);
-        setStatusUnreadable(false);
-      }
-      return next;
-    } catch {
-      return null;
+  const applyStatus = useCallback((next: FullBackupStatusDto) => {
+    lastState.current = next.state;
+    failures.current = 0;
+    if (alive.current) {
+      setStatus(next);
+      setStatusUnreadable(false);
     }
   }, []);
 
+  const refresh = useCallback(async () => {
+    const next = await fetchFullBackupStatus();
+    if (next) applyStatus(next);
+    return next;
+  }, [applyStatus]);
+
   // Poll while a job is running; stop as soon as it is not.
+  // `schedule` is a plain inner function so the timer can re-arm itself without the
+  // callback referring to its own (not yet declared) binding.
   const poll = useCallback(() => {
-    stopPolling();
-    timer.current = setTimeout(async () => {
-      const next = await refresh();
-      if (!alive.current) return;
-      if (next) {
-        if (next.state === "running") poll();
-        return;
-      }
-      // Unreadable (expired session, server down): retry only while the last known state was
-      // "running", and give up after a few in a row, saying so.
-      failures.current += 1;
-      if (lastState.current !== "running") return;
-      if (failures.current >= MAX_POLL_FAILURES) setStatusUnreadable(true);
-      else poll();
-    }, POLL_MS);
+    const schedule = () => {
+      stopPolling();
+      timer.current = setTimeout(async () => {
+        const next = await refresh();
+        if (!alive.current) return;
+        if (next) {
+          if (next.state === "running") schedule();
+          return;
+        }
+        // Unreadable (expired session, server down): retry only while the last known state was
+        // "running", and give up after a few in a row, saying so.
+        failures.current += 1;
+        if (lastState.current !== "running") return;
+        if (failures.current >= MAX_POLL_FAILURES) setStatusUnreadable(true);
+        else schedule();
+      }, POLL_MS);
+    };
+    schedule();
   }, [refresh, stopPolling]);
 
   // On load, pick up a job that is already running (or the last result).
   useEffect(() => {
     alive.current = true;
     if (isAdmin) {
-      void refresh().then((s) => {
+      // Fetch here and apply in the callback (same steps as `refresh`), so no state is set
+      // synchronously in the effect body.
+      void fetchFullBackupStatus().then((s) => {
+        if (s) applyStatus(s);
         if (alive.current && s?.state === "running") poll();
       });
     }
@@ -117,7 +134,7 @@ export function FullBackupPanel({ isAdmin }: { isAdmin: boolean }) {
       alive.current = false;
       stopPolling();
     };
-  }, [isAdmin, refresh, poll, stopPolling]);
+  }, [isAdmin, applyStatus, poll, stopPolling]);
 
   const running = status?.state === "running";
 

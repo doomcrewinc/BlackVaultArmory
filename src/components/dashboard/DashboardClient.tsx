@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo, useSyncExternalStore } from "react";
 import Link from "next/link";
 import {
   DndContext,
@@ -1057,90 +1057,128 @@ function AmmoSummaryWidget({ ammoStocks }: { ammoStocks: AmmoStockItem[] }) {
   );
 }
 
+/** GET /api/stats; null when the response is not OK or cannot be read. Sets no state. */
+async function fetchStats(): Promise<StatsResponse | null> {
+  try {
+    const response = await fetch("/api/stats", { cache: "no-store" });
+    if (!response.ok) return null;
+    return (await response.json()) as StatsResponse;
+  } catch {
+    // Keep server-provided data when refresh fails.
+    return null;
+  }
+}
+
+/**
+ * Client-only values are read through useSyncExternalStore with a server
+ * snapshot: SSR and the hydration render see the server value (so no #418
+ * hydration mismatch), then React re-renders with the client value. Nothing
+ * here is watched for changes, so the subscription is a no-op.
+ */
+const noopSubscribe = () => () => {};
+const clientSnapshotTrue = () => true;
+const serverSnapshotFalse = () => false;
+const serverSnapshotNull = () => null;
+const readWelcomeDismissed = () => localStorage.getItem("bv-welcome-dismissed") === "1";
+const readSettingsHintDismissed = () => localStorage.getItem("bv-settings-hint-shown") === "1";
+const readStoredLayout = () => localStorage.getItem(STORAGE_KEY);
+
+/** Saved widget order merged with DEFAULT_ORDER; DEFAULT_ORDER when absent or unreadable. */
+function parseStoredLayout(saved: string | null): string[] {
+  try {
+    if (saved) {
+      const parsed: string[] = JSON.parse(saved);
+      return [
+        ...parsed.filter((id) => DEFAULT_ORDER.includes(id)),
+        ...DEFAULT_ORDER.filter((id) => !parsed.includes(id)),
+      ];
+    }
+  } catch {
+    // keep DEFAULT_ORDER
+  }
+  return DEFAULT_ORDER;
+}
+
 export function DashboardClient({ data }: { data: DashboardData }) {
   const [liveData, setLiveData] = useState<DashboardData>(data);
+  // Re-seed from the server whenever the `data` prop changes (adjust state during
+  // render against the previous prop, instead of a sync effect).
+  const [prevData, setPrevData] = useState(data);
+  if (data !== prevData) {
+    setPrevData(data);
+    setLiveData(data);
+  }
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  // Always initialise with DEFAULT_ORDER so server and client render identically,
-  // avoiding React hydration mismatch #418.  localStorage is read in useEffect below.
-  const [order, setOrder] = useState<string[]>(DEFAULT_ORDER);
+  // The server and hydration render use DEFAULT_ORDER so they match, avoiding React
+  // hydration mismatch #418; the saved order is read from localStorage on the client.
+  const storedLayout = useSyncExternalStore(noopSubscribe, readStoredLayout, serverSnapshotNull);
+  const restoredOrder = useMemo(() => parseStoredLayout(storedLayout), [storedLayout]);
+  const [reorderedOrder, setOrder] = useState<string[] | null>(null);
+  const order = reorderedOrder ?? restoredOrder;
   const [editMode, setEditMode] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  const [welcomeDismissed, setWelcomeDismissed] = useState(false);
-  const [settingsHintDismissed, setSettingsHintDismissed] = useState(false);
+  const mounted = useSyncExternalStore(noopSubscribe, clientSnapshotTrue, serverSnapshotFalse);
+  const storedWelcomeDismissed = useSyncExternalStore(noopSubscribe, readWelcomeDismissed, serverSnapshotFalse);
+  const storedSettingsHintDismissed = useSyncExternalStore(
+    noopSubscribe,
+    readSettingsHintDismissed,
+    serverSnapshotFalse
+  );
+  const [welcomeDismissedNow, setWelcomeDismissed] = useState(false);
+  const [settingsHintDismissedNow, setSettingsHintDismissed] = useState(false);
+  const welcomeDismissed = welcomeDismissedNow || storedWelcomeDismissed;
+  const settingsHintDismissed = settingsHintDismissedNow || storedSettingsHintDismissed;
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
+  const applyStats = useCallback((stats: StatsResponse) => {
+    setLiveData((previous) => ({
+      firearmCount: stats.totals?.firearms ?? 0,
+      accessoryCount: stats.totals?.accessories ?? 0,
+      totalAmmoRounds: stats.totals?.ammoRounds ?? 0,
+      totalInvestment: stats.investment?.totalCost ?? 0,
+      lowStockItems: stats.ammo?.lowStockItems ?? [],
+      recentFirearms: stats.recent?.firearms ?? [],
+      ammoStocks: stats.ammo?.stocks ?? [],
+      lowStockSupplies: stats.supplies?.lowStockItems ?? [],
+      expiredSupplyCount: stats.supplies?.expiredCount ?? 0,
+      expiringSoonSupplyCount: stats.supplies?.expiringSoonCount ?? 0,
+      // NOT defaulted, unlike the counts above. `StatsResponse` types the
+      // raw /api/stats payload, so every field is optional there — but
+      // falling back to a literal would be guessing about the one setting
+      // this notice exists to report. Keeping the previous value preserves
+      // what the server render already established (page.tsx types it as
+      // required), so a payload that omits the field changes nothing rather
+      // than silently deciding the notice should or should not show.
+      supplyTimezoneConfigured:
+        stats.supplies?.timezoneConfigured ??
+        previous.supplyTimezoneConfigured,
+      // Defaulted to empty/zero like the other lists and counts above: an
+      // absent gear block means "nothing to alert on", not "keep whatever
+      // was there", which would leave a deleted plate on the board.
+      expiringGear: stats.gear?.expiringItems ?? [],
+      expiredGearCount: stats.gear?.expiredCount ?? 0,
+      expiringSoonGearCount: stats.gear?.expiringSoonCount ?? 0,
+      // Defaulted like the gear block above, and for the same reason: an
+      // absent kits block means "nothing to alert on", not "keep whatever
+      // was there", which would leave an emptied bag on the board.
+      expiringKits: stats.kits?.expiringItems ?? [],
+      expiredKitCount: stats.kits?.expiredCount ?? 0,
+      expiringSoonKitCount: stats.kits?.expiringSoonCount ?? 0,
+    }));
+    setLastUpdated(new Date());
+  }, []);
+
   const refreshDashboardData = useCallback(async () => {
-    try {
-      const response = await fetch("/api/stats", { cache: "no-store" });
-      if (!response.ok) return;
-      const stats: StatsResponse = await response.json();
-      setLiveData((previous) => ({
-        firearmCount: stats.totals?.firearms ?? 0,
-        accessoryCount: stats.totals?.accessories ?? 0,
-        totalAmmoRounds: stats.totals?.ammoRounds ?? 0,
-        totalInvestment: stats.investment?.totalCost ?? 0,
-        lowStockItems: stats.ammo?.lowStockItems ?? [],
-        recentFirearms: stats.recent?.firearms ?? [],
-        ammoStocks: stats.ammo?.stocks ?? [],
-        lowStockSupplies: stats.supplies?.lowStockItems ?? [],
-        expiredSupplyCount: stats.supplies?.expiredCount ?? 0,
-        expiringSoonSupplyCount: stats.supplies?.expiringSoonCount ?? 0,
-        // NOT defaulted, unlike the counts above. `StatsResponse` types the
-        // raw /api/stats payload, so every field is optional there — but
-        // falling back to a literal would be guessing about the one setting
-        // this notice exists to report. Keeping the previous value preserves
-        // what the server render already established (page.tsx types it as
-        // required), so a payload that omits the field changes nothing rather
-        // than silently deciding the notice should or should not show.
-        supplyTimezoneConfigured:
-          stats.supplies?.timezoneConfigured ??
-          previous.supplyTimezoneConfigured,
-        // Defaulted to empty/zero like the other lists and counts above: an
-        // absent gear block means "nothing to alert on", not "keep whatever
-        // was there", which would leave a deleted plate on the board.
-        expiringGear: stats.gear?.expiringItems ?? [],
-        expiredGearCount: stats.gear?.expiredCount ?? 0,
-        expiringSoonGearCount: stats.gear?.expiringSoonCount ?? 0,
-        // Defaulted like the gear block above, and for the same reason: an
-        // absent kits block means "nothing to alert on", not "keep whatever
-        // was there", which would leave an emptied bag on the board.
-        expiringKits: stats.kits?.expiringItems ?? [],
-        expiredKitCount: stats.kits?.expiredCount ?? 0,
-        expiringSoonKitCount: stats.kits?.expiringSoonCount ?? 0,
-      }));
-      setLastUpdated(new Date());
-    } catch {
-      // Keep server-provided data when refresh fails.
-    }
-  }, []);
+    const stats = await fetchStats();
+    if (stats) applyStats(stats);
+  }, [applyStats]);
 
   useEffect(() => {
-    setMounted(true);
-    setWelcomeDismissed(localStorage.getItem("bv-welcome-dismissed") === "1");
-    setSettingsHintDismissed(localStorage.getItem("bv-settings-hint-shown") === "1");
-    // Restore saved widget order now that we're safely on the client
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed: string[] = JSON.parse(saved);
-        setOrder([
-          ...parsed.filter((id) => DEFAULT_ORDER.includes(id)),
-          ...DEFAULT_ORDER.filter((id) => !parsed.includes(id)),
-        ]);
-      }
-    } catch {
-      // keep DEFAULT_ORDER
-    }
-  }, []);
-
-  useEffect(() => {
-    setLiveData(data);
-  }, [data]);
-
-  useEffect(() => {
-    refreshDashboardData();
+    // Fetch, then apply in the callback, so no state is set synchronously here.
+    void fetchStats().then((stats) => {
+      if (stats) applyStats(stats);
+    });
 
     const handleFocus = () => {
       refreshDashboardData();
@@ -1158,7 +1196,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [refreshDashboardData]);
+  }, [refreshDashboardData, applyStats]);
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {

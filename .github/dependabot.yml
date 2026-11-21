@@ -17,6 +17,15 @@ updates:
       prefix: build
       include: scope
     groups:
+      # next and eslint-config-next release in lockstep and must stay on the
+      # same version. A dependency joins the first group it matches, so this
+      # group comes first; it covers every update type, majors included,
+      # because a Next.js major needs the matching lint config in the same PR.
+      nextjs:
+        patterns:
+          - next
+          - eslint-config-next
+          - "@next/*"
       production-minor-patch:
         dependency-type: production
         update-types:

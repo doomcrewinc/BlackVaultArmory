@@ -27,39 +27,59 @@ export function ItemHistory({ entityType, entityId }: { entityType: string; enti
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Callers set the loading flag and clear `error` before calling: Load more
+  // in its click handler, an item change during render (below). A promise
+  // chain, so every state update happens in a callback. Never rejects.
   const load = useCallback(
-    async (afterCursor?: string) => {
-      if (afterCursor) setLoadingMore(true);
-      else setLoading(true);
-      setError(null);
-      try {
-        const params = new URLSearchParams();
-        if (afterCursor) params.set("cursor", afterCursor);
-        const qs = params.toString();
-        const url = `/api/admin/audit/item/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}${qs ? `?${qs}` : ""}`;
-        const res = await fetch(url);
-        if (!res.ok) {
+    (afterCursor?: string): Promise<void> =>
+      Promise.resolve()
+        .then(() => {
+          const params = new URLSearchParams();
+          if (afterCursor) params.set("cursor", afterCursor);
+          const qs = params.toString();
+          const url = `/api/admin/audit/item/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}${qs ? `?${qs}` : ""}`;
+          return fetch(url);
+        })
+        .then(async (res) => {
+          if (!res.ok) {
+            setError("Failed to load history.");
+            return;
+          }
+          const data = await res.json().catch(() => ({}));
+          const page: AuditEventDto[] = Array.isArray(data.events) ? data.events : [];
+          setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
+          setCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
+          setHasMore(Boolean(data.nextCursor));
+        })
+        .catch(() => {
           setError("Failed to load history.");
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        const page: AuditEventDto[] = Array.isArray(data.events) ? data.events : [];
-        setEvents((prev) => (afterCursor ? [...prev, ...page] : page));
-        setCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
-        setHasMore(Boolean(data.nextCursor));
-      } catch {
-        setError("Failed to load history.");
-      } finally {
-        setLoading(false);
-        setLoadingMore(false);
-      }
-    },
+        })
+        .finally(() => {
+          setLoading(false);
+          setLoadingMore(false);
+        }),
     [entityType, entityId],
   );
+
+  // A different item: show the loading state and clear the error while its
+  // first page loads (the effect below fetches it).
+  const itemKey = JSON.stringify([entityType, entityId]);
+  const [loadedItemKey, setLoadedItemKey] = useState(itemKey);
+  if (loadedItemKey !== itemKey) {
+    setLoadedItemKey(itemKey);
+    setLoading(true);
+    setError(null);
+  }
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  function loadMore(afterCursor: string) {
+    setLoadingMore(true);
+    setError(null);
+    void load(afterCursor);
+  }
 
   // A failed INITIAL load has nothing to show but the error. A failed LOAD
   // MORE must not throw away what already loaded — the list stays, and the
@@ -79,7 +99,7 @@ export function ItemHistory({ entityType, entityId }: { entityType: string; enti
             events={events}
             hasMore={hasMore}
             loading={loadingMore}
-            onLoadMore={cursor ? () => load(cursor) : undefined}
+            onLoadMore={cursor ? () => loadMore(cursor) : undefined}
             emptyMessage="No history recorded for this item."
           />
           {error && <StatusMessage tone="error" message={error} className="mx-4 mb-4" />}

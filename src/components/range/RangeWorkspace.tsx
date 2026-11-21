@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { VaultInput, VaultSelect, VaultTextArea, vaultCardClass, vaultLabelClass, VaultButton } from "@/components/shared/ui-primitives";
@@ -160,6 +160,53 @@ const DEFAULT_DRILL_LIBRARY: DrillTemplate[] = [
   { id: "dot-torture", name: "Dot Torture", notes: "Accuracy-focused control drill", mode: "accuracy", createdAt: "2026-01-01T00:00:00.000Z" },
 ];
 
+// Per-mount store for window.location.search that reports null until the
+// component has committed. React subscribes after the first commit, at which
+// point the store flips to ready and asks React to re-read it. That matches the
+// timing of the mount effects this replaces:
+// - the server render and the hydration render both see null, so no mismatch;
+// - on a client-side navigation Next.js writes the new URL to window.history in
+//   an insertion effect, so reading it during the first render would return
+//   the PREVIOUS page's query.
+// The store never reports later URL changes. The old effects never reacted to
+// URL changes either.
+function createLocationSearchStore() {
+  let ready = false;
+  return {
+    subscribe(onStoreChange: () => void): () => void {
+      if (!ready) {
+        ready = true;
+        onStoreChange();
+      }
+      return () => {};
+    },
+    getSnapshot(): string | null {
+      return ready ? window.location.search : null;
+    },
+  };
+}
+function getServerLocationSearch(): string | null {
+  return null;
+}
+
+function readStoredDrillLibrary(): DrillTemplate[] | null {
+  try {
+    const raw = window.localStorage.getItem("blackvault-drill-library");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DrillTemplate[];
+    if (!Array.isArray(parsed)) return null;
+    const valid = parsed.filter((item) =>
+      typeof item.id === "string" &&
+      typeof item.name === "string" &&
+      (item.mode === "time" || item.mode === "accuracy" || item.mode === "both")
+    );
+    return valid.length > 0 ? valid : null;
+  } catch {
+    // ignore invalid localStorage payload
+    return null;
+  }
+}
+
 function makeEmptyDrillFormEntry(): DrillFormEntry {
   return {
     id: safeId("drill-form"),
@@ -195,9 +242,9 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
 
   const [sessionDrillFormEntries, setSessionDrillFormEntries] = useState<DrillFormEntry[]>(() => [makeEmptyDrillFormEntry()]);
 
-  const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [selectedSessionIdInput, setSelectedSessionId] = useState<string>("");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
-  const [drillName, setDrillName] = useState<string>("");
+  const [drillNameInput, setDrillName] = useState<string>("");
   const [drillTime, setDrillTime] = useState<string>("");
   const [drillPoints, setDrillPoints] = useState<string>("");
   const [drillPenalties, setDrillPenalties] = useState<string>("");
@@ -219,7 +266,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const [pfComputedValue, setPfComputedValue] = useState<number | null>(null);
   const [hitCounts, setHitCounts] = useState({ alpha: 0, charlie: 0, delta: 0, steel: 0 });
   const [penaltyCounts, setPenaltyCounts] = useState({ miss: 0, noShoot: 0, procedural: 0 });
-  const [performanceDrillName, setPerformanceDrillName] = useState("");
+  const [performanceDrillNameInput, setPerformanceDrillName] = useState("");
   const [selectedPerformanceDrillId, setSelectedPerformanceDrillId] = useState<string>("");
   const router = useRouter();
   const showLogSession = view === "log-session";
@@ -260,16 +307,46 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const [sessionCountByDrill, setSessionCountByDrill] = useState<Record<string, number>>({});
   const [drillLibNoticeDismissed, setDrillLibNoticeDismissed] = useState(false);
 
-  // sessionDate must be computed in the browser, not during SSR: todayLocalISO()
-  // reflects the server's timezone (UTC in Docker) when it runs on the server,
-  // which can bake in the wrong calendar day for viewers west of UTC. Only set
-  // it if the user hasn't already typed a date.
-  useEffect(() => {
-    setSessionDate((current) => (current === "" ? todayLocalISO() : current));
-  }, []);
+  // null until the first commit (and always on the server); after that, the
+  // real query string, which may be "".
+  const [locationSearchStore] = useState(createLocationSearchStore);
+  const locationSearch = useSyncExternalStore(
+    locationSearchStore.subscribe,
+    locationSearchStore.getSnapshot,
+    getServerLocationSearch
+  );
+  const clientReady = locationSearch !== null;
+  const queryParams = useMemo(() => new URLSearchParams(locationSearch ?? ""), [locationSearch]);
+  const queryDrill = queryParams.get("drill");
+  const querySessionId = queryParams.get("sessionId");
+  const queryEdit = queryParams.get("edit");
 
-  const loadSessions = useCallback(async () => {
-    setLoadingSessions(true);
+  // ?drill= and ?sessionId= override the user's choice, which matches the old
+  // effect that kept snapping the state back to the query values. A session
+  // selection that doesn't match a loaded session reads as "". That replaces an
+  // effect that cleared the state and ping-ponged with the query effect while
+  // sessions were still loading.
+  const drillName = queryDrill ? queryDrill : drillNameInput;
+  const requestedSessionId = querySessionId ? querySessionId : selectedSessionIdInput;
+  const selectedSessionId = sessions.some((session) => session.id === requestedSessionId) ? requestedSessionId : "";
+
+  // One-time browser-only initialisation, run in the render right after the
+  // first commit (the same point the old mount effects ran).
+  // - sessionDate must be computed in the browser, not during SSR: todayLocalISO()
+  //   reflects the server's timezone (UTC in Docker) when it runs on the server,
+  //   which can bake in the wrong calendar day for viewers west of UTC. Only set
+  //   it if the user hasn't already typed a date.
+  // - The drill library and the notice-dismissed flag live in localStorage.
+  const [clientInitDone, setClientInitDone] = useState(false);
+  if (clientReady && !clientInitDone) {
+    setClientInitDone(true);
+    setSessionDate((current) => (current === "" ? todayLocalISO() : current));
+    const storedLibrary = readStoredDrillLibrary();
+    if (storedLibrary) setDrillLibrary(storedLibrary);
+    setDrillLibNoticeDismissed(localStorage.getItem("bv-drill-lib-notice-dismissed") === "1");
+  }
+
+  const fetchSessions = useCallback(async () => {
     try {
       const res = await fetch("/api/range/sessions");
       const data = (await res.json()) as RangeSession[] | { error?: string };
@@ -282,8 +359,14 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     }
   }, []);
 
-  const loadSessionHistoryPage = useCallback(async (skip: number) => {
-    setHistoryLoading(true);
+  // Event-driven reload. The mount fetch calls fetchSessions directly because
+  // loadingSessions already starts out true.
+  const loadSessions = useCallback(async () => {
+    setLoadingSessions(true);
+    await fetchSessions();
+  }, [fetchSessions]);
+
+  const fetchSessionHistoryPage = useCallback(async (skip: number) => {
     try {
       const res = await fetch(`/api/range/sessions?take=20&skip=${skip}`);
       if (!res.ok) return;
@@ -300,11 +383,27 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     }
   }, []);
 
+  // "Load more" button path.
+  const loadSessionHistoryPage = useCallback(async (skip: number) => {
+    setHistoryLoading(true);
+    await fetchSessionHistoryPage(skip);
+  }, [fetchSessionHistoryPage]);
+
+  // The first page is (re)fetched whenever the history view has no items. The
+  // loading flag is raised during render on the transition into that state;
+  // the effect below only performs the fetch.
+  const historyNeedsFetch = view === "session-history" && historyItems.length === 0;
+  const [prevHistoryNeedsFetch, setPrevHistoryNeedsFetch] = useState(false);
+  if (historyNeedsFetch !== prevHistoryNeedsFetch) {
+    setPrevHistoryNeedsFetch(historyNeedsFetch);
+    if (historyNeedsFetch) setHistoryLoading(true);
+  }
+
   useEffect(() => {
     if (view === "session-history" && historyItems.length === 0) {
-      void loadSessionHistoryPage(0);
+      void fetchSessionHistoryPage(0);
     }
-  }, [view, historyItems.length, loadSessionHistoryPage]);
+  }, [view, historyItems.length, fetchSessionHistoryPage]);
 
   useEffect(() => {
     fetch("/api/firearms")
@@ -323,8 +422,8 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
       })
       .catch(() => setLoadingAmmo(false));
 
-    void loadSessions();
-  }, [loadSessions]);
+    void fetchSessions();
+  }, [fetchSessions]);
 
   const handleDeleteSession = async (id: string) => {
     setDeletingSessionId(id);
@@ -352,13 +451,8 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     setHistoryConfirmId(null);
   };
 
-  const loadBuilds = useCallback(async (firearmId: string) => {
-    if (!firearmId) {
-      setBuilds([]);
-      return;
-    }
-
-    setLoadingBuilds(true);
+  // Callers raise loadingBuilds before calling (see the firearm-change block below).
+  const fetchBuilds = useCallback(async (firearmId: string) => {
     try {
       const res = await fetch(`/api/builds?firearmId=${firearmId}`);
       const data = (await res.json()) as Build[];
@@ -383,32 +477,52 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     }
   }, []);
 
-  useEffect(() => {
+  // Firearm change: clear builds, or raise the loading flag and fetch.
+  const [prevSelectedFirearm, setPrevSelectedFirearm] = useState(selectedFirearm);
+  if (selectedFirearm !== prevSelectedFirearm) {
+    setPrevSelectedFirearm(selectedFirearm);
     if (selectedFirearm) {
-      void loadBuilds(selectedFirearm);
+      setLoadingBuilds(true);
     } else {
       setBuilds([]);
       setSelectedBuild("");
     }
-  }, [selectedFirearm, loadBuilds]);
+  }
 
   useEffect(() => {
+    if (selectedFirearm) {
+      void fetchBuilds(selectedFirearm);
+    }
+  }, [selectedFirearm, fetchBuilds]);
+
+  // Build (or builds list) change: auto-select that build's accessories. The
+  // selection stays user-editable afterwards.
+  const [prevBuildSelection, setPrevBuildSelection] = useState({ selectedBuild, builds });
+  if (prevBuildSelection.selectedBuild !== selectedBuild || prevBuildSelection.builds !== builds) {
+    setPrevBuildSelection({ selectedBuild, builds });
     const build = builds.find((b) => b.id === selectedBuild);
-    if (!build) return;
-    const autoSelect = new Set<string>();
-    for (const slot of build.slots) {
-      if (slot.accessory) autoSelect.add(slot.accessory.id);
+    if (build) {
+      const autoSelect = new Set<string>();
+      for (const slot of build.slots) {
+        if (slot.accessory) autoSelect.add(slot.accessory.id);
+      }
+      setSelectedAccessories(autoSelect);
     }
-    setSelectedAccessories(autoSelect);
-  }, [selectedBuild, builds]);
+  }
+
+  // Session change: clear drills, or raise the loading flag and fetch.
+  const [prevDrillsSessionId, setPrevDrillsSessionId] = useState(selectedSessionId);
+  if (selectedSessionId !== prevDrillsSessionId) {
+    setPrevDrillsSessionId(selectedSessionId);
+    if (selectedSessionId) {
+      setLoadingDrills(true);
+    } else {
+      setSessionDrills([]);
+    }
+  }
 
   useEffect(() => {
-    if (!selectedSessionId) {
-      setSessionDrills([]);
-      return;
-    }
-
-    setLoadingDrills(true);
+    if (!selectedSessionId) return;
     fetch(`/api/range/sessions/${selectedSessionId}/drills`)
       .then((r) => r.json())
       .then((data) => {
@@ -417,57 +531,21 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
       .finally(() => setLoadingDrills(false));
   }, [selectedSessionId]);
 
-  useEffect(() => {
+  // Session (or sessions list) change: default drillDate to the session's
+  // date. The field stays user-editable afterwards.
+  const [prevDrillDateSource, setPrevDrillDateSource] = useState({ selectedSessionId, sessions });
+  if (prevDrillDateSource.selectedSessionId !== selectedSessionId || prevDrillDateSource.sessions !== sessions) {
+    setPrevDrillDateSource({ selectedSessionId, sessions });
     const session = sessions.find((s) => s.id === selectedSessionId);
-    if (session) {
-      setDrillDate(new Date(session.sessionDate).toISOString().slice(0, 10));
-    } else {
-      setDrillDate("");
-    }
-  }, [selectedSessionId, sessions]);
+    setDrillDate(session ? new Date(session.sessionDate).toISOString().slice(0, 10) : "");
+  }
 
+  // Persist the library only after the one-time localStorage load above, so
+  // the hydration commit never overwrites the stored library with the defaults.
   useEffect(() => {
-    if (sessions.length === 0) {
-      if (selectedSessionId) setSelectedSessionId("");
-      return;
-    }
-
-    const stillExists = sessions.some((session) => session.id === selectedSessionId);
-    if (!stillExists) {
-      setSelectedSessionId("");
-    }
-  }, [sessions, selectedSessionId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem("blackvault-drill-library");
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as DrillTemplate[];
-      if (Array.isArray(parsed)) {
-        const valid = parsed.filter((item) =>
-          typeof item.id === "string" &&
-          typeof item.name === "string" &&
-          (item.mode === "time" || item.mode === "accuracy" || item.mode === "both")
-        );
-        if (valid.length > 0) setDrillLibrary(valid);
-      }
-    } catch {
-      // ignore invalid localStorage payload
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!clientInitDone) return;
     window.localStorage.setItem("blackvault-drill-library", JSON.stringify(drillLibrary));
-  }, [drillLibrary]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setDrillLibNoticeDismissed(
-      localStorage.getItem("bv-drill-lib-notice-dismissed") === "1"
-    );
-  }, []);
+  }, [drillLibrary, clientInitDone]);
 
   useEffect(() => {
     if (view !== "drill-library") return;
@@ -506,46 +584,40 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     [drillLibrary, drillName]
   );
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const drillFromQuery = params.get("drill");
-    if (drillFromQuery) {
-      if (drillFromQuery !== drillName) setDrillName(drillFromQuery);
-      if (drillFromQuery !== performanceDrillName) setPerformanceDrillName(drillFromQuery);
-    }
-    const sessionFromQuery = params.get("sessionId");
-    if (sessionFromQuery && sessionFromQuery !== selectedSessionId) setSelectedSessionId(sessionFromQuery);
-  }, [drillName, performanceDrillName, selectedSessionId]);
-
-  useEffect(() => {
-    if (!showLogSession || typeof window === "undefined") return;
-    const editSessionId = new URLSearchParams(window.location.search).get("edit");
-    if (!editSessionId) {
+  // ?edit=<sessionId> on the log-session view: populate the form from that
+  // session, again whenever the sessions list changes (same triggers as the
+  // old effect, which depended on `sessions`).
+  const [prevEditSessionSource, setPrevEditSessionSource] = useState<{ sessions: RangeSession[]; search: string } | null>(null);
+  if (
+    showLogSession &&
+    locationSearch !== null &&
+    (prevEditSessionSource === null ||
+      prevEditSessionSource.sessions !== sessions ||
+      prevEditSessionSource.search !== locationSearch)
+  ) {
+    setPrevEditSessionSource({ sessions, search: locationSearch });
+    const sessionToEdit = queryEdit ? sessions.find((session) => session.id === queryEdit) : undefined;
+    if (!queryEdit) {
       setEditingSessionId(null);
-      return;
+    } else if (sessionToEdit) {
+      setEditingSessionId(sessionToEdit.id);
+      setSelectedSessionId(sessionToEdit.id);
+      setSessionDate(new Date(sessionToEdit.sessionDate).toISOString().slice(0, 10));
+      setSessionLocation(sessionToEdit.location);
+      setSelectedFirearm(sessionToEdit.firearm.id);
+      setSelectedBuild(sessionToEdit.build?.id ?? "");
+      setRoundsFired(String(sessionToEdit.roundsFired));
+      setSessionNote(sessionToEdit.notes ?? "");
+      setAmmoSelections(
+        sessionToEdit.ammoLinks.length > 0
+          ? sessionToEdit.ammoLinks.map((link) => ({
+              ammoStockId: link.ammoStock?.id ?? "",
+              roundsUsed: String(link.roundsUsed),
+            }))
+          : [{ ammoStockId: "", roundsUsed: "" }]
+      );
     }
-
-    const sessionToEdit = sessions.find((session) => session.id === editSessionId);
-    if (!sessionToEdit) return;
-
-    setEditingSessionId(sessionToEdit.id);
-    setSelectedSessionId(sessionToEdit.id);
-    setSessionDate(new Date(sessionToEdit.sessionDate).toISOString().slice(0, 10));
-    setSessionLocation(sessionToEdit.location);
-    setSelectedFirearm(sessionToEdit.firearm.id);
-    setSelectedBuild(sessionToEdit.build?.id ?? "");
-    setRoundsFired(String(sessionToEdit.roundsFired));
-    setSessionNote(sessionToEdit.notes ?? "");
-    setAmmoSelections(
-      sessionToEdit.ammoLinks.length > 0
-        ? sessionToEdit.ammoLinks.map((link) => ({
-            ammoStockId: link.ammoStock?.id ?? "",
-            roundsUsed: String(link.roundsUsed),
-          }))
-        : [{ ammoStockId: "", roundsUsed: "" }]
-    );
-  }, [sessions, showLogSession]);
+  }
 
   const drillHitFactorPreview = useMemo(() => {
     const time = selectedDrillTemplate?.mode === "accuracy" ? 1 : Number.parseFloat(drillTime);
@@ -887,37 +959,41 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [allLoggedDrills]);
 
-  useEffect(() => {
-    if (drillNameLibrary.length === 0) {
-      setPerformanceDrillName("");
-      return;
-    }
+  // The performance drill is the ?drill= value when present (pinned, as the old
+  // query effect did), else the user's pick; either way it must be a logged
+  // drill name, falling back to the first one, or "" when none exist.
+  const requestedPerformanceDrillName = queryDrill ? queryDrill : performanceDrillNameInput;
+  const performanceDrillName =
+    drillNameLibrary.length === 0
+      ? ""
+      : drillNameLibrary.includes(requestedPerformanceDrillName)
+        ? requestedPerformanceDrillName
+        : drillNameLibrary[0];
 
-    if (!performanceDrillName || !drillNameLibrary.includes(performanceDrillName)) {
-      setPerformanceDrillName(drillNameLibrary[0]);
-    }
-  }, [drillNameLibrary, performanceDrillName]);
+  if (!drillName && drillLibrary.length > 0) {
+    setDrillName(drillLibrary[0].name);
+  }
 
-  useEffect(() => {
-    if (!drillName && drillLibrary.length > 0) {
-      setDrillName(drillLibrary[0].name);
-    }
-  }, [drillLibrary, drillName]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const editId = new URLSearchParams(window.location.search).get("edit");
-    if (!editId) {
+  // ?edit=<templateId>: load that template into the custom-drill form, again
+  // whenever the library changes (same trigger as the old effect).
+  const [prevEditDrillSource, setPrevEditDrillSource] = useState<{ drillLibrary: DrillTemplate[]; search: string } | null>(null);
+  if (
+    locationSearch !== null &&
+    (prevEditDrillSource === null ||
+      prevEditDrillSource.drillLibrary !== drillLibrary ||
+      prevEditDrillSource.search !== locationSearch)
+  ) {
+    setPrevEditDrillSource({ drillLibrary, search: locationSearch });
+    const found = queryEdit ? drillLibrary.find((d) => d.id === queryEdit) : undefined;
+    if (!queryEdit) {
       setEditingDrillId(null);
-      return;
+    } else if (found) {
+      setEditingDrillId(found.id);
+      setCustomDrillName(found.name);
+      setCustomDrillNotes(found.notes ?? "");
+      setCustomDrillMode(found.mode);
     }
-    const found = drillLibrary.find((d) => d.id === editId);
-    if (!found) return;
-    setEditingDrillId(found.id);
-    setCustomDrillName(found.name);
-    setCustomDrillNotes(found.notes ?? "");
-    setCustomDrillMode(found.mode);
-  }, [drillLibrary]);
+  }
 
   const selectedPerformanceTemplate = useMemo(
     () => drillLibrary.find((template) => template.name === performanceDrillName) ?? null,

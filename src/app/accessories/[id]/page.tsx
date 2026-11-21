@@ -136,8 +136,11 @@ export default function AccessoryDetailPage() {
   const id = Array.isArray(params.id) ? params.id[0] : params.id;
 
   const [accessory, setAccessory] = useState<Accessory | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [fetchLoading, setLoading] = useState(true);
+  const [fetchError, setError] = useState<string | null>(null);
+  // A missing route id never fetches: it is an error from the first render.
+  const loading = id ? fetchLoading : false;
+  const error = id ? fetchError : "Invalid accessory route.";
 
   // ADMIN-only History section. This page is a client component (fetches
   // its own data from /api/accessories/:id) with no server-rendered auth
@@ -179,11 +182,7 @@ export default function AccessoryDetailPage() {
   const [batteryError, setBatteryError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!id) {
-      setError("Invalid accessory route.");
-      setLoading(false);
-      return;
-    }
+    if (!id) return;
 
     fetch(`/api/accessories/${id}`)
       .then((r) => r.json())
