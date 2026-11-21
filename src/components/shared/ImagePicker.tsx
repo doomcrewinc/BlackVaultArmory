@@ -32,10 +32,14 @@ export default function ImagePicker({
   const tempId = useRef<string | null>(null);
   function getTempId(): string {
     if (tempId.current === null) {
+      // crypto.randomUUID() only exists in secure contexts, and phones on the LAN
+      // load the app over plain http. crypto.getRandomValues() works in both.
       tempId.current =
-        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
-          : `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          : `tmp-${Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+              b.toString(16).padStart(2, "0")
+            ).join("")}`;
     }
     return tempId.current;
   }
