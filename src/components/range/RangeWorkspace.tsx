@@ -162,14 +162,12 @@ const DEFAULT_DRILL_LIBRARY: DrillTemplate[] = [
 
 // Per-mount store for window.location.search that reports null until the
 // component has committed. React subscribes after the first commit, at which
-// point the store flips to ready and asks React to re-read it. That matches the
-// timing of the mount effects this replaces:
-// - the server render and the hydration render both see null, so no mismatch;
-// - on a client-side navigation Next.js writes the new URL to window.history in
+// point the store flips to ready and asks React to re-read it.
+// - The server render and the hydration render both see null, so they match.
+// - On a client-side navigation Next.js writes the new URL to window.history in
 //   an insertion effect, so reading it during the first render would return
 //   the PREVIOUS page's query.
-// The store never reports later URL changes. The old effects never reacted to
-// URL changes either.
+// The store does not report later URL changes; the query is read once per mount.
 function createLocationSearchStore() {
   let ready = false;
   return {
@@ -321,17 +319,15 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   const querySessionId = queryParams.get("sessionId");
   const queryEdit = queryParams.get("edit");
 
-  // ?drill= and ?sessionId= override the user's choice, which matches the old
-  // effect that kept snapping the state back to the query values. A session
-  // selection that doesn't match a loaded session reads as "". That replaces an
-  // effect that cleared the state and ping-ponged with the query effect while
-  // sessions were still loading.
+  // ?drill= and ?sessionId= override the user's choice while they are in the URL.
+  // A session selection that doesn't match a loaded session reads as "", which
+  // also covers the window before the sessions list has loaded.
   const drillName = queryDrill ? queryDrill : drillNameInput;
   const requestedSessionId = querySessionId ? querySessionId : selectedSessionIdInput;
   const selectedSessionId = sessions.some((session) => session.id === requestedSessionId) ? requestedSessionId : "";
 
   // One-time browser-only initialisation, run in the render right after the
-  // first commit (the same point the old mount effects ran).
+  // first commit.
   // - sessionDate must be computed in the browser, not during SSR: todayLocalISO()
   //   reflects the server's timezone (UTC in Docker) when it runs on the server,
   //   which can bake in the wrong calendar day for viewers west of UTC. Only set
@@ -585,8 +581,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   );
 
   // ?edit=<sessionId> on the log-session view: populate the form from that
-  // session, again whenever the sessions list changes (same triggers as the
-  // old effect, which depended on `sessions`).
+  // session, and again whenever the sessions list changes.
   const [prevEditSessionSource, setPrevEditSessionSource] = useState<{ sessions: RangeSession[]; search: string } | null>(null);
   if (
     showLogSession &&
@@ -959,8 +954,8 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [allLoggedDrills]);
 
-  // The performance drill is the ?drill= value when present (pinned, as the old
-  // query effect did), else the user's pick; either way it must be a logged
+  // The performance drill is the ?drill= value when present, else the user's
+  // pick; either way it must be a logged
   // drill name, falling back to the first one, or "" when none exist.
   const requestedPerformanceDrillName = queryDrill ? queryDrill : performanceDrillNameInput;
   const performanceDrillName =
@@ -975,7 +970,7 @@ export function RangeWorkspace({ view }: RangeWorkspaceProps) {
   }
 
   // ?edit=<templateId>: load that template into the custom-drill form, again
-  // whenever the library changes (same trigger as the old effect).
+  // whenever the library changes.
   const [prevEditDrillSource, setPrevEditDrillSource] = useState<{ drillLibrary: DrillTemplate[]; search: string } | null>(null);
   if (
     locationSearch !== null &&

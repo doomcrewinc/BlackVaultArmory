@@ -51,9 +51,9 @@ function isPlainHttpPage(): boolean {
 }
 
 // Browser-only Intl values, read through useSyncExternalStore: the server snapshot is
-// empty, so SSR/hydration render the same as before mount and the client value
-// appears right after hydration (what the old mount effects did). Neither value
-// changes during a page's life, so the subscription is a no-op.
+// empty, so the server render and the hydration render match, and the client value
+// appears right after hydration. Neither value changes during a page's life, so the
+// subscription is a no-op.
 const noopSubscribe = () => () => {};
 
 function getBrowserTimezone(): string {

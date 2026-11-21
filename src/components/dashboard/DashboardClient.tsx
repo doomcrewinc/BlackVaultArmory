@@ -1101,8 +1101,8 @@ function parseStoredLayout(saved: string | null): string[] {
 
 export function DashboardClient({ data }: { data: DashboardData }) {
   const [liveData, setLiveData] = useState<DashboardData>(data);
-  // Re-seed from the server whenever the `data` prop changes (adjust state during
-  // render against the previous prop, instead of a sync effect).
+  // Re-seed from the server whenever the `data` prop changes, by comparing it
+  // during render with the last `data` seen.
   const [prevData, setPrevData] = useState(data);
   if (data !== prevData) {
     setPrevData(data);
